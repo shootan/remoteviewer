@@ -51,6 +51,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -71,7 +72,17 @@ std::string read_all(const std::wstring& p) {
 }
 const wchar_t kTestAnchor[] = L"D:\\remote\\remote\\.claude\\test-tmp";
 std::wstring gRun;
-bool gKeepPreloginLog = false;  // r6 F-b  // this run's own new folder (with a trailing backslash): logs and the log root live in it
+bool gKeepPreloginLog = false;  // r6 F-b
+// r7 N2: the cases whose child's end was NOT confirmed -- their logs are kept (never deleted at the end)
+std::set<std::wstring> gKeepLogs;
+
+// r7 N2: a safety contradiction (input / power) or an injection-gate refusal ends the WHOLE test here: no further
+// launch, nothing of this run deleted (every log kept), RESULT: INVALID, exit 2. The case's own child has already been
+// ended by its launcher (confirmed, or recorded as not confirmed in gKeepLogs, which is said).
+[[noreturn]] void fatal_invalid(const std::wstring& tag, const std::string& why) {
+  remote60::native_poc::e2e::e2e_case_invalid(gRun, gKeepLogs, tag, why);  // e2e_child_util.hpp (its negative control:
+                                                                           // e2e_guard_runtime_test)
+}  // this run's own new folder (with a trailing backslash): logs and the log root live in it
 
 bool is_reparse(const std::wstring& p) {
   const DWORD a = GetFileAttributesW(p.c_str());
@@ -209,7 +220,7 @@ DWORD run(const std::wstring& dir, const std::wstring& tag, const std::string& s
     if (WaitForSingleObject(pi.hProcess, timeoutMs) == WAIT_OBJECT_0) {
       GetExitCodeProcess(pi.hProcess, &code);
     } else {
-      (void)end_child_confirmed(pi.hProcess, 99);  // r6 F-c
+      if (!end_child_confirmed(pi.hProcess, 99)) gKeepLogs.insert(tag);  // r7 N2: not confirmed -> its log kept
     }
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
@@ -273,11 +284,11 @@ DWORD run_with_client(const std::wstring& dir, const std::wstring& tag, const st
         break;
       }
       if (!seenNeedle.empty() && read_all(log).find(seenNeedle) != std::string::npos) {
-        (void)end_child_confirmed(pi.hProcess, 0xFFFFFFFFu);  // r6 F-c
+        if (!end_child_confirmed(pi.hProcess, 0xFFFFFFFFu)) gKeepLogs.insert(tag);  // r7 N2: not confirmed -> its log kept
         break;
       }
       if (GetTickCount64() > deadline) {
-        (void)end_child_confirmed(pi.hProcess, 0xFFFFFFFFu);  // r6 F-c
+        if (!end_child_confirmed(pi.hProcess, 0xFFFFFFFFu)) gKeepLogs.insert(tag);  // r7 N2: not confirmed -> its log kept
         break;
       }
       // the gate: a Hello only after THIS launch said its whole input-injection-OFF line; another state -> the
@@ -285,7 +296,7 @@ DWORD run_with_client(const std::wstring& dir, const std::wstring& tag, const st
       std::string injWhy;
       const int inj = remote60::native_poc::e2e::e2e_injection_state(read_all(log), &injWhy);
       if (inj < 0) {
-        (void)end_child_confirmed(pi.hProcess, 0xFFFFFFFFu);  // r6 F-c
+        if (!end_child_confirmed(pi.hProcess, 0xFFFFFFFFu)) gKeepLogs.insert(tag);  // r7 N2: not confirmed -> its log kept
         code = kInjectionInvalid;
         std::printf("FAIL  SETUP %ls: input injection not provably off (%s) -- no Hello sent\n", tag.c_str(), injWhy.c_str());
         break;
@@ -334,7 +345,11 @@ int wmain() {
   std::string out;
   DWORD code = run(dir, L"std", "startup_configure_from_env", &out, 20000);
   check("std: the host said its power management OFF (r5 F4, the record)", said_power_off(out));
-  check("std: no input / power contradiction in its whole output (r6 G1)", !remote60::native_poc::e2e::e2e_injection_contradicted(out));
+  {
+    std::string why;  // r7 N2: a contradiction ends the whole test INVALID (no further launch, logs kept)
+    if (remote60::native_poc::e2e::e2e_injection_contradicted(out, &why)) fatal_invalid(L"std", why);
+    check("std: no input / power contradiction in its whole output (r6 G1)", true);
+  }
   check("std: exit 49", code == 49, std::to_string(code));
   check("std: the line says std::exception, its what(), and the step",
         out.find("FATAL: std::exception \"stream-test-seam: injected throw\" at step=startup_configure_from_env -- exit 49") !=
@@ -342,7 +357,11 @@ int wmain() {
 
   code = run(dir, L"winrt", "winrt:startup_configure_from_env", &out, 20000);
   check("winrt: the host said its power management OFF (r5 F4, the record)", said_power_off(out));
-  check("winrt: no input / power contradiction in its whole output (r6 G1)", !remote60::native_poc::e2e::e2e_injection_contradicted(out));
+  {
+    std::string why;  // r7 N2: a contradiction ends the whole test INVALID (no further launch, logs kept)
+    if (remote60::native_poc::e2e::e2e_injection_contradicted(out, &why)) fatal_invalid(L"winrt", why);
+    check("winrt: no input / power contradiction in its whole output (r6 G1)", true);
+  }
   check("winrt: exit 49", code == 49, std::to_string(code));
   check("winrt: the line says winrt::hresult_error, its HRESULT, its message, and the step",
         out.find("FATAL: winrt::hresult_error hr=0x80070005 \"stream-test-seam: injected winrt\" at step=startup_configure_from_env") !=
@@ -351,7 +370,11 @@ int wmain() {
   // r5 F2: the NORMAL control -- no fault injected, a plain 3 s start (not a startup fault); no client of this test
   code = run(dir, L"none", "", &out, 30000);
   check("normal control (nothing injected): no FATAL line", out.find("FATAL:") == std::string::npos, "exit " + std::to_string(code));
-  check("normal control: no input / power contradiction in its whole output (r6 G1)", !remote60::native_poc::e2e::e2e_injection_contradicted(out));
+  {
+    std::string why;  // r7 N2: a contradiction ends the whole test INVALID (no further launch, logs kept)
+    if (remote60::native_poc::e2e::e2e_injection_contradicted(out, &why)) fatal_invalid(L"none", why);
+    check("normal control: no input / power contradiction in its whole output (r6 G1)", true);
+  }
   check("normal control: the host said input injection OFF and power management OFF, both whole (r5 F4)",
         remote60::native_poc::e2e::e2e_injection_state(out, nullptr) == 1);
 
@@ -452,28 +475,33 @@ int wmain() {
   // ---- D2: the ordinary path's two WinRT calls ----
   int hellos = 0;
   code = run_with_client(dir, L"probe_trap", {{"GNLINK_STREAM_TEST_WINRT_TRAP", "probe"}}, "", &out, &hellos);
-  check("...the injection gate held (no Hello before the OFF line)", code != kInjectionInvalid);
+  if (code == kInjectionInvalid) fatal_invalid(L"probe_trap", "the injection gate refused or the run contradicted it");  // r7 N2
+  check("...the injection gate held (no Hello before the OFF line) and nothing contradicted it", true);
   check("ordinary path, probe trap: exit 49 naming IsSupported at startup_init_graphics (the trap is live here)",
         code == 49 && out.find("WinRT trap reached: GraphicsCaptureSession::IsSupported\" at step=startup_init_graphics") != std::string::npos,
         "exit " + std::to_string(code));
   code = run_with_client(dir, L"wrapper_trap", {{"GNLINK_STREAM_TEST_WINRT_TRAP", "wrapper"}}, "", &out, &hellos);
-  check("...the injection gate held (no Hello before the OFF line)", code != kInjectionInvalid);
+  if (code == kInjectionInvalid) fatal_invalid(L"wrapper_trap", "the injection gate refused or the run contradicted it");  // r7 N2
+  check("...the injection gate held (no Hello before the OFF line) and nothing contradicted it", true);
   check("ordinary path, wrapper trap: exit 49 naming the D3D wrapper at startup_init_encoder (the ordinary path keeps it)",
         code == 49 && out.find("WinRT trap reached: CreateDirect3D11DeviceFromDXGIDevice\" at step=startup_init_encoder") != std::string::npos,
         "exit " + std::to_string(code));
   code = run_with_client(dir, L"wgc_throw", {{"GNLINK_STREAM_TEST_WGC_SUPPORTED", "throw"}}, "", &out, &hellos);
-  check("...the injection gate held (no Hello before the OFF line)", code != kInjectionInvalid);
+  if (code == kInjectionInvalid) fatal_invalid(L"wgc_throw", "the injection gate refused or the run contradicted it");  // r7 N2
+  check("...the injection gate held (no Hello before the OFF line) and nothing contradicted it", true);
   check("IsSupported throws: the explicit 'not supported' exit 6 with the HRESULT -- not 49, not taken as supported",
         code == 6 && out.find("WGC not supported (IsSupported threw hr=0x80070005)") != std::string::npos &&
             out.find("FATAL:") == std::string::npos,
         "exit " + std::to_string(code));
   code = run_with_client(dir, L"wgc_false", {{"GNLINK_STREAM_TEST_WGC_SUPPORTED", "false"}}, "", &out, &hellos);
-  check("...the injection gate held (no Hello before the OFF line)", code != kInjectionInvalid);
+  if (code == kInjectionInvalid) fatal_invalid(L"wgc_false", "the injection gate refused or the run contradicted it");  // r7 N2
+  check("...the injection gate held (no Hello before the OFF line) and nothing contradicted it", true);
   check("IsSupported false: exit 6, 'WGC not supported' (as before)",
         code == 6 && out.find("WGC not supported") != std::string::npos && out.find("threw") == std::string::npos,
         "exit " + std::to_string(code));
   code = run_with_client(dir, L"normal", {}, "H264 encoder backend=", &out, &hellos);
-  check("...the injection gate held (no Hello before the OFF line)", code != kInjectionInvalid);
+  if (code == kInjectionInvalid) fatal_invalid(L"normal", "the injection gate refused or the run contradicted it");  // r7 N2
+  check("...the injection gate held (no Hello before the OFF line) and nothing contradicted it", true);
   check("nothing injected: the ordinary path passes both calls (the encoder line is reached), no FATAL",
         out.find("H264 encoder backend=") != std::string::npos && out.find("FATAL:") == std::string::npos &&
             out.find("WGC not supported") == std::string::npos);
@@ -481,6 +509,10 @@ int wmain() {
   // r5 F1: this run's own logs, by name, one by one; then its folder only if empty. The hosts' LOCALAPPDATA folders
   // (lad_*: their diagnostics) are not removed -- they stay inside the test root, said
   for (const wchar_t* t : {L"std", L"winrt", L"none", L"probe_trap", L"wrapper_trap", L"wgc_throw", L"wgc_false", L"normal"}) {
+    if (gKeepLogs.count(t)) {  // r7 N2: its child's end was not confirmed -- its log stays, said
+      std::printf("NOTE  kept (its child's end not confirmed): %lsfatal_%ls.log\n", gRun.c_str(), t);
+      continue;
+    }
     delete_known_file(gRun + L"fatal_" + t + L".log");
   }
   if (!gKeepPreloginLog) delete_known_file(gRun + L"fatal_prelogin.log");  // r6 F-b: kept if its worker's end is unconfirmed

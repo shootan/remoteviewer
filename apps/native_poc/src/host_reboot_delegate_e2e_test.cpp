@@ -141,17 +141,32 @@ struct Host {
     return n;
   }
   void Stop() {
-    if (injMonitor) injMonitor->Stop();  // r6 G1: its last judgement, before it goes
-    reading = false;
+    if (injMonitor) injMonitor->StopPolling();  // r7 N1: polling ends; the final judgement comes after the host and its reader
+    // r7 N1: the producer is ended (its job: every process of it, confirmed), its output read to the end (the reader
+    // gets EOF once the last writer is gone), THEN the final snapshot is judged. An end not confirmed: the read is cut
+    // and the output is NOT complete -- the final judgement says so (INVALID).
+    bool outputComplete = false;
     if (job) {
-      CloseHandle(job);
+      outputComplete = remote60::native_poc::e2e::e2e_end_job_confirmed(job);
+      CloseHandle(job);  // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (already ended above when confirmed)
       job = nullptr;
     }
+    if (!outputComplete) {
+      reading = false;
+      if (readEnd) {
+        CloseHandle(readEnd);
+        readEnd = nullptr;
+      }
+    }
+    if (reader.joinable()) reader.join();
     if (readEnd) {
       CloseHandle(readEnd);
       readEnd = nullptr;
     }
-    if (reader.joinable()) reader.join();
+    if (injMonitor) {
+      injMonitor->Finalize(outputComplete);
+      injMonitor.reset();
+    }
     if (pi.hProcess) {
       WaitForSingleObject(pi.hProcess, 20000);
       CloseHandle(pi.hProcess);

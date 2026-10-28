@@ -661,7 +661,14 @@ int wmain(int argc, wchar_t** argv) {
   target.Stop();
   if (viewer.sock != INVALID_SOCKET) closesocket(viewer.sock);
   if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
-  if (injMon) injMon->Stop();  // r6 G1: its last judgement, before the job closes
+  // r7 N1: polling ends, the host's job is ended and that end confirmed (its log file then complete), THEN the final
+  // snapshot is judged; then the job closes
+  if (injMon) injMon->StopPolling();
+  const bool hostEnded = remote60::native_poc::e2e::e2e_end_job_confirmed(job);
+  if (injMon) {
+    injMon->Finalize(hostEnded);
+    injMon.reset();
+  }
   CloseHandle(job);
   if (hostPi.hProcess) {
     WaitForSingleObject(hostPi.hProcess, 20000);

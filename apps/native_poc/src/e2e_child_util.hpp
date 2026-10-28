@@ -15,6 +15,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
+#include <set>
+#include <string>
 
 namespace remote60::native_poc::e2e {
 
@@ -52,6 +54,17 @@ inline bool e2e_end_child_confirmed(HANDLE process, UINT code, DWORD waitMs = 10
               static_cast<unsigned long>(waitMs));
   std::fflush(stdout);
   return false;
+}
+
+// r7 N2: a safety contradiction (or an injection-gate refusal) ends the WHOLE test: no further launch, nothing of
+// this run deleted, RESULT: INVALID, exit 2. `keep` holds the cases whose child's end was not confirmed (said as such).
+[[noreturn]] inline void e2e_case_invalid(const std::wstring& runFolder, const std::set<std::wstring>& keep,
+                                          const std::wstring& tag, const std::string& why) {
+  std::printf("FAIL  RUN %ls: %s -- its child's end %s; no further launch; this run's logs are kept in %ls\n"
+              "RESULT: INVALID\n",
+              tag.c_str(), why.c_str(), keep.count(tag) ? "NOT confirmed" : "confirmed", runFolder.c_str());
+  std::fflush(stdout);
+  std::_Exit(2);
 }
 
 }  // namespace remote60::native_poc::e2e
