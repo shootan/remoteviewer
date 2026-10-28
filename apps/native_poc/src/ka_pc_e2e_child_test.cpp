@@ -18,6 +18,7 @@
 #include <string>
 
 #include "ka_pc_e2e_child.hpp"
+#include "ka_pc_e2e_webview.hpp"
 
 namespace {
 
@@ -187,6 +188,32 @@ int main(int argc, char** argv) {
           childTrailer.find("producer end: confirmed") != std::string::npos &&
               childTrailer.find("read: end of output") != std::string::npos,
           childTrailer);
+  }
+
+  // ---------------------------------------------------------------- 5. the WebView preflight (no environment created)
+  {
+    std::wstring tmp;
+    const bool temp = ka_pc_e2e::private_temp(root, &tmp, &why);
+    check("this run's TEMP: made new, set, and GetTempPathW returns it", temp, why);
+    const std::wstring shellUdf = tmp + ka_pc_e2e::kShellUdfName, macroUdf = tmp + ka_pc_e2e::kMacroUdfName;
+    const std::string shellPre = ka_pc_e2e::webview_fix_and_preflight(root, ka_pc_e2e::kShellUdfName, shellUdf);
+    const std::string macroPre = ka_pc_e2e::webview_fix_and_preflight(root, ka_pc_e2e::kMacroUdfName, macroUdf);
+    check("the shell's and the macro's preflight hold on this PC now (no other WEBVIEW2_* variable, no WebView2 policy)",
+          temp && shellPre.empty() && macroPre.empty(), shellPre + macroPre);
+    const bool otherRoot =
+        !ka_pc_e2e::webview_preflight(root, ka_pc_e2e::kMacroUdfName, root + L"other-root\\GNLinkMacro").empty();
+    const bool crossed = !ka_pc_e2e::webview_preflight(root, ka_pc_e2e::kShellUdfName, macroUdf).empty();
+    SetEnvironmentVariableW(L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", L"C:\\ka-pc-preflight-contrast");
+    const bool extra = ka_pc_e2e::webview_preflight(root, ka_pc_e2e::kMacroUdfName, macroUdf).find("other WebView2") !=
+                       std::string::npos;
+    SetEnvironmentVariableW(L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", nullptr);
+    SetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_FOLDER", shellUdf.c_str());  // the shell's while the macro's is asked
+    const bool moved = !ka_pc_e2e::webview_preflight(root, ka_pc_e2e::kMacroUdfName, macroUdf).empty();
+    const bool back = ka_pc_e2e::webview_fix_and_preflight(root, ka_pc_e2e::kMacroUdfName, macroUdf).empty();
+    check("...it refuses another owned path, the shell's name for the macro's folder, an extra WEBVIEW2_* variable and "
+          "the shell's UDF in the variable while the macro's is asked; passes again once restored",
+          otherRoot && crossed && extra && moved && back);
+    check("no macro window of a process of this build exists now", !ka_pc_e2e::own_macro_window_exists(self_dir()));
   }
 
   const int childFailures = ka_pc_e2e::child_failures() - setupFailures;

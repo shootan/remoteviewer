@@ -37,6 +37,7 @@
 #include "directory_session_client.hpp"
 #include "e2e_injection_guard.hpp"
 #include "ka_pc_e2e_child.hpp"
+#include "ka_pc_e2e_webview.hpp"
 #include "e2e_isolation.hpp"
 #include "e2e_window_capture.hpp"
 #include "client_managed_viewers.hpp"
@@ -264,7 +265,10 @@ int main() {
     return 2;
   }
   // TEMP / TMP of this process (and so of every child it starts) inside this run (N1): every step checked and what
-  // GetTempPathW really returns compared -- else INVALID before any child. (This test makes no WebView.)
+  // GetTempPathW really returns compared -- else INVALID before any child. This test makes no WebView of its own; the
+  // viewers it starts could (their macro window, GetTempPathW + "GNLinkMacro"): every child's environment is a copy of
+  // this one, so WEBVIEW2_USER_DATA_FOLDER names the run's macro UDF and that WebView's preflight must hold (r2 addition).
+  std::wstring macroUdf;
   {
     std::wstring tmp;
     if (!ka_pc_e2e::private_temp(gRoot, &tmp, &why)) {
@@ -272,7 +276,24 @@ int main() {
       return 2;
     }
     std::printf("temp: %s (GetTempPathW confirmed)\n", N(tmp).c_str());
+    macroUdf = tmp + ka_pc_e2e::kMacroUdfName;
+    const std::string pre = ka_pc_e2e::webview_fix_and_preflight(gRoot, ka_pc_e2e::kMacroUdfName, macroUdf);
+    if (!pre.empty()) {
+      std::printf("FAIL  SETUP the macro WebView preflight: %s -- no child is started\nRESULT: INVALID\n", pre.c_str());
+      return 2;
+    }
+    check("macro WebView preflight: UDF " + N(macroUdf) + " (new, inside this run) = what a viewer's macro window asks "
+          "for = WEBVIEW2_USER_DATA_FOLDER; no other WEBVIEW2_* variable; no WebView2 policy (HKLM/HKCU, 64/32)", true);
   }
+  // a macro window of a viewer this run started is not expected (its WebView's folder cannot be confirmed from here)
+  // (detached, static state: the early INVALID returns below need no join)
+  static std::atomic<bool> macroSeen{false};
+  std::thread([] {
+    for (;;) {
+      if (ka_pc_e2e::own_macro_window_exists(gBuild)) macroSeen = true;
+      Sleep(200);
+    }
+  }).detach();
   std::string socketError;
   initialize_sockets(&socketError);
   std::printf("test root: %s\n", N(gRoot).c_str());
@@ -839,6 +860,8 @@ int main() {
     check("...Release: it ends", o.proc.Exited(8000));
   }
 
+  check("no macro window of a viewer of this run came up, and no macro WebView was created under the run's macro UDF",
+        !macroSeen.load() && GetFileAttributesW(macroUdf.c_str()) == INVALID_FILE_ATTRIBUTES);
   hostOld.End();  // never started (NOT RUN): nothing to end, not a failure
   server.End();
   // N2: every child this test started -- ended here if still running -- judged on its end, EOF and log

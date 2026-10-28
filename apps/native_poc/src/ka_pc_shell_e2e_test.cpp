@@ -39,6 +39,7 @@
 
 #include "e2e_injection_guard.hpp"
 #include "ka_pc_e2e_child.hpp"
+#include "ka_pc_e2e_webview.hpp"
 #include "e2e_isolation.hpp"
 
 namespace {
@@ -112,97 +113,11 @@ bool init_root(std::string* why) {
 // environment, ICoreWebView2Environment7::get_UserDataFolder (the folder really in use) must be that UDF before the
 // sign-in and before any client -- else the run stops. Downloads, new windows and OS dialogs are refused and stop it.
 // The profile is evidence: kept, never deleted here.
-constexpr wchar_t kWebView2Policies[] = L"SOFTWARE\\Policies\\Microsoft\\Edge\\WebView2";
-
-// Names of every WEBVIEW2_* variable in this process's environment except the UDF one ("" = none).
-std::string webview_variables_other_than_udf() {
-  std::string found;
-  wchar_t* block = GetEnvironmentStringsW();
-  if (!block) return "the environment could not be read";
-  for (const wchar_t* e = block; *e; e += wcslen(e) + 1) {
-    const std::wstring entry(e);
-    const size_t eq = entry.find(L'=', 1);
-    const std::wstring name = entry.substr(0, eq);
-    if (name.size() >= 9 && _wcsnicmp(name.c_str(), L"WEBVIEW2_", 9) == 0 &&
-        _wcsicmp(name.c_str(), L"WEBVIEW2_USER_DATA_FOLDER") != 0) {
-      found += (found.empty() ? "" : ", ") + narrow(name);
-    }
-  }
-  FreeEnvironmentStringsW(block);
-  return found;
-}
-
-// Every WebView2 policy present (subkey or value names) or unreadable, HKLM / HKCU, both views ("" = none).
-std::string webview_policies_present() {
-  std::string found;
-  for (HKEY root : {HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER}) {
-    for (REGSAM view : {static_cast<REGSAM>(KEY_WOW64_64KEY), static_cast<REGSAM>(KEY_WOW64_32KEY)}) {
-      const std::string where = std::string(root == HKEY_LOCAL_MACHINE ? "HKLM" : "HKCU") +
-                                (view == KEY_WOW64_64KEY ? "(64)" : "(32)");
-      HKEY k = nullptr;
-      const LONG r = RegOpenKeyExW(root, kWebView2Policies, 0, KEY_READ | view, &k);
-      if (r == ERROR_FILE_NOT_FOUND) continue;
-      if (r != ERROR_SUCCESS) {
-        found += where + ": unreadable (error " + std::to_string(r) + "); ";
-        continue;
-      }
-      DWORD subkeys = 0, values = 0;
-      if (RegQueryInfoKeyW(k, nullptr, nullptr, nullptr, &subkeys, nullptr, nullptr, &values, nullptr, nullptr, nullptr,
-                           nullptr) != ERROR_SUCCESS) {
-        found += where + ": its contents unreadable; ";
-      } else {
-        for (DWORD i = 0; i < subkeys; ++i) {
-          wchar_t n[256] = {};
-          DWORD len = 256;
-          if (RegEnumKeyExW(k, i, n, &len, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS)
-            found += where + " key " + narrow(n) + "; ";
-          else
-            found += where + " key #" + std::to_string(i) + "; ";
-        }
-        for (DWORD i = 0; i < values; ++i) {
-          wchar_t n[256] = {};
-          DWORD len = 256;
-          if (RegEnumValueW(k, i, n, &len, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS)
-            found += where + " value '" + narrow(n) + "'; ";
-          else
-            found += where + " value #" + std::to_string(i) + "; ";
-        }
-      }
-      RegCloseKey(k);
-    }
-  }
-  return found;
-}
-
-// What the product would ask for right now: its own computation (GetTempPathW into MAX_PATH + "GNLinkClient"), or ""
-// when that would not fit its buffer (wcscat_s would not return).
-std::wstring product_udf_now() {
-  wchar_t b[MAX_PATH] = {};
-  const DWORD n = GetTempPathW(MAX_PATH, b);
-  if (n == 0 || n >= MAX_PATH || n + wcslen(L"GNLinkClient") + 1 > MAX_PATH) return {};
-  return std::wstring(b, n) + L"GNLinkClient";
-}
-
-// The preflight, read only (nothing set here): empty = every condition holds for `expectedUdf`; otherwise why not.
+// The preflight itself (variables, policies, the product's own path computation) is shared with the managed test:
+// ka_pc_e2e_webview.hpp. Here: the shell's UDF for this process, then -- once the shell's environment is confirmed
+// -- the macro's UDF for every viewer the shell starts after it (they inherit this environment).
 std::string webview_preflight(const std::wstring& expectedUdf) {
-  if (!ka_pc_e2e::is_inside(expectedUdf, gRoot)) return "the UDF is not inside this run";
-  const std::wstring asked = product_udf_now();
-  if (asked.empty()) return "the product's UDF would not fit MAX_PATH";
-  if (!ka_pc_e2e::same_path(asked, expectedUdf))
-    return "the product would ask for " + narrow(asked) + ", not " + narrow(expectedUdf);
-  wchar_t v[2048] = {};
-  const DWORD n = GetEnvironmentVariableW(L"WEBVIEW2_USER_DATA_FOLDER", v, 2048);
-  if (n == 0 || n >= 2048 || !ka_pc_e2e::same_path(std::wstring(v, n), expectedUdf))
-    return "WEBVIEW2_USER_DATA_FOLDER is not the UDF";
-  const DWORD a = GetFileAttributesW(expectedUdf.c_str());
-  if (a != INVALID_FILE_ATTRIBUTES || GetLastError() != ERROR_FILE_NOT_FOUND) return "the UDF is not new (it exists already)";
-  const std::wstring parent = expectedUdf.substr(0, expectedUdf.find_last_of(L'\\'));
-  if (!ka_pc_e2e::resolves_to_itself(parent)) return "the UDF's folder does not resolve to itself";
-  const std::string vars = webview_variables_other_than_udf();
-  if (!vars.empty()) return "other WebView2 variables are set: " + vars;
-  const std::string policies = webview_policies_present();
-  if (!policies.empty()) return "WebView2 policies are present: " + policies;
-  return {};
+  return ka_pc_e2e::webview_preflight(gRoot, ka_pc_e2e::kShellUdfName, expectedUdf);
 }
 
 // The folder the product's environment REALLY uses (ICoreWebView2Environment7::get_UserDataFolder), or "" + why.
@@ -229,6 +144,7 @@ void pump(unsigned ms);
 [[noreturn]] void stop_run(const std::string& why, int code);
 
 // OS dialogs of this test (its own, or owned by one of its windows -- the WebView's file dialog is): closed, recorded.
+// And a macro window of a viewer this run started: recorded (the run stops; the viewer is ended with the shell).
 std::atomic<bool> gDialogWatchStop{false};
 void dialog_watch() {
   while (!gDialogWatchStop.load()) {
@@ -248,6 +164,11 @@ void dialog_watch() {
           return TRUE;
         },
         0);
+    // a macro WebView in a viewer of this run: its folder was fixed (the macro UDF) but cannot be confirmed from here
+    if (ka_pc_e2e::own_macro_window_exists(gBuild)) {
+      const char* none = nullptr;
+      gExternal.compare_exchange_strong(none, "a macro window (its WebView's folder cannot be confirmed here)");
+    }
     Sleep(200);
   }
 }
@@ -279,6 +200,13 @@ void pump(unsigned ms) {
   do {
     MSG message{};
     while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) {
+      if (message.message == WM_APP + 3 && message.hwnd == gWindow && !gStopping.load()) {
+        // the product would re-create the shell's WebView -- with the environment as it is now (the macro's UDF):
+        // not preflighted for the shell, so it is not dispatched and the run stops
+        const char* none = nullptr;
+        gExternal.compare_exchange_strong(none, "a re-creation of the shell's WebView (its process failed)");
+        continue;
+      }
       if (message.message != WM_QUIT) {
         TranslateMessage(&message);
         DispatchMessageW(&message);
@@ -534,7 +462,7 @@ int main() {
   // N1: TEMP / TMP of this process (and so of every child it starts) inside this run, then the shell's WebView profile
   // fixed and preflighted -- all BEFORE any child and before any WebView environment exists. Anything not confirmed:
   // INVALID, exit 2, CreateCoreWebView2Environment never called.
-  std::wstring udf;
+  std::wstring udf, macroUdf;
   {
     std::wstring tmp;
     if (!ka_pc_e2e::private_temp(gRoot, &tmp, &why)) {
@@ -581,6 +509,21 @@ int main() {
       std::printf("RESULT: INVALID\n");
       return 2;
     }
+    // r2 addition: the macro's WebView (client_macro_window.cpp, GetTempPathW + "GNLinkMacro") lives in a VIEWER, and
+    // every viewer the shell starts inherits this process's environment -- with the shell's UDF in it, a macro WebView
+    // would share the shell's folder. Its own UDF is preflighted here too; it is put in place for the viewers once the
+    // shell's environment is confirmed (below), before the sign-in.
+    macroUdf = tmp + ka_pc_e2e::kMacroUdfName;
+    const std::string macroPre = ka_pc_e2e::webview_fix_and_preflight(gRoot, ka_pc_e2e::kMacroUdfName, macroUdf);
+    const std::string shellAgain = ka_pc_e2e::webview_fix_and_preflight(gRoot, ka_pc_e2e::kShellUdfName, udf);
+    if (!macroPre.empty() || !shellAgain.empty()) {
+      std::printf("FAIL  SETUP the macro WebView preflight: %s%s -- no WebView environment is created\nRESULT: INVALID\n",
+                  macroPre.c_str(), shellAgain.c_str());
+      return 2;
+    }
+    check(true, "macro WebView preflight: UDF " + narrow(macroUdf) +
+                    " (new, inside this run) = what the viewer's macro window asks for (GetTempPathW + GNLinkMacro); "
+                    "the same variable / policy checks");
   }
   wchar_t nodeExe[MAX_PATH] = {};
   wchar_t repoBuf[1024] = {};
@@ -785,6 +728,16 @@ int main() {
         gDialogWatchStop = true;
         dialogWatch.join();
         stop_run("the download / new-window refusal could not be installed", 2);
+      }
+      // r2 addition: from here the viewers the shell starts inherit the MACRO's UDF (their macro window's WebView), not
+      // the shell's. The shell's own environment already exists (the variable is read at creation); a re-creation of it
+      // (the product's WM_APP + 3 after a WebView process failure) would not be preflighted, so pump() refuses it.
+      const std::string macroPre = ka_pc_e2e::webview_fix_and_preflight(gRoot, ka_pc_e2e::kMacroUdfName, macroUdf);
+      check(macroPre.empty(), "the viewers' environment now names the macro's own UDF (preflight holds)", macroPre);
+      if (!macroPre.empty()) {
+        gDialogWatchStop = true;
+        dialogWatch.join();
+        stop_run("the macro WebView preflight: " + macroPre, 2);
       }
     }
     check(wait_for([] { return js(L"!!document.getElementById('signIn')&&!document.getElementById('signIn').disabled") == "true"; }, 20000),
@@ -1274,7 +1227,10 @@ int main() {
     gDialogWatchStop = true;
     dialogWatch.join();
     const char* external = gExternal.load();
-    check(!external, "no download, new window or OS dialog came up during the run", external ? external : "");
+    check(!external, "no download, new window, OS dialog, macro window or WebView re-creation during the run",
+          external ? external : "");
+    check(GetFileAttributesW(macroUdf.c_str()) == INVALID_FILE_ATTRIBUTES,
+          "...and no macro WebView was created under the run's macro UDF (its folder does not exist)");
   }
   for (auto& h : hosts) h->proc.End();  // each host's end is the guard's final judgement (Finalize)
   server.End();
