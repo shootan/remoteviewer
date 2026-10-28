@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "directory_session_client.hpp"
+#include "e2e_injection_guard.hpp"
 #include "e2e_isolation.hpp"
 #include "e2e_window_capture.hpp"
 #include "client_managed_viewers.hpp"
@@ -398,15 +399,17 @@ int main() {
     return h.Start(L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264 --bind-address 127.0.0.1 --bind-port " +
                        std::to_wstring(media) + L" --control-port " + std::to_wstring(control) + L" --directory-url " + W(url) +
                        L" --directory-id tester --directory-pw e2e-pass-1234 --host-name " + W(name) +
-                       L" --directory-cache \"" + dir + L"cache.json\" --seconds 900 --input-injection-mode none",
+                       L" --directory-cache \"" + dir + L"cache.json\" --seconds 900" + e2e::e2e_injection_off_arg(dir),
                    dir, &env);
   };
   Child hostA;
   check("host KA-A (this build) starts", startHost(hostA, gBuild + L"GNLinkStream.exe", "KA-A"));
-  // fail closed: no viewer connects to a host that would inject input into this PC
-  if (!hostA.WaitFor([](const std::string& t) { return t.find("input injection disabled") != std::string::npos; }, 10000)) {
-    std::printf("FAIL  host KA-A did not say 'input injection disabled' -- stopping before any viewer connects\n");
-    return 1;
+  // The shared test-host guard (ka-r3 6b9cf79, e2e_injection_guard.hpp): THIS launch must have said input injection
+  // OFF and host power management OFF, both whole lines, before any viewer exists -- else INVALID, exit 2.
+  {
+    std::string why;
+    if (!e2e::e2e_wait_injection_off([&hostA] { return hostA.Text(); }, 20000, &why))
+      e2e::e2e_injection_setup_failed("host KA-A", why);
   }
   // KA-OLD runs only after KA-A has ended: every host process on this machine registers under the same machine
   // id, so two at once would be one host record that the later one takes over.
@@ -861,7 +864,10 @@ int main() {
 
   // ---------------------------------------------------------------- the unsupported Host
   hostA.End();
-  if (haveOld) {
+  // The published 0.2.163 Host is NOT started any more (the shared guard, Codex Finding-3 (4)): an older binary does not
+  // know --host-power-management and would never say it is off. This case is NOT RUN -- unverified from here on.
+  if (haveOld) std::printf("NOT RUN  the published 0.2.163 Host (an older binary is never started on this PC)\n");
+  if ((false)) {
     check("host KA-OLD (the published 0.2.163) starts, after KA-A ended", startHost(hostOld, oldStream, "KA-OLD"));
     check("...with input injection disabled",
           hostOld.WaitFor([](const std::string& t) { return t.find("input injection disabled") != std::string::npos; }, 10000));
@@ -875,7 +881,7 @@ int main() {
     }
     check("KA-OLD is online in the directory", !idOld.empty(), "old=" + idOld);
   }
-  if (haveOld && !idOld.empty()) {
+  if ((false) && !idOld.empty()) {
     Managed o;
     o.key = url + "\ntester\n" + idOld;
     o.inc = "1";
@@ -899,6 +905,11 @@ int main() {
 
   hostOld.End();
   server.End();
+  // rule 4 of the guard: a host that took input with injection on makes the run INVALID
+  if (e2e::e2e_injection_contradicted(hostA.Text())) {
+    std::printf("FAIL  host KA-A logged input with injection on\nRESULT: INVALID\n");
+    return 2;
+  }
   std::printf("\nka_pc_managed_e2e_test: %s\n", gFailures == 0 ? "ALL PASS" : (std::to_string(gFailures) + " FAILED").c_str());
   return gFailures == 0 ? 0 : 1;
 }

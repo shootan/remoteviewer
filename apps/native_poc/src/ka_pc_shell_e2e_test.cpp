@@ -35,6 +35,7 @@
 #include <fstream>
 #include <sstream>
 
+#include "e2e_injection_guard.hpp"
 #include "e2e_isolation.hpp"
 
 namespace {
@@ -496,17 +497,16 @@ int main() {
         L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264 --bind-address 127.0.0.1 --bind-port " +
             std::to_wstring(media) + L" --control-port " + std::to_wstring(control) + L" --directory-url " + widen(url) +
             L" --directory-id tester --host-name " + widen(name) + L" --directory-cache \"" + dir + L"cache.json\" --seconds 1800" +
-            L" --input-injection-mode none",
+            e2e::e2e_injection_off_arg(dir),
         dir, &env);
     check(started, std::string("host ") + name + " registered as its own record and started from its cache", "id=" + h->id);
-    // fail closed: no viewer connects to a host that would inject input into this PC
-    const uint64_t injUntil = GetTickCount64() + 10000;
-    while (GetTickCount64() < injUntil && h->proc.Text().find("input injection disabled") == std::string::npos &&
-           h->proc.Text().find("input injection enabled") == std::string::npos)
-      Sleep(50);
-    if (h->proc.Text().find("input injection disabled") == std::string::npos) {
-      std::printf("FAIL  host %s did not say 'input injection disabled' -- stopping before any viewer connects\n", name);
-      return 1;
+    // The shared test-host guard (ka-r3 6b9cf79): THIS launch said input injection OFF and host power management
+    // OFF, both whole lines, before any viewer exists -- else INVALID, exit 2 (its hosts die with their jobs).
+    {
+      std::string why;
+      TestHost* th = h.get();
+      if (!e2e::e2e_wait_injection_off([th] { return th->proc.Text(); }, 20000, &why))
+        e2e::e2e_injection_setup_failed(name, why);
     }
     hosts.push_back(std::move(h));
   }
@@ -1050,6 +1050,15 @@ int main() {
     if (gManaged) {
       gManaged->JoinReapers();
       gManaged.reset();
+    }
+  }
+  // rule 4 of the guard: a host that took input with injection on makes the run INVALID
+  for (auto& h : hosts) {
+    if (e2e::e2e_injection_contradicted(h->proc.Text())) {
+      std::printf("FAIL  host %s logged input with injection on\nRESULT: INVALID\n", h->name.c_str());
+      for (auto& k : hosts) k->proc.End();
+      server.End();
+      return 2;
     }
   }
   for (auto& h : hosts) h->proc.End();
