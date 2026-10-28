@@ -5,7 +5,8 @@
 // Role:    (1) TimestampPrefixBuf -- streambuf that stamps every std::cout/std::cerr line with
 //              wall-clock time; (2) HostPowerKeepalive -- SetThreadExecutionState wrapper that keeps
 //              the machine awake while the host runs and the display on while streaming;
-//              (3) wake_display_for_remote_session -- one-shot display wake on the stream edge.
+//              (3) its one-shot display wake on the stream edge -- all of it under one local startup
+//              policy (host_power_policy.hpp, 2026-10-28 Finding-3).
 // Thread:  TimestampPrefixBuf is called from every logging thread (per-thread line buffer + one
 //          locked write). HostPowerKeepalive is main-thread only (SetThreadExecutionState is
 //          per-thread state and must be applied from the thread that owns it).
@@ -25,6 +26,7 @@
 #include <streambuf>
 #include <string>
 #include "host_diagnostic_log.hpp"
+#include "os_input_effects.hpp"
 
 namespace remote60::native_poc {
 
@@ -89,31 +91,26 @@ class TimestampPrefixBuf : public std::streambuf {
   std::mutex mu_;
 };
 
-inline void wake_display_for_remote_session() {
-  // ES_DISPLAY_REQUIRED resets the idle timer, but a monitor that has already powered down
-  // is not guaranteed to light immediately on every display driver. Mirror a real local
-  // wake without leaving the pointer displaced: the paired relative moves cancel out.
-  INPUT wake[2]{};
-  wake[0].type = INPUT_MOUSE;
-  wake[0].mi.dx = 1;
-  wake[0].mi.dwFlags = MOUSEEVENTF_MOVE;
-  wake[1].type = INPUT_MOUSE;
-  wake[1].mi.dx = -1;
-  wake[1].mi.dwFlags = MOUSEEVENTF_MOVE;
-  (void)SendInput(2, wake, sizeof(INPUT));
-  (void)PostMessageW(HWND_BROADCAST, WM_SYSCOMMAND,
-                     static_cast<WPARAM>(SC_MONITORPOWER), static_cast<LPARAM>(-1));
-}
-
+// HostPowerKeepalive (2026-10-28, Codex Finding-3): everything the host does to this machine's power, under ONE local
+// startup-only policy (host_power_policy.hpp), bound before this object exists -- it has no default constructor and
+// no setter. OFF: no execution-state request at construction, while streaming or at destruction, and no display
+// wake; the streaming state is still tracked (nothing else changes). Every effect goes through the OS boundary
+// (os_input_effects.hpp: recorded, never performed, in the record-only test build). The display wake is private:
+// nothing else can call it around the policy.
 class HostPowerKeepalive {
  public:
-  HostPowerKeepalive() {
-    Apply(false);
+  explicit HostPowerKeepalive(bool enabled) : enabled_(enabled) {
+    if (enabled_) Apply(false);
   }
 
   ~HostPowerKeepalive() {
-    (void)SetThreadExecutionState(ES_CONTINUOUS);
+    if (enabled_) (void)os_input::set_thread_execution_state(ES_CONTINUOUS);
   }
+
+  HostPowerKeepalive(const HostPowerKeepalive&) = delete;
+  HostPowerKeepalive& operator=(const HostPowerKeepalive&) = delete;
+
+  bool enabled() const { return enabled_; }
 
   void SetStreaming(bool streaming, bool wakeDisplay = false) {
     // Only a real not-streaming -> streaming edge may wake the display. The wake injects
@@ -123,17 +120,35 @@ class HostPowerKeepalive {
     const bool startedStreaming = streaming && !streaming_;
     if (streaming_ == streaming) return;
     streaming_ = streaming;
+    if (!enabled_) return;  // the local policy is OFF: a call site's request changes nothing on this machine
     Apply(streaming);
-    if (startedStreaming && wakeDisplay) wake_display_for_remote_session();
+    if (startedStreaming && wakeDisplay) WakeDisplay();
   }
 
  private:
   static void Apply(bool streaming) {
     EXECUTION_STATE flags = ES_CONTINUOUS | ES_SYSTEM_REQUIRED;
     if (streaming) flags = static_cast<EXECUTION_STATE>(flags | ES_DISPLAY_REQUIRED);
-    (void)SetThreadExecutionState(flags);
+    (void)os_input::set_thread_execution_state(flags);
   }
 
+  static void WakeDisplay() {
+    // ES_DISPLAY_REQUIRED resets the idle timer, but a monitor that has already powered down
+    // is not guaranteed to light immediately on every display driver. Mirror a real local
+    // wake without leaving the pointer displaced: the paired relative moves cancel out.
+    INPUT wake[2]{};
+    wake[0].type = INPUT_MOUSE;
+    wake[0].mi.dx = 1;
+    wake[0].mi.dwFlags = MOUSEEVENTF_MOVE;
+    wake[1].type = INPUT_MOUSE;
+    wake[1].mi.dx = -1;
+    wake[1].mi.dwFlags = MOUSEEVENTF_MOVE;
+    (void)os_input::send_input(2, wake, sizeof(INPUT));
+    (void)os_input::post_message(HWND_BROADCAST, WM_SYSCOMMAND,
+                                 static_cast<WPARAM>(SC_MONITORPOWER), static_cast<LPARAM>(-1));
+  }
+
+  const bool enabled_;
   bool streaming_ = false;
 };
 

@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "env_util.hpp"
+#include "host_power_policy.hpp"
 
 namespace remote60::native_poc {
 
@@ -45,6 +46,10 @@ struct Args {
   uint32_t traceMax = 0;
   uint32_t inputLogEvery = 120;
   bool enableInputInjection = true;
+  // 2026-10-28 (Codex Finding-3 (1), r5 P2-1): --host-power-management on|off, read by parse_args with the same
+  // token / arity rules as every other switch (an operand of another switch is never it). main() parses BEFORE the
+  // power object exists. Not ok -> the host refuses to start.
+  HostPowerPolicy hostPower;
   std::string inputInjectionMode = "background_message";
   uint32_t inputTargetPid = 0;
   std::string inputTargetProcess;

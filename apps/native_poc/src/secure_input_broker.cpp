@@ -3,6 +3,7 @@
 #include "secure_input_protocol.hpp"  // kSecureInputServiceName
 #include "trusted_service_pipe.hpp"
 #include "secure_input_desktop_fence.hpp"
+#include "os_input_effects.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -70,6 +71,11 @@ std::wstring sibling_executable_path(const wchar_t* fileName) {
 
 bool SecureInputBrokerClient::EnsureInstalledAndConnected(const std::wstring& serviceExePath,
                                                            std::string* status) {
+  // record-only test build (os_input_effects.hpp): no SYSTEM service is installed or connected
+  if (os_input::broker_refused("install_connect")) {
+    if (status) *status = "secure input: record-only test build";
+    return false;
+  }
   std::lock_guard<std::mutex> lock(mu_);
   if (pipe_ != INVALID_HANDLE_VALUE) return true;
   if (!process_is_elevated()) {
@@ -183,6 +189,7 @@ void SecureInputBrokerClient::SetLogonDesktopOnly(bool on) {
 }
 
 bool SecureInputBrokerClient::WriteLocked(SecureInputMessage message) {
+  if (os_input::broker_refused("write")) return false;  // record-only: nothing handed to a service
   message.flags = static_cast<uint16_t>(message.flags | flags_);  // r10 T2: the agent's fence reads it
   if (!ConnectLocked(0)) return false;  // r14 M1: one bounded try on the input path (no pipe wait loop)
   if (remote60::native_poc::write_pipe_bounded(pipe_, &message, sizeof(message))) return true;
