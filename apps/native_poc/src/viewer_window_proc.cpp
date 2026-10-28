@@ -1,6 +1,7 @@
 // See viewer_window_proc.hpp. Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0).
 
 #include "viewer_window_proc.hpp"
+#include "viewer_owner_fence.hpp"
 
 #include <imm.h>
 #pragma comment(lib, "imm32.lib")
@@ -1251,6 +1252,21 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
     case kMsgOwnerFence:
       if (!ctx.session.ownerFenced) {
+        // 0. r5 (Codex R3-b): what has not left yet and is not a release is cancelled at once -- every queued down /
+        //    text / move / wheel, the pending clipboard text (and the clipboard sync: no send, no poll), a typed
+        //    password waiting to be sealed (zeroed). Image / file offers stop. The counters are taken now, before
+        //    the releases, for the fence's verdict (R3-a).
+        const uint32_t droppedInputs = owner_fence_cancel_pending(
+            ctx.control.inputQueue, ctx.control.clipboard, ctx.session.preloginCredMu, ctx.session.preloginCredPassword,
+            ctx.session.preloginCredRequested);
+        ctx.control.clipImage.Stop();
+        ctx.control.fileCopy.Stop();
+        {
+          const FenceCounterSnapshot at = snapshot(ctx.control.inputExchanges);
+          ctx.session.fenceTaken0 = at.taken;
+          ctx.session.fenceAcked0 = at.acked;
+          ctx.session.fenceFailed0 = at.failed;
+        }
         // 1. Whatever is held is released FIRST, while input is still on -- the same set the control channel's
         //    resume sends: every modifier up, every key this window sent down, every mouse button, the scan keys
         //    of host-IME routing, the mouse capture. (Turning input off first would drop these very releases.)
@@ -1273,7 +1289,8 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         ctx.session.ownerFenceAtMs = GetTickCount64();
         RemoveClipboardFormatListener(hwnd);
         std::cout << "[native-video-client] owner fence: held input released (modifierUps=" << modifierUps
-                  << " queued), input and clipboard cut; waiting for the releases to reach the host\n";
+                  << " queued), " << droppedInputs << " queued non-release input(s), the pending clipboard and any "
+                  << "waiting password dropped; input and clipboard cut; waiting for the releases to reach the host\n";
         // 3. r4 (Codex R3): the teardown only once those releases have LEFT and been ACKNOWLEDGED by the host -- the
         //    input queue empty and the reliable control channel holding nothing unacknowledged -- or, on a link that
         //    is not answering, after a bounded budget. Closing at once could end the control loop with the releases
@@ -1799,14 +1816,19 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
       if (wp == kOwnerFenceDrainTimerId) {
         const uint64_t waited = GetTickCount64() - ctx.session.ownerFenceAtMs.load();
-        // every queued input taken AND acknowledged (input actions are request / response: the host acks each one)
-        const bool delivered = ctx.control.inputQueue.Empty() && !ctx.control.inputInFlight.load() &&
-                               !ctx.control.udpControl.TxPending();
-        if (delivered || waited >= kOwnerFenceDrainBudgetMs) {
+        // r5 (Codex R3-a): confirmed only by the host's InputAck for every release exchange since the fence -- an empty
+        // queue or an idle channel is not an acknowledgement (a failed exchange leaves both empty)
+        const FenceVerdict v = fence_release_verdict(
+            FenceCounterSnapshot{ctx.session.fenceTaken0, ctx.session.fenceAcked0, ctx.session.fenceFailed0},
+            snapshot(ctx.control.inputExchanges), ctx.control.inputQueue.Empty(), ctx.control.inputInFlight.load());
+        const bool confirmed = v == FenceVerdict::Confirmed && !ctx.control.udpControl.TxPending();
+        if (confirmed || v == FenceVerdict::Failed || waited >= kOwnerFenceDrainBudgetMs) {
           KillTimer(hwnd, kOwnerFenceDrainTimerId);
           std::cout << "[native-video-client] owner fence: releases "
-                    << (delivered ? "acknowledged by the host" : "NOT confirmed within the budget") << " after "
-                    << waited << " ms; closing the session\n";
+                    << (confirmed ? "acknowledged by the host"
+                                  : v == FenceVerdict::Failed ? "NOT confirmed (an exchange failed)"
+                                                              : "NOT confirmed within the budget")
+                    << " after " << waited << " ms; closing the session\n";
           PostMessageW(hwnd, WM_CLOSE, 0, 0);
         }
         return 0;

@@ -4,6 +4,7 @@
 #include "prelogin_control_allowlist.hpp"
 #include "prelogin_input_gate.hpp"
 #include "viewer_control_client.hpp"
+#include "viewer_owner_fence.hpp"
 
 #include <iostream>
 #include <memory>
@@ -740,6 +741,60 @@ void ControlClient::Run() {
     if (ctx.control.overUdp.load(std::memory_order_acquire)) ctx.control.udpControl.Tick();
     bool didWork = false;
     const uint64_t nowUs = qpc_now_us();
+    // ka-pc-impl r5 (Codex R3-b): after the owner fence this thread sends RELEASES ONLY -- taken straight off the
+    // input queue (the fence dropped every other queued input and cancelled the pending clipboard / credential). No
+    // ping-scheduled work, no pick, no stream state, no clipboard, no credential, no IME align from here on. Each
+    // release's exchange is counted (taken / acked / failed) for the fence's verdict; a failed one is not resumed.
+    if (ctx.session.ownerFenceAtMs.load() != 0) {
+#if defined(REMOTE60_VIEWER_KA_TEST_SEAM)
+      // TEST BUILD ONLY (GNLinkViewerKaTest): REMOTE60_VIEWER_TEST_HOLD_SEND_AFTER_FENCE_MS=N holds this sender for N ms
+      // after the fence -- a sender slow at exactly the wrong moment; REMOTE60_VIEWER_TEST_FAIL_RELEASE_AFTER_FENCE=1
+      // makes the first release exchange after the fence fail (as a write the link refused) -- so a test can show the
+      // fence waits for its releases, and that a failed one is NOT reported as acknowledged.
+      {
+        static const uint64_t holdMs = [] {
+          const char* v = std::getenv("REMOTE60_VIEWER_TEST_HOLD_SEND_AFTER_FENCE_MS");
+          return v ? std::strtoull(v, nullptr, 10) : 0ull;
+        }();
+        if (holdMs && GetTickCount64() - ctx.session.ownerFenceAtMs.load() < holdMs) {
+          Sleep(5);
+          continue;
+        }
+      }
+#endif
+      if (!ctx.control.inputQueue.Empty()) ctx.control.inputInFlight.store(true);
+      struct FencedInFlightDone {
+        std::atomic<bool>* f;
+        ~FencedInFlightDone() { f->store(false); }
+      } fencedInFlightDone{&ctx.control.inputInFlight};
+      ControlOutboundAction release{};
+      if (!take_release_action(ctx.control.inputQueue, nowUs, &release)) {
+        ctx.control.inputInFlight.store(false);
+        ctx.control.inputQueue.WaitForInput(5);
+        continue;
+      }
+      ctx.control.inputExchanges.taken.fetch_add(1);
+      TcpControlResponse releaseResponse{};
+      bool releaseOk = execute_control_action(*controlLink, release, &releaseResponse);
+#if defined(REMOTE60_VIEWER_KA_TEST_SEAM)
+      {
+        static std::atomic<bool> failOnce{[] {
+          const char* v = std::getenv("REMOTE60_VIEWER_TEST_FAIL_RELEASE_AFTER_FENCE");
+          return v && *v == '1';
+        }()};
+        if (failOnce.exchange(false)) releaseOk = false;
+      }
+#endif
+      if (releaseOk && releaseResponse.kind == TcpControlResponseKind::InputAck) {
+        ctx.control.inputExchanges.acked.fetch_add(1);
+      } else {
+        ctx.control.inputExchanges.failed.fetch_add(1);
+        std::cout << "[native-video-client][control] a release after the owner fence was not acknowledged; "
+                     "no resume (the session is ending)\n";
+        break;
+      }
+      continue;
+    }
     // P0: once a second, print mouse-moves the UI generated vs coalesced vs actually sent, with the
     // send->ack RTT and generate->send queue age. moveGen>>moveSent (and coalesced making up the
     // gap) means the drag is serialized 1-per-RTT. windowUs is emitted because the control thread
@@ -1042,22 +1097,6 @@ void ControlClient::Run() {
       std::lock_guard<std::mutex> lock(ctx.control.bandwidthMu);
       bandwidthSnapshot = ctx.control.bandwidth;
     }
-#if defined(REMOTE60_VIEWER_KA_TEST_SEAM)
-    // TEST BUILD ONLY (GNLinkViewerKaTest, ka-pc-impl r4, Codex R3): REMOTE60_VIEWER_TEST_HOLD_SEND_AFTER_FENCE_MS=N
-    // holds every outbound control action for N ms after the owner fence -- a sender that is slow at exactly the
-    // wrong moment -- so a test can show the fence waits for its releases instead of closing over them.
-    {
-      static const uint64_t holdMs = [] {
-        const char* v = std::getenv("REMOTE60_VIEWER_TEST_HOLD_SEND_AFTER_FENCE_MS");
-        return v ? std::strtoull(v, nullptr, 10) : 0ull;
-      }();
-      const uint64_t fencedAt = ctx.session.ownerFenceAtMs.load();
-      if (holdMs && fencedAt && GetTickCount64() - fencedAt < holdMs) {
-        Sleep(5);
-        continue;
-      }
-    }
-#endif
     // r4 (Codex R3): raised before the dequeue (see ViewerControlState::inputInFlight), lowered after the exchange.
     if (!ctx.control.inputQueue.Empty()) ctx.control.inputInFlight.store(true);
     struct InFlightDone {
@@ -1109,7 +1148,16 @@ void ControlClient::Run() {
       }
       TcpControlResponse response{};
       const uint64_t actionStartUs = qpc_now_us();
+      const bool countedInput = action.kind == ControlOutboundActionKind::InputEvent ||
+                                action.kind == ControlOutboundActionKind::InputText ||
+                                action.kind == ControlOutboundActionKind::PhysicalKey;
+      if (countedInput) ctx.control.inputExchanges.taken.fetch_add(1);
       const bool actionOk = execute_control_action(*controlLink, action, &response);
+      if (countedInput) {
+        // r5 (Codex R3-a): acknowledged only by the host's InputAck
+        if (actionOk && response.kind == TcpControlResponseKind::InputAck) ctx.control.inputExchanges.acked.fetch_add(1);
+        else ctx.control.inputExchanges.failed.fetch_add(1);
+      }
       // One exchange that never gets its reply stalls every later one behind it,
       // including input. Naming the slow action is the only way to see which.
       const uint64_t actionDoneUs = qpc_now_us();

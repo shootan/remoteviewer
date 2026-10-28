@@ -753,6 +753,18 @@ endforeach()
 target_compile_definitions(remote60_viewer_ka_test PRIVATE REMOTE60_VIEWER_KA_TEST_SEAM=1)
 set_target_properties(remote60_viewer_ka_test PROPERTIES OUTPUT_NAME "GNLinkViewerKaTest")
 
+# ka-pc-impl r5 (Codex R3-a / R3-b): the owner fence's verdict and cancellation on the viewer's own code (its sources
+# without its main); no window, host, network, clipboard API or real password.
+set(_viewer_sources_nomain ${_viewer_sources})
+list(FILTER _viewer_sources_nomain EXCLUDE REGEX "native_video_client_main\\.cpp$")
+add_executable(remote60_ka_pc_fence_test src/ka_pc_fence_test.cpp ${_viewer_sources_nomain})
+foreach(_prop INCLUDE_DIRECTORIES LINK_LIBRARIES COMPILE_DEFINITIONS COMPILE_OPTIONS)
+  get_target_property(_value remote60_native_video_client_poc ${_prop})
+  if(_value)
+    set_property(TARGET remote60_ka_pc_fence_test PROPERTY ${_prop} "${_value}")
+  endif()
+endforeach()
+
 # prelogin r21 (E2): RequestWindowList's role gate + park through the product ClientSessionController,
 # against a fake control host on loopback (no UI, no SendInput, no desktop).
 add_executable(remote60_client_session_role_park_test
@@ -4542,4 +4554,14 @@ if(GNLINK_HAVE_WEBVIEW2)
   target_include_directories(remote60_ka_pc_shell_e2e_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
   target_link_libraries(remote60_ka_pc_shell_e2e_test PRIVATE ${_recovery_shell_links})
   add_dependencies(remote60_ka_pc_shell_e2e_test remote60_client_shell remote60_viewer_ka_test remote60_native_video_host_poc)
+
+  # ka-pc-impl r5 (Codex R1-a): the shell's own PC-count functions on an in-memory registry (no process, window,
+  # WebView or network); files under REMOTE60_TEST_TMP only.
+  add_executable(remote60_ka_pc_shell_logic_test src/ka_pc_shell_logic_test.cpp ${_recovery_shell_sources})
+  target_compile_definitions(remote60_ka_pc_shell_logic_test PRIVATE REMOTE60_SHELL_TEST_SEAM=1)
+  if(MSVC)
+    target_compile_options(remote60_ka_pc_shell_logic_test PRIVATE /utf-8)
+  endif()
+  target_include_directories(remote60_ka_pc_shell_logic_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+  target_link_libraries(remote60_ka_pc_shell_logic_test PRIVATE ${_recovery_shell_links})
 endif()

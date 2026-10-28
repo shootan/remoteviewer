@@ -128,6 +128,9 @@ struct ViewerCancelSlot {
   // therefore never killed.
   HANDLE testTerminate = nullptr;
 #endif
+  // ka-pc-impl r5 (Codex R1-a): the PC this viewer is for -- kept with the slot so a viewer that a replacement moved
+  // to gReplacedViewers still counts as that PC (last, so older brace-initialisers keep their meaning).
+  std::string hostId;
 };
 std::map<std::string, ViewerCancelSlot> gViewerByHost;
 // ka-pc-impl r4 (Codex decision 1): viewers this owner started whose slot a replacement took over. The cancel only
@@ -1863,6 +1866,7 @@ void begin_session(const ShellConnectRequest& request, bool automatic = false, c
   }
   gViewerByHost[request.hostId] = ViewerCancelSlot{pi.dwProcessId, cancelEvent, liveness};
   gViewerByHost[request.hostId].ownerEndEvent = ownerEndEvent;
+  gViewerByHost[request.hostId].hostId = request.hostId;
   gViewerByHost[request.hostId].operation = operation;
   {
     HANDLE terminate = nullptr;
@@ -1979,6 +1983,10 @@ std::wstring managed_base_args(const std::string& hostId, const std::string& hos
 std::set<std::string> logical_pcs(const std::string& except = {}) {
   std::set<std::string> out;
   for (const auto& entry : gViewerByHost) out.insert(entry.first);
+  // r5 (Codex R1-a): a viewer a replacement kept (it had in fact connected) is that PC, open -- whether or not the
+  // replacement started. Counted per PC: two viewers of one PC are one PC.
+  for (const auto& r : gReplacedViewers)
+    if (!r.hostId.empty()) out.insert(r.hostId);
   if (gManaged)
     for (const auto& id : gManaged->HostIds()) out.insert(id);
   out.erase(gStagingHost);  // r3 (Codex R1): the reserved candidate -- ordinary or kept -- is not one of the three
@@ -1989,6 +1997,8 @@ std::set<std::string> logical_pcs(const std::string& except = {}) {
 // On screen (or being opened): an ordinary viewer, or a kept PC with an activation. Never let go to make room.
 bool pc_visible(const std::string& hostId) {
   if (gViewerByHost.count(hostId)) return true;
+  for (const auto& r : gReplacedViewers)
+    if (r.hostId == hostId) return true;  // r5 (Codex R1-a): a kept-on viewer of this PC is on screen
   const auto* c = gManaged ? gManaged->Find(hostId) : nullptr;
   return c && (c->activeOp != 0 || c->state == "active");
 }

@@ -32,6 +32,14 @@
 
 namespace remote60::native_poc::viewer {
 
+// ka-pc-impl r5 (Codex R3-a): the control thread's count of the input exchanges it RUNS (the UI thread's owner fence
+// reads them; viewer_owner_fence.hpp fence_release_verdict). An acknowledgement is the host's InputAck, nothing less.
+struct InputExchangeCounters {
+  std::atomic<uint64_t> taken{0};   // an input action whose exchange was started
+  std::atomic<uint64_t> acked{0};   // ... that ended with the host's InputAck
+  std::atomic<uint64_t> failed{0};  // ... that ended any other way (a failed exchange, a wrong reply)
+};
+
 // Clipboard text sync (K1). The UI thread hears local clipboard changes (WM_CLIPBOARDUPDATE) and
 // leaves the ones worth sending as a pending outbound; the control thread drains that pending item,
 // sends it, and polls the host for changes the other way. `enabled` is the viewer's on/off toggle
@@ -127,6 +135,7 @@ struct ControlChannelState {
   // lowered once that action's exchange (its ack) is over -- so "the queue is empty and nothing is in flight" means
   // every queued input was acknowledged by the host. The owner fence waits on it.
   std::atomic<bool> inputInFlight{false};
+  InputExchangeCounters inputExchanges;
   // C0 stage 1: the receive thread's latest bandwidth observation, for the control thread to
   // send. Guarded; copied out whole so a report is never sent half-updated.
   std::mutex bandwidthMu;
