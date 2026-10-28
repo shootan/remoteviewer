@@ -1922,6 +1922,12 @@ target_include_directories(remote60_os_input_record_match_test PRIVATE src)
 add_executable(remote60_e2e_injection_guard_test src/e2e_injection_guard_test.cpp)
 target_include_directories(remote60_e2e_injection_guard_test PRIVATE src)
 
+# 2026-10-28 (Codex Finding-3 (4)): an OLDER host's silence against the product's lease / runner (pure, loopback) --
+# the stand-in for the --old-host cases NOT RUN here; not a run of the published host
+add_executable(remote60_standby_legacy_host_test src/standby_legacy_host_test.cpp)
+target_include_directories(remote60_standby_legacy_host_test PRIVATE src)
+target_link_libraries(remote60_standby_legacy_host_test PRIVATE ws2_32)
+
 add_executable(remote60_standby_lease_test src/standby_lease_test.cpp)
 target_include_directories(remote60_standby_lease_test PRIVATE src)
 target_link_libraries(remote60_standby_lease_test PRIVATE ws2_32)
