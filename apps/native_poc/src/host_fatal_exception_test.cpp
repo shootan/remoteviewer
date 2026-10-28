@@ -331,7 +331,8 @@ int wmain() {
     si.hStdOutput = h;
     si.hStdError = h;
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    std::wstring cmd = L"\"" + dir + L"GNLinkStreamMigrationTest.exe\" --prelogin";
+    // input injection OFF and power management OFF from its first line (Finding-3), no client either way
+    std::wstring cmd = L"\"" + dir + L"GNLinkStreamMigrationTest.exe\" --prelogin" + remote60::native_poc::e2e::e2e_injection_off_arg(dir);
     PROCESS_INFORMATION pi{};
     DWORD pcode = 0xFFFFFFFFu;
     bool ended = false;

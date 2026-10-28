@@ -1912,6 +1912,10 @@ target_include_directories(remote60_standby_entry_client_test PRIVATE src)
 # keepalive-r2 ② r3 (Codex scope2 N1, N2): the lease and the runner against a fake host on loopback -- the activation's
 # HelloAck test and the lifetime counterexamples (no product process).
 # 2026-10-28: the e2e input-injection gate, its negative controls (pure: no host, no input API)
+# 2026-10-28 (Codex Finding-3): the host power policy through the product's HostPowerKeepalive, RECORD-ONLY (pure)
+add_executable(remote60_host_power_policy_record_test src/host_power_policy_record_test.cpp)
+target_include_directories(remote60_host_power_policy_record_test PRIVATE src)
+target_compile_definitions(remote60_host_power_policy_record_test PRIVATE REMOTE60_OS_INPUT_RECORD_ONLY=1)
 add_executable(remote60_e2e_injection_guard_test src/e2e_injection_guard_test.cpp)
 target_include_directories(remote60_e2e_injection_guard_test PRIVATE src)
 

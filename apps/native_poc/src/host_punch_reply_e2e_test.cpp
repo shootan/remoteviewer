@@ -244,7 +244,11 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
   {
     wchar_t oldBin[MAX_PATH] = {};
     if (GetEnvironmentVariableW(L"REMOTE60_E2E_OLD_BIN", oldBin, MAX_PATH) != 0 && oldBin[0] != L'\0') {
-      streamSrc = oldBin;
+      // 2026-10-28 (Codex Finding-3 (4)): an older build has no --host-power-management -- it would ignore the
+      // argument and keep its power effects on. Never started here to "check" that; this case is unverified.
+      std::printf("NOT RUN  %s: an older binary (no --host-power-management) is not started on this PC -- unverified "
+                  "(Codex Finding-3 (4))\n", tag);
+      return false;
     }
   }
   if (!CopyFileW(streamSrc.c_str(), (host->dir + L"GNLinkStream.exe").c_str(), FALSE) ||
@@ -281,9 +285,9 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
                      L" --directory-url " + url +
                      L" --directory-id tester --directory-pw e2e-pass-1234" +
                      L" --seconds 90" + isolation_args(host->dir) +
-                     // input injection off (e2e_injection_guard.hpp). Not for a --prelogin worker: no client ever connects
-                     // to one here (its case checks that it stays offline), and its argument contract is the product's
-                     (prelogin ? std::wstring() : remote60::native_poc::e2e::e2e_injection_off_arg(host->dir));
+                     // input injection OFF and host power management OFF (e2e_injection_guard.hpp; Finding-3) -- for a
+                     // --prelogin worker too: its power object exists from its first line, client or not
+                     remote60::native_poc::e2e::e2e_injection_off_arg(host->dir);
 
   // Checked BEFORE anything starts. A host that talks to a directory writes a token cache, and
   // without --directory-cache that is the user's own %LOCALAPPDATA%\remote60\host.json --

@@ -27,13 +27,27 @@
 #include <string>
 #include <thread>
 
+#include "host_power_policy.hpp"
+
 namespace remote60::native_poc::e2e {
 
 // The explicit OFF state for `--input-injection-mode none`, as host_startup_config.cpp prints it (a whole line).
 inline const char* e2e_injection_off_line() { return "input injection disabled (unsupported mode) mode=none"; }
 
-// The argument for the host's command line (the staging directory is not needed: nothing is written).
-inline std::wstring e2e_injection_off_arg(const std::wstring& /*stagingDir*/) { return L" --input-injection-mode none"; }
+// The explicit power OFF state (Codex Finding-3, host_power_policy.hpp), the host's own whole line.
+inline std::string e2e_power_off_line() {
+  HostPowerPolicy off;
+  off.enabled = false;
+  off.fromCommandLine = true;
+  return host_power_policy_line(off);
+}
+
+// The arguments for the host's command line: input injection OFF and host power management OFF (both local,
+// startup-only; nothing is written). A host that does not know --host-power-management (an older build) never says
+// the power line -- the gate refuses it.
+inline std::wstring e2e_injection_off_arg(const std::wstring& /*stagingDir*/) {
+  return L" --input-injection-mode none --host-power-management off";
+}
 
 // What a host wrote to a log file so far (shared read: the host keeps writing it).
 inline std::string e2e_read_text_file(const std::wstring& path) {
@@ -48,9 +62,37 @@ inline std::string e2e_read_text_file(const std::wstring& path) {
   return out;
 }
 
-// The judgement on what a host said so far: 1 = the explicit OFF state, 0 = not yet, -1 = never acceptable
-// (enabled, another disabled reason, the config refused / not loaded).
+// One whole line, said: 1 = exactly `want` up to its line end, 0 = not yet (absent or still being written),
+// -1 = a line with that prefix that is something else.
+inline int e2e_whole_line(const std::string& out, const std::string& prefix, const std::string& want) {
+  const size_t at = out.find(prefix);
+  if (at == std::string::npos) return 0;
+  const size_t end = at + want.size();
+  if (out.compare(at, want.size(), want) == 0) {
+    if (end >= out.size()) return 0;
+    return (out[end] == '\r' || out[end] == '\n') ? 1 : -1;
+  }
+  // a shorter tail still being written is "not yet"; anything that differs is refused
+  if (out.size() - at < want.size() && want.compare(0, out.size() - at, out, at, out.size() - at) == 0) return 0;
+  return -1;
+}
+
+// The power half (Finding-3): 1 = this launch said power management OFF, whole; -1 = on / anything else.
+inline int e2e_power_state(const std::string& out, std::string* why) {
+  if (out.find("invalid --host-power-management value") != std::string::npos) {
+    if (why) *why = "the host refused its power argument";
+    return -1;
+  }
+  const int st = e2e_whole_line(out, "host power management=", e2e_power_off_line());
+  if (st < 0 && why) *why = "the host's power management is not OFF: " + out.substr(out.find("host power management="), 90);
+  return st;
+}
+
+// The judgement on what a host said so far: 1 = input injection OFF and power management OFF, both whole lines;
+// 0 = not yet; -1 = never acceptable (enabled, another off reason, power on, a refused argument / config).
 inline int e2e_injection_state(const std::string& out, std::string* why) {
+  const int power = e2e_power_state(out, why);
+  if (power < 0) return -1;
   if (out.find("input injection enabled") != std::string::npos) {
     if (why) *why = "the host said input injection ENABLED";
     return -1;
@@ -65,7 +107,7 @@ inline int e2e_injection_state(const std::string& out, std::string* why) {
     const size_t end = at + std::strlen(want);
     // the whole line: the mode value is exactly "none" (not "none2", not a prefix of something else)
     if (out.compare(at, std::strlen(want), want) == 0 && end < out.size() && (out[end] == '\r' || out[end] == '\n')) {
-      return 1;
+      return power == 1 ? 1 : 0;  // input OFF said; the power line too, or not yet
     }
     if (out.compare(at, std::strlen(want), want) == 0 && end >= out.size()) return 0;  // the line is still being written
     if (why) *why = "the host is off for another reason, not the explicit setting: " + out.substr(at, 80);

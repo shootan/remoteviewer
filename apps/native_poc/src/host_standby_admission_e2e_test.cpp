@@ -271,7 +271,11 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
   {
     wchar_t oldBin[MAX_PATH] = {};
     if (GetEnvironmentVariableW(L"REMOTE60_E2E_OLD_BIN", oldBin, MAX_PATH) != 0 && oldBin[0] != L'\0') {
-      streamSrc = oldBin;
+      // 2026-10-28 (Codex Finding-3 (4)): an older build has no --host-power-management -- it would ignore the
+      // argument and keep its power effects on. Never started here to "check" that; this case is unverified.
+      std::printf("NOT RUN  %s: an older binary (no --host-power-management) is not started on this PC -- unverified "
+                  "(Codex Finding-3 (4))\n", tag);
+      return false;
     }
   }
   if (!CopyFileW(streamSrc.c_str(), (host->dir + L"GNLinkStream.exe").c_str(), FALSE) ||
@@ -308,9 +312,9 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
                      L" --directory-url " + url +
                      L" --directory-id tester --directory-pw e2e-pass-1234" +
                      L" --seconds " + e2e_host_seconds() + isolation_args(host->dir) +
-                     // input injection off (e2e_injection_guard.hpp). Not for a --prelogin worker: no client ever connects
-                     // to one here (its case checks that it stays offline), and its argument contract is the product's
-                     (prelogin ? std::wstring() : remote60::native_poc::e2e::e2e_injection_off_arg(host->dir));
+                     // input injection OFF and host power management OFF (e2e_injection_guard.hpp; Finding-3) -- for a
+                     // --prelogin worker too: its power object exists from its first line, client or not
+                     remote60::native_poc::e2e::e2e_injection_off_arg(host->dir);
 
   // Checked BEFORE anything starts. A host that talks to a directory writes a token cache, and
   // without --directory-cache that is the user's own %LOCALAPPDATA%\remote60\host.json --
@@ -1550,7 +1554,13 @@ int wmain(int argc, wchar_t** argv) {
   std::wstring oldHost;
   bool realDirectory = false;
   for (int i = 1; i < argc; ++i) {
-    if (i + 1 < argc && std::wstring(argv[i]) == L"--old-host") oldHost = argv[i + 1];
+    if (i + 1 < argc && std::wstring(argv[i]) == L"--old-host") {
+      // 2026-10-28 (Codex Finding-3 (4)): an older build cannot turn its power effects (or, before 0.2.x, maybe
+      // more) off -- not started on this PC. Its cases are UNVERIFIED here (an approved isolated machine, or a
+      // reviewed source-equivalent test build, would be the place).
+      std::printf("NOT RUN  --old-host %ls: an older binary has no --host-power-management; its cases are unverified "
+                  "(Codex Finding-3 (4))\n", argv[i + 1]);
+    }
     if (std::wstring(argv[i]) == L"--real-directory") realDirectory = true;
   }
   const char* kIssuedIp = "211.218.222.1";
@@ -1896,7 +1906,7 @@ int wmain(int argc, wchar_t** argv) {
     host.Stop();
     SetEnvironmentVariableW(L"REMOTE60_E2E_OLD_BIN", nullptr);
   } else {
-    std::printf("\n[an OLDER host] not run (pass --old-host <GNLinkStream.exe without standby>)\n");
+    std::printf("\n[an OLDER host] not run -- unverified on this PC (an older binary has no --host-power-management; Codex Finding-3 (4))\n");
   }
 
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);

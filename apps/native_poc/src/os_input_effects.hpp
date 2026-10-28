@@ -26,9 +26,18 @@ inline constexpr bool kRecordOnly = false;
 
 #if defined(REMOTE60_OS_INPUT_RECORD_ONLY)
 // One line per call, written whole (the host's stdout is shared by its threads).
-inline void record(const std::string& line) {
+// How many effects were recorded, by API prefix -- for the record-only tests (never in a product build).
+inline std::mutex& record_mu() {
   static std::mutex mu;
-  std::lock_guard<std::mutex> lock(mu);
+  return mu;
+}
+inline std::vector<std::string>& recorded() {
+  static std::vector<std::string> v;
+  return v;
+}
+inline void record(const std::string& line) {
+  std::lock_guard<std::mutex> lock(record_mu());
+  recorded().push_back(line);
   std::fputs(("[os-input-record] " + line + "\n").c_str(), stdout);
   std::fflush(stdout);
 }
@@ -103,6 +112,19 @@ inline BOOL set_cursor_pos(int x, int y) {
   return TRUE;
 #else
   return SetCursorPos(x, y);
+#endif
+}
+
+// SetThreadExecutionState (HostPowerKeepalive's only power API; Finding-3): recorded, the system's idle timers never
+// touched (record-only) -- reported as the call would (a non-zero previous state).
+inline EXECUTION_STATE set_thread_execution_state(EXECUTION_STATE flags) {
+#if defined(REMOTE60_OS_INPUT_RECORD_ONLY)
+  char b[64];
+  std::snprintf(b, sizeof(b), "api=SetThreadExecutionState flags=0x%lx", static_cast<unsigned long>(flags));
+  record(b);
+  return ES_CONTINUOUS;
+#else
+  return SetThreadExecutionState(flags);
 #endif
 }
 
