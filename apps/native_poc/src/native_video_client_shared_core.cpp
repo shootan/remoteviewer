@@ -20,8 +20,12 @@ uint64_t queue_now_ms() {
 uint32_t release_identity(const QueuedControlInputMessage& msg) {
   if (msg.type == MessageType::ControlInputEvent && msg.inputEvent.keyCode <= 255) {
     if (msg.inputEvent.kind == 6) return 1 + msg.inputEvent.keyCode;
+    // ka-pc-impl r7 (Codex N1): every mouse button's up, the X pair (VK_XBUTTON1=5, VK_XBUTTON2=6) included --
+    // enqueue_release_for_pressed_mouse_buttons makes those ups, and a release-only drain must keep them. (Whether an
+    // X edge may go to a host at all is the viewer's own fence, enqueue_input_event; it is not decided here.)
     if (msg.inputEvent.kind == 3 && (msg.inputEvent.keyCode == 1 || msg.inputEvent.keyCode == 2 ||
-                                   msg.inputEvent.keyCode == 4)) return 257 + msg.inputEvent.keyCode;
+                                   msg.inputEvent.keyCode == 4 || msg.inputEvent.keyCode == 5 ||
+                                   msg.inputEvent.keyCode == 6)) return 257 + msg.inputEvent.keyCode;
   }
   if (msg.type == MessageType::ControlPhysicalKey && !msg.physicalKey.down &&
       msg.physicalKey.vk <= 255 && msg.physicalKey.scanCode <= 255) {
@@ -78,6 +82,8 @@ uint16_t expected_message_size(MessageType type) {
 }
 
 }  // namespace
+
+uint32_t control_input_release_identity(const QueuedControlInputMessage& msg) { return release_identity(msg); }
 
 uint32_t ClientInputQueue::NextSequence() {
   return nextSeq_.fetch_add(1, std::memory_order_relaxed) + 1;

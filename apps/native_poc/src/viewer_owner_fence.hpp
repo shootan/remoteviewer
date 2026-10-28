@@ -36,16 +36,20 @@
 
 namespace remote60::native_poc::viewer {
 
-// The shared core's release rule (native_video_client_shared_core.cpp release_identity), on an outbound action: a key
-// up, a mouse button up (left/right/middle), a physical key up.
+// r7 (Codex N1): the shared core's ONE release rule (control_input_release_identity), asked about an outbound action --
+// a key up, a mouse button up (left, right, middle, X1, X2), a physical key up. No second copy of the rule.
 inline bool action_is_release(const ControlOutboundAction& a) {
-  if (a.kind == ControlOutboundActionKind::InputEvent && a.inputEvent.keyCode <= 255) {
-    if (a.inputEvent.kind == 6) return true;
-    if (a.inputEvent.kind == 3 && (a.inputEvent.keyCode == 1 || a.inputEvent.keyCode == 2 || a.inputEvent.keyCode == 4))
-      return true;
+  QueuedControlInputMessage m{};
+  if (a.kind == ControlOutboundActionKind::InputEvent) {
+    m.type = MessageType::ControlInputEvent;
+    m.inputEvent = a.inputEvent;
+  } else if (a.kind == ControlOutboundActionKind::PhysicalKey) {
+    m.type = MessageType::ControlPhysicalKey;
+    m.physicalKey = a.physicalKey;
+  } else {
+    return false;
   }
-  return a.kind == ControlOutboundActionKind::PhysicalKey && !a.physicalKey.down && a.physicalKey.vk <= 255 &&
-         a.physicalKey.scanCode <= 255;
+  return control_input_release_identity(m) != 0;
 }
 inline bool action_is_input(const ControlOutboundAction& a) {
   return a.kind == ControlOutboundActionKind::InputEvent || a.kind == ControlOutboundActionKind::InputText ||
@@ -66,6 +70,7 @@ inline void fence_raise(OwnerFenceGate& g) {
   g.acked0 = g.acked;
   g.failed0 = g.failed;
   g.skipped0 = g.skipped;
+  g.cancelled0 = g.cancelled;
 }
 
 // Normal path (control thread): `take` runs the scheduler's choice (it may dequeue an input) INSIDE the gate's
@@ -124,7 +129,7 @@ inline bool gate_take_release(OwnerFenceGate& g, ClientInputQueue& queue, uint64
   }
 }
 
-enum class InputOutcome { Acked, Failed, Skipped };
+enum class InputOutcome { Acked, Failed, Skipped, Cancelled };
 // The end of an admitted input exchange (control thread).
 inline void gate_end_input(OwnerFenceGate& g, InputOutcome o) {
   std::lock_guard<std::mutex> lock(g.mu);
@@ -132,18 +137,48 @@ inline void gate_end_input(OwnerFenceGate& g, InputOutcome o) {
   g.releaseExchange = false;
   if (o == InputOutcome::Acked) ++g.acked;
   else if (o == InputOutcome::Failed) ++g.failed;
-  else ++g.skipped;
+  else if (o == InputOutcome::Skipped) ++g.skipped;
+  else ++g.cancelled;
+}
+
+// r7 (Codex N2): why an exchange failed, one type for every caller (input, clipboard, IME, thumbnail, any action):
+//  - NotStarted: the fence refused its write before any byte of it -- a cancellation by policy (nothing was sent; the
+//    link is intact, the drain of releases goes on);
+//  - Broken: refused in the middle of a message -- the stream is no longer whole;
+//  - HookRefused: the test build refused a release write (a failed release, as a refused write would be);
+//  - Transport: no refusal at all -- the write, the reply or the protocol itself failed.
+enum class ExchangeFailure { NotStarted, Broken, HookRefused, Transport };
+inline ExchangeFailure gate_take_failure(OwnerFenceGate& g) {
+  std::lock_guard<std::mutex> lock(g.mu);
+  const OwnerFenceGate::Refusal r = g.lastRefusal;
+  g.lastRefusal = OwnerFenceGate::Refusal::None;
+  switch (r) {
+    case OwnerFenceGate::Refusal::FenceBeforeAnyByte: return ExchangeFailure::NotStarted;
+    case OwnerFenceGate::Refusal::FenceMidMessage: return ExchangeFailure::Broken;
+    case OwnerFenceGate::Refusal::TestHook: return ExchangeFailure::HookRefused;
+    default: return ExchangeFailure::Transport;
+  }
+}
+// The outcome of an admitted input exchange that did not end in an InputAck.
+inline InputOutcome outcome_of_failure(ExchangeFailure f) {
+  return f == ExchangeFailure::NotStarted ? InputOutcome::Cancelled : InputOutcome::Failed;
 }
 inline void gate_end_other(OwnerFenceGate& g) {
   std::lock_guard<std::mutex> lock(g.mu);
   g.releaseExchange = false;
 }
 
-// May this control-channel write start now? (FenceGatedLink, under the lock)
-inline bool gate_write_allowed(OwnerFenceGate& g) {
+// May this control-channel write start now? (FenceGatedLink, under the lock.) `bytesOfMessageSoFar`: how much of the
+// current message the link already wrote -- a refusal then is recorded as before-any-byte or mid-message (r7, N2).
+inline bool gate_write_allowed(OwnerFenceGate& g, size_t bytesOfMessageSoFar = 0) {
   std::lock_guard<std::mutex> lock(g.mu);
+  if (bytesOfMessageSoFar == 0) g.lastRefusal = OwnerFenceGate::Refusal::None;  // a new message: a fresh record
   if (!g.fenced) return true;
-  if (!g.releaseExchange) return false;
+  if (!g.releaseExchange) {
+    g.lastRefusal = bytesOfMessageSoFar == 0 ? OwnerFenceGate::Refusal::FenceBeforeAnyByte
+                                             : OwnerFenceGate::Refusal::FenceMidMessage;
+    return false;
+  }
 #if defined(REMOTE60_VIEWER_KA_TEST_SEAM)
   // TEST BUILD ONLY (GNLinkViewerKaTest): REMOTE60_VIEWER_TEST_REFUSE_RELEASE_WRITE_AFTER_FENCE=1 -- the FIRST release
   // write after the fence is refused: no byte of it leaves (a write the link refused), so its exchange fails and the
@@ -156,6 +191,7 @@ inline bool gate_write_allowed(OwnerFenceGate& g) {
     }();
     if (armed) {
       armed = false;
+      g.lastRefusal = OwnerFenceGate::Refusal::TestHook;
       return false;
     }
   }
@@ -166,13 +202,24 @@ inline bool gate_write_allowed(OwnerFenceGate& g) {
 inline bool gate_bulk_send_allowed(OwnerFenceGate& g) { return !gate_is_fenced(g); }
 
 enum class FenceVerdict { Pending, Confirmed, Failed };
-// The verdict, all of it read in ONE critical section with the takes and ends above.
-inline FenceVerdict fence_verdict(const OwnerFenceGate& g, const ClientInputQueue& queue) {
+// What the verdict saw, for the log (r7: an InputAck is said apart from what was deliberately not sent).
+struct FenceTally {
+  uint64_t taken = 0, acked = 0, failed = 0, skipped = 0, cancelled = 0;
+};
+// The verdict, all of it read in ONE critical section with the takes and ends above. Confirmed: nothing queued, nothing
+// in flight, and every input exchange since the fence ended in the host's InputAck, or was deliberately not sent
+// (skipped by the logon-screen gate, or a non-release the fence cancelled before any byte of it). Failed: one did fail.
+inline FenceVerdict fence_verdict(const OwnerFenceGate& g, const ClientInputQueue& queue, FenceTally* tally = nullptr) {
   std::lock_guard<std::mutex> lock(g.mu);
+  if (tally) {
+    *tally = FenceTally{g.taken - g.taken0, g.acked - g.acked0, g.failed - g.failed0, g.skipped - g.skipped0,
+                        g.cancelled - g.cancelled0};
+  }
   if (g.failed > g.failed0) return FenceVerdict::Failed;
   if (!queue.Empty() || g.inFlight) return FenceVerdict::Pending;
-  return (g.acked - g.acked0) + (g.skipped - g.skipped0) >= (g.taken - g.taken0) ? FenceVerdict::Confirmed
-                                                                                : FenceVerdict::Pending;
+  return (g.acked - g.acked0) + (g.skipped - g.skipped0) + (g.cancelled - g.cancelled0) >= (g.taken - g.taken0)
+             ? FenceVerdict::Confirmed
+             : FenceVerdict::Pending;
 }
 
 // A ControlLink whose writes ask the gate first. Follows the link it was given even when that is replaced.
@@ -181,15 +228,22 @@ class FenceGatedLink : public ControlLink {
   FenceGatedLink(std::unique_ptr<ControlLink>& inner, OwnerFenceGate& gate) : inner_(&inner), gate_(gate) {}
   bool Read(void* out, size_t len) override { return *inner_ && (*inner_)->Read(out, len); }
   bool Write(const void* data, size_t len) override {
-    if (!gate_write_allowed(gate_)) return false;  // never started
-    return *inner_ && (*inner_)->Write(data, len);
+    if (!gate_write_allowed(gate_, messageBytes_)) return false;  // never started (the reason is in the gate)
+    const bool ok = *inner_ && (*inner_)->Write(data, len);
+    if (ok) messageBytes_ += len;
+    else messageBytes_ = 0;  // that exchange is over (a transport failure); the next write starts a new message
+    return ok;
   }
-  bool EndMessage() override { return *inner_ && (*inner_)->EndMessage(); }
+  bool EndMessage() override {
+    messageBytes_ = 0;  // the next Write begins a new message
+    return *inner_ && (*inner_)->EndMessage();
+  }
   bool Alive() const override { return *inner_ && (*inner_)->Alive(); }
 
  private:
   std::unique_ptr<ControlLink>* inner_;
   OwnerFenceGate& gate_;
+  size_t messageBytes_ = 0;  // of the message being written (control thread only)
 };
 
 // The fence's cancellation of what has not left yet (UI thread, right after fence_raise). Returns how many queued

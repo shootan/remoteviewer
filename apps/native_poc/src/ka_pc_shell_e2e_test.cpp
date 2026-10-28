@@ -976,9 +976,9 @@ int main() {
       // r4 (Codex R3): the releases reached the host BEFORE the session ended -- with the sender held 800 ms
       {
         const std::string vb = lines_of_pid(viewer_log(), pidB);
-        const size_t ack = vb.find("owner fence: releases acknowledged by the host after ");
+        const size_t ack = vb.find("owner fence: releases confirmed after ");
         unsigned long waited = 0;
-        if (ack != std::string::npos) waited = std::strtoul(vb.c_str() + ack + std::strlen("owner fence: releases acknowledged by the host after "), nullptr, 10);
+        if (ack != std::string::npos) waited = std::strtoul(vb.c_str() + ack + std::strlen("owner fence: releases confirmed after "), nullptr, 10);
         check(ack != std::string::npos && waited >= 800,
               "R3: the fence waited for its releases (sender held 800 ms): acknowledged by the host, then closed",
               "waited " + std::to_string(waited) + " ms");

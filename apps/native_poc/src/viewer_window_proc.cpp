@@ -1815,15 +1815,20 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         // r5/r6 (Codex R3-a, F1): confirmed only by the host's InputAck for every input exchange since the fence, all of
         // it read in one critical section with the control thread's takes (an empty queue or an idle channel is not an
         // acknowledgement)
-        const FenceVerdict v = fence_verdict(ctx.control.fenceGate, ctx.control.inputQueue);
+        FenceTally t{};
+        const FenceVerdict v = fence_verdict(ctx.control.fenceGate, ctx.control.inputQueue, &t);
         const bool confirmed = v == FenceVerdict::Confirmed && !ctx.control.udpControl.TxPending();
         if (confirmed || v == FenceVerdict::Failed || waited >= kOwnerFenceDrainBudgetMs) {
           KillTimer(hwnd, kOwnerFenceDrainTimerId);
+          // r7 (Codex): what the host acknowledged is said apart from what was deliberately not sent
           std::cout << "[native-video-client] owner fence: releases "
-                    << (confirmed ? "acknowledged by the host"
+                    << (confirmed ? "confirmed"
                                   : v == FenceVerdict::Failed ? "NOT confirmed (an exchange failed)"
                                                               : "NOT confirmed within the budget")
-                    << " after " << waited << " ms; closing the session\n";
+                    << " after " << waited << " ms -- since the fence: " << t.acked
+                    << " acknowledged by the host (InputAck), " << t.skipped << " not sent by the logon-screen gate, "
+                    << t.cancelled << " non-release(s) cancelled by the fence before a byte, " << t.failed
+                    << " failed, of " << t.taken << " taken; closing the session\n";
           PostMessageW(hwnd, WM_CLOSE, 0, 0);
         }
         return 0;

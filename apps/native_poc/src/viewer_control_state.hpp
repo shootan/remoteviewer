@@ -39,8 +39,15 @@ struct OwnerFenceGate {
   bool fenced = false;           // the owner ended this session: only a release may start a write
   bool releaseExchange = false;  // the exchange the control thread is running is a counted release
   bool inFlight = false;         // an input taken off the queue whose exchange has not ended
-  uint64_t taken = 0, acked = 0, failed = 0, skipped = 0;      // input exchanges: started / InputAck / not / not sent
-  uint64_t taken0 = 0, acked0 = 0, failed0 = 0, skipped0 = 0;  // as they stood when the fence was raised
+  // input exchanges: started / ended in the host's InputAck / failed (a write or reply that went wrong, a refused
+  // release) / not sent by the logon-screen gate / not started because the fence refused it (r7, Codex N2)
+  uint64_t taken = 0, acked = 0, failed = 0, skipped = 0, cancelled = 0;
+  uint64_t taken0 = 0, acked0 = 0, failed0 = 0, skipped0 = 0, cancelled0 = 0;  // as they stood when the fence was raised
+  // r7 (Codex N2): why the latest write was refused -- the gated link records it, the caller of a failed exchange takes
+  // it: refused by the fence before any byte of that message (not started), refused in the middle of a message
+  // (broken), refused by the test build's release hook. None: no refusal -- a failure was the transport's own.
+  enum class Refusal : uint8_t { None, FenceBeforeAnyByte, FenceMidMessage, TestHook };
+  Refusal lastRefusal = Refusal::None;
 };
 
 // Clipboard text sync (K1). The UI thread hears local clipboard changes (WM_CLIPBOARDUPDATE) and

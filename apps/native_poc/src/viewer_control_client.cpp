@@ -803,9 +803,14 @@ void ControlClient::Run() {
       if (releaseOk && releaseResponse.kind == TcpControlResponseKind::InputAck) {
         gate_end_input(ctx.control.fenceGate, InputOutcome::Acked);
       } else {
+        // a release is never "cancelled": the gate admits it, so whatever went wrong is a failure (r7, Codex N2)
+        const ExchangeFailure why = gate_take_failure(ctx.control.fenceGate);
         gate_end_input(ctx.control.fenceGate, InputOutcome::Failed);
-        std::cout << "[native-video-client][control] a release after the owner fence was not acknowledged; "
-                     "no resume (the session is ending)\n";
+        std::cout << "[native-video-client][control] a release after the owner fence was not acknowledged ("
+                  << (why == ExchangeFailure::HookRefused ? "its write was refused by the test hook"
+                      : why == ExchangeFailure::Broken     ? "the message was cut"
+                                                           : "the exchange failed")
+                  << "); no resume (the session is ending)\n";
         break;
       }
       continue;
@@ -1079,7 +1084,7 @@ void ControlClient::Run() {
       imeAction.imeStateReq.clientSendQpcUs = qpc_now_us();
       TcpControlResponse imeResp{};
       if (!execute_control_action(gated, imeAction, &imeResp)) {
-        if (gate_is_fenced(ctx.control.fenceGate)) continue;  // r6: refused by the fence -- releases still go
+        if (gate_take_failure(ctx.control.fenceGate) == ExchangeFailure::NotStarted) continue;  // r7: a fence cancellation
         std::cout << "[native-video-client][control] action failed kind=ime-align\n";
         break;
       }
@@ -1180,9 +1185,12 @@ void ControlClient::Run() {
       TcpControlResponse response{};
       const uint64_t actionStartUs = qpc_now_us();
       const bool actionOk = execute_control_action(gated, action, &response);
-      // r5/r6 (Codex R3-a): an input is acknowledged only by the host's InputAck
-      admitEnd.outcome = (actionOk && response.kind == TcpControlResponseKind::InputAck) ? InputOutcome::Acked
-                                                                                         : InputOutcome::Failed;
+      // r5/r6/r7 (Codex R3-a, N2): an input is acknowledged only by the host's InputAck. Otherwise WHY it did not go is
+      // taken from the gate: refused by the fence before any byte (a down the fence caught between its admission and
+      // its write) is a cancellation -- nothing was sent, the drain goes on; anything else is a failure.
+      const bool inputAcked = actionOk && response.kind == TcpControlResponseKind::InputAck;
+      const ExchangeFailure failure = inputAcked ? ExchangeFailure::Transport : gate_take_failure(ctx.control.fenceGate);
+      admitEnd.outcome = inputAcked ? InputOutcome::Acked : outcome_of_failure(failure);
       // One exchange that never gets its reply stalls every later one behind it,
       // including input. Naming the slow action is the only way to see which.
       const uint64_t actionDoneUs = qpc_now_us();
@@ -1242,7 +1250,9 @@ void ControlClient::Run() {
         // not the same as its reply being redelivered. It fails here; the UI asks again if
         // it still wants the answer. A reply that turns up later is dropped by the re-key,
         // which gives the resumed channel stream ids the old reply does not carry.
-        if (gate_is_fenced(ctx.control.fenceGate)) continue;  // r6: the fence refused it -- releases still go
+        // r7 (Codex N2): only a write the fence refused before any byte is a cancellation the drain may go on after;
+        // a cut message or a transport failure is what it is (no resume after the fence: the loop ends)
+        if (failure == ExchangeFailure::NotStarted) continue;
         if (begin_control_resume(qpc_now_us())) {
           workerState = remote60::native_poc::ControlWorkerState::Resuming;
           continue;
@@ -1337,7 +1347,7 @@ void ControlClient::Run() {
     // Clipboard sync runs whether or not the picker is up (unlike previews), so it comes first.
     if (!didWork) {
       const int synced = pump_clipboard_sync(gated);
-      if (synced < 0 && gate_is_fenced(ctx.control.fenceGate)) continue;  // r6: refused by the fence
+      if (synced < 0 && gate_take_failure(ctx.control.fenceGate) == ExchangeFailure::NotStarted) continue;  // r7
       if (synced < 0) {
         // The same door as a failed action: on the tunnel a clipboard poll that cannot complete
         // is the link having gone, not the clipboard having a problem.
@@ -1351,7 +1361,7 @@ void ControlClient::Run() {
     }
     if (!didWork && ctx.picker.visible.load(std::memory_order_relaxed)) {
       const int fetched = fetch_one_thumbnail(gated);
-      if (fetched < 0 && gate_is_fenced(ctx.control.fenceGate)) continue;  // r6: refused by the fence
+      if (fetched < 0 && gate_take_failure(ctx.control.fenceGate) == ExchangeFailure::NotStarted) continue;  // r7
       if (fetched < 0) {
         if (begin_control_resume(qpc_now_us())) {
           workerState = remote60::native_poc::ControlWorkerState::Resuming;
