@@ -13,6 +13,8 @@
 //        passes (the positive controls). The job is borrowed: dropped at Finalize / destruction.
 //   r8 N2: the startup-fault verdict (fatal's --prelogin worker): the input line may be absent, power OFF may not;
 //        any contradiction, an incomplete read or an unconfirmed end refuses.
+//   r9:  its files live only in a NEW run folder of its own inside REMOTE60_TEST_TMP (e2e_test_root.hpp) -- no %TEMP%;
+//        without a valid root the test refuses before it creates anything; it deletes only the files it made there.
 //   N2:  a case's contradiction ends the WHOLE test before the next case launches, its logs kept; a case whose
 //        child's end was not confirmed is said so.
 //   F-a: no port secured -> INVALID before any child.
@@ -31,6 +33,7 @@
 
 #include "e2e_child_util.hpp"
 #include "e2e_injection_guard.hpp"
+#include "e2e_test_root.hpp"
 
 namespace e = remote60::native_poc::e2e;
 
@@ -53,18 +56,44 @@ std::string offLines() {
 const char* kPowerOn =
     "[native-video-host] host power management=on (local startup policy, default): execution state kept, display wake at a stream start\n";
 
-// r8: a file of this test (its own temp folder) with `text`; empty path on failure
-std::wstring temp_file(const char* tag, const std::string& text) {
-  wchar_t dir[MAX_PATH] = {};
-  GetTempPathW(MAX_PATH, dir);
-  const std::wstring path = std::wstring(dir) + L"e2e_guard_runtime_" + std::wstring(tag, tag + strlen(tag)) + L"_" +
+// r9: this run's own folder inside REMOTE60_TEST_TMP (the parent makes it new; a child is handed it in
+// REMOTE60_E2E_RUN_DIR and re-checks it). Never %TEMP%.
+constexpr wchar_t kRunPrefix[] = L"guard-runtime-";
+std::wstring gRunDir;
+
+bool child_run_dir(std::string* why) {
+  wchar_t v[1024] = {};
+  const DWORD n = GetEnvironmentVariableW(L"REMOTE60_E2E_RUN_DIR", v, 1024);
+  if (n == 0 || n >= 1024) {
+    *why = "REMOTE60_E2E_RUN_DIR is not set";
+    return false;
+  }
+  if (!e::e2e_run_dir_valid(v, kRunPrefix, why)) return false;
+  gRunDir = v;
+  return true;
+}
+
+// A file this process makes in the run folder (CREATE_NEW: never one that is there already); empty path on failure.
+std::wstring run_file(const char* tag, const std::string& text) {
+  if (gRunDir.empty()) return {};
+  const std::wstring path = gRunDir + L"\\" + std::wstring(tag, tag + strlen(tag)) + L"_" +
                             std::to_wstring(GetCurrentProcessId()) + L".log";
-  HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
+  HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
   if (h == INVALID_HANDLE_VALUE) return {};
   DWORD put = 0;
   const bool ok = text.empty() || (WriteFile(h, text.data(), static_cast<DWORD>(text.size()), &put, nullptr) && put == text.size());
   CloseHandle(h);
   return ok ? path : std::wstring();
+}
+
+// Deletes a file run_file made -- only a path directly inside the run folder (nothing else is ever deleted).
+void delete_run_file(const std::wstring& path) {
+  const std::wstring head = gRunDir + L"\\";
+  if (gRunDir.empty() || path.size() <= head.size() || path.compare(0, head.size(), head) != 0 ||
+      path.find(L'\\', head.size()) != std::wstring::npos) {
+    return;
+  }
+  DeleteFileW(path.c_str());
 }
 
 // r8: a message-mode pipe holding one message larger than a read -- ReadFile hands part of it with ERROR_MORE_DATA
@@ -165,9 +194,13 @@ int monitor_case(const std::string& kind) {
     if (kind == "missing_file") {
       mon->Finalize(true, e::e2e_final_file(L"C:\\e2e-guard-runtime-no-such-dir\\host.log"));  // Codex's reproduction
     } else if (kind == "empty_file") {
-      const std::wstring f = temp_file("empty", "");  // opens and reads to EOF -- 0 bytes, no OFF line
+      const std::wstring f = run_file("empty", "");  // opens and reads to EOF -- 0 bytes, no OFF line
+      if (f.empty()) {
+        std::printf("NO_RUN_FILE\n");
+        return 9;
+      }
       const e::E2eFinalOutput fin = e::e2e_final_file(f);
-      DeleteFileW(f.c_str());
+      delete_run_file(f);
       std::printf("EMPTY_COMPLETE=%d BYTES=%zu\n", fin.complete ? 1 : 0, fin.text.size());
       mon->Finalize(true, fin);
     } else if (kind == "pipe_partial") {
@@ -183,9 +216,13 @@ int monitor_case(const std::string& kind) {
     } else {
       e::E2eFinalOutput fin;
       if (kind == "quiet_file") {
-        const std::wstring f = temp_file("quiet", offLines());
+        const std::wstring f = run_file("quiet", offLines());
+        if (f.empty()) {
+          std::printf("NO_RUN_FILE\n");
+          return 9;
+        }
         fin = e::e2e_final_file(f);
-        DeleteFileW(f.c_str());
+        delete_run_file(f);
       } else {
         e::E2eReadEnd end = e::E2eReadEnd::Running;
         fin = eof_pipe_read(offLines(), &end);
@@ -322,10 +359,33 @@ bool invalid_run_job_released(const Run& r) {
 
 int main(int argc, char** argv) {
   if (argc >= 2 && std::string(argv[1]) == "--sleeper") return sleeper();
-  if (argc >= 3 && std::string(argv[1]) == "--monitor-case") return monitor_case(argv[2]);
+  if (argc >= 3 && std::string(argv[1]) == "--monitor-case") {
+    const std::string kind = argv[2];
+    if (kind == "empty_file" || kind == "quiet_file") {  // r9: the only cases that make a file
+      std::string why;
+      if (!child_run_dir(&why)) {
+        std::printf("NO_RUN_DIR %s\n", why.c_str());
+        return 9;
+      }
+    }
+    return monitor_case(kind);
+  }
   if (argc >= 3 && std::string(argv[1]) == "--case-invalid") return case_invalid(argv[2]);
   if (argc >= 2 && std::string(argv[1]) == "--port-case") return port_case();
   if (argc >= 2 && std::string(argv[1]) == "--unconfirmed-case") return unconfirmed_case();
+
+  // r9: a NEW run folder of this test inside REMOTE60_TEST_TMP, or nothing at all (refused before anything is made)
+  {
+    std::string why;
+    std::wstring root;
+    if (!e::e2e_test_root(true, &root, &why) || !e::e2e_new_run_dir(root, kRunPrefix, &gRunDir, &why)) {
+      std::printf("FAIL  no valid test root (%s): refused to run -- no %%TEMP%%, nothing else created or deleted\n"
+                  "RESULT: INVALID\n", why.c_str());
+      return 2;
+    }
+    SetEnvironmentVariableW(L"REMOTE60_E2E_RUN_DIR", gRunDir.c_str());
+    std::printf("NOTE  this run's folder (its files only are deleted; the folder is left): %ls\n", gRunDir.c_str());
+  }
 
   std::printf("--- G1: after the gate, polling catches a later contradiction ---\n");
   for (const char* kind : {"power_on", "input_other", "took_input"}) {
@@ -398,13 +458,13 @@ int main(int argc, char** argv) {
   }
   {
     // the read helper's own ends, in this process (no guard exit involved)
-    const std::wstring wf = temp_file("writeonly", "abc");
+    const std::wstring wf = run_file("writeonly", "abc");
     HANDLE w = CreateFileW(wf.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
     DWORD err = 0;
     std::string got;
     const e::E2eReadEnd end = e::e2e_read_to_end(w, nullptr, [&](const char* p, size_t n) { got.append(p, n); }, &err);
     if (w != INVALID_HANDLE_VALUE) CloseHandle(w);
-    DeleteFileW(wf.c_str());
+    delete_run_file(wf);
     check("a handle that cannot be read (write-only): Error with its code, never EOF",
           end == e::E2eReadEnd::Error && err != 0, "end=" + std::to_string(static_cast<int>(end)) + " err=" + std::to_string(err));
     const e::E2eFinalOutput miss = e::e2e_final_file(L"C:\\e2e-guard-runtime-no-such-dir\\host.log");
