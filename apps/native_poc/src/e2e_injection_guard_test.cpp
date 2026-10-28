@@ -59,8 +59,8 @@ int main() {
         e::e2e_injection_state(kHead + "x [native-video-host] input injection disabled (enableInputInjection=false)\n", &why) == -1,
         why);
   why.clear();
-  check("off by compile-time policy is not taken for it either",
-        e::e2e_injection_state(kHead + "x [native-video-host] input injection blocked by compile-time policy\n", &why) == 0);
+  check("off by compile-time policy is not taken for it either (r5 P2-2: refused -- not the explicit OFF line)",
+        e::e2e_injection_state(kHead + "x [native-video-host] input injection blocked by compile-time policy\n", &why) == -1);
   why.clear();
   check("a config the host could not load is refused",
         e::e2e_injection_state(kHead + "[native-video-host] failed to load --config file: x (failed to open file)\n", &why) == -1, why);

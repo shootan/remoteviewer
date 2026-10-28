@@ -64,17 +64,23 @@ inline std::string e2e_read_text_file(const std::wstring& path) {
 
 // One whole line, said: 1 = exactly `want` up to its line end, 0 = not yet (absent or still being written),
 // -1 = a line with that prefix that is something else.
+// r5 P2-2: EVERY line with that prefix, not only the first: one that differs anywhere -- before or after a matching
+// one -- refuses the launch (a later "power ON" after "power OFF" is a contradiction, not noise).
 inline int e2e_whole_line(const std::string& out, const std::string& prefix, const std::string& want) {
-  const size_t at = out.find(prefix);
-  if (at == std::string::npos) return 0;
-  const size_t end = at + want.size();
-  if (out.compare(at, want.size(), want) == 0) {
-    if (end >= out.size()) return 0;
-    return (out[end] == '\r' || out[end] == '\n') ? 1 : -1;
+  int seen = 0;
+  for (size_t at = out.find(prefix); at != std::string::npos; at = out.find(prefix, at + prefix.size())) {
+    const size_t end = at + want.size();
+    if (out.compare(at, want.size(), want) == 0) {
+      if (end >= out.size()) return seen > 0 ? seen : 0;  // the last line still being written
+      if (out[end] != '\r' && out[end] != '\n') return -1;
+      seen = 1;
+      continue;
+    }
+    // a shorter tail still being written (the last occurrence) is "not yet"; anything that differs is refused
+    if (out.size() - at < want.size() && want.compare(0, out.size() - at, out, at, out.size() - at) == 0) return seen > 0 ? seen : 0;
+    return -1;
   }
-  // a shorter tail still being written is "not yet"; anything that differs is refused
-  if (out.size() - at < want.size() && want.compare(0, out.size() - at, out, at, out.size() - at) == 0) return 0;
-  return -1;
+  return seen;
 }
 
 // The power half (Finding-3): 1 = this launch said power management OFF, whole; -1 = on / anything else.
@@ -100,6 +106,14 @@ inline int e2e_injection_state(const std::string& out, std::string* why) {
   if (out.find("failed to load --config") != std::string::npos) {
     if (why) *why = "the host could not load its injection-off config";
     return -1;
+  }
+  // r5 P2-2: every injection-state line of this launch must be the explicit OFF line (a contradiction anywhere refuses)
+  {
+    const int every = e2e_whole_line(out, "input injection ", e2e_injection_off_line());
+    if (every < 0) {
+      if (why) *why = "the host's input injection states contradict the explicit OFF";
+      return -1;
+    }
   }
   const size_t at = out.find("input injection disabled");
   if (at != std::string::npos) {

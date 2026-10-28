@@ -251,7 +251,10 @@ int main(int argc, char** argv) {
   // while the host is running; the display requirement is enabled only for an active stream.
   // 2026-10-28 (Codex Finding-3): all of it under one local startup-only policy, bound HERE -- before the
   // object exists and before any of its effects (its constructor's request included); said in one line.
-  const remote60::native_poc::HostPowerPolicy powerPolicy = remote60::native_poc::bind_host_power_policy(argc, argv);
+  // r5 P2-1: the ONE parser (parse_args, the same token / arity rules for every switch), before any power effect.
+  // It reads arguments and a --config profile only; nothing in it acts on the machine.
+  const Args args = parse_args(argc, argv);
+  const remote60::native_poc::HostPowerPolicy& powerPolicy = args.hostPower;
   if (!powerPolicy.ok) {
     std::cerr << "[native-video-host] invalid --host-power-management value: " << powerPolicy.bad
               << " (on|off) -- not started\n";
@@ -265,7 +268,6 @@ int main(int argc, char** argv) {
   MainLoopWatchdogThread mainLoopWatchdog;
   startup_process_setup();
 
-  const Args args = parse_args(argc, argv);
 #ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
   {
     // TEST BUILD ONLY (r2 K6): fail-closed -- this host never starts without its pinned window.
