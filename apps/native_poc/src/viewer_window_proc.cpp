@@ -1252,21 +1252,17 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
     case kMsgOwnerFence:
       if (!ctx.session.ownerFenced) {
-        // 0. r5 (Codex R3-b): what has not left yet and is not a release is cancelled at once -- every queued down /
+        // 0. r6 (Codex F1/F2): the gate FIRST -- from this moment nothing but a counted release may start a control
+        //    write, no bulk (image / file) datagram goes, and the input-exchange baseline is taken in the same critical
+        //    section. Nothing here waits on a worker: the image / file workers are stopped by the session's own teardown
+        //    (shutdown_viewer); until then their sends are refused by the gate.
+        fence_raise(ctx.control.fenceGate);
+        //    r5 (Codex R3-b): what has not left yet and is not a release is cancelled at once -- every queued down /
         //    text / move / wheel, the pending clipboard text (and the clipboard sync: no send, no poll), a typed
-        //    password waiting to be sealed (zeroed). Image / file offers stop. The counters are taken now, before
-        //    the releases, for the fence's verdict (R3-a).
+        //    password waiting to be sealed (zeroed).
         const uint32_t droppedInputs = owner_fence_cancel_pending(
             ctx.control.inputQueue, ctx.control.clipboard, ctx.session.preloginCredMu, ctx.session.preloginCredPassword,
             ctx.session.preloginCredRequested);
-        ctx.control.clipImage.Stop();
-        ctx.control.fileCopy.Stop();
-        {
-          const FenceCounterSnapshot at = snapshot(ctx.control.inputExchanges);
-          ctx.session.fenceTaken0 = at.taken;
-          ctx.session.fenceAcked0 = at.acked;
-          ctx.session.fenceFailed0 = at.failed;
-        }
         // 1. Whatever is held is released FIRST, while input is still on -- the same set the control channel's
         //    resume sends: every modifier up, every key this window sent down, every mouse button, the scan keys
         //    of host-IME routing, the mouse capture. (Turning input off first would drop these very releases.)
@@ -1816,11 +1812,10 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_TIMER:
       if (wp == kOwnerFenceDrainTimerId) {
         const uint64_t waited = GetTickCount64() - ctx.session.ownerFenceAtMs.load();
-        // r5 (Codex R3-a): confirmed only by the host's InputAck for every release exchange since the fence -- an empty
-        // queue or an idle channel is not an acknowledgement (a failed exchange leaves both empty)
-        const FenceVerdict v = fence_release_verdict(
-            FenceCounterSnapshot{ctx.session.fenceTaken0, ctx.session.fenceAcked0, ctx.session.fenceFailed0},
-            snapshot(ctx.control.inputExchanges), ctx.control.inputQueue.Empty(), ctx.control.inputInFlight.load());
+        // r5/r6 (Codex R3-a, F1): confirmed only by the host's InputAck for every input exchange since the fence, all of
+        // it read in one critical section with the control thread's takes (an empty queue or an idle channel is not an
+        // acknowledgement)
+        const FenceVerdict v = fence_verdict(ctx.control.fenceGate, ctx.control.inputQueue);
         const bool confirmed = v == FenceVerdict::Confirmed && !ctx.control.udpControl.TxPending();
         if (confirmed || v == FenceVerdict::Failed || waited >= kOwnerFenceDrainBudgetMs) {
           KillTimer(hwnd, kOwnerFenceDrainTimerId);

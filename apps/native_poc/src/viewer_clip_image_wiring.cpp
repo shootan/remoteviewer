@@ -3,6 +3,7 @@
 #include "viewer_state.hpp"
 #include "viewer_log.hpp"
 #include "viewer_clip_image_wiring.hpp"
+#include "viewer_owner_fence.hpp"
 #include "viewer_clip_transfer_bar.hpp"
 #include "viewer_paste_ui.hpp"
 #include "time_utils.hpp"
@@ -19,6 +20,7 @@ void start_clip_image_client(ViewerState& ctx, uint32_t udpMtu) {
   ctx.control.clipImage.SetBulkArbiter(&ctx.control.bulkArbiter);
   ctx.control.clipImage.Start(
       [&ctx](const void* data, size_t len) -> bool {
+        if (!gate_bulk_send_allowed(ctx.control.fenceGate)) return false;  // r6 (Codex F2): none after the owner fence
         return send(ctx.session.sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
       },
       [&ctx]() -> uint64_t {
@@ -68,6 +70,7 @@ void start_clip_image_client(ViewerState& ctx, uint32_t udpMtu) {
                                           [&ctx](bool mayResume) { ctx.control.clipImage.AfterFilePaste(mayResume); });
   ctx.control.fileCopy.Start(
       [&ctx](const void* data, size_t len) -> bool {
+        if (!gate_bulk_send_allowed(ctx.control.fenceGate)) return false;  // r6 (Codex F2): none after the owner fence
         return send(ctx.session.sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
       },
       [&ctx]() -> uint64_t {

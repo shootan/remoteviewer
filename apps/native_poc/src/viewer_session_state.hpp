@@ -45,8 +45,7 @@ struct SessionState {
   bool ownerFenced = false;
   // r4: when the fence was raised (GetTickCount64), for its drain budget; read by the control thread in test builds
   std::atomic<uint64_t> ownerFenceAtMs{0};
-  // r5 (Codex R3-a): the input-exchange counters as the fence found them, before its releases (UI thread only)
-  uint64_t fenceTaken0 = 0, fenceAcked0 = 0, fenceFailed0 = 0;
+
   // cross-thread: set once by create_window; recv/control thread call InvalidateRect/PostMessage on it.
   HWND hwnd = nullptr;
   uint32_t windowW = 1600;

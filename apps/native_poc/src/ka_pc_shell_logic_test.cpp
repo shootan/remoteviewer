@@ -1,7 +1,7 @@
 // ka-pc-impl r5 (Codex codex_ka_pc_src_r4.md R1-a): the shell's PC count with a viewer a replacement kept, on the
 // shell's OWN functions (client_shell_main.cpp with its entry renamed, REMOTE60_SHELL_TEST_SEAM) and an in-memory
-// registry -- no process, no window, no WebView, no network. Its files (client.log, recent_hosts.v1) go under
-// REMOTE60_TEST_TMP only.
+// registry -- no process, no window, no WebView, no network. Its files (client.log, recent_hosts.v1) go only into a new
+// folder of this run's own, inside REMOTE60_TEST_TMP (checked exactly, below).
 //
 // The situation (Codex): A, B, C open; A's "connected" line had not reached the shell, so pressing A replaced it --
 // the old A had in fact connected and stayed open (the connect's cancel does not end an established session), its
@@ -31,18 +31,49 @@ ViewerCancelSlot slot_for(const std::string& host, uint64_t op) {
 }  // namespace
 
 int main() {
-  wchar_t root[1024] = {};
-  if (!GetEnvironmentVariableW(L"REMOTE60_TEST_TMP", root, 1024)) {
-    std::printf("FAIL  REMOTE60_TEST_TMP is not set\n");
+  // r6 (Codex T1): the test root is checked EXACTLY, as the e2e tests do -- REMOTE60_TEST_TMP is a real folder (not a
+  // link) directly under D:\remote\remote\.claude\test-tmp -- and this run writes only into a NEW folder of its own
+  // made inside it (CreateDirectory must create it: an existing one is refused, never reused). Nothing is deleted.
+  wchar_t given[1024] = {};
+  const DWORD gl = GetEnvironmentVariableW(L"REMOTE60_TEST_TMP", given, 1024);
+  if (gl == 0 || gl >= 1024) {
+    std::printf("FAIL  REMOTE60_TEST_TMP is not set (or too long)\n");
     return 2;
   }
-  const std::wstring r(root);
-  if (r.find(L"\\.claude\\test-tmp\\") == std::wstring::npos) {
-    std::printf("FAIL  REMOTE60_TEST_TMP must be under D:/remote/remote/.claude/test-tmp\n");
+  wchar_t full[1024] = {};
+  wchar_t* leaf = nullptr;
+  const DWORD fl = GetFullPathNameW(given, 1024, full, &leaf);
+  if (fl == 0 || fl >= 1024 || !leaf || !*leaf) {
+    std::printf("FAIL  REMOTE60_TEST_TMP is not a usable path\n");
     return 2;
   }
-  CreateDirectoryW(r.c_str(), nullptr);
-  gShellTestDataDir = r + L"\\shelldata";
+  std::wstring parent(full, leaf - full);
+  while (!parent.empty() && (parent.back() == L'\\' || parent.back() == L'/')) parent.pop_back();
+  if (_wcsicmp(parent.c_str(), L"D:\\remote\\remote\\.claude\\test-tmp") != 0) {
+    std::printf("FAIL  REMOTE60_TEST_TMP must be a folder directly under D:/remote/remote/.claude/test-tmp\n");
+    return 2;
+  }
+  const DWORD pa = GetFileAttributesW(parent.c_str());
+  if (pa == INVALID_FILE_ATTRIBUTES || !(pa & FILE_ATTRIBUTE_DIRECTORY) || (pa & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    std::printf("FAIL  the test-tmp anchor is not a plain folder\n");
+    return 2;
+  }
+  if (!CreateDirectoryW(full, nullptr) && GetLastError() != ERROR_ALREADY_EXISTS) {
+    std::printf("FAIL  the test root could not be made\n");
+    return 2;
+  }
+  const DWORD ra = GetFileAttributesW(full);
+  if (ra == INVALID_FILE_ATTRIBUTES || !(ra & FILE_ATTRIBUTE_DIRECTORY) || (ra & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    std::printf("FAIL  the test root is not a plain folder\n");
+    return 2;
+  }
+  const std::wstring run = std::wstring(full) + L"\\run-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                           std::to_wstring(GetTickCount64());
+  if (!CreateDirectoryW(run.c_str(), nullptr)) {  // must be NEW: this run's own
+    std::printf("FAIL  this run's own folder could not be made new\n");
+    return 2;
+  }
+  gShellTestDataDir = run + L"\\shelldata";
   gShellTestDirectoryUrl = "http://127.0.0.1:1";  // never contacted
   {
     std::lock_guard<std::mutex> lock(gStateMu);

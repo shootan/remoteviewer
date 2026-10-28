@@ -32,12 +32,15 @@
 
 namespace remote60::native_poc::viewer {
 
-// ka-pc-impl r5 (Codex R3-a): the control thread's count of the input exchanges it RUNS (the UI thread's owner fence
-// reads them; viewer_owner_fence.hpp fence_release_verdict). An acknowledgement is the host's InputAck, nothing less.
-struct InputExchangeCounters {
-  std::atomic<uint64_t> taken{0};   // an input action whose exchange was started
-  std::atomic<uint64_t> acked{0};   // ... that ended with the host's InputAck
-  std::atomic<uint64_t> failed{0};  // ... that ended any other way (a failed exchange, a wrong reply)
+// ka-pc-impl r6 (Codex R3-a, F1, F2): the owner fence's ONE state, under ONE lock -- see viewer_owner_fence.hpp for
+// every operation on it (they are the only code that touches these fields).
+struct OwnerFenceGate {
+  mutable std::mutex mu;
+  bool fenced = false;           // the owner ended this session: only a release may start a write
+  bool releaseExchange = false;  // the exchange the control thread is running is a counted release
+  bool inFlight = false;         // an input taken off the queue whose exchange has not ended
+  uint64_t taken = 0, acked = 0, failed = 0, skipped = 0;      // input exchanges: started / InputAck / not / not sent
+  uint64_t taken0 = 0, acked0 = 0, failed0 = 0, skipped0 = 0;  // as they stood when the fence was raised
 };
 
 // Clipboard text sync (K1). The UI thread hears local clipboard changes (WM_CLIPBOARDUPDATE) and
@@ -134,8 +137,7 @@ struct ControlChannelState {
   // ka-pc-impl r4 (Codex R3): raised by the control thread BEFORE it takes the next action while input is queued,
   // lowered once that action's exchange (its ack) is over -- so "the queue is empty and nothing is in flight" means
   // every queued input was acknowledged by the host. The owner fence waits on it.
-  std::atomic<bool> inputInFlight{false};
-  InputExchangeCounters inputExchanges;
+  OwnerFenceGate fenceGate;
   // C0 stage 1: the receive thread's latest bandwidth observation, for the control thread to
   // send. Guarded; copied out whole so a report is never sent half-updated.
   std::mutex bandwidthMu;
