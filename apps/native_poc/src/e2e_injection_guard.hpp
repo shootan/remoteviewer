@@ -161,6 +161,40 @@ inline bool e2e_wait_os_record_only(const std::function<std::string()>& hostOutp
   std::_Exit(2);
 }
 
+// r5 (Codex N2): a child started CREATE_SUSPENDED runs only once it is provably inside a kill-on-close job: the job
+// exists, its limit really holds JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (read back, not assumed from the setter), the
+// child is assigned to it -- then, and only then, it is resumed. Any failure: the still-suspended child is ended
+// through this test's own handle (no PID / name kill), waited for, its handles closed, and the test ends INVALID.
+// So a later fail-closed exit (std::_Exit, no destructors) still takes every running child with the job.
+inline void e2e_adopt_or_invalid(HANDLE job, PROCESS_INFORMATION& pi, const char* where) {
+  std::string why;
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
+  if (!job) {
+    why = "no job object";
+  } else if (!QueryInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof(info), nullptr) ||
+             !(info.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)) {
+    why = "the job does not hold kill-on-close";
+  } else if (!AssignProcessToJobObject(job, pi.hProcess)) {
+    why = "the child could not be put in the job (" + std::to_string(GetLastError()) + ")";
+  } else if (ResumeThread(pi.hThread) == static_cast<DWORD>(-1)) {
+    why = "the child could not be resumed (" + std::to_string(GetLastError()) + ")";
+  }
+  if (why.empty()) return;
+  if (pi.hProcess) {
+    TerminateProcess(pi.hProcess, 1);
+    WaitForSingleObject(pi.hProcess, 10000);
+    CloseHandle(pi.hProcess);
+    pi.hProcess = nullptr;
+  }
+  if (pi.hThread) {
+    CloseHandle(pi.hThread);
+    pi.hThread = nullptr;
+  }
+  std::printf("FAIL  SETUP %s: %s -- the child was ended before it ran\nRESULT: INVALID\n", where, why.c_str());
+  std::fflush(stdout);
+  std::_Exit(2);
+}
+
 // Rule 4: a host that took input while injection was on is a contradiction -- the run is invalid.
 inline bool e2e_injection_contradicted(const std::string& hostOutput) {
   return hostOutput.find("injectionEnabled=1") != std::string::npos ||

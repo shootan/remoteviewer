@@ -274,8 +274,8 @@ bool StartHost(SpawnedHost* host, const char* tag, const std::string& serverUrl,
     std::printf("FAIL  the host did not start (%lu)\n", GetLastError());
     return false;
   }
-  AssignProcessToJobObject(host->job, host->pi.hProcess);
-  ResumeThread(host->pi.hThread);
+  // r5 (Codex N2): resumed only inside a verified kill-on-close job, else INVALID
+  remote60::native_poc::e2e::e2e_adopt_or_invalid(host->job, host->pi, "host_migration");
 
   host->reading = true;
   host->reader = std::thread([host] {

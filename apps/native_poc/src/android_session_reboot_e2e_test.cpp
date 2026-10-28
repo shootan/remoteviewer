@@ -214,8 +214,8 @@ int wmain(int argc, wchar_t** argv) {
                                              CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
                                              isoEnv.data(), dir.c_str(), &si, &hostPi) != 0;
     if (launched) {
-      AssignProcessToJobObject(job, hostPi.hProcess);
-      ResumeThread(hostPi.hThread);
+      // r5 (Codex N2): resumed only inside a verified kill-on-close job, else INVALID
+      remote60::native_poc::e2e::e2e_adopt_or_invalid(job, hostPi, "android_session_reboot");
     }
   }
   check("the host started (restricted token)", launched, launched ? "" : std::to_string(GetLastError()));

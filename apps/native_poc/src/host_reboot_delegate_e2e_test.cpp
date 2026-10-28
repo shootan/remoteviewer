@@ -215,8 +215,8 @@ bool StartHost(Host* host, const std::string& url, uint16_t mediaPort, uint16_t 
                                              host->dir.c_str(), &si, &host->pi) != FALSE;
   CloseHandle(writeEnd);
   if (!launched) return false;
-  AssignProcessToJobObject(host->job, host->pi.hProcess);
-  ResumeThread(host->pi.hThread);
+  // r5 (Codex N2): resumed only inside a verified kill-on-close job, else INVALID
+  remote60::native_poc::e2e::e2e_adopt_or_invalid(host->job, host->pi, "host_reboot_delegate");
   host->reading = true;
   host->reader = std::thread([host] {
     char buf[4096];

@@ -258,8 +258,8 @@ int wmain(int argc, wchar_t** argv) {
                      isoEnv.data(), dir.c_str(), &si, &hostPi) != 0;
   if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);  // the host holds its own copy
   if (launched) {
-    AssignProcessToJobObject(job, hostPi.hProcess);
-    ResumeThread(hostPi.hThread);
+    // r5 (Codex N2): resumed only inside a verified kill-on-close job, else INVALID
+    remote60::native_poc::e2e::e2e_adopt_or_invalid(job, hostPi, "host_control_deadline");
   }
   check("the host started", launched);
   // fail closed (e2e_injection_guard.hpp): no client reaches a host that has not said its input injection is off

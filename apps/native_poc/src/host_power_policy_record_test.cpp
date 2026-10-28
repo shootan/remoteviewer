@@ -35,7 +35,7 @@ void check(const char* what, bool ok, const std::string& detail = {}) {
 int count(const char* prefix) {
   std::lock_guard<std::mutex> lock(os::record_mu());
   int n = 0;
-  for (const auto& r : os::recorded()) n += r.rfind(prefix, 0) == 0 ? 1 : 0;
+  for (const auto& r : os::recorded()) n += r.find(prefix) != std::string::npos ? 1 : 0;  // after its "ctx .." tag
   return n;
 }
 void reset() {

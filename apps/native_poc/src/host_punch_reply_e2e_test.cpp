@@ -338,8 +338,8 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
                      host->dir.c_str(), &si, &host->pi) != FALSE;
   CloseHandle(writeEnd);
   if (!launched) return false;
-  AssignProcessToJobObject(host->job, host->pi.hProcess);
-  ResumeThread(host->pi.hThread);
+  // r5 (Codex N2): resumed only inside a verified kill-on-close job, else INVALID
+  remote60::native_poc::e2e::e2e_adopt_or_invalid(host->job, host->pi, "host_punch_reply");
 
   host->reading = true;
   host->reader = std::thread([host] {

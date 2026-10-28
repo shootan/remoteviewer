@@ -322,7 +322,7 @@ void ensure_foreground_ime_alphanumeric() {
   const DWORD fgThread = GetWindowThreadProcessId(fg, nullptr);
   const DWORD myThread = GetCurrentThreadId();
   const bool attached =
-      (fgThread != 0 && fgThread != myThread && AttachThreadInput(myThread, fgThread, TRUE));
+      (fgThread != 0 && fgThread != myThread && os_input::attach_thread_input(myThread, fgThread, TRUE));
   const HWND focus = GetFocus();  // the actual focused control; needs the attach to read cross-thread
   const HWND target = focus ? focus : fg;
   const HIMC imc = ImmGetContext(target);
@@ -330,11 +330,11 @@ void ensure_foreground_ime_alphanumeric() {
     DWORD conv = 0;
     DWORD sentence = 0;
     if (ImmGetConversionStatus(imc, &conv, &sentence) && (conv & IME_CMODE_NATIVE)) {
-      (void)ImmSetConversionStatus(imc, conv & ~(IME_CMODE_NATIVE | IME_CMODE_FULLSHAPE), sentence);
+      (void)os_input::imm_set_conversion_status(imc, conv & ~(IME_CMODE_NATIVE | IME_CMODE_FULLSHAPE), sentence);
     }
     (void)ImmReleaseContext(target, imc);
   }
-  if (attached) AttachThreadInput(myThread, fgThread, FALSE);
+  if (attached) os_input::attach_thread_input(myThread, fgThread, FALSE);
 }
 
 bool send_desktop_virtual_key(uint32_t vk, bool keyUp) {
@@ -394,14 +394,14 @@ HostImeAlignResult host_ime_align_query(bool setEnglish) {
   const DWORD fgThread = GetWindowThreadProcessId(fg0, nullptr);
   const DWORD myThread = GetCurrentThreadId();
   const bool attached =
-      (fgThread != 0 && fgThread != myThread && AttachThreadInput(myThread, fgThread, TRUE));
+      (fgThread != 0 && fgThread != myThread && os_input::attach_thread_input(myThread, fgThread, TRUE));
   const HWND focus = GetFocus();  // real focused control; needs the attach to read cross-thread
   const HWND target = focus ? focus : fg0;
   const HIMC imc = ImmGetContext(target);
   if (!imc) {
     // No IMM context (app without an IMM32 bridge, e.g. some TSF-only surfaces). Unknown -- never
     // guess a toggle.
-    if (attached) AttachThreadInput(myThread, fgThread, FALSE);
+    if (attached) os_input::attach_thread_input(myThread, fgThread, FALSE);
     r.status = 1;
     return r;
   }
@@ -415,18 +415,18 @@ HostImeAlignResult host_ime_align_query(bool setEnglish) {
     const DWORD fg1Thread = fg1 ? GetWindowThreadProcessId(fg1, nullptr) : 0;
     if (fg1 != fg0 || fg1Thread != fgThread) {
       (void)ImmReleaseContext(target, imc);
-      if (attached) AttachThreadInput(myThread, fgThread, FALSE);
+      if (attached) os_input::attach_thread_input(myThread, fgThread, FALSE);
       r.status = 2;  // stale-target
       return r;
     }
-    (void)ImmSetOpenStatus(imc, FALSE);
-    (void)ImmSetConversionStatus(imc, conv & ~(IME_CMODE_NATIVE | IME_CMODE_FULLSHAPE), sentence);
+    (void)os_input::imm_set_open_status(imc, FALSE);
+    (void)os_input::imm_set_conversion_status(imc, conv & ~(IME_CMODE_NATIVE | IME_CMODE_FULLSHAPE), sentence);
     // Re-query the ACTUAL post-set state; API success alone is not proof of English.
     open = ImmGetOpenStatus(imc);
     (void)ImmGetConversionStatus(imc, &conv, &sentence);
   }
   (void)ImmReleaseContext(target, imc);
-  if (attached) AttachThreadInput(myThread, fgThread, FALSE);
+  if (attached) os_input::attach_thread_input(myThread, fgThread, FALSE);
   if (convOk) {
     r.status = 0;  // known
     r.open = open ? 1 : 0;
