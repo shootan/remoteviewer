@@ -419,8 +419,8 @@ int wmain(int argc, wchar_t** argv) {
                               CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
                               isoEnv.data(), dir.c_str(), &si, &hostPi) != 0;
     if (launched) {
-      AssignProcessToJobObject(job, hostPi.hProcess);
-      ResumeThread(hostPi.hThread);
+      // r5 (Codex N2): resumed only inside a verified kill-on-close job, else INVALID
+      remote60::native_poc::e2e::e2e_adopt_or_invalid(job, hostPi, "bwe_observe");
     }
   }
   check("the host started", launched);
@@ -430,6 +430,12 @@ int wmain(int argc, wchar_t** argv) {
       [&] { return remote60::native_poc::e2e::e2e_read_text_file(hostLogPath); }, 20000, &injWhy);
   if (launched && !injOff) remote60::native_poc::e2e::e2e_injection_setup_failed("bwe_observe", injWhy);
   check("the host said its input injection is OFF (--input-injection-mode none) before any client", injOff, injWhy);
+  // r6 G1: the same judgement keeps running after the gate (a contradiction -> INVALID, its job ended)
+  std::unique_ptr<remote60::native_poc::e2e::E2eInjectionMonitor> injMon;
+  if (launched && injOff) {
+    injMon = std::make_unique<remote60::native_poc::e2e::E2eInjectionMonitor>(
+        [&] { return remote60::native_poc::e2e::e2e_read_text_file(hostLogPath); }, job, "bwe_observe");
+  }
 
   ViewerSide viewer;
   std::atomic<uint32_t> probeSeq{0};
@@ -655,6 +661,16 @@ int wmain(int argc, wchar_t** argv) {
   target.Stop();
   if (viewer.sock != INVALID_SOCKET) closesocket(viewer.sock);
   if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
+  // r7 N1: polling ends, the host's job is ended and that end confirmed (its log file then complete), THEN the final
+  // snapshot is judged; then the job closes
+  if (injMon) injMon->StopPolling();
+  const bool hostEnded = remote60::native_poc::e2e::e2e_end_job_confirmed(job);
+  if (injMon) {
+    // r8 N1: the final snapshot read to a confirmed EOF (an open failure / a read error is not complete), its OFF
+    // lines judged; the job closes after
+    injMon->Finalize(hostEnded, remote60::native_poc::e2e::e2e_final_file(hostLogPath));
+    injMon.reset();
+  }
   CloseHandle(job);
   if (hostPi.hProcess) {
     WaitForSingleObject(hostPi.hProcess, 20000);
@@ -741,6 +757,7 @@ int wmain(int argc, wchar_t** argv) {
 
   check("the scratch directory is cleaned up", staging.Remove(), staging.why());
   WSACleanup();
+  remote60::native_poc::e2e::e2e_injection_final_check_all();  // r6 G1: judged again before the result
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  (" << gChecks
             << " checks, " << gFailures << " failed)\n";
   return gFailures == 0 ? 0 : 1;

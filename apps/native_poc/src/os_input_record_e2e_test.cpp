@@ -4,11 +4,14 @@
 // policy, routing and dispatch are the product's; every SendInput / input PostMessage / SetCursorPos / secure-broker
 // hand-off is recorded on its stdout and never performed. This shows, with a real phone session controller:
 //   * the host said "record-only" before anything connected (else the test stops: INVALID, nothing connected);
-//   * the phone's Tab down/up, a pointer move, a left click and a short text each reach the dispatch
-//     ("[input] injected seq=..") AND its record ("[os-input-record] api=..") -- the exact events, the text by its
-//     length and hash only;
-//   * the display wake at the stream start is recorded, not performed;
-//   * this PC saw none of it: the cursor position and the foreground window are the same before and after.
+//   * the phone's Tab down/up, a pointer move, a left click and a two-letter text each reach the product's dispatch
+//     ("[input] injected seq=N" / "[input-text] injected seq=N") AND the effects recorded for THAT input of THIS
+//     session -- tagged "ctx what=.. seq=N epoch=E frag=K", in order (os_input_record_match.hpp; its negative
+//     controls: another session, a missing or reordered fragment, an effect under another input -> FAIL);
+//     the text unit by unit, by its length and hash only;
+//   * the display wake at the stream start is recorded with no input behind it ("ctx none"), not performed.
+// That nothing reached this PC rests on the reviewed boundary (os_input_effects.hpp: these calls are recorded INSTEAD
+// of made) -- not on comparing the cursor or the foreground before and after, which proves nothing either way.
 // What it does not show: that Windows would have accepted any of it. That needs a real OS boundary (an approved
 // isolated machine), not this PC.
 
@@ -35,6 +38,7 @@
 #include "e2e_isolation.hpp"
 #include "e2e_injection_guard.hpp"
 #include "native_video_client_session.hpp"
+#include "os_input_record_match.hpp"
 
 namespace {
 
@@ -176,8 +180,8 @@ int wmain(int argc, wchar_t** argv) {
                                        CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, isoEnv.data(),
                                        dir.c_str(), &si, &hostPi) != 0;
     if (launched) {
-      AssignProcessToJobObject(job, hostPi.hProcess);
-      ResumeThread(hostPi.hThread);
+      // r5 (Codex N2): resumed only inside a verified kill-on-close job, else INVALID
+      remote60::native_poc::e2e::e2e_adopt_or_invalid(job, hostPi, "os_input_record");
     }
   }
   if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
@@ -189,10 +193,6 @@ int wmain(int argc, wchar_t** argv) {
   const bool recordOnly = launched && e2e::e2e_wait_os_record_only(log, 20000, &why);
   if (launched && !recordOnly) e2e::e2e_injection_setup_failed("os_input_record", why);
   check("the host said 'os input effects=record-only' before any client", recordOnly, why);
-
-  POINT cursor0{};
-  GetCursorPos(&cursor0);
-  const HWND fg0 = GetForegroundWindow();
 
   NullSink sink;
   ClientSessionController phone;
@@ -211,12 +211,19 @@ int wmain(int argc, wchar_t** argv) {
     check("...and reaches Connected", up, phone.Snapshot().status);
     phone.RequestStreamActive(true);
     const bool wakeRecorded = wait_until(
-        [&] { return log().find("[os-input-record] api=SendInput n=2 mouse flags=0x1 dx=1") != std::string::npos; }, 15000);
-    check("the display wake at the stream start: recorded (SendInput n=2, +1/-1), not performed", wakeRecorded);
-    check("...and its monitor-power broadcast recorded (PostMessage HWND_BROADCAST WM_SYSCOMMAND)",
-          log().find("[os-input-record] api=PostMessage") != std::string::npos && log().find("msg=0x112") != std::string::npos);
+        [&] { return log().find("[os-input-record] ctx none api=SendInput n=2 mouse flags=0x1 dx=1") != std::string::npos; }, 15000);
+    check("the display wake at the stream start: recorded with no input behind it (ctx none), not performed", wakeRecorded);
+    check("...and its monitor-power broadcast recorded (PostMessage msg=0x112)",
+          log().find("[os-input-record] ctx none api=PostMessage") != std::string::npos && log().find("msg=0x112") != std::string::npos);
 
-    const int disp0 = count(log(), "[native-video-host][input] injected seq=");
+    const size_t disp0 = e2e::e2e_parse_dispatches(log()).size();
+    uint64_t epoch = 0;
+    {
+      const std::string out = log();
+      const size_t at = out.rfind("[native-video-host][control] session epoch=");
+      if (at != std::string::npos) epoch = e2e::field_u64(out.substr(at), "session epoch=");
+    }
+    check("this session's epoch, from the host's own line", epoch != 0, std::to_string(epoch));
     // Tab down/up, a pointer move, a left click, a two-letter text
     const bool queued = phone.QueueInputEvent(5, 0, 0, 0, VK_TAB, 0) && phone.QueueInputEvent(6, 0, 0, 0, VK_TAB, 0) &&
                         phone.QueueInputEvent(1, 320, 240, 0, 0, 0) && phone.QueueInputEvent(2, 320, 240, 0, 1, 1) &&
@@ -224,29 +231,29 @@ int wmain(int argc, wchar_t** argv) {
     const std::u16string text = u"Ab";
     const bool textQueued = phone.QueueInputText(reinterpret_cast<const uint16_t*>(text.data()), text.size());
     check("the phone queued Tab down/up, a move, a click and a text", queued && textQueued);
-    const bool dispatched = wait_until([&] { return count(log(), "[native-video-host][input] injected seq=") >= disp0 + 5; }, 8000);
-    const std::string out = log();
-    check("all five events reached the product's dispatch ([input] injected seq=..)", dispatched,
-          std::to_string(count(out, "[native-video-host][input] injected seq=") - disp0));
-    check("...Tab down and up recorded (SendInput vk=9), not sent",
-          count(out, "key vk=9 down") >= 1 && count(out, "key vk=9 up") >= 1);
-    check("...the pointer recorded (SetCursorPos), the cursor not moved", count(out, "api=SetCursorPos") >= 2);
-    check("...the click recorded (SendInput mouse LEFTDOWN 0x2 / LEFTUP 0x4), not sent",
-          out.find("mouse flags=0x2 ") != std::string::npos && out.find("mouse flags=0x4 ") != std::string::npos);
-    char want[64];
-    std::snprintf(want, sizeof(want), "unicode units=2 fnv=%08x", fnv1a(text));
-    const bool textRecorded = wait_until([&] { return log().find(want) != std::string::npos; }, 5000);
-    check("...the text recorded by its length and hash only (the characters themselves never printed)", textRecorded, want);
+    const bool dispatched = wait_until([&] { return e2e::e2e_parse_dispatches(log()).size() >= disp0 + 6; }, 8000);
+    check("all six reached the product's dispatch (5 x [input], 1 x [input-text] injected seq=..)", dispatched,
+          std::to_string(e2e::e2e_parse_dispatches(log()).size() - disp0));
+    // the text is sent unit by unit (apply_input_text_message -> one SendInput down/up per UTF-16 unit): one record
+    // per unit, each by its own length (1) and hash
+    char unitA[48], unitB[48];
+    std::snprintf(unitA, sizeof(unitA), "unicode units=1 fnv=%08x", fnv1a(u"A"));
+    std::snprintf(unitB, sizeof(unitB), "unicode units=1 fnv=%08x", fnv1a(u"b"));
+    const std::vector<e2e::ExpectedInput> want = {
+        {"input", {"api=SendInput n=1 key vk=9 down"}},
+        {"input", {"api=SendInput n=1 key vk=9 up"}},
+        {"input", {"api=SetCursorPos"}},
+        {"input", {"api=SetCursorPos", "mouse flags=0x2 "}},
+        {"input", {"api=SetCursorPos", "mouse flags=0x4 "}},
+        {"text", {unitA, unitB}},
+    };
+    std::string why;
+    const bool matched = wait_until([&] { return e2e::e2e_match_dispatches(log(), disp0, epoch, want, &why); }, 5000);
+    check("each input's own effects, of THIS session, in order -- recorded, never performed "
+          "(Tab down, Tab up, move, click down, click up, then 'A', 'b' unit by unit)",
+          matched, why);
     phone.Disconnect();
   }
-  POINT cursor1{};
-  GetCursorPos(&cursor1);
-  // (a person moving the mouse meanwhile would fail this check -- it can only fail toward "something moved")
-  check("THIS PC saw none of it: the cursor is where it was", cursor0.x == cursor1.x && cursor0.y == cursor1.y,
-        std::to_string(cursor0.x) + "," + std::to_string(cursor0.y) + " -> " + std::to_string(cursor1.x) + "," +
-            std::to_string(cursor1.y));
-  check("...and the foreground window is the same", GetForegroundWindow() == fg0);
-
   if (launched) {
     TerminateJobObject(job, 0);
     WaitForSingleObject(hostPi.hProcess, 10000);

@@ -241,7 +241,7 @@ bool ReplaceWithUnicode(uint64_t expectedIdentity, const uint16_t* units, uint16
     BOOL readOnly = TRUE;
     const bool cleared = SUCCEEDED(value->get_CurrentIsReadOnly(&readOnly)) && !readOnly && [&] {
       BSTR empty = SysAllocString(L"");
-      const bool ok = empty && SUCCEEDED(value->SetValue(empty));
+      const bool ok = empty && SUCCEEDED(os_input::uia_set_value(value, empty));
       if (empty) SysFreeString(empty);
       return ok;
     }();

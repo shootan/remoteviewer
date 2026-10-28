@@ -6,8 +6,10 @@
 //
 //   --host-power-management on|off     (the command line only)
 //
-// Bound once, before the power object exists and before any of its effects (native_video_host_main.cpp); immutable
-// after that. Nothing remote -- the directory, the control channel, a viewer, a runtime tune, a stream restart -- can
+// Read by parse_args (host_args.cpp) with the same token / arity rules as every other switch -- an operand of another
+// switch (e.g. a window title "--host-power-management") is never taken for it (r5 P2-1) -- and bound once, before
+// the power object exists and before any of its effects (native_video_host_main.cpp parses first); immutable after
+// that. Nothing remote -- the directory, the control channel, a viewer, a runtime tune, a stream restart -- can
 // change it: there is no setter. A value other than on/off refuses the start (no silent default). The bound value
 // is said in one line at startup ("host power management=on|off ...").
 #ifndef REMOTE60_NATIVE_POC_HOST_POWER_POLICY_HPP
@@ -23,30 +25,6 @@ struct HostPowerPolicy {
   bool ok = true;                 // false: an unknown value -- the host refuses to start
   std::string bad;                // that value
 };
-
-inline HostPowerPolicy bind_host_power_policy(int argc, char** argv) {
-  HostPowerPolicy p;
-  for (int i = 1; i < argc; ++i) {
-    if (std::string(argv[i]) != "--host-power-management") continue;
-    if (i + 1 >= argc) {
-      p.ok = false;
-      p.bad = "(missing)";
-      return p;
-    }
-    const std::string v = argv[++i];
-    if (v == "on") {
-      p.enabled = true;
-    } else if (v == "off") {
-      p.enabled = false;
-    } else {
-      p.ok = false;
-      p.bad = v;
-      return p;
-    }
-    p.fromCommandLine = true;  // the last one wins, like the other switches
-  }
-  return p;
-}
 
 // The one startup line (the harness matches it whole).
 inline std::string host_power_policy_line(const HostPowerPolicy& p) {

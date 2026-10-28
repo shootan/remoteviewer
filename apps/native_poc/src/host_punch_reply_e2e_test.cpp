@@ -26,6 +26,7 @@
 #include <cstring>
 #include <functional>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -99,9 +100,14 @@ std::wstring directory_of(const std::wstring& path) {
 struct SpawnedHost {
   PROCESS_INFORMATION pi{};
   HANDLE job = nullptr;
+  // r6 G1: this launch's monitor (after its initial gate); stopped first in Stop()
+  std::unique_ptr<remote60::native_poc::e2e::E2eInjectionMonitor> injMonitor;
   HANDLE readEnd = nullptr;
   std::thread reader;
   std::atomic<bool> reading{false};
+  // r8 N1: how the reader's read ended (E2eReadEnd) and its error -- EOF is the only "output complete"
+  std::atomic<int> readResult{0};
+  std::atomic<unsigned long> readErr{0};
   std::mutex mu;
   std::string output;
   std::wstring dir;
@@ -160,16 +166,36 @@ struct SpawnedHost {
   }
 
   void Stop() {
-    reading = false;
-    if (job) {
-      CloseHandle(job);  // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE takes the host with it
-      job = nullptr;
+    if (injMonitor) injMonitor->StopPolling();  // r7 N1: polling ends; the final judgement comes after the host and its reader
+    // r7 N1: the producer is ended (its job: every process of it, confirmed), its output read to the end (the reader
+    // gets EOF once the last writer is gone), THEN the final snapshot is judged. An end not confirmed: the read is cut
+    // and the output is NOT complete -- the final judgement says so (INVALID).
+    // r8 N1: complete = the producer's end confirmed AND the reader's own EOF (not its join) AND the OFF lines in that
+    // final text (e2e_final_verdict); the job stays open until the final judgement is made, then it closes.
+    bool producerEnded = false;
+    if (job) producerEnded = remote60::native_poc::e2e::e2e_end_job_confirmed(job);
+    if (!producerEnded) {
+      reading = false;
+      if (readEnd) {
+        CloseHandle(readEnd);
+        readEnd = nullptr;
+      }
     }
+    if (reader.joinable()) reader.join();
     if (readEnd) {
       CloseHandle(readEnd);
       readEnd = nullptr;
     }
-    if (reader.joinable()) reader.join();
+    if (injMonitor) {
+      injMonitor->Finalize(producerEnded, remote60::native_poc::e2e::e2e_final_pipe(
+                                              static_cast<remote60::native_poc::e2e::E2eReadEnd>(readResult.load()),
+                                              readErr.load(), log()));
+      injMonitor.reset();
+    }
+    if (job) {
+      CloseHandle(job);  // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (already ended above when confirmed)
+      job = nullptr;
+    }
     if (pi.hThread) CloseHandle(pi.hThread);
     bool exited = true;
     DWORD wait = WAIT_OBJECT_0;
@@ -338,18 +364,22 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
                      host->dir.c_str(), &si, &host->pi) != FALSE;
   CloseHandle(writeEnd);
   if (!launched) return false;
-  AssignProcessToJobObject(host->job, host->pi.hProcess);
-  ResumeThread(host->pi.hThread);
+  // r5 (Codex N2): resumed only inside a verified kill-on-close job, else INVALID
+  remote60::native_poc::e2e::e2e_adopt_or_invalid(host->job, host->pi, "host_punch_reply");
 
   host->reading = true;
-  host->reader = std::thread([host] {
-    char buf[4096];
-    DWORD got = 0;
-    while (host->reading.load() && host->readEnd &&
-           ReadFile(host->readEnd, buf, sizeof(buf), &got, nullptr) && got > 0) {
-      std::lock_guard<std::mutex> lock(host->mu);
-      host->output.append(buf, got);
-    }
+  host->reader = std::thread([host, h = host->readEnd] {
+    // r8 N1: read to a confirmed end of output (EOF / broken pipe), any other end kept apart (e2e_read_to_end)
+    DWORD err = 0;
+    const auto end = remote60::native_poc::e2e::e2e_read_to_end(
+        h, [host] { return host->reading.load(); },
+        [host](const char* p, size_t n) {
+          std::lock_guard<std::mutex> lock(host->mu);
+          host->output.append(p, n);
+        },
+        &err);
+    host->readErr = err;
+    host->readResult = static_cast<int>(end);
   });
   // r6 V5: a --prelogin worker given directory arguments ignores them and never starts its directory
   // agent, so it never names a cache -- it has nothing to write. Its isolation is the empty ProgramData
@@ -362,6 +392,7 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
       remote60::native_poc::e2e::e2e_injection_setup_failed(tag, injWhy);
     }
     check("the host said its input injection is OFF (--input-injection-mode none) before any client", true);
+    host->injMonitor = std::make_unique<remote60::native_poc::e2e::E2eInjectionMonitor>([host] { return host->log(); }, host->job, tag);
   }
   // The host says which cache it will write, before it registers. Confirmed from its own words
   // rather than from the argument this test passed: the question is what the process DID.
@@ -1273,6 +1304,7 @@ int wmain(int argc, wchar_t** argv) {
   // and C2 is where that is being built. Until then this file exercises duplicates and
   // re-sends, and says so rather than letting the gap look closed.
 
+  remote60::native_poc::e2e::e2e_injection_final_check_all();  // r6 G1: judged again before the result
   std::printf("\n%s  (%d checks, %d failed)\n",
               gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED", gChecks, gFailures);
   WSACleanup();

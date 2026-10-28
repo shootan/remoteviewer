@@ -62,6 +62,7 @@
 #include <mutex>
 #include "peer_version.hpp"
 #include "time_utils.hpp"
+#include "os_input_effects.hpp"
 
 namespace remote60::native_poc {
 
@@ -752,6 +753,8 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       std::string target;
       InputFailStage stage = InputFailStage::None;
       DWORD error = 0;
+      // r5 (Codex T1): the effects of this release, tagged with it (record-only test build; nothing in the product)
+      const os_input::DispatchContext dispatchCtx("release", 0, servedEpoch);
       const InputInjectResult result =
           desktopMode && !targetMonitor
               ? InputInjectResult::NoTarget
@@ -1343,6 +1346,8 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
             std::lock_guard<std::mutex> lock(capture.inputTargetMu);
             targetMonitor = reinterpret_cast<HMONITOR>(static_cast<uintptr_t>(capture.inputTarget.monitorHandle));
           }
+          // r5 (Codex T1): the effects of THIS input, tagged with its seq and session (record-only test build only)
+          const os_input::DispatchContext dispatchCtx("input", input.seq, servedEpoch);
           injectResult =
               desktopMode && !targetMonitor ? InputInjectResult::NoTarget :
               inject_background_input_event(input, inputRouter.targetCriteria, capture.targetHwnd,
@@ -1538,6 +1543,8 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
           injectResult = InputInjectResult::Injected;
           resolvedTarget = " secure-system-agent";
         } else {
+          // r5 (Codex T1): the effects of THIS text, tagged with its seq and session (record-only test build only)
+          const os_input::DispatchContext dispatchCtx("text", text.seq, servedEpoch);
           injectResult = apply_input_text_message(text, capture.targetHwnd, desktopMode,
                                                   &inputRouter.desktopState, &resolvedTarget);
         }
