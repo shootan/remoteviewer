@@ -409,7 +409,7 @@ int wmain(int argc, wchar_t** argv) {
   std::string injWhy;
   const bool injOff = started && remote60::native_poc::e2e::e2e_wait_injection_off([&host] { return host.log(); }, 20000, &injWhy);
   if (started && !injOff) remote60::native_poc::e2e::e2e_injection_setup_failed("host_reboot_delegate", injWhy);
-  check("the host said its input injection is OFF (enableInputInjection=false) before any client", injOff, injWhy);
+  check("the host said its input injection is OFF (--input-injection-mode none) before any client", injOff, injWhy);
   Service service;
   if (started && safe && injOff) {
     service.heartbeatSeen = [&host] { return host.log().find("step=heartbeat ok=1") != std::string::npos; };

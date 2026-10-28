@@ -1,13 +1,17 @@
-// 2026-10-28 (verifier, after worker2's finding in the ka-pc e2e; Codex codex_test_injection_finding.md rules 1-6):
-// GNLinkStream injects input by default (host_args.hpp enableInputInjection = true). A test host must never drive
-// THIS PC's input:
-//   1. it is started with injection explicitly OFF -- a --config of its own with {"enableInputInjection": false};
-//   2. nothing connects to it before THIS launch's own output said the explicit OFF state
-//      ("input injection disabled (enableInputInjection=false)") -- not "unsupported mode", not a line of an earlier
-//      run, not the argument this test passed;
-//   3. anything else (enabled, another disabled reason, a config error, silence) is a setup failure: the test stops
-//      at once -- RESULT: INVALID, exit 2 -- before any client exists (its host dies with its job object);
+// 2026-10-28 (verifier, after worker2's finding in the ka-pc e2e; Codex codex_test_injection_finding.md rules 1-6 and
+// "OFF 표현 상충 판단 -- mode=none 채택"): GNLinkStream injects input by default (host_args.hpp
+// enableInputInjection = true). A test host must never drive THIS PC's input:
+//   1. it is started with injection explicitly OFF: the exact argument `--input-injection-mode none` (the parser's
+//      supported value for Disabled, host_input_inject.cpp parse_input_injection_mode -- not an unknown value's
+//      fallback). Not a --config: a profile clears every runtime override it can carry, not only the injection;
+//   2. nothing connects to it before THIS launch's own output said that state, whole:
+//      "input injection disabled (unsupported mode) mode=none" ending its line (the startup wording is the
+//      host's; the mode value must be exactly none) -- not a prefix match, not an earlier run's line;
+//   3. anything else (enabled, another mode / another off reason, a config error, silence) is a setup failure: the
+//      test stops at once -- RESULT: INVALID, exit 2 -- before any client exists (its host dies with its job object);
 //   4. a contradiction later (injectionEnabled=1 in its input log) makes the run INVALID as well.
+// This turns off INPUT injection only. Other OS effects (SAS delegation, credential typing, clipboard, restart, the
+// display wake at a stream start) are not covered by it -- see os_input_effects.hpp for the record-only test build.
 // The host still receives, logs and acknowledges input; that is receipt, not an OS injection.
 #ifndef REMOTE60_NATIVE_POC_E2E_INJECTION_GUARD_HPP
 #define REMOTE60_NATIVE_POC_E2E_INJECTION_GUARD_HPP
@@ -19,54 +23,17 @@
 #include <cstdlib>
 #include <cstring>
 #include <cwchar>
-#include <fstream>
 #include <functional>
 #include <string>
 #include <thread>
 
 namespace remote60::native_poc::e2e {
 
-// The explicit OFF state, as host_startup_config.cpp prints it.
-inline const char* e2e_injection_off_line() { return "input injection disabled (enableInputInjection=false)"; }
+// The explicit OFF state for `--input-injection-mode none`, as host_startup_config.cpp prints it (a whole line).
+inline const char* e2e_injection_off_line() { return "input injection disabled (unsupported mode) mode=none"; }
 
-// The host's --config: injection off. A --config profile CLEARS the runtime overrides it can carry
-// (json_profile::apply_runtime_env_overrides_from_json -> clear_runtime_env_overrides) and sets only what it names --
-// so the ones this test set in its own environment (which the host inherits) are written into it too; without
-// forceEncodedExperiment the host refuses h264 and serves no session at all (seen 2026-10-28).
-inline bool e2e_write_injection_off_config(const std::wstring& stagingDir) {
-  struct Map { const wchar_t* env; const char* json; bool isBool; };
-  static const Map kMaps[] = {
-      {L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", "forceEncodedExperiment", true},
-      {L"REMOTE60_NATIVE_FRAME_GATING_DISABLE", "frameGatingDisable", true},
-      {L"REMOTE60_NATIVE_STATIC_SCENE_FPS", "staticSceneFps", false},
-      {L"REMOTE60_NATIVE_H264_NO_PACING", "h264NoPacing", true},
-      {L"REMOTE60_NATIVE_ABR_DISABLE", "abrDisable", true},
-      {L"REMOTE60_NATIVE_CAPTURE_POOL_BUFFERS", "capturePoolBuffers", false},
-  };
-  std::string json = "{\"enableInputInjection\": false";
-  for (const auto& m : kMaps) {
-    wchar_t v[64] = {};
-    const DWORD n = GetEnvironmentVariableW(m.env, v, 64);
-    if (n == 0 || n >= 64) continue;
-    if (m.isBool) {
-      if (wcscmp(v, L"1") == 0 || _wcsicmp(v, L"true") == 0) json += std::string(", \"") + m.json + "\": true";
-    } else {
-      const unsigned long u = wcstoul(v, nullptr, 10);
-      if (u > 0) json += std::string(", \"") + m.json + "\": " + std::to_string(u);
-    }
-  }
-  json += "}\n";
-  std::ofstream cfg(stagingDir + L"host-config.json", std::ios::binary | std::ios::trunc);
-  cfg << json;
-  return static_cast<bool>(cfg);
-}
-
-// The argument for the host's command line -- it writes that config first. A config that could not be written is
-// one the host fails to load ("failed to load --config"): the gate below rejects that, so this cannot fail open.
-inline std::wstring e2e_injection_off_arg(const std::wstring& stagingDir) {
-  e2e_write_injection_off_config(stagingDir);
-  return L" --config \"" + stagingDir + L"host-config.json\"";
-}
+// The argument for the host's command line (the staging directory is not needed: nothing is written).
+inline std::wstring e2e_injection_off_arg(const std::wstring& /*stagingDir*/) { return L" --input-injection-mode none"; }
 
 // What a host wrote to a log file so far (shared read: the host keeps writing it).
 inline std::string e2e_read_text_file(const std::wstring& path) {
@@ -95,7 +62,12 @@ inline int e2e_injection_state(const std::string& out, std::string* why) {
   const size_t at = out.find("input injection disabled");
   if (at != std::string::npos) {
     const char* want = e2e_injection_off_line();
-    if (out.compare(at, std::strlen(want), want) == 0) return 1;
+    const size_t end = at + std::strlen(want);
+    // the whole line: the mode value is exactly "none" (not "none2", not a prefix of something else)
+    if (out.compare(at, std::strlen(want), want) == 0 && end < out.size() && (out[end] == '\r' || out[end] == '\n')) {
+      return 1;
+    }
+    if (out.compare(at, std::strlen(want), want) == 0 && end >= out.size()) return 0;  // the line is still being written
     if (why) *why = "the host is off for another reason, not the explicit setting: " + out.substr(at, 80);
     return -1;
   }

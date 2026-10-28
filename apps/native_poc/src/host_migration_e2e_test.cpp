@@ -300,7 +300,7 @@ bool StartHost(SpawnedHost* host, const char* tag, const std::string& serverUrl,
   if (!remote60::native_poc::e2e::e2e_wait_injection_off([host] { return host->log(); }, 20000, &injWhy)) {
     remote60::native_poc::e2e::e2e_injection_setup_failed(tag, injWhy);
   }
-  check((std::string("[") + tag + "] the host said its input injection is OFF (enableInputInjection=false) before any client").c_str(),
+  check((std::string("[") + tag + "] the host said its input injection is OFF (--input-injection-mode none) before any client").c_str(),
         true);
   return usedIt && seam;
 }

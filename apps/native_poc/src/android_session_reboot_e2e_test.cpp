@@ -230,7 +230,7 @@ int wmain(int argc, wchar_t** argv) {
   const bool injOff = launched && remote60::native_poc::e2e::e2e_wait_injection_off(
       [&] { return remote60::native_poc::e2e::e2e_read_text_file(hostLogPath); }, 20000, &injWhy);
   if (launched && !injOff) remote60::native_poc::e2e::e2e_injection_setup_failed("android_session_reboot", injWhy);
-  check("the host said its input injection is OFF (enableInputInjection=false) before any client", injOff, injWhy);
+  check("the host said its input injection is OFF (--input-injection-mode none) before any client", injOff, injWhy);
 
   if (launched && safe && injOff) {
     ClientSessionConnectArgs args;

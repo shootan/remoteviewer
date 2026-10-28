@@ -238,7 +238,7 @@ std::wstring e2e_host_seconds() {
 // 2026-10-28 (verifier, after worker2's finding): GNLinkStream injects input by default (host_args.hpp
 // enableInputInjection = true) -- a test host must not drive THIS PC's input. Every host here is started with its
 // injection off (e2e_injection_guard.hpp), and a test client connects only after the host itself said
-// "input injection disabled (enableInputInjection=false)" -- else the test ends INVALID there (StartHost).
+// "input injection disabled (unsupported mode) mode=none" -- else the test ends INVALID there (StartHost).
 std::wstring isolation_args(const std::wstring& stagingDir) {
   return L" --directory-cache \"" + stagingDir + L"host_cache.json\"";
 }
@@ -308,9 +308,8 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
                      L" --directory-url " + url +
                      L" --directory-id tester --directory-pw e2e-pass-1234" +
                      L" --seconds " + e2e_host_seconds() + isolation_args(host->dir) +
-                     // input injection off (e2e_injection_guard.hpp). Not for a --prelogin worker: it refuses any --config
-                     // by design (host_args.cpp preloginRefusedConfig), and no client ever connects to one here -- its
-                     // case checks that it stays offline
+                     // input injection off (e2e_injection_guard.hpp). Not for a --prelogin worker: no client ever connects
+                     // to one here (its case checks that it stays offline), and its argument contract is the product's
                      (prelogin ? std::wstring() : remote60::native_poc::e2e::e2e_injection_off_arg(host->dir));
 
   // Checked BEFORE anything starts. A host that talks to a directory writes a token cache, and
@@ -385,7 +384,7 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
     if (!remote60::native_poc::e2e::e2e_wait_injection_off([host] { return host->log(); }, 20000, &injWhy)) {
       remote60::native_poc::e2e::e2e_injection_setup_failed(tag, injWhy);
     }
-    check("the host said its input injection is OFF (enableInputInjection=false) before any client", true);
+    check("the host said its input injection is OFF (--input-injection-mode none) before any client", true);
   }
   // The host says which cache it will write, before it registers. Confirmed from its own words
   // rather than from the argument this test passed: the question is what the process DID.
