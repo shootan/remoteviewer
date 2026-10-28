@@ -92,6 +92,85 @@ if run:
     os.remove(target)
     os.rmdir(run2)
 
+# T1 (Codex codex_avd_guard_src_r3.md): a REAL directory junction inside the run folder, pointing at a sibling folder of
+# this test's own (beside the run, holding a sentinel). The cleanup must not enter it: with removals RECORDED (nothing
+# deleted), no path below the junction may be chosen; then the real cleanup keeps the sentinel and the junction, and
+# says the run is not clean. The pre-fix cleanup (8a84198) is run the same recorded way, as the contrast.
+import subprocess
+
+
+class RecordingOs:
+    """os, except that remove / rmdir only record (the cleanup under test deletes nothing)."""
+    def __init__(self):
+        self.removed = []
+
+    def __getattr__(self, name):
+        return getattr(os, name)
+
+    def remove(self, p):
+        self.removed.append(os.path.abspath(p))
+
+    def rmdir(self, p):
+        self.removed.append(os.path.abspath(p))
+
+
+def recorded_cleanup(fn_globals, fn, run):
+    rec = RecordingOs()
+    saved_os = fn_globals['os']
+    fn_globals['os'] = rec
+    try:
+        fn(run)
+    finally:
+        fn_globals['os'] = saved_os
+    return rec.removed
+
+
+jroot = os.path.join(anchor, 'gate-junction-test-%d' % pid)
+os.mkdir(jroot)
+sibling = os.path.join(jroot, 'sibling')
+os.mkdir(sibling)
+sentinel = os.path.join(sibling, 'sentinel.txt')
+with open(sentinel, 'w') as f:
+    f.write('must stay')
+jrun, why = gate.self_test_run_dir({'REMOTE60_TEST_TMP': jroot})
+link = os.path.join(jrun, 'link')
+mk = subprocess.run(['cmd', '/c', 'mklink', '/J', link, sibling], capture_output=True, text=True)
+with open(os.path.join(jrun, 'own.txt'), 'w') as f:
+    f.write('x')
+made = mk.returncode == 0 and os.path.isdir(link) and gate._is_link(link)
+check('T1 setup: a real directory junction in the run folder, to a sibling of this test (with a sentinel)', made,
+      (mk.stdout + mk.stderr).strip()[:120])
+below = os.path.normcase(os.path.abspath(link)) + os.sep
+if made:
+    # the pre-fix cleanup, from git (8a84198), recorded
+    old_src = subprocess.run(['git', '-C', os.path.dirname(HERE), 'show', '8a84198:automation/gnlink_check_fixed_server.py'],
+                             capture_output=True, text=True, encoding='utf-8').stdout
+    old_ns = {'__name__': 'gate_8a84198'}
+    exec(compile(old_src, 'gate_8a84198', 'exec'), old_ns)
+    old_removed = recorded_cleanup(old_ns, old_ns['cleanup_run_dir'], jrun)
+    old_below = [p for p in old_removed if os.path.normcase(p).startswith(below)]
+    check('T1 contrast: the pre-fix cleanup (8a84198) chooses a path BELOW the junction (the sibling\'s sentinel)',
+          len(old_below) > 0, 'chosen below the junction: %s' % old_below)
+    new_removed = recorded_cleanup(gate.__dict__, gate.cleanup_run_dir, jrun)
+    new_below = [p for p in new_removed if os.path.normcase(p).startswith(below)]
+    check('T1 fixed: nothing below the junction is chosen (recorded, nothing deleted); its own file is',
+          not new_below and os.path.join(jrun, 'own.txt') in new_removed and
+          os.path.normcase(os.path.abspath(link)) not in [os.path.normcase(p) for p in new_removed],
+          'chosen: %s' % new_removed)
+    files, dirs, left = gate.cleanup_run_dir(jrun)  # the real one
+    check('T1 fixed, for real: the sentinel and the junction stay, the junction is said, the run is not called clean',
+          os.path.isfile(sentinel) and gate._is_link(link) and link in left and jrun in left and files == 1,
+          'files=%d dirs=%d left=%s' % (files, dirs, left))
+# teardown: the junction removed AS A LINK (rmdir of the junction itself, never a recursive delete), then this test's own
+if os.path.isdir(link) and gate._is_link(link):
+    os.rmdir(link)
+check('T1 teardown: the junction gone, the sentinel untouched', not os.path.exists(link) and os.path.isfile(sentinel))
+if os.path.isdir(jrun):
+    os.rmdir(jrun)
+os.remove(sentinel)
+os.rmdir(sibling)
+os.rmdir(jroot)
+
 # the real self-test in that root: the gate's own checks, then its run folder gone
 os.environ['REMOTE60_TEST_TMP'] = root
 saved_out = sys.stdout

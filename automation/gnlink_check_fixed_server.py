@@ -277,32 +277,45 @@ def self_test_run_dir(environ=None):
 
 
 def cleanup_run_dir(run):
-    """Removes what is inside this self-test's own run folder, then the folder: files and folders only (a link is not
-    followed or removed -- it is left and said). Returns (files removed, folders removed, what was left)."""
+    """Removes what is inside this self-test's own run folder, then the folder: files and folders only. A link -- a
+    symlink or a directory junction -- is never entered, followed or removed: it is pruned BEFORE the walk would go
+    below it (T1, Codex codex_avd_guard_src_r3.md: a bottom-up walk had already gone inside a junction before it was
+    checked), left in place and said. Returns (files removed, folders removed, what was left)."""
     files = dirs = 0
     left = []
-    head = os.path.abspath(run) + os.sep
-    for here, subdirs, names in os.walk(run, topdown=False, followlinks=False):
+    run = os.path.abspath(run)
+    if _is_link(run) or not os.path.isdir(run):
+        return 0, 0, [run]  # not a plain folder of its own: nothing is touched
+    head = run + os.sep
+    to_files, to_dirs = [], []
+    for here, subdirs, names in os.walk(run, topdown=True, followlinks=False):
+        keep = []
+        for d in subdirs:  # decided before the walk goes below: a link is pruned, never entered
+            path = os.path.join(here, d)
+            if not os.path.abspath(path).startswith(head) or _is_link(path):
+                left.append(path)
+            else:
+                keep.append(d)
+                to_dirs.append(path)
+        subdirs[:] = keep
         for n in names:
             path = os.path.join(here, n)
             if not os.path.abspath(path).startswith(head) or _is_link(path):
                 left.append(path)
-                continue
-            try:
-                os.remove(path)
-                files += 1
-            except OSError:
-                left.append(path)
-        for d in subdirs:
-            path = os.path.join(here, d)
-            if not os.path.abspath(path).startswith(head) or _is_link(path):
-                left.append(path)
-                continue
-            try:
-                os.rmdir(path)
-                dirs += 1
-            except OSError:
-                left.append(path)
+            else:
+                to_files.append(path)
+    for path in to_files:
+        try:
+            os.remove(path)
+            files += 1
+        except OSError:
+            left.append(path)
+    for path in sorted(to_dirs, key=lambda x: x.count(os.sep), reverse=True):  # the deepest first
+        try:
+            os.rmdir(path)
+            dirs += 1
+        except OSError:
+            left.append(path)
     try:
         os.rmdir(run)
         dirs += 1
