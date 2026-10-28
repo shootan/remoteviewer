@@ -89,6 +89,7 @@
 #include "host_control_session.hpp"
 #include "host_main_loop.hpp"
 #include "host_startup.hpp"
+#include "os_input_effects.hpp"
 
 #ifndef REMOTE60_NATIVE_ENCODED_EXPERIMENT
 #define REMOTE60_NATIVE_ENCODED_EXPERIMENT 0
@@ -394,6 +395,12 @@ void startup_log_config(HostContext& hx) {
                                                                          4ULL))
               << "\n";
   }
+  // Finding-2 (2026-10-28): a record-only test build says so first, as its own state -- not "injection on/off"
+  // (its policy and dispatch run; no OS input effect exists in it: os_input_effects.hpp)
+#if defined(REMOTE60_OS_INPUT_RECORD_ONLY)  // the string itself never exists in a product build
+  std::cout << "[native-video-host] os-input-record: os input effects=record-only (test build: SendInput, input "
+               "PostMessage, SetCursorPos and the secure broker are recorded, never performed)\n";
+#endif
   if (kInputPolicyForceBlock) {
     std::cout << "[native-video-host] input injection blocked by compile-time policy\n";
   } else if (!args.enableInputInjection) {

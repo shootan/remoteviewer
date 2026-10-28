@@ -25,6 +25,7 @@
 #include <streambuf>
 #include <string>
 #include "host_diagnostic_log.hpp"
+#include "os_input_effects.hpp"
 
 namespace remote60::native_poc {
 
@@ -100,8 +101,8 @@ inline void wake_display_for_remote_session() {
   wake[1].type = INPUT_MOUSE;
   wake[1].mi.dx = -1;
   wake[1].mi.dwFlags = MOUSEEVENTF_MOVE;
-  (void)SendInput(2, wake, sizeof(INPUT));
-  (void)PostMessageW(HWND_BROADCAST, WM_SYSCOMMAND,
+  (void)os_input::send_input(2, wake, sizeof(INPUT));
+  (void)os_input::post_message(HWND_BROADCAST, WM_SYSCOMMAND,
                      static_cast<WPARAM>(SC_MONITORPOWER), static_cast<LPARAM>(-1));
 }
 

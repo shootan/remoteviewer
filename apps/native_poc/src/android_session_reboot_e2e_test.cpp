@@ -36,6 +36,7 @@
 #include <vector>
 
 #include "e2e_isolation.hpp"
+#include "e2e_injection_guard.hpp"
 #include "native_video_client_session.hpp"
 #include "reboot_wire.hpp"
 
@@ -190,8 +191,10 @@ int wmain(int argc, wchar_t** argv) {
   bool launched = false;
   if (staged && restricted && hostLog != INVALID_HANDLE_VALUE) {
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
+    // input injection off (e2e_injection_guard.hpp): this test's input must never reach this PC's desktop
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264 --bind-address 127.0.0.1" +
-                       L" --bind-port " + std::to_wstring(mediaPort) + L" --seconds 90";
+                       L" --bind-port " + std::to_wstring(mediaPort) + L" --seconds 90" +
+                       remote60::native_poc::e2e::e2e_injection_off_arg(dir);
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
     mutableCmd.push_back(L'\0');
     STARTUPINFOW si{};
@@ -222,7 +225,14 @@ int wmain(int argc, wchar_t** argv) {
   check("SAFETY: the host's token holds no SeShutdownPrivilege at all (it cannot restart this PC)", safe,
         std::to_string(hostHasShutdown));
 
-  if (launched && safe) {
+  // fail closed: no session to a host that has not said its input injection is off
+  std::string injWhy;
+  const bool injOff = launched && remote60::native_poc::e2e::e2e_wait_injection_off(
+      [&] { return remote60::native_poc::e2e::e2e_read_text_file(hostLogPath); }, 20000, &injWhy);
+  if (launched && !injOff) remote60::native_poc::e2e::e2e_injection_setup_failed("android_session_reboot", injWhy);
+  check("the host said its input injection is OFF (enableInputInjection=false) before any client", injOff, injWhy);
+
+  if (launched && safe && injOff) {
     ClientSessionConnectArgs args;
     args.host = "127.0.0.1";
     args.videoPort = mediaPort;

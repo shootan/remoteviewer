@@ -27,6 +27,7 @@
 
 #include "poc_protocol.hpp"
 #include "product_version.hpp"
+#include "e2e_injection_guard.hpp"
 
 #include <cstdio>
 #include <filesystem>
@@ -62,7 +63,10 @@ DWORD run(const std::wstring& dir, const std::wstring& tag, const std::string& s
   si.hStdError = h;
   si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
   // a port nobody uses, a short run; the injected steps come before any wait for a client
-  std::wstring cmd = L"\"" + dir + L"GNLinkStreamMigrationTest.exe\" --transport udp --codec h264 --seconds 3";
+  // input injection off (e2e_injection_guard.hpp) -- this host dies at a startup step and no client here sends input;
+  // there is no wait for its "disabled" line (it may die before saying it)
+  std::wstring cmd = L"\"" + dir + L"GNLinkStreamMigrationTest.exe\" --transport udp --codec h264 --seconds 3" +
+                     remote60::native_poc::e2e::e2e_injection_off_arg(dir);
   PROCESS_INFORMATION pi{};
   DWORD code = 0xFFFFFFFFu;
   if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, dir.c_str(), &si, &pi)) {
@@ -111,7 +115,7 @@ DWORD run_with_client(const std::wstring& dir, const std::wstring& tag, const st
   si.hStdError = h;
   si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
   std::wstring cmd = L"\"" + dir + L"GNLinkStreamMigrationTest.exe\" --transport udp --codec h264 --bind-port " + std::to_wstring(port) + L" --control-port " + std::to_wstring(free_udp_port()) +
-                     L" --seconds 20";
+                     L" --seconds 20" + remote60::native_poc::e2e::e2e_injection_off_arg(dir);  // input injection off; its only client sends a bare Hello
   PROCESS_INFORMATION pi{};
   DWORD code = 0xFFFFFFFFu;
   if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, dir.c_str(), &si, &pi)) {

@@ -31,6 +31,7 @@
 #include "mouse_button_map.hpp"
 #include "poc_protocol.hpp"
 #include "time_utils.hpp"
+#include "os_input_effects.hpp"
 
 namespace remote60::native_poc {
 
@@ -267,7 +268,7 @@ bool send_desktop_mouse_input(DWORD flags, DWORD mouseData = 0) {
   in.type = INPUT_MOUSE;
   in.mi.dwFlags = flags;
   in.mi.mouseData = mouseData;
-  return SendInput(1, &in, sizeof(INPUT)) == 1;
+  return os_input::send_input(1, &in, sizeof(INPUT)) == 1;
 }
 
 
@@ -285,7 +286,7 @@ bool send_desktop_unicode_char(wchar_t ch) {
     in[i].ki.wScan = static_cast<WORD>(ch);
     in[i].ki.dwFlags = KEYEVENTF_UNICODE | (i == 1 ? KEYEVENTF_KEYUP : 0);
   }
-  return SendInput(2, in, sizeof(INPUT)) == 2;
+  return os_input::send_input(2, in, sizeof(INPUT)) == 2;
 }
 
 // G7: keep the host IME out of the way of injected keystrokes. English letters travel as VK key
@@ -352,7 +353,7 @@ bool send_desktop_virtual_key(uint32_t vk, bool keyUp) {
     default:
       break;
   }
-  return SendInput(1, &in, sizeof(INPUT)) == 1;
+  return os_input::send_input(1, &in, sizeof(INPUT)) == 1;
 }
 
 }  // namespace
@@ -443,7 +444,7 @@ bool inject_physical_scan_key(uint16_t scanCode, bool down, bool extended) {
   in.ki.wScan = static_cast<WORD>(scanCode);
   in.ki.dwFlags = KEYEVENTF_SCANCODE | (down ? 0u : KEYEVENTF_KEYUP) |
                   (extended ? KEYEVENTF_EXTENDEDKEY : 0u);
-  return SendInput(1, &in, sizeof(INPUT)) == 1;
+  return os_input::send_input(1, &in, sizeof(INPUT)) == 1;
 }
 
 
@@ -655,7 +656,7 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       const WPARAM wp = mouse_wire_to_mk(static_cast<uint16_t>(input.buttons & kMouseWireMask));
       const LPARAM lp = MAKELPARAM(static_cast<short>(resolvedClientPt.x), static_cast<short>(resolvedClientPt.y));
       SetLastError(ERROR_SUCCESS);
-      return PostMessageW(resolvedTargetHwnd, WM_MOUSEMOVE, wp, lp) ? InputInjectResult::Injected
+      return os_input::post_message(resolvedTargetHwnd, WM_MOUSEMOVE, wp, lp) ? InputInjectResult::Injected
                                                                     : fail(InputFailStage::PostMessage);
     }
     if (input.kind == 2 || input.kind == 3) {
@@ -673,11 +674,11 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       // before the next call overwrites it. The move carries the state word alone -- WM_MOUSEMOVE
       // has no button identifier in its HIWORD.
       SetLastError(ERROR_SUCCESS);
-      if (!PostMessageW(resolvedTargetHwnd, WM_MOUSEMOVE, static_cast<WPARAM>(LOWORD(wp)), lp)) {
+      if (!os_input::post_message(resolvedTargetHwnd, WM_MOUSEMOVE, static_cast<WPARAM>(LOWORD(wp)), lp)) {
         return fail(InputFailStage::PostMessage);
       }
       SetLastError(ERROR_SUCCESS);
-      if (!PostMessageW(resolvedTargetHwnd, msg, wp, lp)) return fail(InputFailStage::PostMessage);
+      if (!os_input::post_message(resolvedTargetHwnd, msg, wp, lp)) return fail(InputFailStage::PostMessage);
       return InputInjectResult::Injected;
     }
     if (input.kind == 4) {
@@ -687,7 +688,7 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       const LPARAM screenLp =
           MAKELPARAM(static_cast<short>(screenPt.x), static_cast<short>(screenPt.y));
       SetLastError(ERROR_SUCCESS);
-      return PostMessageW(resolvedTargetHwnd, WM_MOUSEWHEEL, wp, screenLp) ? InputInjectResult::Injected
+      return os_input::post_message(resolvedTargetHwnd, WM_MOUSEWHEEL, wp, screenLp) ? InputInjectResult::Injected
                                                                            : fail(InputFailStage::PostMessage);
     }
     if (input.kind == 5 || input.kind == 6) {
@@ -708,7 +709,7 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
       } else {
         const UINT msg = keyUp ? WM_KEYUP : WM_KEYDOWN;
         const LPARAM lp = key_event_lparam(input.keyCode, keyUp);
-        ok = PostMessageW(keyTargetHwnd, msg, static_cast<WPARAM>(input.keyCode), lp) != 0;
+        ok = os_input::post_message(keyTargetHwnd, msg, static_cast<WPARAM>(input.keyCode), lp) != 0;
       }
       if (!ok) return fail(keyStage);
       if (desktopInputState) {
@@ -732,7 +733,7 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
     // on-screen mouse positions before clicking, and scroll mode positions before scrolling.
     // Dropping them made both silently do nothing.
     SetLastError(ERROR_SUCCESS);
-    return SetCursorPos(screenPt.x, screenPt.y) ? InputInjectResult::Injected
+    return os_input::set_cursor_pos(screenPt.x, screenPt.y) ? InputInjectResult::Injected
                                                 : fail(InputFailStage::SetCursorPos);
   }
   if (input.kind == 2 || input.kind == 3) {
@@ -742,14 +743,14 @@ InputInjectResult inject_background_input_event(const ControlInputEventMessage& 
     const MouseSendInput mouse = mouse_vk_to_sendinput(input.kind, input.keyCode);
     if (mouse.flags == 0) return InputInjectResult::Unsupported;
     SetLastError(ERROR_SUCCESS);
-    if (!SetCursorPos(screenPt.x, screenPt.y)) return fail(InputFailStage::SetCursorPos);
+    if (!os_input::set_cursor_pos(screenPt.x, screenPt.y)) return fail(InputFailStage::SetCursorPos);
     SetLastError(ERROR_SUCCESS);
     return send_desktop_mouse_input(mouse.flags, mouse.mouseData) ? InputInjectResult::Injected
                                                                   : fail(InputFailStage::SendInputMouse);
   }
   if (input.kind == 4) {
     SetLastError(ERROR_SUCCESS);
-    if (!SetCursorPos(screenPt.x, screenPt.y)) return fail(InputFailStage::SetCursorPos);
+    if (!os_input::set_cursor_pos(screenPt.x, screenPt.y)) return fail(InputFailStage::SetCursorPos);
     SetLastError(ERROR_SUCCESS);
     return send_desktop_mouse_input(MOUSEEVENTF_WHEEL,
                                     static_cast<DWORD>(static_cast<SHORT>(input.wheelDelta)))
@@ -814,7 +815,7 @@ InputInjectResult apply_input_text_message(const ControlInputTextMessage& text,
     if (ch == 0) continue;
     if (targetHasFocus) {
       if (!send_desktop_unicode_char(static_cast<wchar_t>(ch))) return InputInjectResult::Failed;
-    } else if (!PostMessageW(targetHwnd, WM_CHAR, static_cast<WPARAM>(ch), 1)) {
+    } else if (!os_input::post_message(targetHwnd, WM_CHAR, static_cast<WPARAM>(ch), 1)) {
       return InputInjectResult::Failed;
     }
   }

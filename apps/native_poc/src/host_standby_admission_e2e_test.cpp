@@ -24,6 +24,7 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -31,6 +32,7 @@
 #include <algorithm>
 
 #include "e2e_isolation.hpp"
+#include "e2e_injection_guard.hpp"
 #include "directory_fake_server.hpp"
 #include "directory_rendezvous.hpp"
 #include "native_video_client_tcp_control.hpp"
@@ -233,6 +235,10 @@ std::wstring e2e_host_seconds() {
   return L"90";
 }
 
+// 2026-10-28 (verifier, after worker2's finding): GNLinkStream injects input by default (host_args.hpp
+// enableInputInjection = true) -- a test host must not drive THIS PC's input. Every host here is started with its
+// injection off (e2e_injection_guard.hpp), and a test client connects only after the host itself said
+// "input injection disabled (enableInputInjection=false)" -- else the test ends INVALID there (StartHost).
 std::wstring isolation_args(const std::wstring& stagingDir) {
   return L" --directory-cache \"" + stagingDir + L"host_cache.json\"";
 }
@@ -301,7 +307,11 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
                      L" --control-port " + std::to_wstring(controlPort) +
                      L" --directory-url " + url +
                      L" --directory-id tester --directory-pw e2e-pass-1234" +
-                     L" --seconds " + e2e_host_seconds() + isolation_args(host->dir);
+                     L" --seconds " + e2e_host_seconds() + isolation_args(host->dir) +
+                     // input injection off (e2e_injection_guard.hpp). Not for a --prelogin worker: it refuses any --config
+                     // by design (host_args.cpp preloginRefusedConfig), and no client ever connects to one here -- its
+                     // case checks that it stays offline
+                     (prelogin ? std::wstring() : remote60::native_poc::e2e::e2e_injection_off_arg(host->dir));
 
   // Checked BEFORE anything starts. A host that talks to a directory writes a token cache, and
   // without --directory-cache that is the user's own %LOCALAPPDATA%\remote60\host.json --
@@ -369,6 +379,14 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
   // agent, so it never names a cache -- it has nothing to write. Its isolation is the empty ProgramData
   // above; the case checks the offline result itself.
   if (prelogin) return host->WaitFor("[native-video-host][prelogin]", 20000);
+  // fail closed: no test client reaches a host that has not said its input injection is off
+  {
+    std::string injWhy;
+    if (!remote60::native_poc::e2e::e2e_wait_injection_off([host] { return host->log(); }, 20000, &injWhy)) {
+      remote60::native_poc::e2e::e2e_injection_setup_failed(tag, injWhy);
+    }
+    check("the host said its input injection is OFF (enableInputInjection=false) before any client", true);
+  }
   // The host says which cache it will write, before it registers. Confirmed from its own words
   // rather than from the argument this test passed: the question is what the process DID.
   const std::string wantPath(host->cachePath.begin(), host->cachePath.end());

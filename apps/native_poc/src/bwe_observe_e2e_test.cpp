@@ -56,6 +56,7 @@
 #include <vector>
 
 #include "e2e_isolation.hpp"
+#include "e2e_injection_guard.hpp"
 #include "bandwidth_observe_wire.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "native_video_client_tcp_control.hpp"
@@ -388,7 +389,8 @@ int wmain(int argc, wchar_t** argv) {
     SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATIC_SCENE_FPS", L"15");
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(kHostPort) +
-                       L" --seconds 240" + remote60::native_poc::e2e::e2e_capture_window_args(target.title);
+                       L" --seconds 240" + remote60::native_poc::e2e::e2e_capture_window_args(target.title) +
+                       remote60::native_poc::e2e::e2e_injection_off_arg(dir);
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
     mutableCmd.push_back(L'\0');
     SECURITY_ATTRIBUTES sa{};
@@ -422,6 +424,12 @@ int wmain(int argc, wchar_t** argv) {
     }
   }
   check("the host started", launched);
+  // fail closed (e2e_injection_guard.hpp): no client reaches a host that has not said its input injection is off
+  std::string injWhy;
+  const bool injOff = launched && remote60::native_poc::e2e::e2e_wait_injection_off(
+      [&] { return remote60::native_poc::e2e::e2e_read_text_file(hostLogPath); }, 20000, &injWhy);
+  if (launched && !injOff) remote60::native_poc::e2e::e2e_injection_setup_failed("bwe_observe", injWhy);
+  check("the host said its input injection is OFF (enableInputInjection=false) before any client", injOff, injWhy);
 
   ViewerSide viewer;
   std::atomic<uint32_t> probeSeq{0};

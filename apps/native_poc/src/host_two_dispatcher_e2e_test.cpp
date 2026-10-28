@@ -38,6 +38,7 @@
 #include <vector>
 
 #include "e2e_isolation.hpp"
+#include "e2e_injection_guard.hpp"
 #include "native_video_client_session.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "native_video_client_tcp_control.hpp"
@@ -237,6 +238,8 @@ int wmain(int argc, wchar_t** argv) {
 
   PROCESS_INFORMATION hostPi{};
   bool launched = false;
+  HANDLE hostLog = INVALID_HANDLE_VALUE;
+  const std::wstring hostLogPath = dir + L"host.log";
   if (staged) {
     // h264 over UDP is gated behind this. Set on ourselves so the child inherits it; nothing else
     // in this process cares.
@@ -246,11 +249,22 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1" +
                        L" --bind-port " + std::to_wstring(mediaPort) + L" --control-port " +
-                       std::to_wstring(controlPort) + L" --seconds 90";
+                       std::to_wstring(controlPort) + L" --seconds 90" + remote60::native_poc::e2e::e2e_injection_off_arg(dir);
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
     mutableCmd.push_back(L'\0');
     STARTUPINFOW si{};
     si.cb = sizeof(si);
+    // its stdout to a log in the staging directory: where it says whether it injects input (read below)
+    SECURITY_ATTRIBUTES logSa{};
+    logSa.nLength = sizeof(logSa);
+    logSa.bInheritHandle = TRUE;
+    hostLog = CreateFileW(hostLogPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &logSa,
+                          CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hostLog != INVALID_HANDLE_VALUE) {
+      si.dwFlags = STARTF_USESTDHANDLES;
+      si.hStdOutput = hostLog;
+      si.hStdError = hostLog;
+    }
     // Isolated from the user's machine (RV-00): the child gets a LOCALAPPDATA inside this
     // test's staging directory, so the diagnostic mirror and anything else that follows the
     // variable writes there. Refused outright if the command line could reach the real files.
@@ -263,16 +277,23 @@ int wmain(int argc, wchar_t** argv) {
         remote60::native_poc::e2e::e2e_path_is_under(
             remote60::native_poc::e2e::e2e_block_localappdata(isoEnv), dir);
     check("the launched process is isolated from the user's files", isoOk, isoWhy);
-    launched = isoOk &&
-               CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE,
+    launched = isoOk && hostLog != INVALID_HANDLE_VALUE &&
+               CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, TRUE,
                               CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
                               isoEnv.data(), dir.c_str(), &si, &hostPi) != 0;
+    if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);  // the host holds its own copy
     if (launched) {
       AssignProcessToJobObject(job, hostPi.hProcess);
       ResumeThread(hostPi.hThread);
     }
   }
   check("the host started", launched);
+  // fail closed (e2e_injection_guard.hpp): no client reaches a host that has not said its input injection is off
+  std::string injWhy;
+  const bool injOff = launched && remote60::native_poc::e2e::e2e_wait_injection_off(
+      [&] { return remote60::native_poc::e2e::e2e_read_text_file(hostLogPath); }, 20000, &injWhy);
+  if (launched && !injOff) remote60::native_poc::e2e::e2e_injection_setup_failed("host_two_dispatcher", injWhy);
+  check("the host said its input injection is OFF (enableInputInjection=false) before any client", injOff, injWhy);
 
   NullSink sink;
   ClientSessionController udpClient;

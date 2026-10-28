@@ -44,6 +44,7 @@
 #include <vector>
 
 #include "e2e_isolation.hpp"
+#include "e2e_injection_guard.hpp"
 #include "control_resume.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "native_video_client_tcp_control.hpp"
@@ -329,6 +330,8 @@ void run_range_trial(ViewerSide& v, ControlProxy& proxy, bool up, int seconds) {
 
 int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  // 2026-10-28: injection into this PC's real input path -- refused unless asked for (e2e_injection_guard.hpp)
+  if (remote60::native_poc::e2e::e2e_real_input_refused("control_resume_e2e", "a key-up is injected into a window of this test (SendInput when it has the focus)")) return 3;
   std::cout.setf(std::ios::unitbuf);
 
   if (!host_e2e_allowed()) {

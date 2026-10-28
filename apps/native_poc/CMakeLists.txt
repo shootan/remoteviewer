@@ -231,6 +231,27 @@ target_link_libraries(remote60_native_video_host_migration_seam PRIVATE
   bcrypt windowscodecs shlwapi winmm
 )
 
+# TEST BUILD (2026-10-28, Codex codex_test_injection_finding.md Finding-2): the migration seam's host (the same
+# sources and libraries as GNLinkStream, REMOTE60_STREAM_TEST_SEAM as above) with every OS input effect RECORDED and
+# none performed (REMOTE60_OS_INPUT_RECORD_ONLY, in os_input_effects.hpp and nowhere else): SendInput, input
+# PostMessage, SetCursorPos and the secure-desktop broker. Receipt, policy, routing and dispatch are the product's.
+# Its own output name, never packaged; automation/gnlink_check_fixed_server.py refuses a shipped GNLinkStream.exe that
+# carries its marker ("os-input-record").
+add_executable(remote60_native_video_host_input_record ${_migration_host_sources})
+set_target_properties(remote60_native_video_host_input_record PROPERTIES
+  OUTPUT_NAME "GNLinkStreamInputRecordTest")
+target_include_directories(remote60_native_video_host_input_record PRIVATE src)
+target_compile_definitions(remote60_native_video_host_input_record PRIVATE
+  REMOTE60_STREAM_TEST_SEAM=1
+  REMOTE60_OS_INPUT_RECORD_ONLY=1
+  REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+)
+target_link_libraries(remote60_native_video_host_input_record PRIVATE
+  remote60_file_copy_host
+  capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
+  bcrypt windowscodecs shlwapi winmm
+)
+
 # TEST BUILD (dxgi-wedge-fix r1, Codex B1): the D3D multithread-protection A/B for the field PC. The same
 # sources and libraries as GNLinkStream, with REMOTE60_MT_AB_TEST_SEAM: the arm comes from
 # GNLinkStream.mt-ab.txt beside the exe ("on" sets protection right after the device is created; anything
@@ -1890,6 +1911,10 @@ add_executable(remote60_standby_entry_client_test src/standby_entry_client_test.
 target_include_directories(remote60_standby_entry_client_test PRIVATE src)
 # keepalive-r2 ② r3 (Codex scope2 N1, N2): the lease and the runner against a fake host on loopback -- the activation's
 # HelloAck test and the lifetime counterexamples (no product process).
+# 2026-10-28: the e2e input-injection gate, its negative controls (pure: no host, no input API)
+add_executable(remote60_e2e_injection_guard_test src/e2e_injection_guard_test.cpp)
+target_include_directories(remote60_e2e_injection_guard_test PRIVATE src)
+
 add_executable(remote60_standby_lease_test src/standby_lease_test.cpp)
 target_include_directories(remote60_standby_lease_test PRIVATE src)
 target_link_libraries(remote60_standby_lease_test PRIVATE ws2_32)
@@ -3179,6 +3204,22 @@ target_include_directories(remote60_reboot_menu_vectors_test PRIVATE src)
 target_compile_definitions(remote60_reboot_menu_vectors_test PRIVATE
   "REMOTE60_REBOOT_MENU_VECTORS_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/../shared/reboot_menu_vectors.txt\""
 )
+
+# 2026-10-28 (Codex Finding-2): the record-only OS-effect boundary end to end -- a phone session controller -> the
+# RECORD-ONLY test host (GNLinkStreamInputRecordTest) -> dispatch -> recorded, never performed. REMOTE60_ALLOW_HOST_E2E=1.
+add_executable(remote60_os_input_record_e2e_test
+  src/os_input_record_e2e_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(remote60_os_input_record_e2e_test PRIVATE src)
+target_link_libraries(remote60_os_input_record_e2e_test PRIVATE common ws2_32 advapi32 remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(remote60_os_input_record_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_os_input_record_e2e_test remote60_native_video_host_input_record)
 
 # prelogin-ui r1 (item 8): the phone's session controller -> 84 -> a real host (started WITHOUT
 # SeShutdownPrivilege) -> 85 back. REMOTE60_ALLOW_HOST_E2E=1.
