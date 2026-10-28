@@ -385,24 +385,20 @@ int main() {
     const std::wstring dir = gRoot + L"host-" + W(name) + L"\\";
     CreateDirectoryW(dir.c_str(), nullptr);
     CopyFileW(exe.c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE);
-    // r4: input injection OFF for every test host. GNLinkStream injects by default (host_args.hpp enableInputInjection =
-    // true); before this, each session start's modifier key-ups reached THIS PC's desktop input (2026-10-28, reported).
-    // The host still receives, logs ([input-timing] ... injectionEnabled=0) and acknowledges every input event.
-    // A --config file CLEARS the host's environment overrides (json_profile.hpp), so the h264 switch the
-    // product child gets from its environment is given there too (forceEncodedExperiment).
-    {
-      HANDLE f = CreateFileW((dir + L"host-config.json").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
-      const char cfg[] = "{\"enableInputInjection\": false, \"forceEncodedExperiment\": true}\n";
-      DWORD put = 0;
-      if (f != INVALID_HANDLE_VALUE) { WriteFile(f, cfg, sizeof(cfg) - 1, &put, nullptr); CloseHandle(f); }
-    }
+    // r4: input injection OFF for every test host -- the standard the verifier set (Codex): an explicit
+    // --input-injection-mode none on the argv, and no viewer connects before THIS launch says "input injection
+    // disabled". GNLinkStream injects by default (host_args.hpp enableInputInjection = true); before this, each
+    // session start's modifier key-ups reached this PC's input (2026-10-28, reported). The host still receives,
+    // logs ([input-timing] ... injectionEnabled=0) and acknowledges every input event. (Not --config: a config
+    // file clears the host's environment overrides, the h264 switch among them.)
+
     const auto env = env_with(dir + L"lad", {});
     const uint16_t media = e2e::e2e_pick_free_udp_port(), control = e2e::e2e_pick_free_tcp_port();
     h.logPath = dir + L"host.log";
     return h.Start(L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264 --bind-address 127.0.0.1 --bind-port " +
                        std::to_wstring(media) + L" --control-port " + std::to_wstring(control) + L" --directory-url " + W(url) +
                        L" --directory-id tester --directory-pw e2e-pass-1234 --host-name " + W(name) +
-                       L" --directory-cache \"" + dir + L"cache.json\" --seconds 900 --config \"" + dir + L"host-config.json\"",
+                       L" --directory-cache \"" + dir + L"cache.json\" --seconds 900 --input-injection-mode none",
                    dir, &env);
   };
   Child hostA;

@@ -483,15 +483,12 @@ int main() {
     cache.hostToken = token;
     const bool saved = reg && remote60::native_poc::directory::save_host_cache(narrow(dir + L"cache.json"), cache);
     CopyFileW((gBuild + L"GNLinkStream.exe").c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE);
-    // r4: input injection OFF for every test host. GNLinkStream injects by default (host_args.hpp enableInputInjection =
-    // true); before this, each session start's modifier key-ups reached THIS PC's desktop input (2026-10-28, reported).
-    // The host still receives, logs ([input-timing] ... injectionEnabled=0) and acknowledges every input event.
-    // A --config file CLEARS the host's environment overrides (json_profile.hpp), so the h264 switch the
-    // product child gets from its environment is given there too (forceEncodedExperiment).
-    {
-      std::ofstream cfg(dir + L"host-config.json", std::ios::binary | std::ios::trunc);
-      cfg << "{\"enableInputInjection\": false, \"forceEncodedExperiment\": true}\n";
-    }
+    // r4: input injection OFF for every test host -- the standard the verifier set (Codex): an explicit
+    // --input-injection-mode none on the argv, and no viewer connects before THIS launch says "input injection
+    // disabled". GNLinkStream injects by default (host_args.hpp enableInputInjection = true); before this, each
+    // session start's modifier key-ups reached this PC's input (2026-10-28, reported). The host still receives,
+    // logs ([input-timing] ... injectionEnabled=0) and acknowledges every input event. (Not --config: a config
+    // file clears the host's environment overrides, the h264 switch among them.)
     const auto env = env_with(dir + L"lad", {});
     const uint16_t media = e2e::e2e_pick_free_udp_port(), control = e2e::e2e_pick_free_tcp_port();
     h->proc.logPath = dir + L"host.log";
@@ -499,7 +496,7 @@ int main() {
         L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264 --bind-address 127.0.0.1 --bind-port " +
             std::to_wstring(media) + L" --control-port " + std::to_wstring(control) + L" --directory-url " + widen(url) +
             L" --directory-id tester --host-name " + widen(name) + L" --directory-cache \"" + dir + L"cache.json\" --seconds 1800" +
-            L" --config \"" + dir + L"host-config.json\"",
+            L" --input-injection-mode none",
         dir, &env);
     check(started, std::string("host ") + name + " registered as its own record and started from its cache", "id=" + h->id);
     // fail closed: no viewer connects to a host that would inject input into this PC
