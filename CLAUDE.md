@@ -258,7 +258,13 @@ RDP 상태의 결과는 PASS 든 FAIL 이든 판정 근거로 쓰지 않는다"*
   - 명시 OFF 는 `enableInputInjection=false` 또는 해당 source/binary 에서 `Disabled` 로 해석됨을 확인한
     `--input-injection-mode none` 을 허용한다. 후자의 기존 `disabled (unsupported mode) mode=none` 로그는
     정확한 mode 값·이번 launch 의 effective OFF 와 함께 확인한다. 임의 unknown 값의 fallback 비활성은 인정하지 않는다.
-    이 OFF 는 일반 입력 주입 경로의 차단이며 SAS/credential/clipboard 등 별도 OS 효과의 격리를 대신하지 않는다.
+    이 OFF 는 일반 입력 주입 경로의 차단이며 SAS/credential/clipboard·display wake/전원 유지 등 별도 OS 효과의 격리를 대신하지 않는다.
+  - 실 Host 시험은 stream-start wake 입력·monitor-power broadcast·display/system keepalive 도 명시 OFF 또는
+    검토된 record-only OS 효과 경계로 차단한다. 입력 OFF 만으로 전원/화면 효과까지 없다고 주장하지 않는다.
+    로컬 시작 정책은 원격 제어로 켤 수 없어야 하고, 객체 생성·기동의 최초 효과 전에 적용돼야 한다. 지원 여부와
+    OFF 인자를 기동 전에 확인하고 그 launch 의 effective 상태를 연결/스트리밍 전에 확인한다. ON/미확인은 중지·invalid 다.
+    ON/누락/오타 부정 대조도 실제 OS 효과가 없는 sink/격리 환경 안에서만 한다. 구 바이너리가 차단을 지원하지 않으면
+    승인된 격리 환경/명시된 test build 를 쓰거나 해당 case 를 미검증으로 남긴다. 이름 alias·offscreen 은 효과 차단이 아니다.
   - **그 launch(새 PID·새 로그 범위·binary/config hash)의 effective OFF 증거**를 본 뒤에만 Viewer/클라이언트/세션
     연결이나 입력 가능한 요청을 보낸다. 설정 문자열·"보낼 입력 없음"·이전 실행의 disabled 줄로 대신하지 않는다.
   - `enabled`·설정 오류/무시·미지원 옵션·확인 로그 없음·timeout·상충은 **setup 실패로 종료**(연결 0). check(false)
