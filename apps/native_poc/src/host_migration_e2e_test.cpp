@@ -32,6 +32,7 @@
 #include <functional>
 #include <iterator>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -109,6 +110,8 @@ void script_directory(FakeDirectory& dir, const Reply& heartbeat) {
 struct SpawnedHost {
   PROCESS_INFORMATION pi{};
   HANDLE job = nullptr;
+  // r6 G1: this launch's monitor (after its initial gate); stopped first in Stop()
+  std::unique_ptr<remote60::native_poc::e2e::E2eInjectionMonitor> injMonitor;
   HANDLE readEnd = nullptr;
   std::thread reader;
   std::atomic<bool> reading{false};
@@ -134,6 +137,7 @@ struct SpawnedHost {
 
   /** Ends the host and waits until it has really gone: the cache is read after this. */
   bool Stop() {
+    if (injMonitor) injMonitor->Stop();  // r6 G1: its last judgement, before it goes
     reading = false;
     if (job) {
       CloseHandle(job);  // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE takes the host with it
@@ -302,6 +306,7 @@ bool StartHost(SpawnedHost* host, const char* tag, const std::string& serverUrl,
   }
   check((std::string("[") + tag + "] the host said its input injection is OFF (--input-injection-mode none) before any client").c_str(),
         true);
+  host->injMonitor = std::make_unique<remote60::native_poc::e2e::E2eInjectionMonitor>([host] { return host->log(); }, host->job, tag);
   return usedIt && seam;
 }
 
@@ -483,6 +488,7 @@ int wmain(int argc, wchar_t** argv) {
   case_server_is_down();
 
   WSACleanup();
+  remote60::native_poc::e2e::e2e_injection_final_check_all();  // r6 G1: judged again before the result
   std::printf("\n%s  (%d checks, %d failed)\n",
               gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED", gChecks, gFailures);
   return gFailures == 0 ? 0 : 1;

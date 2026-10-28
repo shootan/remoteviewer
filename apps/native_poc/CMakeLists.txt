@@ -1919,6 +1919,12 @@ target_compile_definitions(remote60_host_power_policy_record_test PRIVATE REMOTE
 # 2026-10-28 r5 (Codex T1): the record matcher's negative controls (pure)
 add_executable(remote60_os_input_record_match_test src/os_input_record_match_test.cpp)
 target_include_directories(remote60_os_input_record_match_test PRIVATE src)
+# 2026-10-28 r6 (Codex ba2eaf2 G1 / F): the guard's run-time half and the child helpers through their real paths
+# (no host: a fixed string and this executable sleeping in a kill-on-close job)
+add_executable(remote60_e2e_guard_runtime_test src/e2e_guard_runtime_test.cpp)
+target_include_directories(remote60_e2e_guard_runtime_test PRIVATE src)
+target_link_libraries(remote60_e2e_guard_runtime_test PRIVATE ws2_32)
+
 add_executable(remote60_e2e_injection_guard_test src/e2e_injection_guard_test.cpp)
 target_include_directories(remote60_e2e_injection_guard_test PRIVATE src)
 

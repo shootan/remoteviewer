@@ -25,6 +25,7 @@
 #include <cstring>
 #include <functional>
 #include <fstream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -106,6 +107,8 @@ std::wstring directory_of(const std::wstring& path) {
 struct SpawnedHost {
   PROCESS_INFORMATION pi{};
   HANDLE job = nullptr;
+  // r6 G1: this launch's monitor (after its initial gate); stopped first in Stop()
+  std::unique_ptr<remote60::native_poc::e2e::E2eInjectionMonitor> injMonitor;
   HANDLE readEnd = nullptr;
   std::thread reader;
   std::atomic<bool> reading{false};
@@ -167,6 +170,7 @@ struct SpawnedHost {
   }
 
   void Stop() {
+    if (injMonitor) injMonitor->Stop();  // r6 G1: its last judgement, before it goes
     reading = false;
     // The host's whole log, appended to REMOTE60_E2E_DUMP_HOST_LOG when set (the evidence of a failing case).
     {
@@ -389,6 +393,7 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
       remote60::native_poc::e2e::e2e_injection_setup_failed(tag, injWhy);
     }
     check("the host said its input injection is OFF (--input-injection-mode none) before any client", true);
+    host->injMonitor = std::make_unique<remote60::native_poc::e2e::E2eInjectionMonitor>([host] { return host->log(); }, host->job, tag);
   }
   // The host says which cache it will write, before it registers. Confirmed from its own words
   // rather than from the argument this test passed: the question is what the process DID.
@@ -1528,6 +1533,7 @@ int run_product_client(const std::vector<std::string>& tokens, const std::wstrin
           count_of(old.log(), "first session") == 0 && count_of(old.log(), "client connected") == 0, old.tail());
     old.Stop();
   }
+  remote60::native_poc::e2e::e2e_injection_final_check_all();  // r6 G1: judged again before the result
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   WSACleanup();
   return gFailures ? 1 : 0;
@@ -1909,6 +1915,7 @@ int wmain(int argc, wchar_t** argv) {
     std::printf("\n[an OLDER host] not run -- unverified on this PC (an older binary has no --host-power-management; Codex Finding-3 (4))\n");
   }
 
+  remote60::native_poc::e2e::e2e_injection_final_check_all();  // r6 G1: judged again before the result
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   WSACleanup();
   return gFailures ? 1 : 0;

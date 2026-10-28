@@ -31,6 +31,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -231,6 +232,12 @@ int wmain(int argc, wchar_t** argv) {
       [&] { return remote60::native_poc::e2e::e2e_read_text_file(hostLogPath); }, 20000, &injWhy);
   if (launched && !injOff) remote60::native_poc::e2e::e2e_injection_setup_failed("android_session_reboot", injWhy);
   check("the host said its input injection is OFF (--input-injection-mode none) before any client", injOff, injWhy);
+  // r6 G1: the same judgement keeps running after the gate (a contradiction -> INVALID, its job ended)
+  std::unique_ptr<remote60::native_poc::e2e::E2eInjectionMonitor> injMon;
+  if (launched && injOff) {
+    injMon = std::make_unique<remote60::native_poc::e2e::E2eInjectionMonitor>(
+        [&] { return remote60::native_poc::e2e::e2e_read_text_file(hostLogPath); }, job, "android_session_reboot");
+  }
 
   if (launched && safe && injOff) {
     ClientSessionConnectArgs args;
@@ -292,7 +299,9 @@ int wmain(int argc, wchar_t** argv) {
     CloseHandle(hostPi.hThread);
   }
   if (restricted) CloseHandle(restricted);
+  if (injMon) injMon->Stop();  // r6 G1: its last judgement, before the job closes
   CloseHandle(job);
+  remote60::native_poc::e2e::e2e_injection_final_check_all();  // r6 G1: judged again before the result
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

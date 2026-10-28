@@ -46,6 +46,7 @@
 #include "product_version.hpp"
 #include "e2e_injection_guard.hpp"
 #include "e2e_isolation.hpp"
+#include "e2e_child_util.hpp"
 
 #include <cstdio>
 #include <filesystem>
@@ -69,7 +70,8 @@ std::string read_all(const std::wstring& p) {
   return ss.str();
 }
 const wchar_t kTestAnchor[] = L"D:\\remote\\remote\\.claude\\test-tmp";
-std::wstring gRun;  // this run's own new folder (with a trailing backslash): logs and the log root live in it
+std::wstring gRun;
+bool gKeepPreloginLog = false;  // r6 F-b  // this run's own new folder (with a trailing backslash): logs and the log root live in it
 
 bool is_reparse(const std::wstring& p) {
   const DWORD a = GetFileAttributesW(p.c_str());
@@ -165,6 +167,8 @@ void remove_made_folder(const std::wstring& path) {
 }
 
 uint16_t free_udp_port();  // below
+uint16_t port_or_invalid(const char* where);  // below (r6 F-a)
+bool end_child_confirmed(HANDLE process, UINT code);  // below (r6 F-c)
 
 // r5 F3: the host's environment -- this process's, with LOCALAPPDATA in this run's folder (its diagnostics land
 // there, not in the user's). Kept with the run's folder; never removed recursively.
@@ -195,8 +199,8 @@ DWORD run(const std::wstring& dir, const std::wstring& tag, const std::string& s
   // loopback, ports nobody holds, a short run. This test opens no socket to it (no client of this test connects);
   // a throw comes at the first configure step, before any wait for a client; `none` is the normal control (r5 F2)
   std::wstring cmd = L"\"" + dir + L"GNLinkStreamMigrationTest.exe\" --transport udp --codec h264 --bind-address 127.0.0.1" +
-                     L" --bind-port " + std::to_wstring(free_udp_port()) + L" --control-port " + std::to_wstring(free_udp_port()) +
-                     L" --seconds 3" + remote60::native_poc::e2e::e2e_injection_off_arg(dir);
+                     L" --bind-port " + std::to_wstring(port_or_invalid("run")) + L" --control-port " +
+                     std::to_wstring(port_or_invalid("run")) + L" --seconds 3" + remote60::native_poc::e2e::e2e_injection_off_arg(dir);
   std::vector<wchar_t> env = host_env(tag);
   PROCESS_INFORMATION pi{};
   DWORD code = 0xFFFFFFFFu;
@@ -205,8 +209,7 @@ DWORD run(const std::wstring& dir, const std::wstring& tag, const std::string& s
     if (WaitForSingleObject(pi.hProcess, timeoutMs) == WAIT_OBJECT_0) {
       GetExitCodeProcess(pi.hProcess, &code);
     } else {
-      TerminateProcess(pi.hProcess, 99);
-      WaitForSingleObject(pi.hProcess, 5000);
+      (void)end_child_confirmed(pi.hProcess, 99);  // r6 F-c
     }
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
@@ -216,16 +219,13 @@ DWORD run(const std::wstring& dir, const std::wstring& tag, const std::string& s
   *out = read_all(log);
   return code;
 }
-uint16_t free_udp_port() {
-  SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  sockaddr_in a{};
-  a.sin_family = AF_INET;
-  a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  bind(s, reinterpret_cast<sockaddr*>(&a), sizeof(a));
-  int n = sizeof(a);
-  getsockname(s, reinterpret_cast<sockaddr*>(&a), &n);
-  closesocket(s);
-  return ntohs(a.sin_port);
+// r6 F-a / F-c: the shared helpers (e2e_child_util.hpp, their negative controls in e2e_guard_runtime_test)
+uint16_t free_udp_port() { return remote60::native_poc::e2e::e2e_free_loopback_udp_port(); }
+uint16_t port_or_invalid(const char* where) { return remote60::native_poc::e2e::e2e_port_or_invalid(where); }
+bool end_child_confirmed(HANDLE process, UINT code) {
+  const bool ok = remote60::native_poc::e2e::e2e_end_child_confirmed(process, code);
+  if (!ok) ++gFailures;  // an end not confirmed is a FAIL of this run
+  return ok;
 }
 
 // The host on `port` with `env` set (the product's stream switches always), a client Hello every 200 ms until it
@@ -234,7 +234,7 @@ constexpr DWORD kInjectionInvalid = 0xFFFFFFFEu;  // the injection gate refused:
 DWORD run_with_client(const std::wstring& dir, const std::wstring& tag, const std::vector<std::pair<std::string, std::string>>& env,
                       const std::string& seenNeedle, std::string* out, int* hellosSent) {
   *hellosSent = 0;
-  const uint16_t port = free_udp_port();
+  const uint16_t port = port_or_invalid("run_with_client");
   const std::wstring log = gRun + L"fatal_" + tag + L".log";
   for (const auto& kv : env) SetEnvironmentVariableA(kv.first.c_str(), kv.second.c_str());
   SetEnvironmentVariableA("REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", "1");
@@ -249,7 +249,7 @@ DWORD run_with_client(const std::wstring& dir, const std::wstring& tag, const st
   si.hStdError = h;
   si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
   std::wstring cmd = L"\"" + dir + L"GNLinkStreamMigrationTest.exe\" --transport udp --codec h264 --bind-address 127.0.0.1" +
-                     L" --bind-port " + std::to_wstring(port) + L" --control-port " + std::to_wstring(free_udp_port()) +
+                     L" --bind-port " + std::to_wstring(port) + L" --control-port " + std::to_wstring(port_or_invalid("run_with_client")) +
                      L" --seconds 20" + remote60::native_poc::e2e::e2e_injection_off_arg(dir);
   std::vector<wchar_t> hostEnv = host_env(tag);
   PROCESS_INFORMATION pi{};
@@ -273,13 +273,11 @@ DWORD run_with_client(const std::wstring& dir, const std::wstring& tag, const st
         break;
       }
       if (!seenNeedle.empty() && read_all(log).find(seenNeedle) != std::string::npos) {
-        TerminateProcess(pi.hProcess, 0xFFFFFFFFu);
-        WaitForSingleObject(pi.hProcess, 5000);
+        (void)end_child_confirmed(pi.hProcess, 0xFFFFFFFFu);  // r6 F-c
         break;
       }
       if (GetTickCount64() > deadline) {
-        TerminateProcess(pi.hProcess, 0xFFFFFFFFu);
-        WaitForSingleObject(pi.hProcess, 5000);
+        (void)end_child_confirmed(pi.hProcess, 0xFFFFFFFFu);  // r6 F-c
         break;
       }
       // the gate: a Hello only after THIS launch said its whole input-injection-OFF line; another state -> the
@@ -287,8 +285,7 @@ DWORD run_with_client(const std::wstring& dir, const std::wstring& tag, const st
       std::string injWhy;
       const int inj = remote60::native_poc::e2e::e2e_injection_state(read_all(log), &injWhy);
       if (inj < 0) {
-        TerminateProcess(pi.hProcess, 0xFFFFFFFFu);
-        WaitForSingleObject(pi.hProcess, 5000);
+        (void)end_child_confirmed(pi.hProcess, 0xFFFFFFFFu);  // r6 F-c
         code = kInjectionInvalid;
         std::printf("FAIL  SETUP %ls: input injection not provably off (%s) -- no Hello sent\n", tag.c_str(), injWhy.c_str());
         break;
@@ -298,6 +295,14 @@ DWORD run_with_client(const std::wstring& dir, const std::wstring& tag, const st
       sendto(s, reinterpret_cast<const char*>(&hello), sizeof(hello), 0, reinterpret_cast<sockaddr*>(&to), sizeof(to));
     }
     closesocket(s);
+    // r6 G1: the whole launch output judged again at the end (a later contradiction -> this case INVALID)
+    {
+      std::string why;
+      if (code != kInjectionInvalid && remote60::native_poc::e2e::e2e_injection_contradicted(read_all(log), &why)) {
+        std::printf("FAIL  RUN %ls: input / power state contradicted during the run (%s)\n", tag.c_str(), why.c_str());
+        code = kInjectionInvalid;
+      }
+    }
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
   }
@@ -329,6 +334,7 @@ int wmain() {
   std::string out;
   DWORD code = run(dir, L"std", "startup_configure_from_env", &out, 20000);
   check("std: the host said its power management OFF (r5 F4, the record)", said_power_off(out));
+  check("std: no input / power contradiction in its whole output (r6 G1)", !remote60::native_poc::e2e::e2e_injection_contradicted(out));
   check("std: exit 49", code == 49, std::to_string(code));
   check("std: the line says std::exception, its what(), and the step",
         out.find("FATAL: std::exception \"stream-test-seam: injected throw\" at step=startup_configure_from_env -- exit 49") !=
@@ -336,6 +342,7 @@ int wmain() {
 
   code = run(dir, L"winrt", "winrt:startup_configure_from_env", &out, 20000);
   check("winrt: the host said its power management OFF (r5 F4, the record)", said_power_off(out));
+  check("winrt: no input / power contradiction in its whole output (r6 G1)", !remote60::native_poc::e2e::e2e_injection_contradicted(out));
   check("winrt: exit 49", code == 49, std::to_string(code));
   check("winrt: the line says winrt::hresult_error, its HRESULT, its message, and the step",
         out.find("FATAL: winrt::hresult_error hr=0x80070005 \"stream-test-seam: injected winrt\" at step=startup_configure_from_env") !=
@@ -344,6 +351,7 @@ int wmain() {
   // r5 F2: the NORMAL control -- no fault injected, a plain 3 s start (not a startup fault); no client of this test
   code = run(dir, L"none", "", &out, 30000);
   check("normal control (nothing injected): no FATAL line", out.find("FATAL:") == std::string::npos, "exit " + std::to_string(code));
+  check("normal control: no input / power contradiction in its whole output (r6 G1)", !remote60::native_poc::e2e::e2e_injection_contradicted(out));
   check("normal control: the host said input injection OFF and power management OFF, both whole (r5 F4)",
         remote60::native_poc::e2e::e2e_injection_state(out, nullptr) == 1);
 
@@ -380,7 +388,7 @@ int wmain() {
     // r5 F3: the worker's own test seam names its listener -- loopback, a port nobody holds, a short life (without
     // it, a worker takes the product's ports on every interface)
     SetEnvironmentVariableW(L"GNLINK_STREAM_TEST_BIND_ADDRESS", L"127.0.0.1");
-    SetEnvironmentVariableW(L"GNLINK_STREAM_TEST_BIND_PORT", std::to_wstring(free_udp_port()).c_str());
+    SetEnvironmentVariableW(L"GNLINK_STREAM_TEST_BIND_PORT", std::to_wstring(port_or_invalid("prelogin")).c_str());
     SetEnvironmentVariableW(L"GNLINK_STREAM_TEST_SECONDS", L"5");
     const std::wstring log = gRun + L"fatal_prelogin.log";
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
@@ -396,12 +404,13 @@ int wmain() {
     PROCESS_INFORMATION pi{};
     DWORD pcode = 0xFFFFFFFFu;
     bool ended = false;
+    bool workerGone = true;  // r6 F-b: false = its end not confirmed -> nothing of it is removed
     std::vector<wchar_t> workerEnv = host_env(L"prelogin");
     if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
                        workerEnv.data(), dir.c_str(), &si, &pi)) {
       ended = WaitForSingleObject(pi.hProcess, 20000) == WAIT_OBJECT_0;
       if (ended) GetExitCodeProcess(pi.hProcess, &pcode);
-      else TerminateProcess(pi.hProcess, 99);
+      else workerGone = end_child_confirmed(pi.hProcess, 99);  // r6 F-b: confirmed, or its logs are kept below
       CloseHandle(pi.hProcess);
       CloseHandle(pi.hThread);
     }
@@ -427,11 +436,17 @@ int wmain() {
     check("...and the same line still reached the stdout it was started with (the test's)",
           read_all(log).find("at step=startup_configure_from_env -- exit 49") != std::string::npos);
     check("...the worker said its power management OFF (r5 F4, the record)", said_power_off(read_all(log)));
-    // r5 F1: the one file it writes there, then the folders made for it -- each alone, none recursively
-    delete_known_file(logs + L"\\prelogin_worker.log");
-    remove_made_folder(logs);
-    remove_made_folder(root + L"\\GNLink");
-    remove_made_folder(root);
+    // r5 F1: the one file it writes there, then the folders made for it -- each alone, none recursively.
+    // r6 F-b: only once the worker's end is confirmed; otherwise everything of it is kept (said), cleanup deferred
+    if ((ended || workerGone)) {
+      delete_known_file(logs + L"\\prelogin_worker.log");
+      remove_made_folder(logs);
+      remove_made_folder(root + L"\\GNLink");
+      remove_made_folder(root);
+    } else {
+      std::printf("NOTE  the worker's end is not confirmed: its log root and log are kept, cleanup deferred: %ls\n", root.c_str());
+      gKeepPreloginLog = true;
+    }
   }
 
   // ---- D2: the ordinary path's two WinRT calls ----
@@ -468,7 +483,7 @@ int wmain() {
   for (const wchar_t* t : {L"std", L"winrt", L"none", L"probe_trap", L"wrapper_trap", L"wgc_throw", L"wgc_false", L"normal"}) {
     delete_known_file(gRun + L"fatal_" + t + L".log");
   }
-  delete_known_file(gRun + L"fatal_prelogin.log");
+  if (!gKeepPreloginLog) delete_known_file(gRun + L"fatal_prelogin.log");  // r6 F-b: kept if its worker's end is unconfirmed
   remove_made_folder(gRun.substr(0, gRun.size() - 1));
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;

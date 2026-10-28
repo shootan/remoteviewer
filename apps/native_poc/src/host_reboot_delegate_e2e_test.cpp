@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <functional>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -117,6 +118,8 @@ int process_has_shutdown_privilege(HANDLE process) {
 struct Host {
   PROCESS_INFORMATION pi{};
   HANDLE job = nullptr;
+  // r6 G1: this launch's monitor (after its initial gate); stopped first in Stop()
+  std::unique_ptr<remote60::native_poc::e2e::E2eInjectionMonitor> injMonitor;
   HANDLE readEnd = nullptr;
   std::thread reader;
   std::atomic<bool> reading{false};
@@ -138,6 +141,7 @@ struct Host {
     return n;
   }
   void Stop() {
+    if (injMonitor) injMonitor->Stop();  // r6 G1: its last judgement, before it goes
     reading = false;
     if (job) {
       CloseHandle(job);
@@ -410,6 +414,7 @@ int wmain(int argc, wchar_t** argv) {
   const bool injOff = started && remote60::native_poc::e2e::e2e_wait_injection_off([&host] { return host.log(); }, 20000, &injWhy);
   if (started && !injOff) remote60::native_poc::e2e::e2e_injection_setup_failed("host_reboot_delegate", injWhy);
   check("the host said its input injection is OFF (--input-injection-mode none) before any client", injOff, injWhy);
+  if (injOff) host.injMonitor = std::make_unique<remote60::native_poc::e2e::E2eInjectionMonitor>([&host] { return host.log(); }, host.job, "host_reboot_delegate");
   Service service;
   if (started && safe && injOff) {
     service.heartbeatSeen = [&host] { return host.log().find("step=heartbeat ok=1") != std::string::npos; };
@@ -534,6 +539,7 @@ int wmain(int argc, wchar_t** argv) {
   host.Stop();
   if (clientSock != INVALID_SOCKET) closesocket(clientSock);
   if (restricted) CloseHandle(restricted);
+  remote60::native_poc::e2e::e2e_injection_final_check_all();  // r6 G1: judged again before the result
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

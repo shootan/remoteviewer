@@ -430,6 +430,12 @@ int wmain(int argc, wchar_t** argv) {
       [&] { return remote60::native_poc::e2e::e2e_read_text_file(hostLogPath); }, 20000, &injWhy);
   if (launched && !injOff) remote60::native_poc::e2e::e2e_injection_setup_failed("bwe_observe", injWhy);
   check("the host said its input injection is OFF (--input-injection-mode none) before any client", injOff, injWhy);
+  // r6 G1: the same judgement keeps running after the gate (a contradiction -> INVALID, its job ended)
+  std::unique_ptr<remote60::native_poc::e2e::E2eInjectionMonitor> injMon;
+  if (launched && injOff) {
+    injMon = std::make_unique<remote60::native_poc::e2e::E2eInjectionMonitor>(
+        [&] { return remote60::native_poc::e2e::e2e_read_text_file(hostLogPath); }, job, "bwe_observe");
+  }
 
   ViewerSide viewer;
   std::atomic<uint32_t> probeSeq{0};
@@ -655,6 +661,7 @@ int wmain(int argc, wchar_t** argv) {
   target.Stop();
   if (viewer.sock != INVALID_SOCKET) closesocket(viewer.sock);
   if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
+  if (injMon) injMon->Stop();  // r6 G1: its last judgement, before the job closes
   CloseHandle(job);
   if (hostPi.hProcess) {
     WaitForSingleObject(hostPi.hProcess, 20000);
@@ -741,6 +748,7 @@ int wmain(int argc, wchar_t** argv) {
 
   check("the scratch directory is cleaned up", staging.Remove(), staging.why());
   WSACleanup();
+  remote60::native_poc::e2e::e2e_injection_final_check_all();  // r6 G1: judged again before the result
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  (" << gChecks
             << " checks, " << gFailures << " failed)\n";
   return gFailures == 0 ? 0 : 1;

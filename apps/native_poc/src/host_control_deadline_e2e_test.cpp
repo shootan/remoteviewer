@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -268,6 +269,12 @@ int wmain(int argc, wchar_t** argv) {
       [&] { return remote60::native_poc::e2e::e2e_read_text_file(hostLogPath); }, 20000, &injWhy);
   if (launched && !injOff) remote60::native_poc::e2e::e2e_injection_setup_failed("host_control_deadline", injWhy);
   check("the host said its input injection is OFF (--input-injection-mode none) before any client", injOff, injWhy);
+  // r6 G1: the same judgement keeps running after the gate (a contradiction -> INVALID, its job ended)
+  std::unique_ptr<remote60::native_poc::e2e::E2eInjectionMonitor> injMon;
+  if (launched && injOff) {
+    injMon = std::make_unique<remote60::native_poc::e2e::E2eInjectionMonitor>(
+        [&] { return remote60::native_poc::e2e::e2e_read_text_file(hostLogPath); }, job, "host_control_deadline");
+  }
 
   SOCKET media = INVALID_SOCKET;
   SOCKET control = INVALID_SOCKET;
@@ -342,6 +349,7 @@ int wmain(int argc, wchar_t** argv) {
   // host is WAITED for, and only then is anything deleted.
   //
   // Waiting needs the handle, which is why it is closed after the wait rather than before.
+  if (injMon) injMon->Stop();  // r6 G1: its last judgement, before the job closes
   CloseHandle(job);
   bool hostGone = true;
   if (hostPi.hProcess) {
@@ -354,6 +362,7 @@ int wmain(int argc, wchar_t** argv) {
   check("the scratch directory is cleaned up", staging.Remove(), staging.why());
   WSACleanup();
 
+  remote60::native_poc::e2e::e2e_injection_final_check_all();  // r6 G1: judged again before the result
   std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  ("
             << gChecks << " checks, " << gFailures << " failed)\n";
   return gFailures == 0 ? 0 : 1;
