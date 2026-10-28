@@ -39,6 +39,7 @@
 #include "directory_client.hpp"
 #include "directory_fake_server.hpp"
 #include "e2e_isolation.hpp"
+#include "e2e_injection_guard.hpp"
 
 using remote60::native_poc::test_support::FakeDirectory;
 using remote60::native_poc::test_support::Reply;
@@ -164,9 +165,11 @@ struct SpawnedHost {
   }
 };
 
-/** The arguments that keep a test host off the user's files. (RV-00) */
+/** The arguments that keep a test host off the user's files (RV-00) -- and off this PC's input (2026-10-28,
+ *  e2e_injection_guard.hpp: GNLinkStream injects by default). */
 std::wstring isolation_args(const std::wstring& stagingDir) {
-  return L" --directory-cache \"" + stagingDir + L"host_cache.json\"";
+  return L" --directory-cache \"" + stagingDir + L"host_cache.json\"" +
+         remote60::native_poc::e2e::e2e_injection_off_arg(stagingDir);
 }
 
 /**
@@ -292,6 +295,13 @@ bool StartHost(SpawnedHost* host, const char* tag, const std::string& serverUrl,
   const bool seam = host->WaitFor("[stream-test-seam] server=" + serverUrl, 10000);
   check((std::string("[") + tag + "] a real streaming host started, on the staging cache, in the test-seam build").c_str(),
         usedIt && seam, said ? host->tail() : "the host never said which cache it used");
+  // fail closed: nothing reaches a host that has not said its input injection is off
+  std::string injWhy;
+  if (!remote60::native_poc::e2e::e2e_wait_injection_off([host] { return host->log(); }, 20000, &injWhy)) {
+    remote60::native_poc::e2e::e2e_injection_setup_failed(tag, injWhy);
+  }
+  check((std::string("[") + tag + "] the host said its input injection is OFF (--input-injection-mode none) before any client").c_str(),
+        true);
   return usedIt && seam;
 }
 

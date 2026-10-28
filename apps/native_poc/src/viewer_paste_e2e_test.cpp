@@ -37,6 +37,7 @@
 //   remote60_viewer_paste_e2e_test --out <dir>      (needs REMOTE60_ALLOW_HOST_E2E=1)
 
 #include "e2e_isolation.hpp"
+#include "e2e_injection_guard.hpp"
 #include "control_resume_e2e_support.hpp"
 
 #include <shlobj.h>  // DROPFILES
@@ -2377,6 +2378,8 @@ void run_child_on_private_station(const std::wstring& outDir, bool legacy, bool 
 
 int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  // 2026-10-28: injection into this PC's real input path -- refused unless asked for (e2e_injection_guard.hpp)
+  if (remote60::native_poc::e2e::e2e_real_input_refused("viewer_paste_e2e", "Ctrl+V / Shift+Insert keys are injected by the host (SendInput when its window has the focus)")) return 3;
   SetConsoleOutputCP(CP_UTF8);
   std::wstring outDir, childResult;
   bool legacy = false;

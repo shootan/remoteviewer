@@ -142,6 +142,8 @@ Args parse_args(int argc, char** argv) {
       if (parse_u32(argv[++i], &v)) {
         a.directoryObservePort = static_cast<uint16_t>(std::min<uint32_t>(v, 65535));
       }
+    } else if (k == "--host-power-management" && i + 1 < argc) {
+      ++i;  // bound before parse_args, before the power object exists (host_power_policy.hpp); its value is not an arg
     } else if (k == "--input-injection-mode" && i + 1 < argc) {
       a.inputInjectionMode = argv[++i];
     } else if (k == "--input-target-pid" && i + 1 < argc) {

@@ -38,6 +38,7 @@
 #include "stream_child_env.hpp"
 #include "directory_fake_server.hpp"
 #include "e2e_isolation.hpp"
+#include "e2e_injection_guard.hpp"
 #include "native_video_client_session.hpp"
 #include "poc_protocol.hpp"
 #include "prelogin_admin_pipe.hpp"
@@ -182,7 +183,7 @@ bool StartHost(Host* host, const std::string& url, uint16_t mediaPort, uint16_t 
                      L" --bind-port " + std::to_wstring(mediaPort) + L" --control-port " + std::to_wstring(tcpControlPort) +
                      L" --directory-url " + wurl +
                      L" --directory-id tester --directory-pw e2e-pass-1234 --seconds 90" + L" --directory-cache \"" + host->dir +
-                     L"host_cache.json\"";
+                     L"host_cache.json\"" + remote60::native_poc::e2e::e2e_injection_off_arg(host->dir);  // input injection off (e2e_injection_guard.hpp)
   std::string why;
   if (!remote60::native_poc::e2e::e2e_command_is_isolated(cmd, host->dir, &why)) {
     std::printf("FAIL  the host command is not isolated: %s\n", why.c_str());
@@ -404,8 +405,13 @@ int wmain(int argc, wchar_t** argv) {
   const int priv = started ? process_has_shutdown_privilege(host.pi.hProcess) : -1;
   const bool safe = priv == 0;
   check("SAFETY: the host's token holds no SeShutdownPrivilege at all", safe, std::to_string(priv));
+  // fail closed (e2e_injection_guard.hpp): nothing reaches a host that has not said its input injection is off
+  std::string injWhy;
+  const bool injOff = started && remote60::native_poc::e2e::e2e_wait_injection_off([&host] { return host.log(); }, 20000, &injWhy);
+  if (started && !injOff) remote60::native_poc::e2e::e2e_injection_setup_failed("host_reboot_delegate", injWhy);
+  check("the host said its input injection is OFF (--input-injection-mode none) before any client", injOff, injWhy);
   Service service;
-  if (started && safe) {
+  if (started && safe && injOff) {
     service.heartbeatSeen = [&host] { return host.log().find("step=heartbeat ok=1") != std::string::npos; };
     service.start(pipe, host.dir + L"GNLinkStream.exe");
 

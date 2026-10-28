@@ -9,8 +9,9 @@
 // CreateDirectory, which fails on any existing name: r4 T2-b) holds the cache file. Nothing is deleted before the run;
 // after it, that file (if the agent wrote it) and this run's folder (not recursive) go. Without a valid root it refuses
 // to run. (r2 named a fixed file beside the executable and deleted it at start and end: for a build outside the
-// repository that is a delete outside it. The agent never wrote it -- an unreachable directory never registers -- so
-// those deletes found nothing; see the report.)
+// repository that is a delete outside it. What is known is that the test never made that file -- the agent never
+// wrote it: an unreachable directory never registers. Whether a file of that name was there before, and what each
+// delete returned, was not recorded; see the report.)
 
 #include <winsock2.h>
 #include <ws2tcpip.h>

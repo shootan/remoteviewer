@@ -25,11 +25,13 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "e2e_isolation.hpp"
+#include "e2e_injection_guard.hpp"
 #include "directory_fake_server.hpp"
 #include "directory_rendezvous.hpp"
 #include "native_video_client_tcp_control.hpp"
@@ -206,6 +208,10 @@ struct SpawnedHost {
  * makes the pre-launch check refuse, so the host that would have written the real cache is
  * never started.
  */
+// 2026-10-28 (verifier, after worker2's finding): GNLinkStream injects input by default (host_args.hpp
+// enableInputInjection = true) -- a test host must not drive THIS PC's input. Every host here is started with its
+// injection off (e2e_injection_guard.hpp), and a test client connects only after the host itself said
+// "input injection disabled (unsupported mode) mode=none" -- else the test ends INVALID there (StartHost).
 std::wstring isolation_args(const std::wstring& stagingDir) {
   return L" --directory-cache \"" + stagingDir + L"host_cache.json\"";
 }
@@ -238,7 +244,11 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
   {
     wchar_t oldBin[MAX_PATH] = {};
     if (GetEnvironmentVariableW(L"REMOTE60_E2E_OLD_BIN", oldBin, MAX_PATH) != 0 && oldBin[0] != L'\0') {
-      streamSrc = oldBin;
+      // 2026-10-28 (Codex Finding-3 (4)): an older build has no --host-power-management -- it would ignore the
+      // argument and keep its power effects on. Never started here to "check" that; this case is unverified.
+      std::printf("NOT RUN  %s: an older binary (no --host-power-management) is not started on this PC -- unverified "
+                  "(Codex Finding-3 (4))\n", tag);
+      return false;
     }
   }
   if (!CopyFileW(streamSrc.c_str(), (host->dir + L"GNLinkStream.exe").c_str(), FALSE) ||
@@ -274,7 +284,10 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
                      L" --control-port " + std::to_wstring(controlPort) +
                      L" --directory-url " + url +
                      L" --directory-id tester --directory-pw e2e-pass-1234" +
-                     L" --seconds 90" + isolation_args(host->dir);
+                     L" --seconds 90" + isolation_args(host->dir) +
+                     // input injection OFF and host power management OFF (e2e_injection_guard.hpp; Finding-3) -- for a
+                     // --prelogin worker too: its power object exists from its first line, client or not
+                     remote60::native_poc::e2e::e2e_injection_off_arg(host->dir);
 
   // Checked BEFORE anything starts. A host that talks to a directory writes a token cache, and
   // without --directory-cache that is the user's own %LOCALAPPDATA%\remote60\host.json --
@@ -342,6 +355,14 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
   // agent, so it never names a cache -- it has nothing to write. Its isolation is the empty ProgramData
   // above; the case checks the offline result itself.
   if (prelogin) return host->WaitFor("[native-video-host][prelogin]", 20000);
+  // fail closed: no test client reaches a host that has not said its input injection is off
+  {
+    std::string injWhy;
+    if (!remote60::native_poc::e2e::e2e_wait_injection_off([host] { return host->log(); }, 20000, &injWhy)) {
+      remote60::native_poc::e2e::e2e_injection_setup_failed(tag, injWhy);
+    }
+    check("the host said its input injection is OFF (--input-injection-mode none) before any client", true);
+  }
   // The host says which cache it will write, before it registers. Confirmed from its own words
   // rather than from the argument this test passed: the question is what the process DID.
   const std::string wantPath(host->cachePath.begin(), host->cachePath.end());

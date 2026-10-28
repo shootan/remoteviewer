@@ -64,6 +64,7 @@
 #include "capture_backend_dxgi.hpp"
 #include "host_string_util.hpp"
 #include "host_log.hpp"
+#include "host_power_policy.hpp"
 #include "host_args.hpp"
 #include "host_bgra_scale.hpp"
 #include "host_bottleneck.hpp"
@@ -248,7 +249,16 @@ int main(int argc, char** argv) {
   } drainWorkerLogAtReturn;
   // A remote host cannot wake itself after Windows enters S3. Keep the machine reachable
   // while the host is running; the display requirement is enabled only for an active stream.
-  HostPowerKeepalive powerKeepalive;
+  // 2026-10-28 (Codex Finding-3): all of it under one local startup-only policy, bound HERE -- before the
+  // object exists and before any of its effects (its constructor's request included); said in one line.
+  const remote60::native_poc::HostPowerPolicy powerPolicy = remote60::native_poc::bind_host_power_policy(argc, argv);
+  if (!powerPolicy.ok) {
+    std::cerr << "[native-video-host] invalid --host-power-management value: " << powerPolicy.bad
+              << " (on|off) -- not started\n";
+    return 65;
+  }
+  std::cout << "[native-video-host] " << remote60::native_poc::host_power_policy_line(powerPolicy) << "\n";
+  HostPowerKeepalive powerKeepalive(powerPolicy.enabled);
   // Outlive every capture/encoder/session owner, including their destructors after shutdown_host.
   // A GPU resource Release may block too; disarming before those destructors left a teardown gap.
   WatchdogState watchdog;
