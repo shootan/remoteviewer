@@ -14,6 +14,7 @@
 #include "clipboard_sync.hpp"
 #include "native_socket.hpp"
 #include "client_park_state.hpp"
+#include "client_mouse_xbutton_fence.hpp"
 #include "client_telemetry_window.hpp"
 #include "client_host_role_gate.hpp"
 #include "native_video_client_shared_core.hpp"
@@ -476,6 +477,9 @@ class ClientSessionController {
   mutable std::mutex parkMu_;
   ClientParkFence park_;
   ClientHeldInput heldInput_;
+  // keepalive-r2 e r2: what became of each X button's press on this connection (refused / dropped / sent); under
+  // parkMu_, reset with the connection (client_mouse_xbutton_fence.hpp)
+  ClientMouseXPressLedger mouseXLedger_;
   std::atomic<bool> parkInhibit_{false};
   std::atomic<uint32_t> parkReleased_{0};
   std::atomic<uint32_t> parkDroppedActions_{0};

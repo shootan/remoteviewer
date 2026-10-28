@@ -621,7 +621,8 @@ bool ClientSessionController::QueueInputEvent(uint16_t kind, int32_t x, int32_t 
   }
   // keepalive-r2 e: no X edge, no X bit to a host without kCaptureFlagMouseXButtonsV1 (or not known yet) -- the
   // JNI input and the macro playback both come here (client_mouse_xbutton_fence.hpp; the PC: fence_mouse_for_host).
-  if (!FenceMouseXButtonsForHost(HostTakesMouseXButtons(role.known, role.flags), kind, keyCode, &buttons)) {
+  // r2: a press refused here stays refused to its up (its up and its held bit too), whatever the next Pong says.
+  if (!mouseXLedger_.AdmitQueued(HostTakesMouseXButtons(role.known, role.flags), kind, keyCode, &buttons)) {
     mouseXButtonsHeldBack_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
@@ -977,7 +978,14 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       }
       // keepalive-r2 e: the same X fence on whatever reached the queue another way (a release the park or the
       // held state made, an entry the queue kept through DropAllButReleases); a refused edge is never OnSent.
-      if (!FenceMouseXButtonsAction(HostTakesMouseXButtons(role.known, role.flags), &action)) {
+      // r2: per press -- a down dropped here takes its up and its held bit with it; a sent down's owed release
+      // goes only while the host takes X.
+      bool xAdmitted = true;
+      {
+        std::lock_guard<std::mutex> lk(parkMu_);
+        xAdmitted = mouseXLedger_.AdmitSendAction(HostTakesMouseXButtons(role.known, role.flags), &action);
+      }
+      if (!xAdmitted) {
         mouseXButtonsHeldBack_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
@@ -1004,6 +1012,7 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         // StreamState with no answer of its own, handed to the ordered control stream).
         std::lock_guard<std::mutex> lk(parkMu_);
         heldInput_.OnSent(action);
+        mouseXLedger_.OnSentAction(action);  // r2: a sent X down owes its release; a sent X up ends it
         if (action.kind == ControlOutboundActionKind::StreamState) {
           park_.OnStreamStateSent((action.streamState.flags & 0x1u) != 0);
         } else if (action.kind == ControlOutboundActionKind::Ping) {
@@ -1779,6 +1788,7 @@ void ClientSessionController::ResetUnlocked() {
     std::lock_guard<std::mutex> lk(parkMu_);
     park_.End();
     heldInput_.Reset();
+    mouseXLedger_.Reset();  // r2: no press record carried into another connection
   }
   parkInhibit_.store(false, std::memory_order_release);
   parkReleased_.store(0, std::memory_order_relaxed);
