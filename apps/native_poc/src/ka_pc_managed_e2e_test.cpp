@@ -24,7 +24,9 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <fstream>
 #include <functional>
+#include <memory>
 #include <map>
 #include <mutex>
 #include <regex>
@@ -82,7 +84,15 @@ bool init_root(std::string* why) {
   const DWORD a = GetFileAttributesW(full);
   if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_REPARSE_POINT)) { *why = "the test root is a link"; return false; }
   CreateDirectoryW(full, nullptr);
-  gRoot = std::wstring(full) + L"\\";
+  // ka-pc r7+ (the shared guard: a repository fixture this run OWNS): a NEW folder of this run inside the root --
+  // made new here (an existing one is refused, never reused) -- and everything of the run goes in it.
+  const std::wstring run = std::wstring(full) + L"\\run-" + std::to_wstring(GetCurrentProcessId()) + L"-" +
+                           std::to_wstring(GetTickCount64());
+  if (!CreateDirectoryW(run.c_str(), nullptr)) {
+    *why = "this run's own folder could not be made new";
+    return false;
+  }
+  gRoot = run + L"\\";
   wchar_t self[MAX_PATH] = {};
   GetModuleFileNameW(nullptr, self, MAX_PATH);
   std::wstring s(self);
@@ -91,14 +101,24 @@ bool init_root(std::string* why) {
 }
 
 // One child process: in a job of ours (KILL_ON_JOB_CLOSE), its stdout/stderr collected.
+// One child of this test: started suspended, resumed only inside a verified kill-on-close job (the shared guard's
+// e2e_adopt_or_invalid), its stdout/stderr read to a CONFIRMED end (e2e_read_to_end). A test HOST additionally goes
+// through the shared guard (Guard): no client before THIS launch said input injection OFF and power management OFF,
+// both whole lines; a monitor judges its output while it runs; its end (End) is the guard's final judgement -- the job
+// ended (confirmed), the output read to EOF, that final text judged (E2eInjectionMonitor::Finalize). Nothing here
+// varies the guard; it is used as it is (ka-r3 b8dcc93).
 struct Child {
   PROCESS_INFORMATION pi{};
   HANDLE job = nullptr;
   HANDLE out = nullptr;
   std::thread reader;
+  std::atomic<bool> reading{false};
+  std::atomic<int> readResult{0};
+  std::atomic<unsigned long> readErr{0};
   std::mutex mu;
   std::string text;
   std::wstring logPath;
+  std::unique_ptr<e2e::E2eInjectionMonitor> monitor;
   bool Start(const std::wstring& cmd, const std::wstring& dir, const std::vector<wchar_t>* env,
              std::vector<HANDLE> extraInherit = {}) {
     SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
@@ -133,31 +153,40 @@ struct Child {
     CloseHandle(nul);
     if (!ok) return false;
     job = CreateJobObjectW(nullptr, nullptr);
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim{};
-    lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-    SetInformationJobObject(job, JobObjectExtendedLimitInformation, &lim, sizeof(lim));
-    if (!AssignProcessToJobObject(job, pi.hProcess)) {
-      TerminateProcess(pi.hProcess, 1);
-      return false;
+    if (job) {
+      JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim{};
+      lim.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+      SetInformationJobObject(job, JobObjectExtendedLimitInformation, &lim, sizeof(lim));
     }
-    ResumeThread(pi.hThread);
+    e2e::e2e_adopt_or_invalid(job, pi, "ka-pc e2e child");  // resumed only inside a verified kill-on-close job
+    reading = true;
     reader = std::thread([this] {
-      char b[4096];
-      DWORD got = 0;
-      while (ReadFile(out, b, sizeof(b), &got, nullptr) && got > 0) {
-        std::lock_guard<std::mutex> lock(mu);
-        text.append(b, got);
-      }
+      DWORD err = 0;
+      const auto end = e2e::e2e_read_to_end(
+          out, [this] { return reading.load(); },
+          [this](const char* p, size_t n) {
+            std::lock_guard<std::mutex> lock(mu);
+            text.append(p, n);
+          },
+          &err);
+      readErr = err;
+      readResult = static_cast<int>(end);
     });
     return true;
+  }
+  // A test host: the shared guard's initial gate, then its monitor. Fails closed (INVALID, exit 2) before any client.
+  void Guard(const char* where) {
+    std::string why;
+    if (!e2e::e2e_wait_injection_off([this] { return Text(); }, 20000, &why)) e2e::e2e_injection_setup_failed(where, why);
+    monitor = std::make_unique<e2e::E2eInjectionMonitor>([this] { return Text(); }, job, where);
   }
   std::string Text() {
     std::lock_guard<std::mutex> lock(mu);
     return text;
   }
   bool WaitFor(const std::function<bool(const std::string&)>& pred, int ms) {
-    const uint64_t until = now_ms() + ms;
-    while (now_ms() < until) {
+    const uint64_t until = GetTickCount64() + ms;
+    while (GetTickCount64() < until) {
       if (pred(Text())) return true;
       Sleep(100);
     }
@@ -165,22 +194,24 @@ struct Child {
   }
   bool Exited(int ms) { return pi.hProcess && WaitForSingleObject(pi.hProcess, ms) == WAIT_OBJECT_0; }
   void End() {
-    if (job) {
-      TerminateJobObject(job, 0);
-      CloseHandle(job);
-      job = nullptr;
+    bool producerEnded = false;
+    if (job) producerEnded = e2e::e2e_end_job_confirmed(job);  // every process of its job, confirmed
+    if (!producerEnded) {
+      reading = false;  // an end not confirmed: the read is cut, the output is NOT complete (judged so below)
+      if (out) CloseHandle(out), out = nullptr;
     }
-    if (pi.hProcess) WaitForSingleObject(pi.hProcess, 3000);
     if (reader.joinable()) reader.join();
     if (out) CloseHandle(out), out = nullptr;
+    if (monitor) {
+      monitor->Finalize(producerEnded, e2e::e2e_final_pipe(static_cast<e2e::E2eReadEnd>(readResult.load()),
+                                                           readErr.load(), Text()));
+      monitor.reset();
+    }
+    if (job) CloseHandle(job), job = nullptr;
+    if (pi.hProcess) WaitForSingleObject(pi.hProcess, 3000);
     if (!logPath.empty()) {
-      HANDLE f = CreateFileW(logPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, 0, nullptr);
-      if (f != INVALID_HANDLE_VALUE) {
-        const std::string t = Text();
-        DWORD put = 0;
-        WriteFile(f, t.data(), static_cast<DWORD>(t.size()), &put, nullptr);
-        CloseHandle(f);
-      }
+      std::ofstream f(logPath, std::ios::binary | std::ios::trunc);
+      f << Text();
     }
     if (pi.hThread) CloseHandle(pi.hThread), pi.hThread = nullptr;
     if (pi.hProcess) CloseHandle(pi.hProcess), pi.hProcess = nullptr;
@@ -334,6 +365,14 @@ int main() {
     std::printf("FAIL  no test root: %s\n", why.c_str());
     return 2;
   }
+  // TEMP / TMP of this process (and so of every child it starts) inside this run: nothing of the test -- the shell's
+  // WebView profile (GetTempPath + "GNLinkClient") among them -- lands in the user's %TEMP%.
+  {
+    const std::wstring tmp = gRoot + L"temp";
+    CreateDirectoryW(tmp.c_str(), nullptr);
+    SetEnvironmentVariableW(L"TEMP", tmp.c_str());
+    SetEnvironmentVariableW(L"TMP", tmp.c_str());
+  }
   std::string socketError;
   initialize_sockets(&socketError);
   std::printf("test root: %s\n", N(gRoot).c_str());
@@ -404,13 +443,9 @@ int main() {
   };
   Child hostA;
   check("host KA-A (this build) starts", startHost(hostA, gBuild + L"GNLinkStream.exe", "KA-A"));
-  // The shared test-host guard (ka-r3 6b9cf79, e2e_injection_guard.hpp): THIS launch must have said input injection
-  // OFF and host power management OFF, both whole lines, before any viewer exists -- else INVALID, exit 2.
-  {
-    std::string why;
-    if (!e2e::e2e_wait_injection_off([&hostA] { return hostA.Text(); }, 20000, &why))
-      e2e::e2e_injection_setup_failed("host KA-A", why);
-  }
+  // The shared test-host guard (ka-r3 b8dcc93): THIS launch said input injection OFF and power management OFF, both
+  // whole lines, before any viewer exists -- else INVALID, exit 2; then its monitor; its end is the final judgement.
+  hostA.Guard("host KA-A");
   // KA-OLD runs only after KA-A has ended: every host process on this machine registers under the same machine
   // id, so two at once would be one host record that the later one takes over.
   wchar_t oldStream[1024] = {};
@@ -905,11 +940,8 @@ int main() {
 
   hostOld.End();
   server.End();
-  // rule 4 of the guard: a host that took input with injection on makes the run INVALID
-  if (e2e::e2e_injection_contradicted(hostA.Text())) {
-    std::printf("FAIL  host KA-A logged input with injection on\nRESULT: INVALID\n");
-    return 2;
-  }
+  // the shared guard: every launch of the run judged before the result (a finalized one on its complete output)
+  e2e::e2e_injection_final_check_all();
   std::printf("\nka_pc_managed_e2e_test: %s\n", gFailures == 0 ? "ALL PASS" : (std::to_string(gFailures) + " FAILED").c_str());
   return gFailures == 0 ? 0 : 1;
 }
