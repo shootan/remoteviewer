@@ -110,6 +110,8 @@ def dump():
                     'desc': n.get('content-desc', ''),
                     'enabled': n.get('enabled') == 'true',
                     'clickable': n.get('clickable') == 'true',
+                    'selected': n.get('selected') == 'true',  # r7f: a segment button's chosen state (View.isSelected)
+                    'password': n.get('password') == 'true',  # r7f: its text is never recorded
                     'bounds': (x1, y1, x2, y2),
                 })
             return nodes

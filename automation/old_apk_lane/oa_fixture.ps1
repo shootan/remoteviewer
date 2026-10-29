@@ -12,6 +12,8 @@ param(
   [ValidateSet('S', 'P')][string]$Arm = 'S',
   [string]$BuildDir = '',
   [string]$ServerJs = '',
+  # r7f: the directory's pinned sha256 (required with KE_RELAY_TRACE=1: the trace-only test copy of the candidate)
+  [string]$ServerSha256 = '',
   [switch]$WithStandby,
   [string[]]$HolderCmd = @(),
   [int]$ControlPort = 18460,
@@ -192,9 +194,31 @@ try {
     $NodeCmd = @('node', $server)
     Say "  directory server.js $server $((Get-FileHash $server).Hash.ToLower().Substring(0,16)) relayTrace=$($dirEnv['REMOTE60_RELAY_TRACE'])"
   }
+  # r7f (Codex codex_old_apk_lane_src_r7d.md (3)): the candidate 53fced4's server.js has NO relay trace -- the variable
+  # alone traces nothing. With KE_RELAY_TRACE=1 the directory run must be the pinned file (-ServerSha256: the trace-only
+  # test copy oa_relay_trace_server.py builds) AND must say itself that its trace is on; else nothing more starts.
+  $script_ = $NodeCmd[$NodeCmd.Count - 1]
+  if ($ServerSha256) {
+    $got = if (Test-Path -LiteralPath $script_ -PathType Leaf) { (Get-FileHash -LiteralPath $script_).Hash.ToLower() } else { 'no file' }
+    if ($got -ne $ServerSha256.ToLower()) { throw "the directory $script_ is not the pinned one (sha256 $got, pinned $ServerSha256)" }
+    Say "  directory pinned: $script_ sha256=$got"
+  } elseif ($dirEnv['REMOTE60_RELAY_TRACE'] -eq '1') {
+    throw "KE_RELAY_TRACE=1 needs -ServerSha256 (the pinned trace-only test copy of the candidate's server)"
+  }
   $node = Start-Owned 'node' $NodeCmd[0] @($NodeCmd | Select-Object -Skip 1) "$Root\dir\server" $dirEnv
   Start-Sleep 2
   if ($node.HasExited) { throw "the directory ended at once (exit $($node.ExitCode))" }
+  if ($dirEnv['REMOTE60_RELAY_TRACE'] -eq '1') {
+    $on = $false
+    $deadline = (Get-Date).AddSeconds(8)
+    while ((Get-Date) -lt $deadline -and -not $node.HasExited) {
+      if ((Test-Path -LiteralPath "$Root\dir\server.stdout.txt") -and
+          (Select-String -LiteralPath "$Root\dir\server.stdout.txt" -SimpleMatch '[relay-trace] ENABLED' -Quiet)) { $on = $true; break }
+      Start-Sleep -Milliseconds 250
+    }
+    if (-not $on) { throw "KE_RELAY_TRACE=1 but the directory never said '[relay-trace] ENABLED' -- it has no trace (53fced4 as it is has none)" }
+    Say "  relay trace: the directory says it is on"
+  }
 
   # ---- the hosts, one after another; any failure -- or any child found dead -- stops the rest from starting
   $b = if ($BuildDir) { $BuildDir } else { "$wt\build\apps\native_poc\Release" }

@@ -148,6 +148,21 @@ $r = Run-Case 'orch-stopthrow' 'a=ok' @{ KE_FIXTURE_TEST_STOP_THROW_FOR = 'stand
 Check 'one cleanup error: holder killed after its error, a and node ended, rc 3, nothing left' ($r.rc -eq 3 -and $r.result -match 'standby stop error' -and
   $r.result -match '  a exit 0' -and $r.result -match '  node ended' -and $r.left -eq 0) "rc=$($r.rc) left=$($r.left)"
 
+"--- r7f: the relay trace -- the variable alone traces nothing (53fced4); the pinned trace-only copy must say it is on"
+$stubNodeSha = (Get-FileHash "$e\stubs\stub_node.py").Hash.ToLower()
+$r = Run-Case 'orch-trace-ok' 'a=ok' @{ KE_RELAY_TRACE = '1'; KE_STUB_NODE_TRACE = '1' } @('-Arm', 'S', '-ServerSha256', $stubNodeSha)
+Check 'trace on, the pinned directory says "[relay-trace] ENABLED": host started, AVD ran, rc 0' ($r.avd -and $r.hostStarted -and
+  $r.rc -eq 0 -and $r.fx -match 'relay trace: the directory says it is on' -and $r.fx -match 'directory pinned:' -and $r.left -eq 0) "rc=$($r.rc)"
+$r = Run-Case 'orch-trace-silent' 'a=ok' @{ KE_RELAY_TRACE = '1' } @('-Arm', 'S', '-ServerSha256', $stubNodeSha)
+Check 'NEGATIVE trace on, the directory never says so (53fced4 as it is): no host, no AVD, rc != 0, the reason said' (-not $r.avd -and
+  -not $r.hostStarted -and $r.rc -ne 0 -and $r.fx -match "never said '\[relay-trace\] ENABLED'" -and $r.left -eq 0) "rc=$($r.rc)"
+$r = Run-Case 'orch-trace-nopin' 'a=ok' @{ KE_RELAY_TRACE = '1'; KE_STUB_NODE_TRACE = '1' } @('-Arm', 'S')
+Check 'NEGATIVE trace on with no -ServerSha256: the directory is not even started, no host, no AVD' (-not $r.avd -and
+  -not $r.hostStarted -and $r.rc -ne 0 -and $r.fx -notmatch 'started node' -and $r.fx -match 'needs -ServerSha256') "rc=$($r.rc)"
+$r = Run-Case 'orch-trace-wrongpin' 'a=ok' @{ KE_RELAY_TRACE = '1'; KE_STUB_NODE_TRACE = '1' } @('-Arm', 'S', '-ServerSha256', ('0' * 64))
+Check 'NEGATIVE trace on, the directory file is not the pinned one: not started, no host, no AVD' (-not $r.avd -and
+  -not $r.hostStarted -and $r.rc -ne 0 -and $r.fx -notmatch 'started node' -and $r.fx -match 'is not the pinned one') "rc=$($r.rc)"
+
 "--- a real run without an APK file is refused before anything starts"
 $before = @(Get-ChildItem $runs -Directory | ForEach-Object Name)
 $p = Start-Process -FilePath powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$e\oa_slot.ps1", '-Tag', 'orch-noapk',

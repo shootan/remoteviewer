@@ -20,6 +20,7 @@ param(
   [string]$Apk = '',
   [string]$BuildDir = '',
   [string]$ServerJs = '',
+  [string]$ServerSha256 = '',  # r7f: passed to the fixture (required there with KE_RELAY_TRACE=1)
   [string]$JobRun = '',
   [switch]$WithStandby,
   [string[]]$HolderCmd = @()
@@ -71,7 +72,7 @@ if (Is-Link $root) { "FAIL  SETUP slot: the run folder is a link`nRESULT: INVALI
 $sum = "$root\slot.txt"
 function Say([string]$line) { $line | Out-File $sum -Append -Encoding utf8 }
 Say "slot run=$runId start $(Get-Date -Format s) (qwinsta: $((qwinsta | Select-String '^>').Line.Trim()))"
-Say "  arm $Arm standby=$([bool]$WithStandby) build=$BuildDir server=$ServerJs"
+Say "  arm $Arm standby=$([bool]$WithStandby) build=$BuildDir server=$ServerJs serverSha256=$ServerSha256 relayTrace=$env:KE_RELAY_TRACE"
 if ($AvdCmd.Count -eq 0) {
   if (-not $Apk -or -not (Test-Path -LiteralPath $Apk -PathType Leaf)) { "FAIL  SETUP slot: -Apk is not a file ($Apk)`nRESULT: INVALID"; exit 2 }
   Say "  apk $Apk $((Get-FileHash $Apk).Hash.ToLower())"
@@ -117,6 +118,10 @@ $fxCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $(& $q "$e\oa_
          "-HostSec 2400 -ReadyTimeoutSec $ReadyTimeoutSec -StopWaitSec $StopWaitSec -Arm $Arm"
 if ($BuildDir) { $fxCmd += " -BuildDir $(& $q $BuildDir)" }
 if ($ServerJs) { $fxCmd += " -ServerJs $(& $q $ServerJs)" }
+if ($ServerSha256) {
+  if ($ServerSha256 -notmatch '^[0-9a-fA-F]{64}$') { "FAIL  SETUP slot: -ServerSha256 is not a sha256`nRESULT: INVALID"; exit 2 }
+  $fxCmd += " -ServerSha256 $ServerSha256"
+}
 if ($WithStandby) { $fxCmd += " -WithStandby" }
 if ($HolderCmd.Count) { $fxCmd += " -HolderCmd $(& $q ($HolderCmd -join ','))" }
 if ($HarnessCmd.Count) { $fxCmd += " -HarnessCmd $(& $q ($HarnessCmd -join ','))" }
