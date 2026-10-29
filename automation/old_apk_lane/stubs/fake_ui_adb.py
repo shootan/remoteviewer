@@ -227,11 +227,18 @@ elif cmd.startswith('shell dumpsys input_method'):
         print('  mInputShown=true mVisibleBound=true\n  mWindowVisible=true mDecorViewVisible=true')
     elif st == 'hidden':
         print('  mInputShown=false mVisibleBound=false\n  mWindowVisible=false mDecorViewVisible=false')
+    elif st == 'internal':  # r7i: the verifier's run after BACK -- off screen, the IME's own flag still true
+        print('  mInputShown=false mVisibleBound=false\n  mWindowVisible=false mDecorViewVisible=false\n'
+              '  mIsInputViewShown=true')
+    elif st == 'windowonly':  # r7i: the system says hidden but the IME window is still visible
+        print('  mInputShown=false\n  mWindowVisible=true mDecorViewVisible=true')
+    elif st == 'partial':  # r7i: only the system flag read -- the window's own state missing
+        print('  mInputShown=false')
     else:
         print('  (no state lines this build prints)')
 elif cmd == 'shell input keyevent 4':
-    if ime() == 'shown' and os.environ.get('OA_FAKE_BACK', 'ime') == 'ime':
-        state['ime'] = 'hidden'
+    if ime() == 'shown' and os.environ.get('OA_FAKE_BACK', 'ime') in ('ime', 'internal'):
+        state['ime'] = 'hidden' if os.environ.get('OA_FAKE_BACK', 'ime') == 'ime' else 'internal'
     elif state.get('scene') == 'hosts':
         state['dialog'] = True
     json.dump(state, open(state_path, 'w', encoding='utf-8'))

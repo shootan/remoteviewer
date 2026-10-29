@@ -212,18 +212,41 @@ def host_log():
         return ''
 
 
+IME_READS = []  # r7i: every keyboard read's flag lines (only those lines -- nothing else of the dump is kept)
+SCREEN_FLAGS = ('mInputShown', 'mWindowVisible', 'mDecorViewVisible')
+
+
 def ime_state():
-    """r7d: the soft keyboard, from `dumpsys input_method` -- ('shown' | 'hidden' | 'unknown', the flags read). Any of
-    mInputShown / mWindowVisible / mDecorViewVisible / mIsInputViewShown true = shown; mInputShown false and none true =
-    hidden; anything else = unknown (judged as not safe: no tap)."""
+    """The soft keyboard ON SCREEN, from `dumpsys input_method` -> ('shown' | 'hidden' | 'unknown', detail list).
+    r7i (verifier oa-s-20261030072336: after BACK the screenshot showed no keyboard, the app logged ImeTracker onHidden
+    for HIDE_SOFT_INPUT_BY_BACK_KEY, yet mIsInputViewShown stayed true and r7d called it shown): what is on screen is
+    the system's mInputShown (InputMethodManagerService: the IME is being shown) and the IME window's own visibility
+    (InputMethodService mWindowVisible / mDecorViewVisible -- both cleared by hideWindow()). mIsInputViewShown is the
+    IME's internal "the input view would be shown" evaluation (updateInputViewShown / onEvaluateInputViewShown), NOT
+    cleared when the window hides -- recorded, not judged.
+      shown    any of mInputShown / mWindowVisible / mDecorViewVisible true
+      hidden   all three read and all three false (mIsInputViewShown true alone is noted as IME-internal only)
+      unknown  anything else -- a flag missing, nothing read: not safe, no tap"""
     out = adb('shell', 'dumpsys', 'input_method')
+    lines = [l.strip() for l in out.splitlines()
+             if re.search(r'(mInputShown|mWindowVisible|mDecorViewVisible|mIsInputViewShown|isInputViewShown)=', l)]
+    IME_READS.append(f'{time.strftime("%H:%M:%S")} ' + ' | '.join(lines)[:600])
+    try:
+        open(os.path.join(OUT, 'ime_reads.txt'), 'w', encoding='utf-8').write('\n'.join(IME_READS) + '\n')
+    except OSError:
+        pass
     flags = re.findall(r'(mInputShown|mWindowVisible|mDecorViewVisible|mIsInputViewShown|isInputViewShown)=(true|false)', out)
-    trues = sorted({k for k, v in flags if v == 'true'})
-    if trues:
-        return 'shown', trues
-    if any(k == 'mInputShown' for k, _ in flags):
-        return 'hidden', []
-    return 'unknown', []
+    seen = {}
+    for k, v in flags:
+        seen.setdefault(k, set()).add(v)
+    on_screen = sorted(k for k in SCREEN_FLAGS if 'true' in seen.get(k, set()))
+    if on_screen:
+        return 'shown', on_screen
+    if all(seen.get(k) == {'false'} for k in SCREEN_FLAGS):
+        internal = sorted(k for k in ('mIsInputViewShown', 'isInputViewShown') if 'true' in seen.get(k, set()))
+        return 'hidden', ([f'{k}=true (IME-internal only; mInputShown / mWindowVisible / mDecorViewVisible false)'
+                           for k in internal])
+    return 'unknown', [f'missing / unclear: {[k for k in SCREEN_FLAGS if seen.get(k) != {"false"}]}']
 
 
 PICK_MARK = []  # [app log cursor, host log length, pinned id, host prefix sha256] at the last successful pick

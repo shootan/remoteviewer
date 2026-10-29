@@ -471,6 +471,41 @@ def main():
           all(c in nr for c in '567') and steps_p.get('2k') is True and steps_p.get('3w') is True,
           f'rc={rc} steps={steps_p} taps after 4={after} not run={nr}')
 
+    # r7i (verifier oa-s-20261030072336 1b: after BACK only mIsInputViewShown was true, the keyboard gone on screen)
+    for ime, want, what in (('internal', 'hidden', "the run's pattern: mInputShown / mWindowVisible / mDecorViewVisible false, "
+                             'mIsInputViewShown true'), ('shown', 'shown', 'all on'),
+                            ('windowonly', 'shown', 'mInputShown false but the IME window visible'),
+                            ('partial', 'unknown', 'only mInputShown read (the window state missing)'),
+                            ('unknown', 'unknown', 'no flags at all')):
+        m, p = case(f'ime-{ime}', 'ok', ime=ime, scene='hosts')
+        st, why = m.ime_state()
+        check(f'r7i ime_state: {what} -> {want}', st == want and (ime != 'internal' or 'IME-internal only' in ' '.join(why)),
+              f'{st} {why}')
+    m, p = case('hosts-ime-hide-internal', 'ok', ime='shown', back='internal', scene='hosts')
+    ok = m.hide_ime_on_hosts('1b the sign-in keyboard')
+    rec = open(os.path.join(p['out'], 'ime_reads.txt'), encoding='utf-8').read()
+    check('r7i 1b: BACK puts the keyboard away and only mIsInputViewShown stays true (the run) -> PASS, the flag noted; '
+          'the flag lines kept (ime_reads.txt)', ok and last(m)[1] is True and 'IME-internal only' in last(m)[2] and
+          'mIsInputViewShown=true' in rec and keys(p) == ['shell input keyevent 4'], last(m)[2][:200])
+    old = os.path.join(RUNS, f'oa_avd_ff1c72a-{os.getpid()}.py')
+    with open(old, 'wb') as f:
+        f.write(subprocess.run(['git', '-C', WT, 'show', 'ff1c72a:automation/old_apk_lane/oa_avd.py'], capture_output=True,
+                               check=True).stdout)
+    m, p = case('hosts-ime-hide-internal-ff1c72a', 'ok', ime='shown', back='internal', scene='hosts', avd=old)
+    ok = m.hide_ime_on_hosts('1b the sign-in keyboard')
+    check('r7i contrast: ff1c72a on the same pattern -> 1b FAIL (the run\'s failure reproduced)', not ok and
+          last(m)[1] is False, last(m)[2][:160])
+    m, p = case('input-ime-partial', 'ok', ime='partial')
+    m.pick_pinned('3 the pinned window picked')
+    n_taps = len(taps(p))
+    ok4 = m.input_check()
+    check('NEGATIVE 4 r7i: the keyboard state only half read -> unknown -> FAIL with NO tap', not ok4 and
+          len(taps(p)) == n_taps and 'unknown' in last(m)[2], last(m)[2][:160])
+    m, p = case('input-ime-internal', 'ok', ime='internal')
+    m.pick_pinned('3 the pinned window picked')
+    ok4 = m.input_check()
+    check('control 4 r7i: the run\'s internal-only pattern counts as no keyboard -> the tap goes, PASS', ok4, last(m)[2][:160])
+
     print(f'\n{checks} checks, {fails} failed\nRESULT: {"PASS" if fails == 0 else "FAIL"}')
     return 0 if fails == 0 else 1
 
