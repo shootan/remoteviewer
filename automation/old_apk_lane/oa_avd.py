@@ -9,10 +9,12 @@ log: the test host's `[input-trace]` lines (input injection none: the events are
   arm S  the same-source fixture build of 0.2.32 (DIRECTORY_URL = the fixture's): 1 sign in, 2 the ordinary connect
          (directory), 3 the desktop picked -> first frame (time, screenshot sha256), 4 one input reaches the host, 5 PC
          목록: the park, 6 the parked PC again -> a picture again, 7 (with a standby lease) the lease undisturbed.
-  arm P  the PUBLISHED 0.2.32 (its DIRECTORY_URL is the fixed https server, which this lane does not use): 1 NOT RUN;
-         2 its manual connect to the host (10.0.2.2, the host's UDP port and TCP control port); 3, 4 as S; 5 PC 목록:
-         0.2.32 refuses a park in manual mode and disconnects (park_refused manual=true) -- that is judged; 6 the manual
-         connect again -> a picture again; 7 as S.
+  arm P  the PUBLISHED 0.2.32 (its DIRECTORY_URL is the fixed https server, which this lane does not use). r2 (Codex
+         codex_rel_0164_old_apk_lane_decision.md): its ONE app start must show an empty sign-in store (auto_login
+         NO_CREDENTIAL, no sign_in_store line) or the arm is INVALID; 1 NOT RUN; 2 its manual DIRECT connect (10.0.2.2:
+         UDP video + TCP control -- the host's own log must show one TCP control client); 3, 4 as S; 5 and 6 NOT RUN
+         (the manual UI has no PC 목록 / park); instead 5d 연결 해제 -> the connect form (the host's TCP client gone)
+         and 6r connect again (a new session) -> the desktop -> a picture; 7 as S.
 No clipboard is changed. No real password is shown: adb errors and steps are cleaned (oa_adb._clean).
 
   python -I oa_avd.py <run folder> <S|P> <apk> <out>"""
@@ -170,25 +172,101 @@ def pick_desktop(tag):
     return digest
 
 
-def manual_connect(tag, video_port, control_port):
-    """0.2.32's manual connect: the launch extras (host / videoPort / controlPort), 수동 연결, 연결."""
-    ka.adb('shell', 'am', 'force-stop', PKG, check=False)
-    time.sleep(1)
+class Invalid(Exception):
+    """A precondition of the arm did not hold: nothing is judged (exit 2)."""
+
+
+def tcp_clients(log):
+    return len(re.findall(r'\[native-video-host\]\[control\] client connected', log))
+
+
+def p_first_connect(video_port, control_port):
+    """Arm P, the app's ONE start (rev r2, Codex codex_rel_0164_old_apk_lane_decision.md "P의 운영 로그인 방지"):
+    onCreate starts beginAutoLogin before the manual button can be tapped, and the button does not cancel it. The
+    package was installed and `pm clear`ed before this first start, so its sign-in store (KeystoreLoginVault, the
+    app's own preferences + keystore) is empty: LoginFlow.comeBack answers NO_CREDENTIAL from vault.load() and
+    settleOwedSignOuts has nothing owed -- neither sends anything (b554e76 LoginFlow.kt:225-226, :603-618). That is
+    CONFIRMED from the app's own log before anything is tapped: `auto_login NO_CREDENTIAL` and no `sign_in_store`
+    line; anything else is INVALID (the app is stopped at once). Then 수동 연결 -> 연결: the launch extras' host /
+    videoPort / controlPort, TCP control + UDP video (b554e76's manual args: requireTcpControl=true,
+    controlOverUdp=false) -- judged from the host's own log, not from the app's."""
+    h0 = tcp_clients(host_log())
     ka.adb('shell', 'am', 'start', '-n', f'{PKG}/.MainActivity', '--es', 'host', '10.0.2.2',
            '--ei', 'videoPort', str(video_port), '--ei', 'controlPort', str(control_port))
+    m = wait_log(r'\[auto_login\][^\n]*', '', 30)
+    log = applog()
+    store = re.findall(r'\[sign_in_store\][^\n]*', log)
+    upd = re.findall(r'\[update_check\][^\n]*', log)
+    step(f'  P precondition: {m.group(0) if m else "no auto_login line in 30 s"}; sign_in_store lines={len(store)}')
+    step('  P start-up update check (the published build derives it from its fixed https directory; no session, so '
+         'no credential): ' + (' | '.join(upd)[:240] if upd else 'no update_check line yet'))
+    if not m or 'NO_CREDENTIAL' not in m.group(0) or store:
+        ka.adb('shell', 'am', 'force-stop', PKG, check=False)
+        raise Invalid('arm P precondition: the app did not start with an empty sign-in store '
+                      f'({m.group(0) if m else "no auto_login"}; sign_in_store={store[:2]})')
     n0 = cursor()
     if not ka.wait('loginManualButton', 30):
-        verdict(f'{tag}: the manual connect is offered', False)
+        verdict('2 (P) the manual connect is offered', False)
         return False
     tap('loginManualButton')
     if not ka.wait('connectButton', 20):
-        verdict(f'{tag}: the manual connect form is shown', False)
+        verdict('2 (P) the manual connect form is shown', False)
         return False
     tap('connectButton')
     ok = ka.wait('listDevicesButton', 40) is not None
-    verdict(f'{tag}: the manual connect to the host (10.0.2.2 video {video_port} control {control_port}) reaches its targets',
-            ok, ' | '.join(re.findall(r'\[(?:login_manual|connect_failed|targets_ready|scene)\][^\n]*', since(n0)))[:300])
-    return ok
+    hl = host_log()
+    tcp = tcp_clients(hl) - h0
+    verdict(f'2 (P) the manual DIRECT connect (10.0.2.2: UDP video {video_port}, TCP control {control_port}) reaches '
+            'the targets, and the host took ONE TCP control client', ok and tcp == 1,
+            f'host tcp clients +{tcp} listen={"yes" if f"control waiting port={control_port}" in hl else "NO"} | ' +
+            ' | '.join(re.findall(r'\[(?:login_manual|connect_failed|targets_ready|scene)\][^\n]*', since(n0)))[:260])
+    return ok and tcp == 1
+
+
+def p_disconnect():
+    """Arm P, P-5d (NOT ⑤): the manual UI has no PC 목록 (SessionPark.canPark is false in manual mode, b554e76
+    SessionPark.kt:78: viewerMenuHostsButton GONE) -- its way back is 연결 해제 (viewerMenuDisconnectButton, then the
+    dialog's yes) to its home scene CONNECT. Judged: the app's viewer_disconnect, the connect form shown again, the
+    host's TCP control client gone."""
+    n0 = cursor()
+    h0 = len(re.findall(r'\[control\] tcp client disconnected', host_log()))
+    shown = False
+    if ka.wait('viewerMenuButton', 2) is None:
+        ka.adb('shell', 'input', 'tap', '1200', '540')
+        time.sleep(1.0)
+    hosts_offered = False
+    if ka.wait('viewerMenuButton', 5):
+        tap('viewerMenuButton')
+        hosts_offered = ka.wait('viewerMenuHostsButton', 3) is not None
+        if ka.wait('viewerMenuDisconnectButton', 8):
+            tap('viewerMenuDisconnectButton')
+            if ka.wait('android:id/button1', 8):
+                tap('android:id/button1')
+                shown = ka.wait('connectButton', 20) is not None
+    time.sleep(1.5)
+    gone = len(re.findall(r'\[control\] tcp client disconnected', host_log())) - h0
+    log = since(n0)
+    verdict('5d (P) 연결 해제 from the viewer menu -> the connect form again; the host saw its TCP control client go '
+            '(the manual UI offers no PC 목록)', shown and gone >= 1 and '[viewer_disconnect]' in log and not hosts_offered,
+            f'pc-list offered={hosts_offered} host tcp disconnects +{gone} | ' +
+            ' | '.join(re.findall(r'\[(?:viewer_disconnect|park_[a-z_]+|scene)\][^\n]*', log))[:220])
+    return shown
+
+
+def p_reconnect(control_port):
+    """Arm P, P-6r (NOT ⑥: nothing was parked): 연결 again from the connect form (no new app start) -> the targets."""
+    h0 = tcp_clients(host_log())
+    n0 = cursor()
+    if not ka.wait('connectButton', 10):
+        verdict('6r (P) the connect form is there to connect again', False)
+        return False
+    tap('connectButton')
+    ok = ka.wait('listDevicesButton', 40) is not None
+    tcp = tcp_clients(host_log()) - h0
+    verdict(f'6r (P) connect again (a NEW manual session, TCP control {control_port}) reaches the targets', ok and tcp == 1,
+            f'host tcp clients +{tcp} | ' +
+            ' | '.join(re.findall(r'\[(?:connect_failed|targets_ready|scene)\][^\n]*', since(n0)))[:240])
+    return ok and tcp == 1
 
 
 def main():
@@ -223,8 +301,10 @@ def main():
         res = install()
         step('install: ' + res[-300:])
         if 'INSTALL_FAILED_UPDATE_INCOMPATIBLE' in res:
-            # the package on the AVD is signed by another key (the published 0.2.32 vs a debug-signed build): only with
-            # OA_REINSTALL=1 is the test package uninstalled first (its data is cleared below anyway); else INVALID
+            # the package on the AVD is signed by another key -- NOT expected between the two arms (r2: the published
+            # 0.2.32 and the fixture build are both signed with the same Android Debug key, cert sha256 dcc806ae...);
+            # an earlier, other-signed build of the package might be. Only with OA_REINSTALL=1 is the test package
+            # uninstalled first (its data is cleared below anyway); else INVALID
             if os.environ.get('OA_REINSTALL') != '1':
                 step('SETUP: another signer\'s build of the package is installed -- rerun with OA_REINSTALL=1 to uninstall it first')
                 return 2
@@ -269,17 +349,23 @@ def main():
             if not listed:
                 return 1
             n0 = cursor()
+            hs0 = len(host_log())
             tap('card:' + HOST)
             targets = ka.wait('listDevicesButton', 40) is not None
             log = since(n0)
+            # r2: the path 0.2.32 actually took, as its own log and the host's say (the fixture's hosts bind 127.0.0.1:
+            # from the AVD the relay is expected; recorded, not assumed)
+            hnew = host_log()[hs0:]
+            path = re.findall(r'[^\n]*(?:relay|udp control session|session admitted|tcp client|client connected)[^\n]*', hnew)
             verdict('2 the ordinary connect (directory): the host\'s targets are shown', targets,
                     ' | '.join(re.findall(r'\[(?:directory_chosen|targets_ready|connect_failed|directory_connect_failed)\][^\n]*', log))[:300])
+            step('  2: the host\'s lines of this connect: ' + ' || '.join(l.strip()[:140] for l in path[:4]))
             if not targets:
                 return 1
         else:
             skip_case('1 sign in', 'the PUBLISHED 0.2.32 signs in only to its fixed https server (b554e76 build.gradle.kts:6/50)'
                       ' -- not this lane\'s fixture; see arm S')
-            if not video_port or not manual_connect('2 (P)', video_port, control_port):
+            if not video_port or not control_port or not p_first_connect(video_port, control_port):
                 return 1
 
         # 3
@@ -295,26 +381,19 @@ def main():
         verdict('4 one input reaches the host (its [input-trace]; not injected: input none)', len(traces) > 0,
                 f'new={len(traces)} ' + ' | '.join(traces[:3])[:240])
 
-        # 5
-        n0 = cursor()
-        h0 = host_log()
-        menu('viewerMenuHostsButton')
-        listed = ka.wait('card:' + HOST, 30) is not None
-        time.sleep(2)
-        log = since(n0)
-        ended = len(re.findall(r'udp control session ended', host_log())) - len(re.findall(r'udp control session ended', h0))
+        # 5 + 6
         if ARM == 'S':
+            n0 = cursor()
+            h0 = host_log()
+            menu('viewerMenuHostsButton')
+            listed = ka.wait('card:' + HOST, 30) is not None
+            time.sleep(2)
+            log = since(n0)
+            ended = len(re.findall(r'udp control session ended', host_log())) - len(re.findall(r'udp control session ended', h0))
             verdict('5 PC 목록: 0.2.32\'s park (park_begin, park_confirmed) -- the PC listed', listed and '[park_begin]' in log
                     and '[park_confirmed]' in log, ' | '.join(re.findall(r'\[park_[a-z_]+\][^\n]*', log))[:300] +
                     f' | host sessions ended since: {ended}')
-        else:
-            verdict('5 (P) PC 목록 in manual mode: 0.2.32 refuses the park and disconnects (park_refused manual=true)',
-                    re.search(r'\[park_refused\][^\n]*manual=true', log) is not None,
-                    ' | '.join(re.findall(r'\[(?:park_[a-z_]+|scene)\][^\n]*', log))[:300])
-        shot('5_list')
-
-        # 6
-        if ARM == 'S':
+            shot('5_list')
             n0 = cursor()
             tap('card:' + HOST)
             m = wait_log(r'\[park_reuse\][^\n]*', n0, 30)
@@ -322,8 +401,15 @@ def main():
                     m.group(0)[:200] if m else ' | '.join(re.findall(r'\[(?:park_[a-z_]+|directory_[a-z_]+)\][^\n]*', since(n0)))[:240])
             pick_desktop('6b the desktop again after the park')
         else:
-            if manual_connect('6a (P) the manual connect again', video_port, control_port):
-                pick_desktop('6b (P) the desktop again')
+            # r2 (Codex: map 1-7 to what the arm's UI really has; no hidden handler, no fake capability)
+            skip_case('5 PC 목록 (park)', 'the manual UI offers no PC 목록: SessionPark.canPark is false in manual mode '
+                      '(b554e76 SessionPark.kt:78), viewerMenuHostsButton GONE -- P-5d below is 연결 해제, not a park')
+            skip_case('6 the parked PC again (resume)', 'nothing is parked in manual mode -- P-6r below is a NEW manual '
+                      'session, not a resume')
+            if p_disconnect():
+                shot('5d_connect_form')
+                if p_reconnect(control_port):
+                    pick_desktop('6r (P) the desktop again')
 
         # 7
         if standby:
@@ -344,6 +430,9 @@ def main():
         else:
             skip_case('7 standby undisturbed', 'run without -WithStandby')
         open(os.path.join(OUT, 'app_final.log'), 'w', encoding='utf-8').write(applog())
+    except Invalid as e:
+        step(f'INVALID  {e} -- nothing of this arm is judged')
+        return 2
     except Exception:
         tb = traceback.format_exc()
         open(os.path.join(OUT, 'avd_traceback.txt'), 'w', encoding='utf-8').write(tb)
