@@ -397,18 +397,47 @@ def main():
                                    ('same-markerlost', marker_lost, 'marker is gone', 'the pick marker is gone from the app log')):
         ok, d = not_same(tag, spoil, want)
         check(f'NEGATIVE 4 r7f(6): {what} after the pick -> "cannot tell" -> FAIL with NO tap', ok, d)
-    # the 30 s watch (3w) uses the same check: a failed read during it is a FAIL, never "held"
+    # The watch has a strict baseline read now. Test that path separately from a failure in its loop.
+    m, p = case('watch-baseline-pullfail', 'ok')
+    m.pick_pinned('3 the pinned window picked')
+    n_taps = len(taps(p))
+    os.environ['OA_FAKE_PULL_FAIL'] = '1'
+    try:
+        okw = m.observe_connection('3w the connection')
+    finally:
+        os.environ['OA_FAKE_PULL_FAIL'] = '0'
+    r = last(m)
+    check('NEGATIVE 3w: the baseline app snapshot fails -> FAIL before the watch, no input', not okw and r[1] is False
+          and 'no current snapshot / pick marker / video out baseline' in r[2] and len(taps(p)) == n_taps, r[2][:200])
+
     for tag, spoil, want, what in (('watch-pullfail', pull_fails, 'no app snapshot', 'the app log pull fails'),
                                    ('watch-hostshrink', host_shrinks, 'shrank', 'the host log shrinks')):
         m, p = case(tag, 'ok')
         m.pick_pinned('3 the pinned window picked')
-        spoil(p)
+        read_snapshot = m.applog_snapshot
+        reads, injected = [], []
+
+        def snapshot_after_initial_gate():
+            # Read 1 is the video-counter baseline; read 2 is same_viewer's initial gate.
+            # Read 3 is its check AFTER the first loop sleep. Inject only there, once.
+            if len(reads) == 2:
+                spoil(p)
+                injected.append(True)
+            result = read_snapshot()
+            reads.append(result[0])
+            return result
+
+        m.applog_snapshot = snapshot_after_initial_gate
         n_taps = len(taps(p))
-        okw = m.observe_connection('3w the connection')
-        os.environ['OA_FAKE_PULL_FAIL'] = '0'
+        try:
+            okw = m.observe_connection('3w the connection')
+        finally:
+            m.applog_snapshot = read_snapshot
+            os.environ['OA_FAKE_PULL_FAIL'] = '0'
         r = last(m)
-        check(f'NEGATIVE 3w r7f(6): {what} during the watch -> FAIL ("cannot tell"), no input', not okw and r[1] is False
-              and want in r[2] and len(taps(p)) == n_taps, r[2][:200])
+        check(f'NEGATIVE 3w: {what} AFTER a good baseline and initial gate -> FAIL in the loop, no input', not okw
+              and r[1] is False and want in r[2] and reads[:2] == [True, True] and len(injected) == 1
+              and len(taps(p)) == n_taps, f'reads={reads} injected={len(injected)} {r[2][:160]}')
     old = os.path.join(RUNS, f'oa_avd_9cec590-{os.getpid()}.py')
     with open(old, 'wb') as f:
         f.write(subprocess.run(['git', '-C', WT, 'show', '9cec590:automation/old_apk_lane/oa_avd.py'], capture_output=True,
