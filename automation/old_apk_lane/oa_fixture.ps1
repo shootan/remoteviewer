@@ -170,6 +170,7 @@ try {
 
   # ---- the hosts, one after another; any failure -- or any child found dead -- stops the rest from starting
   $b = if ($BuildDir) { $BuildDir } else { "$wt\build\apps\native_poc\Release" }
+  if (-not [IO.Path]::IsPathRooted($b)) { throw "the build folder must be an absolute path ($b)" }  # r4
   if ($HarnessCmd.Count -eq 0) {
     $HarnessCmd = @("$b\remote60_mobile_abr_session_e2e_test.exe")
     Say "  harness $((Get-FileHash $HarnessCmd[0]).Hash.ToLower()) test host $((Get-FileHash "$b\GNLinkStreamPinnedSelectTest.exe").Hash.ToLower())"
@@ -211,7 +212,9 @@ try {
   if ($WithStandby) {
     $sdir = "$Root\standby"
     New-Item -ItemType Directory $sdir | Out-Null
-    $hc = if ($HolderCmd.Count) { $HolderCmd } else { @("$b\remote60_ka_standby_holder_tool.exe") }
+    # r4 (verifier oa-s/oa-p 2026-10-29 23:56): @( ) around the if -- an if EXPRESSION goes through the pipeline, so
+    # a one-element array came out as a bare string and $hc[0] was its first letter ('D' -> a relative path)
+    $hc = @(if ($HolderCmd.Count) { $HolderCmd } else { "$b\remote60_ka_standby_holder_tool.exe" })
     $hargv = @($hc | Select-Object -Skip 1) + @('--url', 'http://127.0.0.1:18410', '--host-name', 'oa-pc-a',
       '--account-file', "$Root\fixture_account.txt", '--viewer', "$b\GNLinkViewerKaTest.exe", '--root', $sdir,
       '--stop-file', "$sdir\stop", '--max-sec', "$HostSec")

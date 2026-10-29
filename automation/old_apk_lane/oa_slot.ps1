@@ -43,6 +43,10 @@ foreach ($v in 'HarnessCmd', 'NodeCmd', 'AvdCmd', 'HolderCmd') {
   $cur = @(Get-Variable $v -ValueOnly)
   if ($cur.Count -eq 1) { Set-Variable $v @($cur[0] -split ',') }
 }
+# r4: every path argument absolute -- a relative one would be read against whichever cwd a child happens to have
+foreach ($pv in @(@('Apk', $Apk), @('BuildDir', $BuildDir), @('ServerJs', $ServerJs), @('JobRun', $JobRun))) {
+  if ($pv[1] -and -not [IO.Path]::IsPathRooted($pv[1])) { "FAIL  SETUP slot: -$($pv[0]) must be an absolute path ($($pv[1]))`nRESULT: INVALID"; exit 2 }
+}
 $wt = (Resolve-Path "$PSScriptRoot\..\..").Path
 $e = $PSScriptRoot
 $anchor = "$wt\.claude\oa_runs"

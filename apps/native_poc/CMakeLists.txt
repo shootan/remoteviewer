@@ -768,6 +768,8 @@ target_link_libraries(remote60_ka_standby_holder_tool PRIVATE common ws2_32 wind
 # r3 (Codex codex_old_apk_lane_src_r2.md N2): the holder's exit from its whole end, pure-logic. TEST ONLY.
 add_executable(remote60_ka_standby_holder_verdict_test src/ka_standby_holder_verdict_test.cpp)
 target_include_directories(remote60_ka_standby_holder_verdict_test PRIVATE src)
+# r4: a stand-in holder EXE for the orchestration test's default-path case (no viewer, no network). TEST ONLY.
+add_executable(remote60_oa_stub_holder src/oa_stub_holder_tool.cpp)
 
 # rel-0164 old-APK lane: the verified kill-on-close job runner and its start test, from feat/apk-0.2.33 (de2d60a / 4f04415)
 # as they are -- the AVD bundle runs its fixture in it. TEST TOOLS ONLY.

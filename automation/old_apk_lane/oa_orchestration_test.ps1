@@ -13,14 +13,16 @@ function Check([string]$what, [bool]$ok, [string]$detail = '') {
   $script:checks++; if (-not $ok) { $script:fails++ }
   "$(if ($ok) { 'PASS' } else { 'FAIL' })  $what$(if ($detail) { "  $detail" })"
 }
-function Run-Case([string]$tag, [string]$plan, [hashtable]$extraEnv, [string[]]$slotArgs) {
+function Run-Case([string]$tag, [string]$plan, [hashtable]$extraEnv, [string[]]$slotArgs, [bool]$defaultHolder = $false) {
   $env:KE_STUB_PLAN = $plan
   foreach ($k in $extraEnv.Keys) { Set-Item "env:$k" $extraEnv[$k] }
   $before = @(Get-ChildItem $runs -Directory -ErrorAction SilentlyContinue | ForEach-Object Name)
+  # r4: $defaultHolder -- no -HolderCmd: the fixture runs <BuildDir>\remote60_ka_standby_holder_tool.exe itself
+  $holderArgs = if ($defaultHolder) { @() } else { @('-HolderCmd', "$py,-I,$e\stubs\stub_holder.py") }
   $p = Start-Process -FilePath powershell -ArgumentList (@('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$e\oa_slot.ps1",
     '-Tag', $tag, '-ReadyTimeoutSec', '5', '-FixtureReadyTimeoutSec', '90', '-StopWaitSec', '5',
     '-HarnessCmd', "$py,-I,$e\stubs\stub_harness.py", '-NodeCmd', "$py,-I,$e\stubs\stub_node.py",
-    '-HolderCmd', "$py,-I,$e\stubs\stub_holder.py", '-AvdCmd', "$py,-I,$e\stubs\stub_avd.py") + $slotArgs) `
+    '-AvdCmd', "$py,-I,$e\stubs\stub_avd.py") + $holderArgs + $slotArgs) `
     -PassThru -NoNewWindow -RedirectStandardOutput "$runs\_orch_$tag.out.txt" -RedirectStandardError "$runs\_orch_$tag.err.txt"
   $null = $p.Handle
   $done = $p.WaitForExit(240000)
@@ -40,7 +42,8 @@ function Run-Case([string]$tag, [string]$plan, [hashtable]$extraEnv, [string[]]$
     harnessArgs = Raw 'a\harness_args.txt'
     holderArgs = Raw 'standby\holder_args.txt'
     pidFiles = @(if ($root) { Get-ChildItem $root -Recurse -Filter *.pid -ErrorAction SilentlyContinue })
-    left = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$e\stubs\stub_*" -or $_.CommandLine -like "*oa_fixture.ps1*" }).Count
+    left = @(Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "*$e\stubs\stub_*" -or $_.CommandLine -like "*oa_fixture.ps1*" -or
+      $_.CommandLine -like '*_stubbuild-*remote60_ka_standby_holder_tool.exe*' }).Count
     slot = Raw 'slot.txt'; result = Raw 'fixture_result.txt'; fx = $fx
   }
 }
@@ -80,6 +83,22 @@ Check 'standby dies: no AVD, rc != 0, nothing left' (-not $r.avd -and $r.rc -ne 
 $r = Run-Case 'orch-sb-late' 'a=ok' @{ OA_STUB_HOLDER = 'readydie'; OA_STUB_AVD_SEC = '6' } @('-WithStandby')
 Check 'standby late: the AVD ran and passed, the bundle still fails (rc 3)' ($r.avd -and $r.rc -eq 3 -and
   $r.fx -match 'LATE FAILURE: standby ended' -and $r.left -eq 0) "rc=$($r.rc) left=$($r.left)"
+
+"--- r4: the DEFAULT holder path (no -HolderCmd): <BuildDir>\remote60_ka_standby_holder_tool.exe, one element"
+# a stand-in build folder of this run: the holder is remote60_oa_stub_holder.exe (no viewer, no network) under the
+# real name; the viewer exe is only hashed by the fixture
+$stubBuild = "$runs\_stubbuild-$PID"
+New-Item -ItemType Directory $stubBuild | Out-Null
+$stubExe = "$wt\build\apps\native_poc\Release\remote60_oa_stub_holder.exe"
+Copy-Item $stubExe "$stubBuild\remote60_ka_standby_holder_tool.exe"
+Copy-Item $stubExe "$stubBuild\GNLinkViewerKaTest.exe"
+$r = Run-Case 'orch-sb-default' 'a=ok' @{} @('-WithStandby', '-BuildDir', $stubBuild) $true
+Check 'default holder path: the fixture ran <BuildDir>\remote60_ka_standby_holder_tool.exe (hashed, started, ready), rc 0, nothing left' (
+  $r.avd -and $r.rc -eq 0 -and $r.holderStarted -and $r.fx -match 'standby holder [0-9a-f]{16} viewer [0-9a-f]{16}' -and
+  $r.holderArgs -match [regex]::Escape("--root $($r.root)\standby") -and $r.result -match '  standby exit 0' -and $r.left -eq 0) "rc=$($r.rc) left=$($r.left)"
+"--- r4: a relative -BuildDir is refused before anything starts"
+$r = Run-Case 'orch-relbuild' 'a=ok' @{} @('-WithStandby', '-BuildDir', 'relative\build')
+Check 'relative -BuildDir: refused (exit 2), no fixture started' ($r.rc -eq 2 -and -not $r.hostStarted -and -not $r.avd) "rc=$($r.rc)"
 
 "--- r3 N2: the holder was ready, but its end was not a clean Release (exit 5): the bundle fails"
 $r = Run-Case 'orch-sb-rel5' 'a=ok' @{ OA_STUB_HOLDER = 'release5' } @('-WithStandby')
