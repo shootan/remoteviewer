@@ -1,4 +1,5 @@
 #include "udp_control_channel.hpp"
+#include "client_liveness_trace.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -162,6 +163,14 @@ const char* to_string(ControlCloseReason reason) {
 UdpControlChannel::Stats UdpControlChannel::GetStats() const {
   std::lock_guard<std::mutex> lock(mu_);
   Stats result = stats_;
+  result.txQueued = txQueue_.size();
+  if (!txQueue_.empty()) {
+    result.headSeq = txQueue_.front().seq;
+    result.headAttempts = txQueue_.front().attempts;
+    result.headFirstSendUs = txQueue_.front().firstSendUs;
+    result.headLastSendUs = txQueue_.front().lastSendUs;
+  }
+  result.lastAckedSeq = lastAckedTxSeq_;
   result.pendingMessages = rxPending_.size();
   for (const auto& entry : rxPending_) result.inboundBytes += entry.second.bytes.size();
   for (const auto& bytes : rxReady_) result.inboundBytes += bytes.size();
@@ -235,6 +244,7 @@ bool UdpControlChannel::Send(const void* data, size_t len) {
   msg.fragCount = static_cast<uint16_t>((len + fragBytes_ - 1) / fragBytes_);
   msg.lastSendUs = now_us();
   msg.attempts = 1;
+  REMOTE60_LT(if (txQueue_.empty()) msg.firstSendUs = msg.lastSendUs);
   txQueue_.push_back(std::move(msg));
   ++stats_.messagesSent;
 
@@ -326,9 +336,13 @@ void UdpControlChannel::HandleAck(const UdpControlAckPacket& packet) {
     probeDecidedUs_ = now_us();
     return;
   }
-  if (txQueue_.empty() || txQueue_.front().seq != packet.messageSeq) return;
+  if (txQueue_.empty() || txQueue_.front().seq != packet.messageSeq) {
+    REMOTE60_LT(++stats_.acksIgnored);
+    return;
+  }
 
   if (packet.kind == static_cast<uint16_t>(UdpPacketKind::ControlNack)) {
+    REMOTE60_LT(++stats_.nacksReceived);
     std::vector<uint16_t> missing(packet.missing, packet.missing + packet.missingCount);
     if (!missing.empty()) SendFragments(txQueue_.front(), &missing);
     txQueue_.front().lastSendUs = now_us();
@@ -336,10 +350,15 @@ void UdpControlChannel::HandleAck(const UdpControlAckPacket& packet) {
   }
 
   lastAckedTxSeq_ = packet.messageSeq;
+  REMOTE60_LT({
+    ++stats_.acksAccepted;
+    stats_.lastAckRxUs = now_us();
+  });
   txQueue_.pop_front();
   if (!txQueue_.empty()) {
     txQueue_.front().lastSendUs = now_us();
     txQueue_.front().attempts = 1;
+    REMOTE60_LT(txQueue_.front().firstSendUs = txQueue_.front().lastSendUs);
     SendFragments(txQueue_.front(), nullptr);
   }
 }

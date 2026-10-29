@@ -167,13 +167,13 @@ void AndroidVideoDecoderSink::WorkerMain() {
         for (ANativeWindow* w : release) ANativeWindow_release(w);
       });
       if (surfaceReleasedSeq_ != surfaceApplied_) {
-        surfaceReleasedSeq_ = surfaceApplied_;
+        MarkSurfaceReleasedLocked(surfaceApplied_);
         doneCv_.notify_all();
       }
       continue;
     }
     if (surfaceReleasedSeq_ != surfaceApplied_) {
-      surfaceReleasedSeq_ = surfaceApplied_;
+      MarkSurfaceReleasedLocked(surfaceApplied_);
       doneCv_.notify_all();
     }
     while (!inbox_.empty() && !workerStop_ && surfaceApplied_ == surfaceSeq_ && !CodecResetPendingLocked()) {
@@ -235,19 +235,34 @@ void AndroidVideoDecoderSink::SetTargetFps(uint32_t fps) {
 }
 
 // apk-decoder-liveness r1: the UI hands the Surface's window over and returns -- the codec for it is made by the
-// worker. A detach (null) waits for the worker to have stopped the codec and let go of the old window: the app
-// connects another producer to that surface right after (MainActivity DetachDecoder). Only the UI waits here.
-void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
+// worker. r3 D1: a detach (null) waits for the worker to have stopped the codec and let go of the old window -- at
+// most kDetachDeadlineMs, and not at all when an earlier detach is still pending (never stacked). Only the UI waits.
+int64_t AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
+  constexpr size_t kMaxWindowsToRelease = 4;
   ANativeWindow* window = nullptr;
   if (surface != nullptr) {
     window = ANativeWindow_fromSurface(env, surface);
     if (!window) log_error("failed to acquire ANativeWindow from Surface");
   }
   std::unique_lock<std::mutex> lk(mu_);
+  if (window && (surfaceReleasedSeq_ < lastDetachSeq_ || windowsToRelease_.size() >= kMaxWindowsToRelease)) {
+    // A producer may still be on the old surface (or the worker is behind on letting windows go): no new surface is
+    // taken. The app keeps that surface BLOCKED; this reference was never handed over -- give it back here.
+    char line[160];
+    std::snprintf(line, sizeof(line), "video surface refused: detach pending (released=%llu detach=%llu) toRelease=%zu",
+                  static_cast<unsigned long long>(surfaceReleasedSeq_), static_cast<unsigned long long>(lastDetachSeq_),
+                  windowsToRelease_.size());
+    lk.unlock();
+    log_info(line);
+    ANativeWindow_release(window);
+    return 0;
+  }
+  const bool earlierDetachPending = surfaceReleasedSeq_ < lastDetachSeq_;
   if (requestedWindow_) windowsToRelease_.push_back(requestedWindow_);  // asked for, never applied
   requestedWindow_ = window;
   surfaceRequested_ = window != nullptr;
   const uint64_t seq = ++surfaceSeq_;
+  if (!window) lastDetachSeq_ = seq;
   ++codecResetSeq_;
   EnsureWorkerLocked();
   if (window) {
@@ -260,17 +275,27 @@ void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
   }
   PublishDecodeStateLocked();
   workCv_.notify_all();
-  if (window) return;
+  if (window) return static_cast<int64_t>(seq);
+  if (earlierDetachPending) {
+    lk.unlock();
+    log_info("video surface cleared: an earlier detach is still pending -- not waited for again");
+    return -static_cast<int64_t>(seq);
+  }
   const auto t0 = std::chrono::steady_clock::now();
-  doneCv_.wait(lk, [&] { return surfaceReleasedSeq_ >= seq || workerStop_; });
+  const bool done = doneCv_.wait_for(lk, std::chrono::milliseconds(kDetachDeadlineMs),
+                                     [&] { return surfaceReleasedSeq_ >= seq || workerStop_; }) &&
+                    surfaceReleasedSeq_ >= seq;
+  lk.unlock();
   const auto waitedMs =
       std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
-  if (waitedMs >= 50) {
-    char line[128];
-    std::snprintf(line, sizeof(line), "video surface detach waited ms=%lld (the UI only)",
+  if (!done || waitedMs >= 50) {
+    char line[160];
+    std::snprintf(line, sizeof(line), "video surface detach %s seq=%llu waited ms=%lld (the UI only)",
+                  done ? "done" : "PENDING past the deadline", static_cast<unsigned long long>(seq),
                   static_cast<long long>(waitedMs));
     log_info(line);
   }
+  return done ? static_cast<int64_t>(seq) : -static_cast<int64_t>(seq);
 }
 
 // apk-decoder-liveness r1: the receive thread's part -- the owner, the selection gate, the inbox; then it returns.

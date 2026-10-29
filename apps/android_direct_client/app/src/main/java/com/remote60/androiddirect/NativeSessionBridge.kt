@@ -97,7 +97,10 @@ object NativeSessionBridge {
     external fun nativeDirectoryChosenCandidate(handle: Long): String
 
     external fun nativeDirectoryLastError(handle: Long): String
-    external fun nativeSetSurface(surface: Surface?)
+    // apk-decoder-liveness r3 D1: > 0 done / taken; 0 refused (a detach still pending); < 0 a detach not done within
+    // its deadline (-seq: nativeSurfaceReleasedSeq() reaches seq once it is).
+    external fun nativeSetSurface(surface: Surface?): Long
+    external fun nativeSurfaceReleasedSeq(): Long
 
     /** Called once per frame the view actually latched, which is the only count that
      *  corresponds to what a person sees. Everything else counts frames we handed over. */

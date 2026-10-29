@@ -31,14 +31,24 @@ namespace remote60::android_direct {
 // thread (which also carries the UDP control channel), the session's control thread and the UI hand frames,
 // answers and requests over and return at once; none of them waits for a codec being created, started, stopped or
 // fed. A codec result is applied only if no reset was asked for while it was made (codecResetSeq_).
-// The one wait left is the UI's detach (SetSurface(null)): the app relies on the codec having let go of the
-// surface when it returns (MainActivity DetachDecoder) -- the UI waits for that, never RX or control.
+// The one wait left is the UI's detach (SetSurface(null)): the app connects another producer to that surface only once
+// the codec has let go of it. r3 (Codex design r3 D1): that wait is BOUNDED -- at most kDetachDeadlineMs for one
+// handoff, never stacked: a detach that does not finish in time returns its request as still pending (negative), the
+// app leaves the surface BLOCKED and releases nothing of it, and learns of the late completion from
+// SurfaceReleasedSeq(). While a detach is pending no new surface is taken (SetSurface(non-null) answers 0).
 class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameSink {
  public:
   AndroidVideoDecoderSink() = default;
   ~AndroidVideoDecoderSink() override;
 
-  void SetSurface(JNIEnv* env, jobject surface);
+  // r3 D1. surface != null: the request's seq (> 0), or 0 when refused (a detach is still pending, or too many
+  // windows are still to be let go). surface == null: the request's seq when the codec stopped and the old window was
+  // let go within the deadline; -seq when not (pending: SurfaceReleasedSeq() reaches seq once it is done).
+  int64_t SetSurface(JNIEnv* env, jobject surface);
+  static constexpr int kDetachDeadlineMs = 2000;
+  // Every surface request up to this seq is done: the codec of the old surface stopped and deleted, its window let
+  // go. Lock-free (the UI polls it while a detach is pending).
+  uint64_t SurfaceReleasedSeq() const { return surfaceReleasedAtomic_.load(std::memory_order_acquire); }
 #ifdef REMOTE60_DECODER_TEST_HOOKS
   // TEST BUILD ONLY (the Windows tests against the stand-in NDK; never defined for the APK): true once the worker
   // has taken every frame and request made before this call and finished a whole pass after it.
@@ -307,6 +317,12 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t surfaceSeq_ = 0;
   uint64_t surfaceApplied_ = 0;
   uint64_t surfaceReleasedSeq_ = 0;                  // the codec stopped and the old window let go, up to this request
+  std::atomic<uint64_t> surfaceReleasedAtomic_{0};   // the same, for lock-free readers
+  uint64_t lastDetachSeq_ = 0;                       // the latest SetSurface(null) (under mu_)
+  void MarkSurfaceReleasedLocked(uint64_t seq) {
+    surfaceReleasedSeq_ = seq;
+    surfaceReleasedAtomic_.store(seq, std::memory_order_release);
+  }
   std::vector<ANativeWindow*> windowsToRelease_;     // released by the worker, outside mu_
   // Frames from the receive thread, at most kInboxMaxFrames / kInboxMaxBytes; the oldest goes when full (an IDR
   // that goes is lost: KeyLost, a key asked for; the deltas after a gap are not fed before the next IDR).

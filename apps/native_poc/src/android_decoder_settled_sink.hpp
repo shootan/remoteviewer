@@ -26,9 +26,10 @@ class SettledSink : public AndroidVideoDecoderSink {
     std::exit(2);
   }
 
-  void SetSurface(JNIEnv* env, jobject surface) {
-    Base::SetSurface(env, surface);
+  int64_t SetSurface(JNIEnv* env, jobject surface) {
+    const int64_t r = Base::SetSurface(env, surface);
     Settle();
+    return r;
   }
   void OnEncodedH264Frame(Frame&& frame) override {
     Base::OnEncodedH264Frame(std::move(frame));

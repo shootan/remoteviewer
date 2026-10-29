@@ -2386,14 +2386,22 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         val destroyedId = sharpenPolicy.surfaceId
         val (commands, androidReleases) = sharpenPolicy.surfaceDestroyed()
         // r2 H1: kept per surface id -- a late release of an older surface's renderer frees exactly that one.
-        if (destroyedId != null) {
-            if (androidReleases) sharpenSurfaceTextures.remove(destroyedId) else sharpenAppOwnedSurfaces += destroyedId
-        }
         executeSharpen(commands)
+        // r3 D1: a decoder detach that missed its deadline may still hold this surface: the app releases it, once,
+        // when that detach is done -- never Android now.
+        val decoderHolds = destroyedId != null && sharpenPolicy.decoderHolds(destroyedId)
+        if (decoderHolds) sharpenPolicy.decoderHoldTakesSurfaceTexture()
+        val releasesNow = androidReleases && !decoderHolds
+        if (destroyedId != null) {
+            if (releasesNow) sharpenSurfaceTextures.remove(destroyedId) else sharpenAppOwnedSurfaces += destroyedId
+        }
         surfaceBufferWidth = 0
         surfaceBufferHeight = 0
-        diagnosticsLog.log("viewer_surface_released", "scene=$currentScene destroyed=1 appReleases=${if (androidReleases) 0 else 1}")
-        return androidReleases
+        diagnosticsLog.log(
+            "viewer_surface_released",
+            "scene=$currentScene destroyed=1 appReleases=${if (releasesNow) 0 else 1} decoderHolds=${if (decoderHolds) 1 else 0}"
+        )
+        return releasesNow
     }
 
     override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
@@ -6198,7 +6206,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     }
 
     private fun executeSharpen(commands: List<SharpenPathPolicy.Command>) {
-        for (command in commands) {
+        for ((index, command) in commands.withIndex()) {
             when (command) {
                 SharpenPathPolicy.Command.BindDirect -> {
                     cancelSharpenGate()
@@ -6208,8 +6216,16 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                         continue
                     }
                     val surface = Surface(st)
+                    if (NativeSessionBridge.nativeSetSurface(surface) == 0L) {
+                        // r3 D1: refused -- a decoder detach is still pending. Nothing connected; this Surface was
+                        // never handed over.
+                        surface.release()
+                        diagnosticsLog.log("decoder_attach_refused", "path=direct surface=${sharpenPolicy.surfaceId}")
+                        executeSharpen(sharpenPolicy.decoderAttachRefused())
+                        return
+                    }
                     videoSurface = surface
-                    NativeSessionBridge.nativeSetSurface(surface)
+                    decoderDirectSurfaceId = sharpenPolicy.surfaceId
                     diagnosticsLog.log(
                         "sharpen_path",
                         "path=direct requested=${sharpenPolicy.requested.code} effective=off " +
@@ -6217,11 +6233,30 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     )
                 }
                 SharpenPathPolicy.Command.DetachDecoder -> {
-                    // Synchronous on the native side: the codec is stopped and the window released before
-                    // this returns -- the old producer is gone before any new one connects.
-                    NativeSessionBridge.nativeSetSurface(null)
+                    // r3 D1 (Codex): the native side waits for the codec to stop and its window to be let go -- at
+                    // most its deadline (2 s for this handoff). In time: the old producer is gone, go on. Not in
+                    // time: the decoder may still be a producer -- nothing more of this batch is carried out, no
+                    // Surface is released, the surface is BLOCKED; the late completion is watched for.
+                    val result = NativeSessionBridge.nativeSetSurface(null)
+                    if (result < 0L) {
+                        val seq = -result
+                        videoSurface?.let { decoderHeldSurfaces += it }
+                        videoSurface = null
+                        sharpenInputSurface = null  // the renderer still owns its input; its release is deferred
+                        val onSurface = decoderDirectSurfaceId
+                        decoderDirectSurfaceId = null
+                        val rest = commands.subList(index + 1, commands.size)
+                        diagnosticsLog.log(
+                            "decoder_detach_blocked",
+                            "seq=$seq direct=${onSurface ?: "none"} surface=${sharpenPolicy.surfaceId} notCarriedOut=${rest.size}"
+                        )
+                        executeSharpen(sharpenPolicy.decoderDetachTimedOut(onSurface, rest))
+                        watchDecoderDetach(seq)
+                        return
+                    }
                     videoSurface?.release()
                     videoSurface = null
+                    decoderDirectSurfaceId = null
                     sharpenInputSurface = null  // the renderer owns and releases its input Surface
                 }
                 is SharpenPathPolicy.Command.StartRenderer -> startSharpenRenderer(command.generation, command.strength)
@@ -6229,8 +6264,13 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                     val input = sharpenInputSurface
                     if (input != null && command.generation == sharpenRendererGeneration) {
                         val epochBefore = NativeSessionBridge.nativeCodecEpoch()
+                        if (NativeSessionBridge.nativeSetSurface(input) == 0L) {
+                            // r3 D1: refused -- a decoder detach is still pending: the renderer goes, nothing connects.
+                            diagnosticsLog.log("decoder_attach_refused", "path=sharpen gen=${command.generation}")
+                            executeSharpen(sharpenPolicy.decoderAttachRefused())
+                            return
+                        }
                         armSharpenGate(command.generation, epochBefore)
-                        NativeSessionBridge.nativeSetSurface(input)
                         diagnosticsLog.log(
                             "sharpen_path",
                             "path=sharpen gen=${command.generation} requested=${sharpenPolicy.requested.code} " +
@@ -6284,6 +6324,37 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
                 }
             }
         }
+    }
+
+    // r3 D1: Java Surfaces handed to the decoder whose detach missed its deadline -- released only once the native
+    // side reports it done; the TextureView surface the decoder is writing into directly (null: none / the renderer's).
+    private val decoderHeldSurfaces = ArrayList<Surface>()
+    private var decoderDirectSurfaceId: Long? = null
+    private var decoderDetachWaitSeq = 0L
+    private var decoderDetachWatchSinceMs = 0L
+
+    private fun watchDecoderDetach(seq: Long) {
+        val first = decoderDetachWaitSeq == 0L
+        if (seq > decoderDetachWaitSeq) decoderDetachWaitSeq = seq
+        if (!first) return  // one watcher, for the latest seq
+        decoderDetachWatchSinceMs = SystemClock.elapsedRealtime()
+        val poll = object : Runnable {
+            override fun run() {
+                if (NativeSessionBridge.nativeSurfaceReleasedSeq() < decoderDetachWaitSeq) {
+                    val waited = SystemClock.elapsedRealtime() - decoderDetachWatchSinceMs
+                    sharpenHandler.postDelayed(this, if (waited < 10_000L) 100L else 500L)
+                    return
+                }
+                val waited = SystemClock.elapsedRealtime() - decoderDetachWatchSinceMs
+                for (surface in decoderHeldSurfaces) surface.release()
+                val released = decoderHeldSurfaces.size
+                decoderHeldSurfaces.clear()
+                diagnosticsLog.log("decoder_detach_late_done", "seq=$decoderDetachWaitSeq afterMs=$waited surfacesReleased=$released")
+                decoderDetachWaitSeq = 0L
+                executeSharpen(sharpenPolicy.decoderDetachCompleted())
+            }
+        }
+        sharpenHandler.postDelayed(poll, 100L)
     }
 
     private fun startSharpenRenderer(generation: Long, strength: Float) {

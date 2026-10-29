@@ -216,6 +216,18 @@ class UdpControlChannel {
     uint64_t nacksSent = 0;
     uint64_t pendingMessages = 0;
     uint64_t inboundBytes = 0;
+    // apk-decoder-liveness r3 (Codex D2): the reliable head as it stands -- read by the test-build trace only. The
+    // counters below are kept only with GNLINK_LIVENESS_TRACE (0 otherwise); the head fields are read from the queue.
+    uint64_t txQueued = 0;          // messages not yet acknowledged (the head is in flight)
+    uint32_t headSeq = 0;           // 0: none
+    uint32_t headAttempts = 0;
+    uint64_t headFirstSendUs = 0;   // when the head was first sent (trace builds)
+    uint64_t headLastSendUs = 0;
+    uint32_t lastAckedSeq = 0;
+    uint64_t lastAckRxUs = 0;       // the last ACK that cleared the head (trace builds)
+    uint64_t acksAccepted = 0;      // ACKs that cleared the head (trace builds)
+    uint64_t acksIgnored = 0;       // ACK / NACK datagrams for another seq (trace builds)
+    uint64_t nacksReceived = 0;     // NACKs for the head (trace builds)
   };
   Stats GetStats() const;
 
@@ -226,6 +238,7 @@ class UdpControlChannel {
     uint16_t fragCount = 0;
     uint64_t lastSendUs = 0;
     uint32_t attempts = 0;
+    uint64_t firstSendUs = 0;  // apk-decoder-liveness r3 trace (set only with GNLINK_LIVENESS_TRACE)
   };
 
   struct Inbound {

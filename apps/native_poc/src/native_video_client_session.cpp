@@ -1600,12 +1600,21 @@ std::string ClientSessionController::LivenessTraceLine() {
   std::string line = std::string(kLivenessTraceMarker) + " " + livenessTrace_.Format(now_us());
   if (controlOverUdp_.load(std::memory_order_acquire)) {
     const UdpControlChannel::Stats st = udpControl_.GetStats();
-    char ch[200];
-    std::snprintf(ch, sizeof(ch), " | ch sent=%llu recv=%llu retx=%llu nack=%llu pend=%llu closed=%d reason=%s",
+    const uint64_t now = now_us();
+    auto age = [now](uint64_t t) -> long long {
+      return t == 0 ? -1 : static_cast<long long>((now >= t ? now - t : 0) / 1000);
+    };
+    char ch[400];
+    std::snprintf(ch, sizeof(ch),
+                  " | ch sent=%llu recv=%llu retx=%llu nack=%llu pend=%llu txq=%llu head=%u/%u first=%lldms last=%lldms "
+                  "acked=%u ack=%lldms ackOk=%llu ackIgn=%llu nackRx=%llu closed=%d reason=%s",
                   static_cast<unsigned long long>(st.messagesSent), static_cast<unsigned long long>(st.messagesReceived),
                   static_cast<unsigned long long>(st.fragmentRetransmits), static_cast<unsigned long long>(st.nacksSent),
-                  static_cast<unsigned long long>(st.pendingMessages), udpControl_.IsClosed() ? 1 : 0,
-                  to_string(udpControl_.CloseReason()));
+                  static_cast<unsigned long long>(st.pendingMessages), static_cast<unsigned long long>(st.txQueued),
+                  st.headSeq, st.headAttempts, age(st.headFirstSendUs), age(st.headLastSendUs), st.lastAckedSeq,
+                  age(st.lastAckRxUs), static_cast<unsigned long long>(st.acksAccepted),
+                  static_cast<unsigned long long>(st.acksIgnored), static_cast<unsigned long long>(st.nacksReceived),
+                  udpControl_.IsClosed() ? 1 : 0, to_string(udpControl_.CloseReason()));
     line += ch;
   } else {
     line += " | ch tcp";

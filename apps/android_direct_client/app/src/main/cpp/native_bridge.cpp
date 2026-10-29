@@ -636,10 +636,18 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeDirectoryLastError(
   return to_jstring(env, e ? e->Error() : std::string("no_entry"));
 }
 
-extern "C" JNIEXPORT void JNICALL
+// apk-decoder-liveness r3 D1: see AndroidVideoDecoderSink::SetSurface -- > 0 done / taken, 0 refused, < 0 a detach
+// still pending past its deadline (nativeSurfaceReleasedSeq reaches its seq once done).
+extern "C" JNIEXPORT jlong JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeSetSurface(
     JNIEnv* env, jobject /* this */, jobject surface) {
-  g_video_decoder_sink.SetSurface(env, surface);
+  return static_cast<jlong>(g_video_decoder_sink.SetSurface(env, surface));
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeSurfaceReleasedSeq(
+    JNIEnv* /* env */, jobject /* this */) {
+  return static_cast<jlong>(g_video_decoder_sink.SurfaceReleasedSeq());
 }
 
 extern "C" JNIEXPORT void JNICALL
