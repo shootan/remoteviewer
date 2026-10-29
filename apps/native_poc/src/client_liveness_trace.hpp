@@ -62,6 +62,18 @@ enum class LtPhase : uint32_t {
   WkRead = 13,       // reading the control link (it ticks the channel while it waits)
 };
 
+// apk-decoder-inbox r1 (Codex codex_apk_decoder_inbox_decision_r1.md (3)): EVERY KeyframeRequestState::Request(2)
+// site of the session, by origin -- accepted (queued) or refused by the limiter. keyWantQueued / keyWantRefused below
+// counted only some of them (owed / per-frame / answer), which is why `kq` was not "requests sent".
+enum class LtKeyOrigin : uint32_t {
+  Owed = 0,      // the selection's owed IDR (control loop, 1 s x 8)
+  Held = 1,      // a held (refused) decoder request retried by the control loop
+  Answer = 2,    // the decoder's request right after a selection answer
+  Frame = 3,     // the decoder's request right after a frame (receive thread)
+  Pipeline = 4,  // the assembler's own requestKeyframe callback (a gap it saw)
+  Count = 5,
+};
+
 inline const char* lt_phase_name(uint32_t p) {
   switch (static_cast<LtPhase>(p)) {
     case LtPhase::RxWait: return "wait";
@@ -114,6 +126,26 @@ struct ClientLivenessTrace {
   void Wk(LtPhase p, uint64_t nowUs) {
     wkPhase.store(static_cast<uint32_t>(p), std::memory_order_relaxed);
     wkPhaseSinceUs.store(nowUs, std::memory_order_relaxed);
+  }
+  std::atomic<uint64_t> keyReqAccepted[static_cast<int>(LtKeyOrigin::Count)] = {};
+  std::atomic<uint64_t> keyReqRefused[static_cast<int>(LtKeyOrigin::Count)] = {};
+  void KeyReq(LtKeyOrigin o, bool accepted) {
+    (accepted ? keyReqAccepted : keyReqRefused)[static_cast<int>(o)].fetch_add(1, std::memory_order_relaxed);
+  }
+  // " | kreq owed=a/r held=a/r ans=a/r frame=a/r pipe=a/r" (accepted / refused by the limiter)
+  std::string FormatKeyRequests() const {
+    char b[200];
+    auto a = [this](LtKeyOrigin o) {
+      return static_cast<unsigned long long>(keyReqAccepted[static_cast<int>(o)].load(std::memory_order_relaxed));
+    };
+    auto r = [this](LtKeyOrigin o) {
+      return static_cast<unsigned long long>(keyReqRefused[static_cast<int>(o)].load(std::memory_order_relaxed));
+    };
+    std::snprintf(b, sizeof(b), " | kreq owed=%llu/%llu held=%llu/%llu ans=%llu/%llu frame=%llu/%llu pipe=%llu/%llu",
+                  a(LtKeyOrigin::Owed), r(LtKeyOrigin::Owed), a(LtKeyOrigin::Held), r(LtKeyOrigin::Held),
+                  a(LtKeyOrigin::Answer), r(LtKeyOrigin::Answer), a(LtKeyOrigin::Frame), r(LtKeyOrigin::Frame),
+                  a(LtKeyOrigin::Pipeline), r(LtKeyOrigin::Pipeline));
+    return b;
   }
   void MaxDeliver(uint64_t us) {
     uint64_t cur = rxDeliverMaxUs.load(std::memory_order_relaxed);

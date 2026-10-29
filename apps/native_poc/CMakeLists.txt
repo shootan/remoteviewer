@@ -1157,6 +1157,20 @@ target_include_directories(remote60_android_decoder_liveness_test PRIVATE
 )
 target_compile_definitions(remote60_android_decoder_liveness_test PRIVATE NOMINMAX)
 
+# apk-decoder-inbox r1 (Codex codex_apk_decoder_inbox_decision_r1.md (3)): the inbox / recovery-want contrasts against
+# the stand-in NDK -- the design's criteria; at ac587dd the baseline (expected FAILs). TEST ONLY.
+add_executable(remote60_android_decoder_inbox_test
+  src/android_decoder_inbox_test.cpp
+  src/test_fake_ndk/fake_ndk.cpp
+  ${REMOTE60_LIVENESS_SINK_DIR}/android_video_decoder.cpp
+)
+target_include_directories(remote60_android_decoder_inbox_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
+  ${REMOTE60_LIVENESS_SINK_DIR}
+  src
+)
+target_compile_definitions(remote60_android_decoder_inbox_test PRIVATE NOMINMAX)
+
 # apk-decoder-liveness r1 contrast 2: the product receive loop (VideoReceiveMain, which carries the UDP control
 # channel) delivering into the APK sink while its codec is held; a fake host over loopback with its own control
 # channel. TEST ONLY. The same REMOTE60_LIVENESS_SINK_DIR choice as above.

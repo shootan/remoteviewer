@@ -934,13 +934,16 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       }
       constexpr uint32_t kOwedKeyMaxAttempts = 8;
       constexpr uint64_t kOwedKeyRetryUs = 1000000;
-      if (owed != 0 && owedAttempts_ < kOwedKeyMaxAttempts && loopNowUs >= owedNextUs_ &&
-          keyframeRequests_.Request(2, loopNowUs).queued) {
-        ++owedAttempts_;
-        owedNextUs_ = loopNowUs + kOwedKeyRetryUs;
-        REMOTE60_LT(livenessTrace_.keyWantQueued.fetch_add(1, std::memory_order_relaxed));
-        std::fprintf(stderr, "[native-video-client-session] keyframe owed to selection %llu: asked (%u)\n",
-                     static_cast<unsigned long long>(owed), owedAttempts_);
+      if (owed != 0 && owedAttempts_ < kOwedKeyMaxAttempts && loopNowUs >= owedNextUs_) {
+        const bool queued = keyframeRequests_.Request(2, loopNowUs).queued;
+        REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Owed, queued));  // apk-decoder-inbox r1
+        if (queued) {
+          ++owedAttempts_;
+          owedNextUs_ = loopNowUs + kOwedKeyRetryUs;
+          REMOTE60_LT(livenessTrace_.keyWantQueued.fetch_add(1, std::memory_order_relaxed));
+          std::fprintf(stderr, "[native-video-client-session] keyframe owed to selection %llu: asked (%u)\n",
+                       static_cast<unsigned long long>(owed), owedAttempts_);
+        }
       }
     }
     REMOTE60_LT({
@@ -948,10 +951,13 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       livenessTrace_.owedAttempts.store(owedAttempts_, std::memory_order_relaxed);
       livenessTrace_.owedNextUs.store(owedNextUs_, std::memory_order_relaxed);
     });
-    if (!parking && decoderRekeyPending_.load(std::memory_order_acquire) &&
-        keyframeRequests_.Request(2, loopNowUs).queued) {
-      decoderRekeyPending_.store(false, std::memory_order_release);
-      std::fprintf(stderr, "[native-video-client-session] held keyframe request queued\n");
+    if (!parking && decoderRekeyPending_.load(std::memory_order_acquire)) {
+      const bool queued = keyframeRequests_.Request(2, loopNowUs).queued;
+      REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Held, queued));  // apk-decoder-inbox r1
+      if (queued) {
+        decoderRekeyPending_.store(false, std::memory_order_release);
+        std::fprintf(stderr, "[native-video-client-session] held keyframe request queued\n");
+      }
     }
     bool haveAction = false;
     {
@@ -1144,8 +1150,12 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
             encodedFrameSink_->OnWindowSelectionControlResultFor(answer, action.selectionTag);
             // r3 M1: the answer itself may owe the decoder an IDR (its own arrived first and was
             // dropped). Queued now, not at the next frame.
-            if (encodedFrameSink_->ConsumeDecoderKeyframeRequest() &&
-                !keyframeRequests_.Request(2, now_us()).queued) {
+            bool answerQueued = true;
+            if (encodedFrameSink_->ConsumeDecoderKeyframeRequest()) {
+              answerQueued = keyframeRequests_.Request(2, now_us()).queued;
+              REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Answer, answerQueued));  // apk-decoder-inbox r1
+            }
+            if (!answerQueued) {
               decoderRekeyPending_.store(true, std::memory_order_release);
               std::fprintf(stderr, "[native-video-client-session] keyframe request after the select answer held by the limiter\n");
             }
@@ -1401,7 +1411,9 @@ void ClientSessionController::VideoReceiveMain() {
     // rather than letting every later delta decode against a reference that never arrived.
     if (currentSink->ConsumeDecoderKeyframeRequest()) {
       // r3 M1: refused by the limiter is not forgotten -- the control loop retries it.
-      if (!keyframeRequests_.Request(2, now_us()).queued) {
+      const bool frameQueued = keyframeRequests_.Request(2, now_us()).queued;
+      REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Frame, frameQueued));  // apk-decoder-inbox r1
+      if (!frameQueued) {
         decoderRekeyPending_.store(true, std::memory_order_release);
         REMOTE60_LT(livenessTrace_.keyWantRefused.fetch_add(1, std::memory_order_relaxed));
       } else {
@@ -1412,7 +1424,9 @@ void ClientSessionController::VideoReceiveMain() {
   };
   callbacks.requestKeyframe = [&]() {
     // KeyframeRequestState owns the time/token limiter, so repeated gaps cannot make an IDR storm.
-    (void)keyframeRequests_.Request(2, now_us());
+    const bool pipeQueued = keyframeRequests_.Request(2, now_us()).queued;
+    REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Pipeline, pipeQueued));  // apk-decoder-inbox r1
+    (void)pipeQueued;
   };
   callbacks.discontinuity = [&]() {
     if (currentSink) currentSink->OnVideoDiscontinuity();
@@ -1597,19 +1611,23 @@ void ClientSessionController::VideoReceiveMain() {
 
 std::string ClientSessionController::LivenessTraceLine() {
 #ifdef GNLINK_LIVENESS_TRACE
-  std::string line = std::string(kLivenessTraceMarker) + " " + livenessTrace_.Format(now_us());
+  std::string line = std::string(kLivenessTraceMarker) + " " + livenessTrace_.Format(now_us()) +
+                     livenessTrace_.FormatKeyRequests();  // apk-decoder-inbox r1
   if (controlOverUdp_.load(std::memory_order_acquire)) {
     const UdpControlChannel::Stats st = udpControl_.GetStats();
     const uint64_t now = now_us();
     auto age = [now](uint64_t t) -> long long {
       return t == 0 ? -1 : static_cast<long long>((now >= t ? now - t : 0) / 1000);
     };
-    char ch[400];
+    char ch[480];
     std::snprintf(ch, sizeof(ch),
-                  " | ch sent=%llu recv=%llu retx=%llu nack=%llu pend=%llu txq=%llu head=%u/%u first=%lldms last=%lldms "
-                  "acked=%u ack=%lldms ackOk=%llu ackIgn=%llu nackRx=%llu closed=%d reason=%s",
+                  // apk-decoder-inbox r1: labels as they are -- fragRetx = selective fragment retries only, headResend =
+                  // Tick's timeout resends of the head, rxPend = incomplete inbound messages (not the tx queue)
+                  " | ch sent=%llu recv=%llu fragRetx=%llu headResend=%llu nack=%llu rxPend=%llu txq=%llu head=%u/%u "
+                  "first=%lldms last=%lldms acked=%u ack=%lldms ackOk=%llu ackIgn=%llu nackRx=%llu closed=%d reason=%s",
                   static_cast<unsigned long long>(st.messagesSent), static_cast<unsigned long long>(st.messagesReceived),
-                  static_cast<unsigned long long>(st.fragmentRetransmits), static_cast<unsigned long long>(st.nacksSent),
+                  static_cast<unsigned long long>(st.fragmentRetransmits),
+                  static_cast<unsigned long long>(st.headTimeoutResends), static_cast<unsigned long long>(st.nacksSent),
                   static_cast<unsigned long long>(st.pendingMessages), static_cast<unsigned long long>(st.txQueued),
                   st.headSeq, st.headAttempts, age(st.headFirstSendUs), age(st.headLastSendUs), st.lastAckedSeq,
                   age(st.lastAckRxUs), static_cast<unsigned long long>(st.acksAccepted),

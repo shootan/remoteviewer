@@ -228,6 +228,9 @@ class UdpControlChannel {
     uint64_t acksAccepted = 0;      // ACKs that cleared the head (trace builds)
     uint64_t acksIgnored = 0;       // ACK / NACK datagrams for another seq (trace builds)
     uint64_t nacksReceived = 0;     // NACKs for the head (trace builds)
+    // apk-decoder-inbox r1: Tick's TIMEOUT resend of the whole head (trace builds). fragmentRetransmits above counts
+    // only selective fragment retries (a NACK's missing list) -- a head resent on timeout was never in it.
+    uint64_t headTimeoutResends = 0;
   };
   Stats GetStats() const;
 

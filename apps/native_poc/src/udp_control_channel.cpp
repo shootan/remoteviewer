@@ -459,6 +459,7 @@ void UdpControlChannel::Tick() {
         return;
       }
       head.lastSendUs = now;
+      REMOTE60_LT(++stats_.headTimeoutResends);  // apk-decoder-inbox r1
       SendFragments(head, nullptr);
     }
   }

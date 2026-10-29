@@ -165,7 +165,7 @@ void AndroidVideoDecoderSink::WorkerMain() {
     if (!windowsToRelease_.empty()) {
       std::vector<ANativeWindow*> release;
       release.swap(windowsToRelease_);
-      CodecCall([&] {
+      CodecCall(kApiWindowRelease, [&] {
         for (ANativeWindow* w : release) ANativeWindow_release(w);
       });
       if (surfaceReleasedSeq_ != surfaceApplied_) {
@@ -178,12 +178,21 @@ void AndroidVideoDecoderSink::WorkerMain() {
       MarkSurfaceReleasedLocked(surfaceApplied_);
       doneCv_.notify_all();
     }
+    REMOTE60_LT(ltPassFrames_ = 0; ltPassStartUs_ = LtNowUs());
     while (!inbox_.empty() && !workerStop_ && surfaceApplied_ == surfaceSeq_ && !CodecResetPendingLocked()) {
       InboxFrame item = std::move(inbox_.front());
       inbox_.pop_front();
       inboxBytes_ -= std::min(inboxBytes_, item.frame.payload.size());
+      REMOTE60_LT({
+        ++ltPassFrames_;
+        if (item.enqueueUs) LtAge(ltAgePop_, LtNowUs() - item.enqueueUs);
+      });
       ProcessFrameLocked(std::move(item));
     }
+    REMOTE60_LT(if (ltPassFrames_) {
+      LtMax(ltPassFramesMax_, ltPassFrames_);
+      LtMax(ltPassServiceMaxUs_, LtNowUs() - ltPassStartUs_);
+    });
     if (surfaceApplied_ != surfaceSeq_ || CodecResetPendingLocked()) continue;
     RetryCodecLocked();  // r4 N3
     if (surfaceApplied_ != surfaceSeq_ || CodecResetPendingLocked()) continue;
@@ -312,7 +321,20 @@ int64_t AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
 // apk-decoder-liveness r1: the receive thread's part -- the owner, the selection gate, the inbox; then it returns.
 // Nothing here touches the codec or waits for the worker.
 void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::native_poc::UdpH264AssembledFrame&& frame) {
+#ifdef GNLINK_LIVENESS_TRACE
+  // apk-decoder-inbox r1: the receive thread's wait for the state lock and how long it holds it (trace builds)
+  const uint64_t ltWait0 = LtNowUs();
+  struct LtHold {
+    AndroidVideoDecoderSink* s;
+    uint64_t t0 = 0;
+    ~LtHold() { LtMax(s->ltRxLockHoldMaxUs_, LtNowUs() - t0); }
+  } ltHold{this};
+#endif
   LockedState lock(this);
+  REMOTE60_LT({
+    ltHold.t0 = LtNowUs();
+    LtMax(ltRxLockWaitMaxUs_, ltHold.t0 - ltWait0);
+  });
   if (!OwnerLocked(token)) return;
   EnsureWorkerLocked();
 
@@ -343,7 +365,7 @@ void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::nat
     if (isKeyFrame) gate_.KeyLost(frame.header.streamGeneration);
     ++inboxOversizeDrops_;
     inboxGap_ = true;
-    decoderKeyframeRequest_ = true;
+    NoteKeyWantLocked(kWantOversize);
     char line[192];
     std::snprintf(line, sizeof(line), "decoder inbox: frame over the cap refused bytes=%zu cap=%zu key=%u refused=%llu",
                   frame.payload.size(), kInboxMaxBytes, isKeyFrame ? 1u : 0u,
@@ -357,8 +379,13 @@ void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::nat
                   latestInputStreamGeneration_ != frame.header.streamGeneration;
   latestInputStreamGeneration_ = frame.header.streamGeneration;
   inboxBytes_ += frame.payload.size();
+  REMOTE60_LT(item.enqueueUs = LtNowUs());
   item.frame = std::move(frame);
   inbox_.push_back(std::move(item));
+  REMOTE60_LT({
+    LtMax(ltInboxHwFrames_, inbox_.size());
+    LtMax(ltInboxHwBytes_, inboxBytes_);
+  });
   // Bounded: the oldest goes. Its loss is the codec's loss -- an IDR is owed again and asked for, and the deltas
   // after the gap are not fed before the next IDR (ProcessFrameLocked). r4 N2: no exception for the last frame --
   // the frame just added is within the cap by itself, so this stops with it in the inbox and the total <= the cap.
@@ -369,7 +396,7 @@ void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::nat
     inbox_.pop_front();
     ++inboxDrops_;
     inboxGap_ = true;
-    decoderKeyframeRequest_ = true;
+    NoteKeyWantLocked(kWantInboxOverflow);
     if ((inboxDrops_ % 30u) == 1u) {
       char line[160];
       std::snprintf(line, sizeof(line), "decoder inbox full: oldest frame dropped drops=%llu",
@@ -382,13 +409,14 @@ void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::nat
 
 // The worker's part of a frame (what the receive thread did here before r1), in arrival order.
 void AndroidVideoDecoderSink::ProcessFrameLocked(InboxFrame&& item) {
+  REMOTE60_LT(ltCurEnqueueUs_ = item.enqueueUs);  // its age when it is queued into the codec (directly from here)
   remote60::native_poc::UdpH264AssembledFrame frame = std::move(item.frame);
   const bool isKeyFrame = (frame.header.flags & 1u) != 0;
   if (item.resetPts) ResetPtsStateLocked();
   if (inboxGap_) {
     if (!isKeyFrame) {
       ++inboxGapDrops_;
-      decoderKeyframeRequest_ = true;
+      NoteKeyWantLocked(kWantGapDelta);
       return;
     }
     inboxGap_ = false;
@@ -412,7 +440,7 @@ void AndroidVideoDecoderSink::ProcessFrameLocked(InboxFrame&& item) {
   // (the session's limiter paces the asks); the IDR then starts this instance like any other.
   if (codecAwaitsKey_ && !isKeyFrame) {
     ++deltaBeforeKeyDrops_;
-    decoderKeyframeRequest_ = true;
+    NoteKeyWantLocked(kWantAwaitKey);
     if ((deltaBeforeKeyDrops_ % 30u) == 1u) {
       char line[160];
       std::snprintf(line, sizeof(line), "delta before the codec's first IDR dropped streamGen=%llu drops=%llu",
@@ -430,7 +458,7 @@ void AndroidVideoDecoderSink::ProcessFrameLocked(InboxFrame&& item) {
   pendingFrame_.Offer(std::move(frame), gate_, [this](remote60::native_poc::UdpH264AssembledFrame& f) {
     return TryQueueFrameLocked(f);
   }, &keyRequest);
-  if (keyRequest) decoderKeyframeRequest_ = true;
+  if (keyRequest) NoteKeyWantLocked(kWantPendingSlot);
   if (pendingFrame_.has()) {
     pendingFrameCount_ = 1;
     if (!hadPending) pendingFrameQueueRetryCount_ = 0;
@@ -831,7 +859,7 @@ bool AndroidVideoDecoderSink::AbortWindowSelectionAs(uint64_t token) {
   // applies). Inside the transition's grace only; the app pauses the stream before it aborts, so then
   // nothing is measured anyway.
   StartGraceLocked(false);
-  decoderKeyframeRequest_ = true;
+  NoteKeyWantLocked(kWantSelectionAbort);
   log_info("selection aborted");
   return true;
 }
@@ -896,6 +924,12 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " codecRetries=" + std::to_string(codecAutoRetries_);       // r4 N3
   status += " queueVoided=" + std::to_string(queueVoided_);             // r4 N1
   status += " inboxRefused=" + std::to_string(inboxOversizeDrops_);     // r4 N2
+  // apk-decoder-inbox r1: how often the decoder set its key-request want, by cause (a want is consumed by the
+  // session per frame / answer; it is not a request sent)
+  status += " keyWant=ovs:" + std::to_string(keyWant_[kWantOversize]) + ",ovf:" + std::to_string(keyWant_[kWantInboxOverflow]) +
+            ",gap:" + std::to_string(keyWant_[kWantGapDelta]) + ",await:" + std::to_string(keyWant_[kWantAwaitKey]) +
+            ",pend:" + std::to_string(keyWant_[kWantPendingSlot]) + ",abort:" + std::to_string(keyWant_[kWantSelectionAbort]) +
+            ",up:" + std::to_string(keyWant_[kWantCodecUp]);
   return status;
 }
 
@@ -911,7 +945,44 @@ std::string AndroidVideoDecoderSink::LivenessTraceLine() const {
                 age(ltCodecCallSinceUs_.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(ltWorkerTid_.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(ltInbox_.load(std::memory_order_relaxed)));
-  return line;
+  // apk-decoder-inbox r1: maxima since the start (never reset), and age histograms (ms: <50 <100 <250 <500 <1000 >=)
+  auto hist = [](const LtAgeHist& h) {
+    char b[120];
+    std::snprintf(b, sizeof(b), "max=%llums n=%llu h=%llu/%llu/%llu/%llu/%llu/%llu",
+                  static_cast<unsigned long long>(h.maxUs.load(std::memory_order_relaxed) / 1000),
+                  static_cast<unsigned long long>(h.count.load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(h.bucket[0].load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(h.bucket[1].load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(h.bucket[2].load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(h.bucket[3].load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(h.bucket[4].load(std::memory_order_relaxed)),
+                  static_cast<unsigned long long>(h.bucket[5].load(std::memory_order_relaxed)));
+    return std::string(b);
+  };
+  std::string out = line;
+  char more[256];
+  std::snprintf(more, sizeof(more), " | inboxHw=%llu/%lluB passFramesMax=%llu passSvcMax=%llums rxLockWaitMax=%llums "
+                "rxLockHoldMax=%llums",
+                static_cast<unsigned long long>(ltInboxHwFrames_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(ltInboxHwBytes_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(ltPassFramesMax_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(ltPassServiceMaxUs_.load(std::memory_order_relaxed) / 1000),
+                static_cast<unsigned long long>(ltRxLockWaitMaxUs_.load(std::memory_order_relaxed) / 1000),
+                static_cast<unsigned long long>(ltRxLockHoldMaxUs_.load(std::memory_order_relaxed) / 1000));
+  out += more;
+  out += " | agePop " + hist(ltAgePop_) + " | ageQueue " + hist(ltAgeQueue_) + " | api";
+  static const char* kApiNames[kApiKinds] = {"other", "create", "stopDel", "name", "deqIn", "queueIn",
+                                             "fmt", "release", "deqOut", "winRel"};
+  for (int k = 0; k < kApiKinds; ++k) {
+    const uint64_t n = ltApiCount_[k].load(std::memory_order_relaxed);
+    if (n == 0) continue;
+    char a[80];
+    std::snprintf(a, sizeof(a), " %s=%llu/%llums/%llums", kApiNames[k], static_cast<unsigned long long>(n),
+                  static_cast<unsigned long long>(ltApiTotalUs_[k].load(std::memory_order_relaxed) / n / 1000),
+                  static_cast<unsigned long long>(ltApiMaxUs_[k].load(std::memory_order_relaxed) / 1000));
+    out += a;  // count / mean / max
+  }
+  return out;
 #else
   return std::string();
 #endif
@@ -969,7 +1040,7 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height,
   const std::vector<uint8_t> csd1 = csd1_;
   codecState_ = "creating";
   const char* failed = nullptr;
-  AMediaCodec* codec = CodecCall([&]() -> AMediaCodec* {
+  AMediaCodec* codec = CodecCall(kApiCreate, [&]() -> AMediaCodec* {
     AMediaCodec* c = AMediaCodec_createDecoderByType(kMimeTypeAvc);
     if (!c) {
       failed = "AMediaCodec_createDecoderByType(video/avc) failed";
@@ -1027,7 +1098,7 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height,
   }
   if (resetSeq != codecResetSeq_ || window != window_ || workerStop_) {
     // Made for a surface / owner / selection that is gone: never used.
-    CodecCall([&] {
+    CodecCall(kApiStopDelete, [&] {
       AMediaCodec_stop(codec);
       AMediaCodec_delete(codec);
     });
@@ -1043,7 +1114,7 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height,
     // r4 N3: a codec made after a failure can take an IDR again -- an owed one is asked for afresh (Rearm: a new
     // token, the session's same bounded asks); r5: whichever path made it.
     gate_.Rearm();
-    decoderKeyframeRequest_ = true;
+    NoteKeyWantLocked(kWantCodecUp);
     char rline[160];
     std::snprintf(rline, sizeof(rline), "codec made on retry %u after a failure: an owed IDR is asked for afresh (token=%llu)",
                   codecAutoRetries_, static_cast<unsigned long long>(gate_.OwedToken()));
@@ -1067,7 +1138,7 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height,
   outputWidth_ = width;
   outputHeight_ = height;
   char line[224];
-  std::string name = CodecCall([&] {
+  std::string name = CodecCall(kApiName, [&] {
     char* codecName = nullptr;
     std::string n = "?";
     if (AMediaCodec_getName(codec, &codecName) == AMEDIA_OK && codecName) {
@@ -1168,7 +1239,7 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
 
   size_t inputBufferSize = 0;
   uint8_t* inputBuffer = nullptr;
-  const ssize_t inputIndex = CodecCall([&]() -> ssize_t {
+  const ssize_t inputIndex = CodecCall(kApiDequeueIn, [&]() -> ssize_t {
     const ssize_t index = AMediaCodec_dequeueInputBuffer(codec, 0);
     if (index >= 0) inputBuffer = AMediaCodec_getInputBuffer(codec, static_cast<size_t>(index), &inputBufferSize);
     return index;
@@ -1203,7 +1274,7 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
   }
 
   const int64_t ptsUs = static_cast<int64_t>(ComputeQueuedPtsUsLocked(frame));
-  const media_status_t queued = CodecCall([&] {
+  const media_status_t queued = CodecCall(kApiQueueIn, [&] {
     std::memcpy(inputBuffer, frame.payload.data(), frame.payload.size());
     return AMediaCodec_queueInputBuffer(codec, static_cast<size_t>(inputIndex), 0,
                                         static_cast<size_t>(frame.payload.size()), ptsUs, 0);
@@ -1231,6 +1302,10 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
   if (queueingReplay_) RememberReplayPtsLocked(ptsUs);
   lastInputQueueSteadyUs_ = steady_now_us();
   if (isKey) codecAwaitsKey_ = false;  // keepalive r5 D1: this instance has its IDR
+  REMOTE60_LT(if (ltCurEnqueueUs_) {
+    LtAge(ltAgeQueue_, LtNowUs() - ltCurEnqueueUs_);
+    ltCurEnqueueUs_ = 0;  // a held frame queued later has no enqueue time here: not counted
+  });
   if ((frame.header.flags & 1u) != 0 && gate_.pending() != 0 &&
       readySelectionGeneration_ != gate_.pending()) {
     bootstrapFrame_ = frame;
@@ -1299,7 +1374,7 @@ void AndroidVideoDecoderSink::ResetCodecLocked() {
     AMediaCodec* const codec = codec_;
     codec_ = nullptr;
     codecState_ = "none";
-    CodecCall([&] {
+    CodecCall(kApiStopDelete, [&] {
       AMediaCodec_stop(codec);
       AMediaCodec_delete(codec);
     });
@@ -1349,7 +1424,7 @@ void AndroidVideoDecoderSink::UpdateOutputFormatLocked() {
   if (!codec_) return;
 
   AMediaCodec* const codec = codec_;
-  AMediaFormat* format = CodecCall([&] { return AMediaCodec_getOutputFormat(codec); });
+  AMediaFormat* format = CodecCall(kApiFormat, [&] { return AMediaCodec_getOutputFormat(codec); });
   if (!format) return;
 
   // The coded (buffer) size, then the visible part of it. viewer-sharpness r1 A: Codec2 decoders report the
@@ -1448,10 +1523,10 @@ void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
   if (heldOutputScheduled_) {
     // NDK timestamps use CLOCK_MONOTONIC, the same domain as steady_clock on Android.
     const int64_t atNs = static_cast<int64_t>(heldOutputPresentUs_ * 1000ULL);
-    status = CodecCall([&] { return AMediaCodec_releaseOutputBufferAtTime(codec, index, atNs); });
+    status = CodecCall(kApiRelease, [&] { return AMediaCodec_releaseOutputBufferAtTime(codec, index, atNs); });
     ++presentScheduledCount_;
   } else {
-    status = CodecCall([&] { return AMediaCodec_releaseOutputBuffer(codec, index, true); });
+    status = CodecCall(kApiRelease, [&] { return AMediaCodec_releaseOutputBuffer(codec, index, true); });
     ++presentImmediateCount_;
   }
   if (status != AMEDIA_OK) {
@@ -1540,7 +1615,7 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
   for (;;) {
     if (!codec_ || CodecResetPendingLocked()) return;  // r1: the codec is about to go
     AMediaCodec* const codec = codec_;
-    const ssize_t outputIndex = CodecCall([&] { return AMediaCodec_dequeueOutputBuffer(codec, &info, 0); });
+    const ssize_t outputIndex = CodecCall(kApiDequeueOut, [&] { return AMediaCodec_dequeueOutputBuffer(codec, &info, 0); });
     lastOutputDequeue_ = static_cast<int64_t>(outputIndex);
     if (CodecResetPendingLocked()) return;
     if (outputIndex >= 0) {

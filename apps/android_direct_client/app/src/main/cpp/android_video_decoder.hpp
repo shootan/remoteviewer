@@ -201,6 +201,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   struct InboxFrame {
     remote60::native_poc::UdpH264AssembledFrame frame;
     bool resetPts = false;  // the receive side saw the stream generation change (the old ResetPtsStateLocked rule)
+    uint64_t enqueueUs = 0;  // apk-decoder-inbox r1: set only in test builds (GNLINK_LIVENESS_TRACE)
   };
   void EnsureWorkerLocked();
   void WorkerMain();
@@ -210,20 +211,38 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void ProcessFrameLocked(InboxFrame&& item);
   bool CodecResetPendingLocked() const { return codecResetApplied_ != codecResetSeq_; }
   // Runs f -- codec / window work -- with mu_ released when called on the worker; inline otherwise (the
-  // destructor, after the worker has ended).
+  // destructor, after the worker has ended). apk-decoder-inbox r1: `kind` says which codec API it is, for the
+  // test-build latency per kind (count / total / max of the call itself, mu_ released).
+  enum ApiKind : int {
+    kApiOther = 0, kApiCreate, kApiStopDelete, kApiName, kApiDequeueIn, kApiQueueIn, kApiFormat, kApiRelease,
+    kApiDequeueOut, kApiWindowRelease, kApiKinds
+  };
   template <class F>
   decltype(auto) CodecCall(F&& f) {
+    return CodecCall(kApiOther, std::forward<F>(f));
+  }
+  template <class F>
+  decltype(auto) CodecCall(int kind, F&& f) {
     if (workerLock_ == nullptr || std::this_thread::get_id() != workerId_) return f();
     REMOTE60_LT(ltCodecCallSinceUs_.store(LtNowUs(), std::memory_order_relaxed));
     workerLock_->unlock();
     struct Relock {
       std::unique_lock<std::mutex>* l;
       std::atomic<uint64_t>* since;
+      AndroidVideoDecoderSink* s;
+      int kind;
       ~Relock() {
-        REMOTE60_LT(since->store(0, std::memory_order_relaxed));
+        REMOTE60_LT({
+          const uint64_t t0 = since->load(std::memory_order_relaxed);
+          const uint64_t d = t0 ? LtNowUs() - t0 : 0;
+          s->ltApiCount_[kind].fetch_add(1, std::memory_order_relaxed);
+          s->ltApiTotalUs_[kind].fetch_add(d, std::memory_order_relaxed);
+          LtMax(s->ltApiMaxUs_[kind], d);
+          since->store(0, std::memory_order_relaxed);
+        });
         l->lock();
       }
-    } relock{workerLock_, &ltCodecCallSinceUs_};
+    } relock{workerLock_, &ltCodecCallSinceUs_, this, kind};
     return f();
   }
 
@@ -379,6 +398,41 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
                                      .count());
   }
   std::atomic<uint64_t> ltCodecCallSinceUs_{0};
+  // apk-decoder-inbox r1 (Codex codex_apk_decoder_inbox_decision_r1.md (3)), written only with GNLINK_LIVENESS_TRACE:
+  // the inbox's high-water, the age of a frame when the worker takes it and when it goes into the codec, how much a
+  // worker pass takes from the inbox and how long that takes, the receive thread's wait for / hold of mu_, and each
+  // codec API call's own time by kind. Maxima since the start.
+  static void LtMax(std::atomic<uint64_t>& a, uint64_t v) {
+    uint64_t cur = a.load(std::memory_order_relaxed);
+    while (v > cur && !a.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {
+    }
+  }
+  struct LtAgeHist {
+    std::atomic<uint64_t> maxUs{0};
+    std::atomic<uint64_t> count{0};
+    std::atomic<uint64_t> bucket[6] = {};  // ms: <50 <100 <250 <500 <1000 >=1000
+  };
+  static void LtAge(LtAgeHist& h, uint64_t us) {
+    LtMax(h.maxUs, us);
+    h.count.fetch_add(1, std::memory_order_relaxed);
+    const uint64_t ms = us / 1000;
+    const int b = ms < 50 ? 0 : ms < 100 ? 1 : ms < 250 ? 2 : ms < 500 ? 3 : ms < 1000 ? 4 : 5;
+    h.bucket[b].fetch_add(1, std::memory_order_relaxed);
+  }
+  std::atomic<uint64_t> ltInboxHwFrames_{0};
+  std::atomic<uint64_t> ltInboxHwBytes_{0};
+  std::atomic<uint64_t> ltPassFramesMax_{0};
+  std::atomic<uint64_t> ltPassServiceMaxUs_{0};
+  std::atomic<uint64_t> ltRxLockWaitMaxUs_{0};
+  std::atomic<uint64_t> ltRxLockHoldMaxUs_{0};
+  uint64_t ltPassFrames_ = 0;    // the worker's own (under mu_)
+  uint64_t ltPassStartUs_ = 0;
+  uint64_t ltCurEnqueueUs_ = 0;
+  LtAgeHist ltAgePop_;
+  LtAgeHist ltAgeQueue_;
+  std::atomic<uint64_t> ltApiCount_[kApiKinds] = {};
+  std::atomic<uint64_t> ltApiTotalUs_[kApiKinds] = {};
+  std::atomic<uint64_t> ltApiMaxUs_[kApiKinds] = {};
   std::atomic<uint64_t> ltWorkerPassUs_{0};
   std::atomic<uint64_t> ltWorkerTid_{0};
   std::atomic<uint64_t> ltInbox_{0};
@@ -406,6 +460,17 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   // Set when a delta had to be discarded before reaching the codec; consumed by the session,
   // which turns it into a rate-limited IDR request.
   bool decoderKeyframeRequest_ = false;
+  // apk-decoder-inbox r1: each time the want is set, by cause (always counted; DebugStatus `keyWant=`). Setting it is
+  // unchanged -- the same flag at the same places; the session consumes it per frame / answer.
+  enum KeyWant : int {
+    kWantOversize = 0, kWantInboxOverflow, kWantGapDelta, kWantAwaitKey, kWantPendingSlot, kWantSelectionAbort,
+    kWantCodecUp, kWantKinds
+  };
+  uint64_t keyWant_[kWantKinds] = {};
+  void NoteKeyWantLocked(int cause) {
+    decoderKeyframeRequest_ = true;
+    ++keyWant_[cause];
+  }
   // Intervals between the times frames actually reach the display, drained once a second by
   // the session and reported to the host. A scheduled release lands at its presentation
   // timestamp, not at the moment we called release -- draining several ready buffers in one
