@@ -14,7 +14,9 @@ param(
   [string]$ServerJs = '',
   [switch]$WithStandby,
   [string[]]$HolderCmd = @(),
-  [int]$ControlPort = 18460
+  [int]$ControlPort = 18460,
+  # r6: the relay address the directory hands its clients (empty: this PC's LAN IPv4, see below)
+  [string]$RelayIp = ''
 )
 # rel-0164 old-APK lane: made from the AVD harness r8 ke_fixture.ps1 (the supervisor rules unchanged) for ONE pinned test
 # host, oa-pc-a, through the shared injection / power guard; arm P adds the host's TCP control listener (127.0.0.1:
@@ -110,6 +112,14 @@ function Stop-All([string]$why) {
       $graceMs = if ($name -eq 'node') { 0 } else { $StopWaitSec * 1000 }
       if ($pr.WaitForExit($graceMs)) {
         $result[$name] = "exit $($pr.ExitCode)"
+        # r6: a host's own log, kept whatever the harness did -- its copy (directoryhost_host.log) is made only at its
+        # normal end; if it is missing, the log its readiness named is copied here (while it still exists)
+        if ($name -ne 'node' -and $name -ne 'standby' -and -not (Test-Path -LiteralPath "$Root\$name\directoryhost_host.log")) {
+          $rd = "$Root\$name\directoryhost_ready.txt"
+          $hl = if (Test-Path -LiteralPath $rd) { [regex]::Match((Get-Content -LiteralPath $rd -Raw), 'host_log=(\S+)').Groups[1].Value } else { '' }
+          if ($hl -and (Test-Path -LiteralPath $hl)) { Copy-Item -LiteralPath $hl -Destination "$Root\$name\host.log.kept" }
+          $result[$name] += if ($hl -and (Test-Path -LiteralPath "$Root\$name\host.log.kept")) { '; host log kept by the fixture' } else { '; NO host log (harness copy missing, source gone)' }
+        }
         if ($name -ne 'node' -and $pr.ExitCode -ne 0) { [void]$script:failed.Add("$name exit $($pr.ExitCode)") }
       } else {
         $pr.Kill()
@@ -142,8 +152,26 @@ try {
   $chars = 'abcdefghijkmnpqrstuvwxyz23456789'
   $pw = -join (1..16 | ForEach-Object { $chars[(Get-Random -Maximum $chars.Length)] })
   "oatest $pw" | Out-File "$Root\fixture_account.txt" -Encoding ascii
+  # r6 (verifier oa-s / oa-p 2026-10-30 00:56: the PC-side standby lease ended "unsupported"; the fixture-only checks
+  # 01:15): a standby lease aims at the relay address its capability names (standby_lease.hpp:9; server.js:1310
+  # RELAY_IP), and the relay binds the lease to the wire the client OBSERVED from (server: "standby hello rejected
+  # ... reason=wire-mismatch expectedWire=127.0.0.1"). So one relay address serves only clients that reach it from the
+  # same wire as their observation:
+  #   * the phone (emulator) observes via 10.0.2.2 -> wire 127.0.0.1, and reaches the relay as 127.0.0.1 only through
+  #     10.0.2.2 (ke-r26: standby relay=reserved worked);
+  #   * the PC-side holder's viewer observes via 127.0.0.1 -> wire 127.0.0.1, and cannot reach 10.0.2.2 at all (00:56:
+  #     no hello reached the relay); through this PC's LAN address its datagrams leave from that address (01:15:
+  #     wire-mismatch). Only 127.0.0.1 works for it.
+  # Hence by arm: S (the phone uses the directory and the relay) -> 10.0.2.2, and NO PC-side standby lease (refused
+  # here, not discovered later); P (the phone connects directly, no relay) -> 127.0.0.1, where the holder's lease works.
+  if (-not $RelayIp) { $RelayIp = if ($Arm -eq 'P') { '127.0.0.1' } else { '10.0.2.2' } }
+  if ($Arm -eq 'S' -and $WithStandby) {
+    throw "arm S cannot hold a PC-side standby lease in this fixture: the phone needs the relay at 10.0.2.2, which the PC cannot reach (see oa_fixture.ps1 r6) -- run case 7 with arm P"
+  }
+  if ($RelayIp -notin @('10.0.2.2', '127.0.0.1')) { throw "-RelayIp must be 10.0.2.2 (arm S) or 127.0.0.1 (arm P): $RelayIp" }
+  Say "  relay address handed out: $RelayIp (arm $Arm; hosts dial 127.0.0.1)"
   $dirEnv = @{ REMOTE60_DIR_DATA = "$Root\dir\directory-data.json"; REMOTE60_DIR_PORT = '18410'; REMOTE60_DIR_UDP_PORT = '18411';
-    REMOTE60_LOG_DIR = "$Root\dir\logs"; REMOTE60_RELAY_ENABLED = '1'; REMOTE60_RELAY_IP = '10.0.2.2';
+    REMOTE60_LOG_DIR = "$Root\dir\logs"; REMOTE60_RELAY_ENABLED = '1'; REMOTE60_RELAY_IP = $RelayIp;
     # the relay as the HOSTS dial it (they run on this PC, where 10.0.2.2 is not reachable)
     REMOTE60_RELAY_HOST_FACING_IP = '127.0.0.1'; REMOTE60_RELAY_PORT = '18443'; REMOTE60_RELAY_ALLOW_IPS = '*';
     REMOTE60_RELAY_ALLOW_ACCOUNTS = 'oatest' }
@@ -233,7 +261,7 @@ try {
   # ---- every host ready AND every child still alive: said whole, then wait for the bundle's stop
   $dead = Dead-Child
   if ($dead) { throw "before the fixture's readiness: $dead" }
-  "ready run=$RunId hosts=a standby=$sb controlPort=$cp" | Out-File "$Root\fixture_ready.tmp" -Encoding ascii
+  "ready run=$RunId hosts=a standby=$sb controlPort=$cp relay=$RelayIp" | Out-File "$Root\fixture_ready.tmp" -Encoding ascii
   Move-Item -LiteralPath "$Root\fixture_ready.tmp" -Destination "$Root\fixture_ready.txt"
   Say "  fixture ready"
   if ($env:KE_FIXTURE_TEST_CRASH_AFTER_READY -eq '1') { Say "  TEST: the fixture crashes now (no cleanup of its own)"; [Environment]::Exit(9) }

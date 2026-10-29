@@ -49,13 +49,13 @@ function Run-Case([string]$tag, [string]$plan, [hashtable]$extraEnv, [string[]]$
 }
 if (-not (Test-Path $runs)) { New-Item -ItemType Directory $runs | Out-Null }
 
-"--- arm S + standby: host ready, standby ready, the AVD passes"
-$r = Run-Case 'orch-s-sb' 'a=ok' @{} @('-Arm', 'S', '-WithStandby')
-Check 'S+standby: host and holder started, AVD saw "standby=ready controlPort=0", rc 0, nothing left' ($r.avd -and $r.hostStarted -and
-  $r.holderStarted -and $r.avdSaw -match 'hosts=a standby=ready controlPort=0' -and $r.rc -eq 0 -and $r.pidFiles.Count -eq 0 -and
-  $r.left -eq 0) "rc=$($r.rc) avd=$($r.avd) saw=$($r.avdSaw.Trim())"
-Check 'S: the harness got no --host-control-port; the holder got this run''s standby root, stop file, oa-pc-a, the account file' (
-  $r.harnessArgs -match '--host-name oa-pc-a' -and $r.harnessArgs -notmatch '--host-control-port' -and
+"--- arm P + standby (r6: case 7 runs with arm P): host ready, standby ready, the AVD passes; relay 127.0.0.1"
+$r = Run-Case 'orch-p-sb' 'a=ok' @{} @('-Arm', 'P', '-WithStandby')
+Check 'P+standby: host and holder started, AVD saw "standby=ready controlPort=18460 relay=127.0.0.1", rc 0, nothing left' ($r.avd -and
+  $r.hostStarted -and $r.holderStarted -and $r.avdSaw -match 'hosts=a standby=ready controlPort=18460 relay=127\.0\.0\.1' -and
+  $r.rc -eq 0 -and $r.pidFiles.Count -eq 0 -and $r.left -eq 0) "rc=$($r.rc) avd=$($r.avd) saw=$($r.avdSaw.Trim())"
+Check 'P+standby: the holder got this run''s standby root, stop file, oa-pc-a, the account file' (
+  $r.harnessArgs -match '--host-name oa-pc-a' -and
   $r.holderArgs -match '--host-name oa-pc-a' -and $r.holderArgs -match [regex]::Escape("--root $($r.root)\standby ") -and
   $r.holderArgs -match [regex]::Escape("--stop-file $($r.root)\standby\stop") -and $r.holderArgs -match 'fixture_account\.txt' -and
   $r.result -match '  standby exit 0' -and $r.result -match '  a exit 0')
@@ -69,18 +69,30 @@ Check 'P: harness got --host-control-port 18460, no holder, AVD saw "standby=non
   $r.harnessArgs -match '--host-control-port 18460' -and -not $r.holderStarted -and
   $r.avdSaw -match 'standby=none controlPort=18460' -and $r.rc -eq 0 -and $r.left -eq 0) "rc=$($r.rc) saw=$($r.avdSaw.Trim())"
 
+"--- arm S, no standby: no --host-control-port, relay 10.0.2.2 (the phone's)"
+$r = Run-Case 'orch-s' 'a=ok' @{} @('-Arm', 'S')
+Check 'S: harness got no --host-control-port, no holder, AVD saw "standby=none controlPort=0 relay=10.0.2.2", rc 0' ($r.avd -and
+  $r.harnessArgs -notmatch '--host-control-port' -and -not $r.holderStarted -and
+  $r.avdSaw -match 'standby=none controlPort=0 relay=10\.0\.2\.2' -and $r.rc -eq 0 -and $r.left -eq 0) "rc=$($r.rc) saw=$($r.avdSaw.Trim())"
+
+"--- r6: arm S + standby is refused before anything starts (the PC cannot reach the phone's relay address)"
+$r = Run-Case 'orch-s-sb-refused' 'a=ok' @{} @('-Arm', 'S', '-WithStandby')
+Check 'S+standby: refused (rc 2), no node / host / holder started, no AVD, the reason said' (-not $r.avd -and $r.rc -eq 2 -and
+  -not $r.hostStarted -and -not $r.holderStarted -and $r.fx -notmatch 'started node' -and
+  $r.fx -match 'arm S cannot hold a PC-side standby lease') "rc=$($r.rc)"
+
 "--- standby never ready (5 s)"
-$r = Run-Case 'orch-sb-silent' 'a=ok' @{ OA_STUB_HOLDER = 'silent' } @('-WithStandby')
+$r = Run-Case 'orch-sb-silent' 'a=ok' @{ OA_STUB_HOLDER = 'silent' } @('-Arm', 'P', '-WithStandby')
 Check 'standby silent: no AVD, rc != 0, holder ended by its stop (exit 3), host ended 0, nothing left' (-not $r.avd -and $r.rc -ne 0 -and
   $r.fx -match 'no ready lease' -and $r.result -match '  standby exit 3' -and $r.result -match '  a exit 0' -and $r.left -eq 0) "rc=$($r.rc) left=$($r.left)"
 
 "--- standby holder dies at once (the viewer died)"
-$r = Run-Case 'orch-sb-dies' 'a=ok' @{ OA_STUB_HOLDER = 'dies' } @('-WithStandby')
+$r = Run-Case 'orch-sb-dies' 'a=ok' @{ OA_STUB_HOLDER = 'dies' } @('-Arm', 'P', '-WithStandby')
 Check 'standby dies: no AVD, rc != 0, nothing left' (-not $r.avd -and $r.rc -ne 0 -and $r.fx -match 'standby: its holder ended \(exit 4\)' -and
   $r.left -eq 0) "rc=$($r.rc) left=$($r.left)"
 
 "--- standby ready, then dies during the AVD (a late failure); the AVD itself passes"
-$r = Run-Case 'orch-sb-late' 'a=ok' @{ OA_STUB_HOLDER = 'readydie'; OA_STUB_AVD_SEC = '6' } @('-WithStandby')
+$r = Run-Case 'orch-sb-late' 'a=ok' @{ OA_STUB_HOLDER = 'readydie'; OA_STUB_AVD_SEC = '6' } @('-Arm', 'P', '-WithStandby')
 Check 'standby late: the AVD ran and passed, the bundle still fails (rc 3)' ($r.avd -and $r.rc -eq 3 -and
   $r.fx -match 'LATE FAILURE: standby ended' -and $r.left -eq 0) "rc=$($r.rc) left=$($r.left)"
 
@@ -92,47 +104,47 @@ New-Item -ItemType Directory $stubBuild | Out-Null
 $stubExe = "$wt\build\apps\native_poc\Release\remote60_oa_stub_holder.exe"
 Copy-Item $stubExe "$stubBuild\remote60_ka_standby_holder_tool.exe"
 Copy-Item $stubExe "$stubBuild\GNLinkViewerKaTest.exe"
-$r = Run-Case 'orch-sb-default' 'a=ok' @{} @('-WithStandby', '-BuildDir', $stubBuild) $true
+$r = Run-Case 'orch-sb-default' 'a=ok' @{} @('-Arm', 'P', '-WithStandby', '-BuildDir', $stubBuild) $true
 Check 'default holder path: the fixture ran <BuildDir>\remote60_ka_standby_holder_tool.exe (hashed, started, ready), rc 0, nothing left' (
   $r.avd -and $r.rc -eq 0 -and $r.holderStarted -and $r.fx -match 'standby holder [0-9a-f]{16} viewer [0-9a-f]{16}' -and
   $r.holderArgs -match [regex]::Escape("--root $($r.root)\standby") -and $r.result -match '  standby exit 0' -and $r.left -eq 0) "rc=$($r.rc) left=$($r.left)"
 "--- r4: a relative -BuildDir is refused before anything starts"
-$r = Run-Case 'orch-relbuild' 'a=ok' @{} @('-WithStandby', '-BuildDir', 'relative\build')
+$r = Run-Case 'orch-relbuild' 'a=ok' @{} @('-Arm', 'P', '-WithStandby', '-BuildDir', 'relative\build')
 Check 'relative -BuildDir: refused (exit 2), no fixture started' ($r.rc -eq 2 -and -not $r.hostStarted -and -not $r.avd) "rc=$($r.rc)"
 
 "--- r3 N2: the holder was ready, but its end was not a clean Release (exit 5): the bundle fails"
-$r = Run-Case 'orch-sb-rel5' 'a=ok' @{ OA_STUB_HOLDER = 'release5' } @('-WithStandby')
+$r = Run-Case 'orch-sb-rel5' 'a=ok' @{ OA_STUB_HOLDER = 'release5' } @('-Arm', 'P', '-WithStandby')
 Check 'standby rc 5 at its stop: the AVD ran, the fixture counts it (standby exit 5), the bundle fails (rc 3)' ($r.avd -and
   $r.rc -eq 3 -and $r.result -match '  standby exit 5' -and $r.left -eq 0) "rc=$($r.rc) left=$($r.left)"
 "--- the host's harness ends at once (staging / launch / guard failure), standby asked"
-$r = Run-Case 'orch-exit2' 'a=exit2' @{} @('-WithStandby')
+$r = Run-Case 'orch-exit2' 'a=exit2' @{} @('-Arm', 'P', '-WithStandby')
 Check 'host exit2: holder never started, no AVD, rc != 0, nothing left' (-not $r.avd -and $r.hostStarted -and -not $r.holderStarted -and
   $r.rc -ne 0 -and $r.left -eq 0) "rc=$($r.rc)"
 
 "--- the host writes another run's readiness"
-$r = Run-Case 'orch-foreign' 'a=foreign' @{} @('-WithStandby')
+$r = Run-Case 'orch-foreign' 'a=foreign' @{} @('-Arm', 'P', '-WithStandby')
 Check 'foreign readiness: holder never started, no AVD, rc != 0' (-not $r.avd -and -not $r.holderStarted -and $r.rc -ne 0) "rc=$($r.rc)"
 
 "--- the directory dies at once"
-$r = Run-Case 'orch-nodedies' 'a=ok' @{ KE_STUB_NODE = 'dies' } @('-WithStandby')
+$r = Run-Case 'orch-nodedies' 'a=ok' @{ KE_STUB_NODE = 'dies' } @('-Arm', 'P', '-WithStandby')
 Check 'node dies: no host, no holder, no AVD, rc != 0' (-not $r.avd -and -not $r.hostStarted -and -not $r.holderStarted -and $r.rc -ne 0) "rc=$($r.rc)"
 
 "--- the host fails late (during the AVD)"
-$r = Run-Case 'orch-late' 'a=late' @{ OA_STUB_AVD_SEC = '6' } @('-WithStandby')
+$r = Run-Case 'orch-late' 'a=late' @{ OA_STUB_AVD_SEC = '6' } @('-Arm', 'P', '-WithStandby')
 Check 'host late: the AVD ran, the bundle fails (rc 3), the holder still ended 0' ($r.avd -and $r.rc -eq 3 -and $r.fx -match 'LATE FAILURE: a ended' -and
   $r.result -match '  standby exit 0' -and $r.left -eq 0) "rc=$($r.rc)"
 
 "--- the AVD fails, the fixture fine"
-$r = Run-Case 'orch-avdfail' 'a=ok' @{ OA_STUB_AVD_RC = '1' } @('-WithStandby')
+$r = Run-Case 'orch-avdfail' 'a=ok' @{ OA_STUB_AVD_RC = '1' } @('-Arm', 'P', '-WithStandby')
 Check 'AVD rc 1: the bundle says the AVD (rc 1)' ($r.avd -and $r.rc -eq 1 -and $r.left -eq 0) "rc=$($r.rc)"
 
 "--- the fixture crashes right after its readiness: its job ends the host, the holder and the node"
-$r = Run-Case 'orch-crash' 'a=ok' @{ KE_FIXTURE_TEST_CRASH_AFTER_READY = '1' } @('-WithStandby')
+$r = Run-Case 'orch-crash' 'a=ok' @{ KE_FIXTURE_TEST_CRASH_AFTER_READY = '1' } @('-Arm', 'P', '-WithStandby')
 Check 'fixture crash: residual ended by the job (confirmed), rc 3, nothing left' ($r.rc -eq 3 -and
   $r.slot -match 'job_run: child_exit=9 residual=[1-9]\d* forced=0 ended_confirmed=1' -and $r.left -eq 0) "rc=$($r.rc) left=$($r.left) $([regex]::Match($r.slot, 'job_run:[^\r\n]*').Value)"
 
 "--- stopping the holder throws (one cleanup error): host and node still ended"
-$r = Run-Case 'orch-stopthrow' 'a=ok' @{ KE_FIXTURE_TEST_STOP_THROW_FOR = 'standby' } @('-WithStandby')
+$r = Run-Case 'orch-stopthrow' 'a=ok' @{ KE_FIXTURE_TEST_STOP_THROW_FOR = 'standby' } @('-Arm', 'P', '-WithStandby')
 Check 'one cleanup error: holder killed after its error, a and node ended, rc 3, nothing left' ($r.rc -eq 3 -and $r.result -match 'standby stop error' -and
   $r.result -match '  a exit 0' -and $r.result -match '  node ended' -and $r.left -eq 0) "rc=$($r.rc) left=$($r.left)"
 
