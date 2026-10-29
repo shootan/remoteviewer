@@ -367,18 +367,34 @@ RDP 상태의 결과는 PASS 든 FAIL 이든 판정 근거로 쓰지 않는다"*
   → 외부 https 확인.**
 - ⚠️ **manifest 와 sig 의 교체는 "pair 원자적" 이 아니다.** 둘을 `.tmp` 로 올린 뒤 **`mv` 를 두 번**
   한다. `rename(2)` 은 **파일 하나 단위로만** 원자적이고, 스크립트 자신이 그렇게 적고 있다
-  (`automation/gnlink_deploy.sh:435-436`). 즉 **두 `mv` 사이에 manifest 와 sig 가 짝이 맞지 않는
+  (`automation/gnlink_deploy.sh` 의 `publish_pair`). 즉 **두 `mv` 사이에 manifest 와 sig 가 짝이 맞지 않는
   창이 있다.** 그 창은 업로드 전체 길이가 아니라 rename 두 번 폭으로 **좁혀진 것**이지 없어진 것이
   아니다. 그 사이에 읽은 클라이언트는 서명 불일치로 **거부**한다(안전한 방향이다). 이 사실을
   "원자적" 으로 바꿔 적지 않는다.
-  - 🔴 **부분 교체 실패는 자동 원복이 보장되지 않는다.** 두 rename 은 `mv && mv` 로 이어져 있어
-    (`:440`), **첫 번째만 성공하면 manifest 는 새 것 · sig 는 이전 것**으로 남는다. 뒤이은
-    `rm -f *.tmp` 는 그 상태를 되돌리지 못한다. 이때는 **정확한 backup pair 로 직접 원복**해야 하고,
-    게시 실패는 **blocker 로 보고**한다.
-    ⚠️ 스크립트의 `die` 문구 *"the previous release is still published"*(`:442`)는 **이 경우에 맞지
-    않는다** — 운영 한계로 기록해 둔다.
-  - **후속 2건**(제품 스크립트라 이번 문서 작업에서 건드리지 않음): 위 `:442` 실패 메시지,
-    그리고 `:445` 의 로그 문구가 아직 *"env 를 바꿀 때만 재시작"* 취지라 아래 재시작 항목과 어긋난다.
+  - 🔴 **부분 교체 실패는 자동 원복이 보장되지 않는다.** 두 rename 은 `mv && mv` 로 이어져 있어,
+    **첫 번째만 성공할 수 있다.** 스크립트는 이때 `.tmp` 를 지우지 않고 남기고 **exit 4** 로 끝난다
+    (RV-14, 09-23 부터). 2026-10-28(maint r1·r2)부터는 두 가지를 **따로** 말한다:
+    - `swap-state`(**단계 추정**, 어느 `.tmp` 가 남았나 — 읽기만): `manifest-only` / `neither` / `unknown`.
+      ⚠️ `manifest-only` 는 "manifest rename 만 끝났다" 일 뿐 **짝 불일치의 증거가 아니다** — 같은 서명
+      릴리스를 다시 게시하던 중이면 남은 sig 가 그 manifest 에 그대로 유효하다(Codex maint M1).
+    - `pair-state`(**지금 게시된 것**, 읽기 전용으로 가져와 바이트 비교 + 게시 전과 같은 검증기·키로 서명
+      검증): `verified-this-release` / `verified-another-pair` / `does-not-verify`(클라이언트가 거부) /
+      `incomplete`(파일 없음) / `unknown`(조회·읽기·검증을 **수행하지 못함** — 어느 쪽으로도 단정하지 않음).
+    - ⚠️ 상태는 **그 조회가 실제로 돌았을 때만** 말한다(maint r3, Codex M2). 존재 조회가 실패하면(ssh 255·
+      원격 명령 실패) `incomplete` 가 아니라 `unknown` 이다. `does-not-verify` 는 검증기가 돌아서 **명시적으로
+      거부했을 때**(`gnlink_verify_manifest.js` exit **3**)뿐이다. node 실행 불가(127)·node 자체 오류(1)·파일/키를
+      읽지 못함(4)은 `unknown` 이다. (r4) "없음" 은 manifest 디렉터리를 **끝 표지까지 나열**했을 때만 말한다 —
+      `test -f` 는 "없음" 과 "볼 수 없음" 을 구분하지 못한다. 공용 검증 모듈은 `crypto.verify` 예외도
+      SignatureInvalid 로 접으므로, CLI 가 같은 입력으로 한 번 더 확인해 **예외면 4** 로 낸다.
+    어느 경우든 exit 4 이고 게시 실패는 **blocker 로 보고**한다. 원복은 상태에 따라 다르다:
+    - `verified-this-release`: 이 릴리스의 두 파일과 대조해 확인한 뒤 **재실행**한다(원복 대상이 아니다).
+    - `verified-another-pair`: backup 의 SHA256SUMS 와 대조한다. **그것이 게시돼야 할 짝이 아닐 때만** 정확한
+      backup pair 로 원복한다.
+    - `does-not-verify` / `incomplete`: **정확한 backup pair 로 직접 원복**한다.
+    - `unknown`: 두 파일을 직접 확인하고, 검증되는 짝이 아니면 정확한 backup pair 로 원복한다.
+    자동 원복·부분 파일 삭제는 하지 않는다. "클라이언트가 거부한다" 는 `does-not-verify` 일 때만 쓴다.
+  - 예전 문구(*"the previous release is still published"*, *"env 를 바꿀 때만 재시작"*)는 09-23 커밋
+    65fcee7 에서 이미 바뀌었다. 이 절의 옛 줄 번호(:435~:445)는 그 이전 기준이었다.
 - **재시작**: 평시 릴리스는 필요 없다 — manifest 핸들러가 요청마다 디스크를 읽는다
   (`apps/directory/server.js`). ⚠️ 다만 *"env 를 바꿀 때뿐"* 은 틀렸다. **서버 코드나 그 의존 모듈을
   갱신할 때도 재시작이 필요하다.** 서버앱을 올릴 때는 **의존 모듈 전량**(`server.js` ·

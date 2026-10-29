@@ -21,14 +21,19 @@ set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY="$REPO/automation/gnlink_deploy.sh"
-# 0.2.109-r2, not 0.2.109: the first cut of that release did not name GNLinkSetup.exe, and the
-# preflight gate now refuses it -- correctly. A fixture has to be a release that could actually be
-# published, or every case downstream is testing the refusal instead of the thing it names.
-SOURCE_REL="${GNLINK_TEST_RELEASE:-$REPO/.claude/rel/0.2.109-r2}"
+# A fixture has to be a release that could actually be published, or every case downstream is testing the
+# refusal instead of the thing it names.
+# maint r2: by default the fixture is MADE here (below): a release with exactly the payload names the product
+# replaces today (read from the same source the payload gate reads), signed with a throwaway key generated for
+# this run -- never the operational key. The old fixtures (.claude/rel/0.2.109-r2, 0.2.123) are refused by today's
+# payload gate (GNLinkClipHelper.exe), which made every case below test that refusal instead of its own subject.
+# GNLINK_TEST_RELEASE still names a real signed release to use instead (verified with the product's key).
+SOURCE_REL="${GNLINK_TEST_RELEASE:-}"
 # That release was signed when the server was called rem.shotan.net, and its artifact urls say
 # so. It cannot be edited -- the signature covers them -- so the cases below publish it under
 # the base it was made for. What the script does with its DEFAULT base is case 12.
-FIXTURE_BASE="https://rem.shotan.net"
+# maint r1: overridable, so a newer fixture (signed for the current server) can be used: GNLINK_TEST_FIXTURE_BASE.
+FIXTURE_BASE="${GNLINK_TEST_FIXTURE_BASE:-https://rem.shotan.net}"
 
 failures=0
 check() {
@@ -41,17 +46,89 @@ check() {
   fi
 }
 
-if [ ! -f "$SOURCE_REL/windows.manifest" ]; then
-  printf 'FAIL  no release to test with at %s\n' "$SOURCE_REL"
-  printf 'gnlink_deploy_test: FAILED (1)\n'
-  exit 1
-fi
-
 mkdir -p "$REPO/.claude"
 WORK="$(mktemp -d "$REPO/.claude/deploy-test.XXXXXX")"
 # Only ever the directory this test created, and only on the way out.
 cleanup() { rm -rf -- "$WORK"; }
 trap cleanup EXIT
+
+# ---------------------------------------------------------------------------- the fixture (maint r2)
+# A throwaway P-256 key, made the way gnlink_release_test.sh makes its own: the private half DPAPI-wrapped in
+# this run's directory, the public half (X||Y hex) handed ONLY to the deploy child as GNLINK_PUBLIC_KEY_HEX (the
+# verifier's existing override). The product's pinned key and every check stay as they are.
+make_test_key() {
+  local dir="$1"
+  mkdir -p "$dir"
+  powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "
+  \$ErrorActionPreference = 'Stop'
+  Add-Type -AssemblyName System.Security
+  \$e = [System.Security.Cryptography.ECDsa]::Create(
+    [System.Security.Cryptography.ECCurve]::CreateFromFriendlyName('nistP256'))
+  \$k = \$e.ExportParameters(\$true)
+  \$ms = New-Object System.IO.MemoryStream
+  \$bw = New-Object System.IO.BinaryWriter(\$ms)
+  \$bw.Write([int]0x32534345); \$bw.Write([int]32)
+  \$bw.Write(\$k.Q.X); \$bw.Write(\$k.Q.Y); \$bw.Write(\$k.D)
+  \$bw.Flush()
+  \$prot = [System.Security.Cryptography.ProtectedData]::Protect(
+    \$ms.ToArray(), \$null, [System.Security.Cryptography.DataProtectionScope]::CurrentUser)
+  [System.IO.File]::WriteAllBytes((Join-Path '$(cygpath -w "$dir")' 'private.ecc.dpapi'), \$prot)
+  \$hex = ([System.BitConverter]::ToString(\$k.Q.X + \$k.Q.Y) -replace '-','').ToLowerInvariant()
+  [System.IO.File]::WriteAllText((Join-Path '$(cygpath -w "$dir")' 'public_xy.hex'), \$hex)
+  \$bw.Dispose(); \$e.Dispose()" >/dev/null 2>&1
+  [ -f "$dir/private.ecc.dpapi" ] && [ -f "$dir/public_xy.hex" ]
+}
+
+# A release directory: payload/ with one small file per name the product replaces (data for this test, never run
+# or installed), a manifest naming each with its size, sha256 and url under $FIXTURE_BASE/updates/<version>/, and
+# its signature made by the release signing script with the test key (it verifies before it writes).
+make_fixture() {
+  local dir="$1" version="$2" keydir="$3" names name rel f size sha
+  mkdir -p "$dir/payload"
+  names="$(python -c "import sys; sys.path.insert(0, r'$(cygpath -w "$REPO/automation")'); import gnlink_check_payload_set as m; print('\\n'.join(sorted(m.expected_names())))" | tr -d '\r')"
+  [ -n "$names" ] || return 1
+  {
+    printf '# GNLink update manifest -- TEST FIXTURE %s, signed with a throwaway test key (never the operational one).\n' "$version"
+    printf 'schema=2\nreleaseId=r-%s-fixture\nplatform=windows\narch=x64\nversion=%s\n' "$version" "$version"
+    while IFS= read -r name; do
+      [ -n "$name" ] || continue
+      rel="${name//\\//}"
+      f="$dir/payload/$rel"
+      mkdir -p "$(dirname "$f")"
+      { printf 'GNLink deploy-test fixture %s %s\n' "$version" "$name"; head -c 2048 /dev/zero | tr '\0' 'x'; } > "$f"
+      size="$(wc -c < "$f" | tr -d ' ')"
+      sha="$(sha256sum -- "$f" | cut -d' ' -f1)"
+      printf 'artifact=%s|%s|%s|%s/updates/%s/%s\n' "$name" "$size" "$sha" "$FIXTURE_BASE" "$version" "$rel"
+    done <<< "$names"
+  } > "$dir/windows.manifest"
+  powershell.exe -NoProfile -ExecutionPolicy Bypass \
+    -File "$(cygpath -w "$REPO/automation/gnlink_release_sign.ps1")" \
+    -ReleaseDir "$(cygpath -w "$dir")" -KeyDir "$(cygpath -w "$keydir")" \
+    -TrustedKeyHex "$(cat "$keydir/public_xy.hex")" >/dev/null 2>&1
+  [ -f "$dir/windows.sig" ]
+}
+
+TEST_KEY_HEX=""
+if [ -z "$SOURCE_REL" ]; then
+  KEYDIR="$WORK/testkey"
+  SOURCE_REL="$WORK/fixture-0.2.109"
+  if make_test_key "$KEYDIR" && make_fixture "$SOURCE_REL" 0.2.109 "$KEYDIR"; then
+    TEST_KEY_HEX="$(cat "$KEYDIR/public_xy.hex")"
+    printf 'fixture: made (test key, %s artifacts)\n' "$(grep -c '^artifact=' "$SOURCE_REL/windows.manifest")"
+  else
+    printf 'FAIL  the test fixture could not be made (key or signing)\n'
+    printf 'gnlink_deploy_test: FAILED (1)\n'
+    exit 1
+  fi
+fi
+if [ ! -f "$SOURCE_REL/windows.manifest" ]; then
+  printf 'FAIL  no release to test with at %s\n' "$SOURCE_REL"
+  printf 'gnlink_deploy_test: FAILED (1)\n'
+  exit 1
+fi
+# The fixture must pass the payload gate the deploy applies -- otherwise every case tests that refusal.
+python "$(cygpath -w "$REPO/automation/gnlink_check_payload_set.py")" "$(cygpath -w "$SOURCE_REL/windows.manifest")" >/dev/null 2>&1
+check "the fixture names everything the product replaces (the deploy's payload gate)" "$([ $? -eq 0 ] && echo 1 || echo 0)"
 
 # A private copy of the release, so a case that tampers with it cannot touch the real one.
 copy_release() {
@@ -66,7 +143,7 @@ run_deploy() {
   local root="$1" rel="$2"; shift 2
   LAST_OUT="$WORK/out.$$.txt"
   GNLINK_REMOTE_MODE=local GNLINK_LOCAL_ROOT="$root" GNLINK_VERIFY_PUBLIC=0 \
-    GNLINK_PUBLIC_BASE="$FIXTURE_BASE" \
+    GNLINK_PUBLIC_BASE="$FIXTURE_BASE" GNLINK_PUBLIC_KEY_HEX="${GNLINK_PUBLIC_KEY_HEX-$TEST_KEY_HEX}" \
     bash "$DEPLOY" --release-dir "$rel" --platform windows "$@" >"$LAST_OUT" 2>&1
   return $?
 }
@@ -326,7 +403,7 @@ run_deploy_default() {
   local root="$1" rel="$2"
   LAST_OUT="$WORK/out.$$.txt"
   env -u GNLINK_PUBLIC_BASE GNLINK_REMOTE_MODE=local GNLINK_LOCAL_ROOT="$root" \
-    GNLINK_VERIFY_PUBLIC=0 \
+    GNLINK_VERIFY_PUBLIC=0 GNLINK_PUBLIC_KEY_HEX="${GNLINK_PUBLIC_KEY_HEX-$TEST_KEY_HEX}" \
     bash "$DEPLOY" --release-dir "$rel" --platform windows >"$LAST_OUT" 2>&1
   return $?
 }
@@ -338,6 +415,241 @@ check "...because of where its artifacts are" \
       "$(grep -i 'rem.shotan.net' "$LAST_OUT" | head -1)"
 check "...and nothing is uploaded or published" \
       "$([ -z "$(find "$ROOT12" -type f 2>/dev/null)" ] && echo 1 || echo 0)"
+
+# ---------------------------------------------------------------------------- 13. a swap that fails half-way
+# maint r1/r2: when one of the two renames fails, the script says the PHASE (swap-state: which .tmp is left) and,
+# separately, what is published NOW (pair-state: present? this release's bytes? verifies?). Only the second is a
+# statement about what clients get (Codex maint M1). The failure is made the only way a local root can make one
+# rename fail and not the other: an `mv` earlier on the PATH that refuses one name; a `cat` that refuses one path
+# makes the read-back fail (the "could not be checked" case). Everything else is the real script.
+printf '\n13. a swap that fails half-way\n'
+SHIM13="$WORK/shim13"; mkdir -p "$SHIM13"
+REAL_MV="$(command -v mv)"
+REAL_CAT="$(command -v cat)"
+cat > "$SHIM13/mv" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in *"\$GNLINK_TEST_FAIL_MV_SUFFIX") echo "mv: refused by the test (\$a)" >&2; exit 1 ;; esac
+done
+exec "$REAL_MV" "\$@"
+SHIM
+cat > "$SHIM13/cat" <<SHIM
+#!/usr/bin/env bash
+for a in "\$@"; do
+  case "\$a" in *"\${GNLINK_TEST_FAIL_CAT_SUFFIX:-@none@}") echo "cat: refused by the test (\$a)" >&2; exit 1 ;; esac
+done
+exec "$REAL_CAT" "\$@"
+SHIM
+chmod +x "$SHIM13/mv" "$SHIM13/cat"
+run_deploy_failing() {
+  local root="$1" rel="$2" mvSuffix="$3" catSuffix="${4:-}"
+  LAST_OUT="$WORK/out.$$.txt"
+  PATH="$SHIM13:$PATH" GNLINK_TEST_FAIL_MV_SUFFIX="$mvSuffix" GNLINK_TEST_FAIL_CAT_SUFFIX="$catSuffix" \
+    GNLINK_REMOTE_MODE=local GNLINK_LOCAL_ROOT="$root" GNLINK_VERIFY_PUBLIC=0 \
+    GNLINK_PUBLIC_BASE="$FIXTURE_BASE" GNLINK_PUBLIC_KEY_HEX="${GNLINK_PUBLIC_KEY_HEX-$TEST_KEY_HEX}" \
+    bash "$DEPLOY" --release-dir "$rel" --platform windows >"$LAST_OUT" 2>&1
+  return $?
+}
+state_line() { grep "^$1 " "$LAST_OUT" | head -1 | cut -d' ' -f2; }
+pub="$WORK/rel13-pub"
+REL13="$WORK/rel13"; copy_release "$REL13"
+# 13a. nothing published before; the signature rename fails
+ROOT13A="$WORK/root13a"; mkdir -p "$ROOT13A"
+run_deploy_failing "$ROOT13A" "$REL13" ".sig.tmp"; rc=$?
+check "13a. no pair before, the signature rename fails: exit 4" "$([ $rc -eq 4 ] && echo 1 || echo 0)" "exit=$rc"
+check "13a. ...phase: manifest-only" "$([ "$(state_line swap-state)" = manifest-only ] && echo 1 || echo 0)" "$(state_line swap-state)"
+check "13a. ...published: incomplete (no signature at all)" "$([ "$(state_line pair-state)" = incomplete ] && echo 1 || echo 0)" "$(state_line pair-state)"
+check "13a. ...and it is true: the new manifest is there, the signature only as .tmp" \
+      "$([ "$(published_sha "$ROOT13A")" = "$(sha256sum -- "$REL13/windows.manifest" | cut -d' ' -f1)" ] && \
+          [ -f "$ROOT13A/update-manifests/windows.sig.tmp" ] && [ ! -e "$ROOT13A/update-manifests/windows.sig" ] && echo 1 || echo 0)"
+# 13b. ANOTHER signed release published before (0.2.110, same test key); the signature rename fails
+if [ -n "$TEST_KEY_HEX" ]; then
+  RELO="$WORK/rel-0.2.110"
+  make_fixture "$RELO" 0.2.110 "$KEYDIR" >/dev/null 2>&1
+  ROOT13B="$WORK/root13b"; mkdir -p "$ROOT13B"
+  run_deploy "$ROOT13B" "$RELO" >/dev/null 2>&1
+  oldsig="$(sha256sum -- "$ROOT13B/update-manifests/windows.sig" 2>/dev/null | cut -d' ' -f1)"
+  run_deploy_failing "$ROOT13B" "$REL13" ".sig.tmp"; rc=$?
+  check "13b. another pair before, the signature rename fails: exit 4" "$([ $rc -eq 4 ] && echo 1 || echo 0)" "exit=$rc"
+  check "13b. ...phase: manifest-only" "$([ "$(state_line swap-state)" = manifest-only ] && echo 1 || echo 0)"
+  check "13b. ...published: does-not-verify (the new manifest beside the old signature)" \
+        "$([ "$(state_line pair-state)" = does-not-verify ] && echo 1 || echo 0)" "$(state_line pair-state)"
+  check "13b. ...and it is true: the old signature is still the published one" \
+        "$([ "$(sha256sum -- "$ROOT13B/update-manifests/windows.sig" | cut -d' ' -f1)" = "$oldsig" ] && echo 1 || echo 0)"
+  check "13b. ...the old pair was backed up first" \
+        "$([ -n "$(find "$ROOT13B/manifest-backups" -name windows.sig 2>/dev/null | head -1)" ] && echo 1 || echo 0)"
+else
+  printf 'SKIP  13b/13c/13d need the made fixture (GNLINK_TEST_RELEASE names an external release)\n'
+fi
+# 13c. the SAME release published before; re-publishing it, the signature rename fails (Codex M1's case)
+if [ -n "$TEST_KEY_HEX" ]; then
+  ROOT13C="$WORK/root13c"; mkdir -p "$ROOT13C"
+  run_deploy "$ROOT13C" "$REL13" >/dev/null 2>&1
+  run_deploy_failing "$ROOT13C" "$REL13" ".sig.tmp"; rc=$?
+  check "13c. the same pair before, the signature rename fails: exit 4 (still a failed publish)" "$([ $rc -eq 4 ] && echo 1 || echo 0)" "exit=$rc"
+  check "13c. ...phase: manifest-only" "$([ "$(state_line swap-state)" = manifest-only ] && echo 1 || echo 0)"
+  check "13c. ...published: verified-this-release (NOT a mismatch)" \
+        "$([ "$(state_line pair-state)" = verified-this-release ] && echo 1 || echo 0)" "$(state_line pair-state)"
+  check "13c. ...and its ERROR line does not claim clients refuse it" "$(grep '^ERROR the swap' "$LAST_OUT" | grep -q 'refuse' && echo 0 || echo 1)" "$(grep '^ERROR the swap' "$LAST_OUT" | head -1 | cut -c1-120)"
+  check "13c. ...and it is true: the published pair verifies (the verifier, the test key)" \
+        "$(GNLINK_PUBLIC_KEY_HEX="$TEST_KEY_HEX" node "$(cygpath -w "$REPO/automation/gnlink_verify_manifest.js")" \
+             "$(cygpath -w "$ROOT13C/update-manifests/windows.manifest")" "$(cygpath -w "$ROOT13C/update-manifests/windows.sig")" windows >/dev/null 2>&1 && echo 1 || echo 0)"
+fi
+# 13d. another pair before; the MANIFEST rename fails (nothing replaced)
+if [ -n "$TEST_KEY_HEX" ]; then
+  ROOT13D="$WORK/root13d"; mkdir -p "$ROOT13D"
+  run_deploy "$ROOT13D" "$RELO" >/dev/null 2>&1
+  run_deploy_failing "$ROOT13D" "$REL13" ".manifest.tmp"; rc=$?
+  check "13d. the manifest rename fails: exit 4" "$([ $rc -eq 4 ] && echo 1 || echo 0)" "exit=$rc"
+  check "13d. ...phase: neither" "$([ "$(state_line swap-state)" = neither ] && echo 1 || echo 0)"
+  check "13d. ...published: verified-another-pair (the previous one, intact)" \
+        "$([ "$(state_line pair-state)" = verified-another-pair ] && echo 1 || echo 0)" "$(state_line pair-state)"
+  check "13d. ...both .tmp kept for diagnosis" \
+        "$([ -f "$ROOT13D/update-manifests/windows.manifest.tmp" ] && [ -f "$ROOT13D/update-manifests/windows.sig.tmp" ] && echo 1 || echo 0)"
+fi
+# 13e. the read-back itself fails: nothing is claimed
+ROOT13E="$WORK/root13e"; mkdir -p "$ROOT13E"
+run_deploy "$ROOT13E" "$REL13" >/dev/null 2>&1
+run_deploy_failing "$ROOT13E" "$REL13" ".sig.tmp" "update-manifests/windows.sig"; rc=$?
+check "13e. the published pair cannot be read back: exit 4" "$([ $rc -eq 4 ] && echo 1 || echo 0)" "exit=$rc"
+check "13e. ...published: unknown, and no claim either way" \
+      "$([ "$(state_line pair-state)" = unknown ] && ! grep '^ERROR the swap' "$LAST_OUT" | grep -q 'refuse\|verifies\|is THIS' && echo 1 || echo 0)" "$(state_line pair-state)"
+# maint r3/r4 (Codex M2): a check that did not RUN is "unknown", never "missing" or "refused". Shims in their own
+# directory so the cases above are untouched; each one leaves a mark when it injects, so a case can show its fault
+# was reached (a fault that never fired proves nothing):
+#  - `bash`: fails (255, as ssh does) the one remote command whose text carries $GNLINK_TEST_FAIL_SH_MATCH -- the
+#    local root runs every remote command through `bash -c`
+#  - `find`: with GNLINK_TEST_FIND_FAULT=1, lists the manifest directory as the real one does and then exits 1, the
+#    way find ends when one entry could not be read (the listing looks complete; only its exit says otherwise)
+#  - `node`: for the read-back pair only (deploy-tmp/pair.*), cannot run (127) or dies with node's own exit 1
+SHIM13M="$WORK/shim13m"; mkdir -p "$SHIM13M"
+HIT13M="$WORK/hit13m"; mkdir -p "$HIT13M"
+REAL_BASH="$(command -v bash)"
+REAL_NODE="$(command -v node)"
+REAL_FIND="$(command -v find)"
+cat > "$SHIM13M/bash" <<SHIM
+#!$REAL_BASH
+if [ "\${1:-}" = "-c" ] && [ -n "\${GNLINK_TEST_FAIL_SH_MATCH:-}" ]; then
+  case "\${2:-}" in *"\$GNLINK_TEST_FAIL_SH_MATCH"*) : > "$HIT13M/bash"; echo "ssh: the test dropped this query" >&2; exit 255 ;; esac
+fi
+exec "$REAL_BASH" "\$@"
+SHIM
+cat > "$SHIM13M/find" <<SHIM
+#!$REAL_BASH
+if [ "\${GNLINK_TEST_FIND_FAULT:-}" = "1" ]; then
+  case " \$* " in *update-manifests*)
+    "$REAL_FIND" "\$@"
+    : > "$HIT13M/find"; echo "find: an entry could not be read (the test)" >&2; exit 1 ;;
+  esac
+fi
+exec "$REAL_FIND" "\$@"
+SHIM
+cat > "$SHIM13M/node" <<SHIM
+#!$REAL_BASH
+for a in "\$@"; do
+  case "\$a" in *deploy-tmp/pair.*)
+    case "\${GNLINK_TEST_NODE_FAULT:-}" in
+      missing) : > "$HIT13M/node"; echo "node: command not found (the test)" >&2; exit 127 ;;
+      throw)   : > "$HIT13M/node"; echo "Error: thrown by the test" >&2; exit 1 ;;
+    esac ;;
+  esac
+done
+exec "$REAL_NODE" "\$@"
+SHIM
+chmod +x "$SHIM13M/bash" "$SHIM13M/find" "$SHIM13M/node"
+run_deploy_m2() {
+  local root="$1" rel="$2" shMatch="$3" nodeFault="$4" findFault="${5:-}"
+  rm -f "$HIT13M"/*
+  PATH="$SHIM13M:$PATH" GNLINK_TEST_FAIL_SH_MATCH="$shMatch" GNLINK_TEST_NODE_FAULT="$nodeFault" \
+    GNLINK_TEST_FIND_FAULT="$findFault" run_deploy_failing "$root" "$rel" ".sig.tmp"
+}
+hit() { [ -e "$HIT13M/$1" ]; }
+pair_sha() { printf '%s %s' "$(sha256sum -- "$1/update-manifests/windows.manifest" 2>/dev/null | cut -d' ' -f1)" \
+                            "$(sha256sum -- "$1/update-manifests/windows.sig" 2>/dev/null | cut -d' ' -f1)"; }
+no_claim() { ! grep '^ERROR the swap' "$LAST_OUT" | grep -q 'refuse\|incomplete\|missing\|verifies\|is THIS'; }
+# 13g. the directory listing does not run (255): pair and phase unknown -- before r3 this said "incomplete"
+ROOT13G="$WORK/root13g"; mkdir -p "$ROOT13G"
+run_deploy "$ROOT13G" "$REL13" >/dev/null 2>&1
+before13g="$(pair_sha "$ROOT13G")"
+run_deploy_m2 "$ROOT13G" "$REL13" "gnlink-list-end" ""; rc=$?
+check "13g. the listing query fails (255): exit 4, and the fault was reached" "$([ $rc -eq 4 ] && hit bash && echo 1 || echo 0)" "exit=$rc"
+check "13g. ...published: unknown (not incomplete), phase unknown, and no claim either way" \
+      "$([ "$(state_line pair-state)" = unknown ] && [ "$(state_line swap-state)" = unknown ] && no_claim && echo 1 || echo 0)" \
+      "$(state_line pair-state) $(state_line swap-state)"
+check "13g. ...and it is true that the pair is whole: the same bytes as before" \
+      "$([ "$(pair_sha "$ROOT13G")" = "$before13g" ] && echo 1 || echo 0)"
+# 13h. (r4, Codex M2-b) the listing RAN but an entry could not be read inside it (find exit 1, full output): unknown
+ROOT13H="$WORK/root13h"; mkdir -p "$ROOT13H"
+run_deploy "$ROOT13H" "$REL13" >/dev/null 2>&1
+before13h="$(pair_sha "$ROOT13H")"
+run_deploy_m2 "$ROOT13H" "$REL13" "" "" "1"; rc=$?
+check "13h. an entry cannot be read inside the listing: exit 4, and the fault was reached" "$([ $rc -eq 4 ] && hit find && echo 1 || echo 0)" "exit=$rc"
+check "13h. ...published: unknown (not incomplete), phase unknown, and no claim either way" \
+      "$([ "$(state_line pair-state)" = unknown ] && [ "$(state_line swap-state)" = unknown ] && no_claim && echo 1 || echo 0)" \
+      "$(state_line pair-state) $(state_line swap-state)"
+check "13h. ...and it is true that the pair is whole: the same bytes as before" \
+      "$([ "$(pair_sha "$ROOT13H")" = "$before13h" ] && echo 1 || echo 0)"
+# 13i. the verifier cannot run (127): unknown -- before r3 this said "does-not-verify, clients will refuse"
+ROOT13I="$WORK/root13i"; mkdir -p "$ROOT13I"
+run_deploy "$ROOT13I" "$REL13" >/dev/null 2>&1
+before13i="$(pair_sha "$ROOT13I")"
+run_deploy_m2 "$ROOT13I" "$REL13" "" "missing"; rc=$?
+check "13i. the verifier cannot run (127): exit 4, and the fault was reached" "$([ $rc -eq 4 ] && hit node && echo 1 || echo 0)" "exit=$rc"
+check "13i. ...published: unknown (not does-not-verify), and no claim either way" \
+      "$([ "$(state_line pair-state)" = unknown ] && no_claim && echo 1 || echo 0)" "$(state_line pair-state)"
+check "13i. ...and it is true that the pair verifies: the same bytes as before" \
+      "$([ "$(pair_sha "$ROOT13I")" = "$before13i" ] && echo 1 || echo 0)"
+# 13j. the verifier dies (node's own exit 1, an uncaught error): unknown
+ROOT13J="$WORK/root13j"; mkdir -p "$ROOT13J"
+run_deploy "$ROOT13J" "$REL13" >/dev/null 2>&1
+run_deploy_m2 "$ROOT13J" "$REL13" "" "throw"; rc=$?
+check "13j. the verifier dies (exit 1): exit 4, published: unknown, the fault reached" \
+      "$([ $rc -eq 4 ] && [ "$(state_line pair-state)" = unknown ] && no_claim && hit node && echo 1 || echo 0)" "exit=$rc $(state_line pair-state)"
+# 13k. the verifier's own codes, run for real: a refusal is 3 and only a refusal; a check that cannot be done is 4.
+# (r4, Codex M2-a) crypto.verify made to throw inside the real CLI and the real shared module (a --require preload
+# that replaces it, leaving a mark when it runs): the shared module folds that into SignatureInvalid; the CLI must
+# not call it a refusal.
+VJS="$(cygpath -w "$REPO/automation/gnlink_verify_manifest.js")"
+vcode() { local rc=0; node "$VJS" "$@" >/dev/null 2>&1 || rc=$?; echo "$rc"; }
+THROW13K="$WORK/crypto-verify-throws.js"
+HIT13K="$WORK/hit13k-crypto"
+cat > "$THROW13K" <<JS
+const crypto = require('crypto');
+const fs = require('fs');
+crypto.verify = function () { fs.writeFileSync(process.env.GNLINK_TEST_HIT, 'x'); throw new Error('provider failure (the test)'); };
+JS
+vcode_throwing() {
+  rm -f "$HIT13K"
+  GNLINK_TEST_HIT="$(cygpath -w "$HIT13K")" NODE_OPTIONS="--require $(cygpath -w "$THROW13K")" vcode "$@"
+}
+if [ -n "$TEST_KEY_HEX" ] && [ -n "${RELO:-}" ]; then
+  M13="$(cygpath -w "$REL13/windows.manifest")"; S13="$(cygpath -w "$REL13/windows.sig")"; SO="$(cygpath -w "$RELO/windows.sig")"
+  # a real refusal: this release's manifest with another release's signature (both made with the test key)
+  c="$(GNLINK_PUBLIC_KEY_HEX="$TEST_KEY_HEX" vcode "$M13" "$SO" windows)"
+  check "13k. verifier: a document that does not verify -> 3 (REFUSED)" "$([ "$c" = 3 ] && echo 1 || echo 0)" "exit=$c"
+  c="$(GNLINK_PUBLIC_KEY_HEX="$TEST_KEY_HEX" vcode "$M13" "$S13" windows)"
+  check "13k. ...a pair that verifies -> 0" "$([ "$c" = 0 ] && echo 1 || echo 0)" "exit=$c"
+  c="$(GNLINK_PUBLIC_KEY_HEX="$TEST_KEY_HEX" vcode_throwing "$M13" "$S13" windows)"
+  check "13k. ...a valid pair while crypto.verify throws -> 4 (not 3), and the throw was reached" \
+        "$([ "$c" = 4 ] && [ -e "$HIT13K" ] && echo 1 || echo 0)" "exit=$c"
+  c="$(GNLINK_PUBLIC_KEY_HEX="$TEST_KEY_HEX" vcode_throwing "$M13" "$SO" windows)"
+  check "13k. ...a mismatched pair while crypto.verify throws -> 4 (it was not observed)" \
+        "$([ "$c" = 4 ] && [ -e "$HIT13K" ] && echo 1 || echo 0)" "exit=$c"
+  c="$(printf 'zz' > "$WORK/bad.sig"; GNLINK_PUBLIC_KEY_HEX="$TEST_KEY_HEX" vcode "$M13" "$(cygpath -w "$WORK/bad.sig")" windows)"
+  check "13k. ...a signature that is not a signature -> 3" "$([ "$c" = 3 ] && echo 1 || echo 0)" "exit=$c"
+fi
+c="$(GNLINK_PUBLIC_KEY_HEX="${TEST_KEY_HEX:-}" vcode "$(cygpath -w "$WORK/no-such.manifest")" "$(cygpath -w "$REL13/windows.sig")" windows)"
+check "13k. ...a file it cannot read -> 4 (not 3)" "$([ "$c" = 4 ] && echo 1 || echo 0)" "exit=$c"
+c="$(GNLINK_PUBLIC_KEY_HEX="zz" vcode "$(cygpath -w "$REL13/windows.manifest")" "$(cygpath -w "$REL13/windows.sig")" windows)"
+check "13k. ...a key it cannot use -> 4 (not 3)" "$([ "$c" = 4 ] && echo 1 || echo 0)" "exit=$c"
+
+# 13f. a normal publish has neither line, and names the restart rule
+ROOT13F="$WORK/root13f"; mkdir -p "$ROOT13F"
+run_deploy "$ROOT13F" "$REL13"; rc=$?
+check "13f. a normal publish: exit 0, no swap-state / pair-state" \
+      "$([ $rc -eq 0 ] && ! grep -q '^swap-state\|^pair-state' "$LAST_OUT" && echo 1 || echo 0)" "exit=$rc"
+check "13f. ...and the restart line names code, modules and env" \
+      "$(grep -q 'a module it requires, or its env' "$LAST_OUT" && echo 1 || echo 0)"
 
 # ----------------------------------------------------------------------------
 
