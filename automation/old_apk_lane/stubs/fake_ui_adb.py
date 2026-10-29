@@ -35,6 +35,10 @@ the PinnedSelectTest host log when a card / the picture is tapped. Every call is
        OA_FAKE_DROP_SEC=<s>: that long after the picture the connection breaks (the app: scene HOSTS, status error; the
        host: udp control session ended) and the PC list shows the error text (statusText).
        OA_FAKE_PW_TEXT: the login password field's text (to see that a record never writes it).
+  r7f (6): OA_FAKE_PULL_FAIL=1  a pull of the app log fails (exit 1, nothing written).
+       arm P: `am start ... --es host` -> the app's start (auto_login NO_CREDENTIAL; loginManualButton), the manual
+       button -> the connect form (connectButton), connect -> the targets (login_manual, targets_ready; the host: a TCP
+       control client).
 """
 import json
 import os
@@ -83,6 +87,8 @@ def card_text():
     return 'Notepad' if variant == 'nopinned' else 'remote60 mobile abr…'
 
 
+MANUAL = (40, 1000, 1040, 1100)
+CONNECT = (40, 1200, 1040, 1300)
 LOGIN = {'loginIdInput': (40, 480, 1040, 560, 'ID'), 'loginPasswordInput': (40, 630, 1040, 720, 'Password'),
          'loginButton': (40, 800, 1040, 900, 'Sign In')}
 
@@ -92,6 +98,10 @@ def nodes():
     if state.get('scene') == 'login':
         return root + [(k, v[:4], os.environ.get('OA_FAKE_PW_TEXT', v[4]) if k == 'loginPasswordInput' else v[4])
                        for k, v in LOGIN.items()]
+    if state.get('scene') == 'start':
+        return root + [('loginManualButton', MANUAL, '수동 연결')]
+    if state.get('scene') == 'connect':
+        return root + [('connectButton', CONNECT, '연결')]
     if state.get('scene') == 'hosts':
         out = root + [('hostCardName', HOSTCARD, 'oa-pc-a')]
         if state.get('err'):
@@ -147,7 +157,14 @@ elif cmd.startswith('shell input tap'):
     x, y = int(args[3]), int(args[4])
     hit = [n for n in nodes() if n[1][0] <= x <= n[1][2] and n[1][1] <= y <= n[1][3] and n[0] != 'android:id/content']
     rid = hit[0][0] if hit else ''
-    if rid == 'loginButton':
+    if rid == 'loginManualButton':
+        state['scene'] = 'connect'
+    elif rid == 'connectButton':
+        state['scene'] = 'targets'
+        app('[login_manual] host=10.0.2.2')
+        app('[targets_ready] origin=connect ms=1 items=1 gen=1')
+        host('client connected transport=tcp')
+    elif rid == 'loginButton':
         state['scene'] = 'hosts'
         app('[login_attempt] server=http://10.0.2.2:18410 id=oatest')
     elif rid == 'hostCardName':
@@ -218,6 +235,13 @@ elif cmd == 'shell input keyevent 4':
     elif state.get('scene') == 'hosts':
         state['dialog'] = True
     json.dump(state, open(state_path, 'w', encoding='utf-8'))
+elif cmd.startswith('shell am start') and '--es' in args:
+    state['scene'] = 'start'
+    app('[auto_login] NO_CREDENTIAL')
+    json.dump(state, open(state_path, 'w', encoding='utf-8'))
+elif args[:1] == ['pull'] and not args[1].endswith('base.apk') and os.environ.get('OA_FAKE_PULL_FAIL') == '1':
+    sys.stderr.write('adb: error: failed to stat remote object: Permission denied (fake)\n')
+    sys.exit(1)
 elif args[:1] == ['pull']:
     if args[1].endswith('base.apk'):
         shutil.copyfile(os.environ['OA_FAKE_ADB_APK'], args[2])
