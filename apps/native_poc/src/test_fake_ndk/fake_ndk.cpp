@@ -6,6 +6,7 @@
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 
@@ -18,6 +19,22 @@ Controls& controls() {
   static Controls c;
   return c;
 }
+Barrier& barrier() {
+  static Barrier b;
+  return b;
+}
+namespace {
+// Called with mu() NOT held.
+void hold_if(uint32_t bit) {
+  Barrier& b = barrier();
+  if ((b.which.load() & bit) == 0 || !b.held.load()) return;
+  b.waiting.fetch_add(1);
+  while (b.held.load() && (b.which.load() & bit) != 0) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  b.waiting.fetch_sub(1);
+  b.passed.fetch_add(1);
+}
+void note_thread() { controls().codecThreads.insert(std::this_thread::get_id()); }  // with mu() held
+}  // namespace
 }  // namespace fake_ndk
 
 struct AMediaFormat {
@@ -28,6 +45,7 @@ struct AMediaFormat {
 };
 struct AMediaCodec {
   bool started = false;
+  const void* window = nullptr;
   std::vector<uint8_t> input = std::vector<uint8_t>(1 << 20);
 };
 
@@ -45,8 +63,15 @@ int __android_log_write(int prio, const char* tag, const char* text) {
   return 0;
 }
 
-ANativeWindow* ANativeWindow_fromSurface(JNIEnv*, jobject surface) { return static_cast<ANativeWindow*>(surface); }
-void ANativeWindow_release(ANativeWindow*) {}
+ANativeWindow* ANativeWindow_fromSurface(JNIEnv*, jobject surface) {
+  std::lock_guard<std::mutex> lk(fake_ndk::mu());
+  if (surface) ++fake_ndk::controls().windowsAcquired;
+  return static_cast<ANativeWindow*>(surface);
+}
+void ANativeWindow_release(ANativeWindow* w) {
+  std::lock_guard<std::mutex> lk(fake_ndk::mu());
+  if (w) ++fake_ndk::controls().windowsReleased;
+}
 
 AMediaFormat* AMediaFormat_new() { return new AMediaFormat(); }
 media_status_t AMediaFormat_delete(AMediaFormat* f) {
@@ -81,32 +106,50 @@ bool AMediaFormat_getRect(AMediaFormat* f, const char* name, int32_t* l, int32_t
 }
 
 AMediaCodec* AMediaCodec_createDecoderByType(const char*) {
+  fake_ndk::hold_if(fake_ndk::kHoldCreate);
   std::lock_guard<std::mutex> lk(fake_ndk::mu());
+  fake_ndk::note_thread();
   if (fake_ndk::controls().createFails) return nullptr;
   ++fake_ndk::controls().codecsCreated;
   return new AMediaCodec();
 }
-media_status_t AMediaCodec_configure(AMediaCodec*, const AMediaFormat*, ANativeWindow*, AMediaCrypto*, uint32_t) {
+media_status_t AMediaCodec_configure(AMediaCodec* c, const AMediaFormat*, ANativeWindow* w, AMediaCrypto*, uint32_t) {
+  fake_ndk::hold_if(fake_ndk::kHoldConfigure);
   std::lock_guard<std::mutex> lk(fake_ndk::mu());
-  return fake_ndk::controls().configureFails ? AMEDIA_ERROR_UNKNOWN : AMEDIA_OK;
+  fake_ndk::note_thread();
+  if (fake_ndk::controls().configureFails) return AMEDIA_ERROR_UNKNOWN;
+  fake_ndk::controls().lastConfiguredWindow = w;
+  c->window = w;
+  return AMEDIA_OK;
 }
 media_status_t AMediaCodec_start(AMediaCodec* c) {
+  fake_ndk::hold_if(fake_ndk::kHoldStart);
   std::lock_guard<std::mutex> lk(fake_ndk::mu());
+  fake_ndk::note_thread();
   if (fake_ndk::controls().startFails) return AMEDIA_ERROR_UNKNOWN;
   c->started = true;
   ++fake_ndk::controls().codecsStarted;
   return AMEDIA_OK;
 }
 media_status_t AMediaCodec_stop(AMediaCodec* c) {
+  fake_ndk::hold_if(fake_ndk::kHoldStop);
+  std::lock_guard<std::mutex> lk(fake_ndk::mu());
+  fake_ndk::note_thread();
   c->started = false;
   return AMEDIA_OK;
 }
 media_status_t AMediaCodec_delete(AMediaCodec* c) {
+  {
+    std::lock_guard<std::mutex> lk(fake_ndk::mu());
+    fake_ndk::note_thread();
+    ++fake_ndk::controls().codecsDeleted;
+  }
   delete c;
   return AMEDIA_OK;
 }
 ssize_t AMediaCodec_dequeueInputBuffer(AMediaCodec*, int64_t) {
   std::lock_guard<std::mutex> lk(fake_ndk::mu());
+  fake_ndk::note_thread();
   return fake_ndk::controls().inputAvailable ? 0 : AMEDIACODEC_INFO_TRY_AGAIN_LATER;
 }
 uint8_t* AMediaCodec_getInputBuffer(AMediaCodec* c, size_t, size_t* outSize) {
@@ -115,12 +158,15 @@ uint8_t* AMediaCodec_getInputBuffer(AMediaCodec* c, size_t, size_t* outSize) {
 }
 media_status_t AMediaCodec_queueInputBuffer(AMediaCodec* c, size_t, int64_t, size_t size, uint64_t ptsUs, uint32_t) {
   std::lock_guard<std::mutex> lk(fake_ndk::mu());
+  fake_ndk::note_thread();
   fake_ndk::controls().queued.emplace_back(c->input.begin(), c->input.begin() + static_cast<std::ptrdiff_t>(size));
   fake_ndk::controls().queuedPts.push_back(static_cast<int64_t>(ptsUs));
+  fake_ndk::controls().queuedWindow.push_back(c->window);
   return AMEDIA_OK;
 }
 ssize_t AMediaCodec_dequeueOutputBuffer(AMediaCodec*, AMediaCodecBufferInfo* info, int64_t) {
   std::lock_guard<std::mutex> lk(fake_ndk::mu());
+  fake_ndk::note_thread();
   auto& c = fake_ndk::controls();
   if (c.outputs.empty()) return AMEDIACODEC_INFO_TRY_AGAIN_LATER;
   const fake_ndk::Controls::Output o = c.outputs.front();

@@ -14,11 +14,13 @@
 #include <string>
 #include <vector>
 
+#include "android_decoder_settled_sink.hpp"
 #include "android_video_decoder.hpp"
 #include "fake_ndk.hpp"
 #include "poc_protocol.hpp"
 
 using remote60::android_direct::AndroidVideoDecoderSink;
+using remote60::android_direct::SettledSink;
 using namespace remote60::native_poc;
 
 namespace {
@@ -85,7 +87,7 @@ ControlWindowSelectedMessage answer(uint64_t gen) {
 }
 
 // The sink's state for one selection whose IDR came before its answer: owed.
-void owe(AndroidVideoDecoderSink& sink, uint64_t selection, uint64_t gen) {
+void owe(SettledSink& sink, uint64_t selection, uint64_t gen) {
   sink.PrepareForWindowSelection(selection);
   sink.OnEncodedH264Frame(frame(gen, true, 0x10));  // its IDR, before the answer: dropped
   sink.OnWindowSelectionControlResultFor(answer(gen), selection);
@@ -99,7 +101,7 @@ jobject surface() { return &surfaceToken; }
 int main() {
   {
     std::puts("\n--- 1. the owed IDR arrives while there is no surface yet ---");
-    AndroidVideoDecoderSink sink;
+    SettledSink sink;
     owe(sink, 5, 40);
     const uint64_t t1 = sink.KeyframeOwedFor();
     check("answered after its IDR was dropped: owed", t1 != 0);
@@ -124,7 +126,7 @@ int main() {
     std::puts("\n--- 2. a surface, but the codec cannot be created / configured / started ---");
     const char* what[] = {"created", "configured", "started"};
     for (int k = 0; k < 3; ++k) {
-      AndroidVideoDecoderSink sink;
+      SettledSink sink;
       JNIEnv* env = nullptr;
       sink.SetSurface(env, surface());
       owe(sink, 6, 41);
@@ -145,7 +147,7 @@ int main() {
   }
   {
     std::puts("\n--- 3. no free input buffer: the IDR is held, then lost to a codec reset ---");
-    AndroidVideoDecoderSink sink;
+    SettledSink sink;
     JNIEnv* env = nullptr;
     sink.SetSurface(env, surface());
     owe(sink, 7, 42);
@@ -163,7 +165,7 @@ int main() {
   }
   {
     std::puts("\n--- 4. held, then queued once a buffer frees up ---");
-    AndroidVideoDecoderSink sink;
+    SettledSink sink;
     JNIEnv* env = nullptr;
     sink.SetSurface(env, surface());
     owe(sink, 8, 43);
@@ -184,7 +186,7 @@ int main() {
   }
   {
     std::puts("\n--- 5. what does not pay it, and what ends it ---");
-    AndroidVideoDecoderSink sink;
+    SettledSink sink;
     JNIEnv* env = nullptr;
     sink.SetSurface(env, surface());
     owe(sink, 9, 44);
@@ -201,7 +203,7 @@ int main() {
 
   {
     std::puts("\n--- 6. the answer came first (nothing owed), then its IDR finds no surface ---");
-    AndroidVideoDecoderSink sink;
+    SettledSink sink;
     sink.PrepareForWindowSelection(12);
     sink.OnWindowSelectionControlResultFor(answer(47), 12);  // nothing of gen 47 dropped before it
     check("answered first: nothing owed", sink.KeyframeOwedFor() == 0);
@@ -217,7 +219,7 @@ int main() {
   }
   {
     std::puts("\n--- 7. nothing owed, its IDR held for a buffer, then lost to a codec reset ---");
-    AndroidVideoDecoderSink sink;
+    SettledSink sink;
     JNIEnv* env = nullptr;
     sink.SetSurface(env, surface());
     sink.PrepareForWindowSelection(13);
@@ -239,7 +241,7 @@ int main() {
     // IDR had left, and the next frames -- deltas -- went in first. The emulator's decoder took 12-15 of them,
     // never produced a picture, and never freed an input buffer for the IDRs that followed: no first frame.
     std::puts("\n--- 8. r5 D1: a codec started by the surface takes no delta before an IDR ---");
-    AndroidVideoDecoderSink sink;
+    SettledSink sink;
     sink.PrepareForWindowSelection(14);
     sink.OnWindowSelectionControlResultFor(answer(49), 14);
     sink.OnEncodedH264Frame(frame(49, true, 0x91));  // the selection's IDR -- no surface yet: dropped

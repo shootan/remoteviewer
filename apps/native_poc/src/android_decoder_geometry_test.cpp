@@ -13,11 +13,13 @@
 #include <string>
 #include <vector>
 
+#include "android_decoder_settled_sink.hpp"
 #include "android_video_decoder.hpp"
 #include "fake_ndk.hpp"
 #include "poc_protocol.hpp"
 
 using remote60::android_direct::AndroidVideoDecoderSink;
+using remote60::android_direct::SettledSink;
 using namespace remote60::native_poc;
 
 namespace {
@@ -66,7 +68,7 @@ std::string size_str(uint64_t packed) {
 }
 
 // One codec: started by a key frame of the wire size, then the decoder announces `fmt`. The visible size after it.
-uint64_t visible_after(AndroidVideoDecoderSink& sink, uint32_t wireW, uint32_t wireH, uint64_t gen, const Fmt& fmt,
+uint64_t visible_after(SettledSink& sink, uint32_t wireW, uint32_t wireH, uint64_t gen, const Fmt& fmt,
                        std::string* debug) {
   sink.OnEncodedH264Frame(key_frame(wireW, wireH, gen));
   {
@@ -121,7 +123,7 @@ int main() {
   };
   uint64_t gen = 10;
   for (const Case& c : cases) {
-    AndroidVideoDecoderSink sink;
+    SettledSink sink;
     sink.SetSurface(env, surface());
     std::string dbg;
     const uint64_t got = visible_after(sink, c.wireW, c.wireH, ++gen, c.fmt, &dbg);
@@ -132,7 +134,7 @@ int main() {
 
   std::puts("\n--- [8] a new codec does not carry the last one's crop (resolution / selection change, reconnect)");
   {
-    AndroidVideoDecoderSink sink;
+    SettledSink sink;
     sink.SetSurface(env, surface());
     std::string dbg;
     const uint64_t first = visible_after(sink, 1920, 1080, ++gen, {1936, 1088, true, false, 8, 4, 1927, 1083}, &dbg);

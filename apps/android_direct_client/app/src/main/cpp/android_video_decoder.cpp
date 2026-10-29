@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -105,37 +106,120 @@ std::vector<uint8_t> with_start_code(const uint8_t* data, size_t size) {
 }  // namespace
 
 AndroidVideoDecoderSink::~AndroidVideoDecoderSink() {
-  // Before the lock: the pump takes it every tick, so joining while holding it would deadlock.
-  StopOutputPump();
+  // The worker ends first, joined WITHOUT mu_ (it takes mu_ on every pass). Then nothing else touches the codec:
+  // what is left is stopped and released here, inline.
+  {
+    std::lock_guard<std::mutex> lk(mu_);
+    workerStop_ = true;
+  }
+  workCv_.notify_all();
+  doneCv_.notify_all();
+  if (worker_.joinable()) worker_.join();
   LockedState lock(this);
   ResetCodecLocked();
   ReleaseSurfaceLocked();
+  if (requestedWindow_) windowsToRelease_.push_back(requestedWindow_);
+  requestedWindow_ = nullptr;
+  for (ANativeWindow* w : windowsToRelease_) ANativeWindow_release(w);
+  windowsToRelease_.clear();
 }
 
-void AndroidVideoDecoderSink::StartOutputPumpLocked() {
-  if (outputPumpThread_.joinable()) return;
-  outputPumpStop_.store(false, std::memory_order_relaxed);
-  outputPumpThread_ = std::thread([this] { OutputPumpMain(); });
+// apk-decoder-liveness r1: started on first use (the sink is a process global; no thread at static init).
+void AndroidVideoDecoderSink::EnsureWorkerLocked() {
+  if (worker_.joinable() || workerStop_) return;
+  worker_ = std::thread([this] { WorkerMain(); });
 }
 
-void AndroidVideoDecoderSink::StopOutputPump() {
-  outputPumpStop_.store(true, std::memory_order_relaxed);
-  if (outputPumpThread_.joinable()) outputPumpThread_.join();
+void AndroidVideoDecoderSink::RequestCodecResetLocked() {
+  ++codecResetSeq_;
+  EnsureWorkerLocked();
+  workCv_.notify_all();
 }
 
-void AndroidVideoDecoderSink::OutputPumpMain() {
-  // A frame is due at a wall-clock instant, so something has to be watching the clock. The
-  // tick is well under a frame period: an empty dequeue costs almost nothing, and being a few
-  // milliseconds late to hand over a frame is the entire defect this exists to avoid.
+void AndroidVideoDecoderSink::ClearInboxLocked() {
+  inbox_.clear();
+  inboxBytes_ = 0;
+  inboxGap_ = false;
+}
+
+// The worker's pass: an applied surface, an applied reset, the frames in order, the codec pumped (held frame,
+// bootstrap replay, output due), the decode state published. Between passes it sleeps at most the pump tick:
+// a frame is due at a wall-clock instant, so something has to be watching the clock, and being a few
+// milliseconds late to hand one over is the defect the pump exists to avoid.
+void AndroidVideoDecoderSink::WorkerMain() {
   constexpr auto kPumpInterval = std::chrono::milliseconds(3);
-  while (!outputPumpStop_.load(std::memory_order_relaxed)) {
-    {
-      LockedState lock(this);
-      if (codec_) DrainOutputLocked();
+  std::unique_lock<std::mutex> lk(mu_);
+  workerId_ = std::this_thread::get_id();
+  workerLock_ = &lk;
+  while (!workerStop_) {
+    if (surfaceApplied_ != surfaceSeq_) ApplySurfaceLocked();
+    if (CodecResetPendingLocked()) {
+      const uint64_t seq = codecResetSeq_;
+      ResetCodecLocked();  // mu_ released around the codec's stop / delete
+      codecResetApplied_ = seq;
+      continue;  // a surface or another reset may have come meanwhile
     }
-    std::this_thread::sleep_for(kPumpInterval);
+    if (!windowsToRelease_.empty()) {
+      std::vector<ANativeWindow*> release;
+      release.swap(windowsToRelease_);
+      CodecCall([&] {
+        for (ANativeWindow* w : release) ANativeWindow_release(w);
+      });
+      if (surfaceReleasedSeq_ != surfaceApplied_) {
+        surfaceReleasedSeq_ = surfaceApplied_;
+        doneCv_.notify_all();
+      }
+      continue;
+    }
+    if (surfaceReleasedSeq_ != surfaceApplied_) {
+      surfaceReleasedSeq_ = surfaceApplied_;
+      doneCv_.notify_all();
+    }
+    while (!inbox_.empty() && !workerStop_ && surfaceApplied_ == surfaceSeq_ && !CodecResetPendingLocked()) {
+      InboxFrame item = std::move(inbox_.front());
+      inbox_.pop_front();
+      inboxBytes_ -= std::min(inboxBytes_, item.frame.payload.size());
+      ProcessFrameLocked(std::move(item));
+    }
+    if (surfaceApplied_ != surfaceSeq_ || CodecResetPendingLocked()) continue;
+    if (codec_) PumpCodecLocked();
+    PublishDecodeStateLocked();
+    ++workerPasses_;
+    doneCv_.notify_all();
+    if (workerStop_) break;
+    workCv_.wait_for(lk, kPumpInterval, [this] {
+      return workerStop_ || !inbox_.empty() || surfaceApplied_ != surfaceSeq_ || CodecResetPendingLocked();
+    });
+  }
+  workerLock_ = nullptr;
+}
+
+// The surface the UI asked for, made current: the codec (bound to the old one) stopped, the old window let go
+// (outside mu_, next pass), and -- with the stream's SPS/PPS known -- a codec for the new one.
+void AndroidVideoDecoderSink::ApplySurfaceLocked() {
+  ResetCodecLocked();  // mu_ released around stop / delete; the request may change meanwhile -- read it after
+  if (window_) windowsToRelease_.push_back(window_);
+  window_ = requestedWindow_;
+  requestedWindow_ = nullptr;
+  surfaceApplied_ = surfaceSeq_;
+  codecResetApplied_ = codecResetSeq_;  // this reset is the one the surface asked for
+  if (window_ && !EnsureCodecLocked(configuredWidth_, configuredHeight_)) {
+    log_info("video surface set; codec waiting for keyframe/csd");
   }
 }
+
+#ifdef REMOTE60_DECODER_TEST_HOOKS
+bool AndroidVideoDecoderSink::WaitIdleForTest(int timeoutMs) {
+  std::unique_lock<std::mutex> lk(mu_);
+  EnsureWorkerLocked();
+  workCv_.notify_all();
+  const uint64_t start = workerPasses_;
+  return doneCv_.wait_for(lk, std::chrono::milliseconds(timeoutMs), [&] {
+    return workerPasses_ >= start + 2 && inbox_.empty() && surfaceApplied_ == surfaceSeq_ &&
+           surfaceReleasedSeq_ == surfaceApplied_ && !CodecResetPendingLocked() && windowsToRelease_.empty();
+  });
+}
+#endif
 
 void AndroidVideoDecoderSink::SetTargetFps(uint32_t fps) {
   LockedState lock(this);
@@ -145,36 +229,51 @@ void AndroidVideoDecoderSink::SetTargetFps(uint32_t fps) {
       std::max<uint64_t>(1ULL, 1000000ULL / static_cast<uint64_t>(clampedFps)));
 }
 
+// apk-decoder-liveness r1: the UI hands the Surface's window over and returns -- the codec for it is made by the
+// worker. A detach (null) waits for the worker to have stopped the codec and let go of the old window: the app
+// connects another producer to that surface right after (MainActivity DetachDecoder). Only the UI waits here.
 void AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
-  LockedState lock(this);
-  ResetCodecLocked();
-  ReleaseSurfaceLocked();
-
-  if (surface == nullptr) {
+  ANativeWindow* window = nullptr;
+  if (surface != nullptr) {
+    window = ANativeWindow_fromSurface(env, surface);
+    if (!window) log_error("failed to acquire ANativeWindow from Surface");
+  }
+  std::unique_lock<std::mutex> lk(mu_);
+  if (requestedWindow_) windowsToRelease_.push_back(requestedWindow_);  // asked for, never applied
+  requestedWindow_ = window;
+  surfaceRequested_ = window != nullptr;
+  const uint64_t seq = ++surfaceSeq_;
+  ++codecResetSeq_;
+  EnsureWorkerLocked();
+  if (window) {
+    // r5 N1: an IDR still owed (one may have been dropped while there was no surface) is asked for
+    // afresh now that it can be decoded.
+    gate_.Rearm();
+    StartGraceLocked(false);  // mobile-abr r5: the surface back is an active transition
+  } else {
     log_info("video surface cleared");
-    return;
   }
-
-  window_ = ANativeWindow_fromSurface(env, surface);
-  if (!window_) {
-    log_error("failed to acquire ANativeWindow from Surface");
-    return;
+  PublishDecodeStateLocked();
+  workCv_.notify_all();
+  if (window) return;
+  const auto t0 = std::chrono::steady_clock::now();
+  doneCv_.wait(lk, [&] { return surfaceReleasedSeq_ >= seq || workerStop_; });
+  const auto waitedMs =
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
+  if (waitedMs >= 50) {
+    char line[128];
+    std::snprintf(line, sizeof(line), "video surface detach waited ms=%lld (the UI only)",
+                  static_cast<long long>(waitedMs));
+    log_info(line);
   }
-
-  if (!EnsureCodecLocked(configuredWidth_, configuredHeight_)) {
-    log_info("video surface set; codec waiting for keyframe/csd");
-  }
-  // r5 N1: an IDR still owed (one may have been dropped while there was no surface) is asked for
-  // afresh now that it can be decoded.
-  gate_.Rearm();
-  StartGraceLocked(false);  // mobile-abr r5: the surface back is an active transition
 }
 
+// apk-decoder-liveness r1: the receive thread's part -- the owner, the selection gate, the inbox; then it returns.
+// Nothing here touches the codec or waits for the worker.
 void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::native_poc::UdpH264AssembledFrame&& frame) {
   LockedState lock(this);
   if (!OwnerLocked(token)) return;
-
-  PumpCodecLocked();
+  EnsureWorkerLocked();
 
   const bool isKeyFrame = (frame.header.flags & 1u) != 0;
   if (!gate_.Admit(frame.header.streamGeneration, isKeyFrame)) {
@@ -192,11 +291,46 @@ void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::nat
     return;
   }
 
-  if (latestInputStreamGeneration_ != 0 &&
-      latestInputStreamGeneration_ != frame.header.streamGeneration) {
-    ResetPtsStateLocked();
-  }
+  InboxFrame item;
+  item.resetPts = latestInputStreamGeneration_ != 0 &&
+                  latestInputStreamGeneration_ != frame.header.streamGeneration;
   latestInputStreamGeneration_ = frame.header.streamGeneration;
+  inboxBytes_ += frame.payload.size();
+  item.frame = std::move(frame);
+  inbox_.push_back(std::move(item));
+  // Bounded: the oldest goes. Its loss is the codec's loss -- an IDR is owed again and asked for, and the deltas
+  // after the gap are not fed before the next IDR (ProcessFrameLocked).
+  while (inbox_.size() > kInboxMaxFrames || (inboxBytes_ > kInboxMaxBytes && inbox_.size() > 1)) {
+    const auto& old = inbox_.front().frame;
+    if ((old.header.flags & 1u) != 0) gate_.KeyLost(old.header.streamGeneration);
+    inboxBytes_ -= std::min(inboxBytes_, old.payload.size());
+    inbox_.pop_front();
+    ++inboxDrops_;
+    inboxGap_ = true;
+    decoderKeyframeRequest_ = true;
+    if ((inboxDrops_ % 30u) == 1u) {
+      char line[160];
+      std::snprintf(line, sizeof(line), "decoder inbox full: oldest frame dropped drops=%llu",
+                    static_cast<unsigned long long>(inboxDrops_));
+      log_info(line);
+    }
+  }
+  workCv_.notify_all();
+}
+
+// The worker's part of a frame (what the receive thread did here before r1), in arrival order.
+void AndroidVideoDecoderSink::ProcessFrameLocked(InboxFrame&& item) {
+  remote60::native_poc::UdpH264AssembledFrame frame = std::move(item.frame);
+  const bool isKeyFrame = (frame.header.flags & 1u) != 0;
+  if (item.resetPts) ResetPtsStateLocked();
+  if (inboxGap_) {
+    if (!isKeyFrame) {
+      ++inboxGapDrops_;
+      decoderKeyframeRequest_ = true;
+      return;
+    }
+    inboxGap_ = false;
+  }
   configuredWidth_ = frame.header.width;
   configuredHeight_ = frame.header.height;
   const bool codecConfigUpdated = UpdateCodecConfigLocked(frame.payload);
@@ -246,7 +380,8 @@ void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::nat
 // selection gate (an answer or an owed key of the last PC is not this one's), the counts, the presentation window, a
 // pending key request. A new binding starts like a new stream (D1: its codec takes no delta before an IDR).
 void AndroidVideoDecoderSink::ResetForBindingLocked() {
-  ResetCodecLocked();
+  RequestCodecResetLocked();
+  ClearInboxLocked();
   configuredWidth_ = 0;
   configuredHeight_ = 0;
   outputWidth_ = 0;
@@ -293,7 +428,8 @@ uint64_t AndroidVideoDecoderSink::Binding() {
 void AndroidVideoDecoderSink::OnVideoStreamResetAs(uint64_t token) {
   LockedState lock(this);
   if (!OwnerLocked(token)) return;
-  ResetCodecLocked();
+  RequestCodecResetLocked();
+  ClearInboxLocked();
   configuredWidth_ = 0;
   configuredHeight_ = 0;
   outputWidth_ = 0;
@@ -315,7 +451,7 @@ void AndroidVideoDecoderSink::OnVideoDiscontinuityAs(uint64_t token) {
   if (!OwnerLocked(token)) return;
   // Keep SPS/PPS, dimensions, and the active selection generation. Only decoder reference
   // pictures and pending compressed frames are invalid after a UDP loss.
-  ResetCodecLocked();
+  RequestCodecResetLocked();
   log_info("video decoder reset after transport discontinuity");
 }
 
@@ -393,10 +529,12 @@ bool AndroidVideoDecoderSink::TakeReplayPtsLocked(int64_t ptsUs) {
 void AndroidVideoDecoderSink::PublishDecodeStateLocked() {
   // r5 (Codex F1 contract): no surface = intended inactivity (not measured). A selection being set up is
   // active viewing: it is held back only by the bounded startup grace, not indefinitely.
-  const bool valid = window_ != nullptr;
+  // apk-decoder-liveness r1: the surface the UI set (its request), not the worker's applied window -- the
+  // validity does not wait for the codec.
+  const bool valid = surfaceRequested_;
   // The generation moves whenever what the decoder's count means could have changed: validity, the
   // surface, the selection being prepared / abandoned and the stream generation it was answered with.
-  uint64_t key = reinterpret_cast<uintptr_t>(window_);
+  uint64_t key = surfaceSeq_;
   key = key * 1000003ULL ^ binding_;  // keepalive-multi r1: a new binding starts a new measurement
   key = key * 1000003ULL ^ (valid ? 1ULL : 0ULL);
   key = key * 1000003ULL ^ gate_.pending();
@@ -579,7 +717,8 @@ void AndroidVideoDecoderSink::RefuseSelectionForAs(uint64_t token, uint64_t tag)
 bool AndroidVideoDecoderSink::PrepareForWindowSelectionAs(uint64_t token, uint64_t selectionGeneration) {
   LockedState lock(this);
   if (!OwnerLocked(token)) return false;
-  ResetCodecLocked();
+  RequestCodecResetLocked();
+  ClearInboxLocked();
   configuredWidth_ = 0;
   configuredHeight_ = 0;
   outputWidth_ = 0;
@@ -605,7 +744,8 @@ bool AndroidVideoDecoderSink::PrepareForWindowSelectionAs(uint64_t token, uint64
 bool AndroidVideoDecoderSink::AbortWindowSelectionAs(uint64_t token) {
   LockedState lock(this);
   if (!OwnerLocked(token)) return false;
-  ResetCodecLocked();
+  RequestCodecResetLocked();
+  ClearInboxLocked();
   configuredWidth_ = 0;
   configuredHeight_ = 0;
   outputWidth_ = 0;
@@ -678,12 +818,19 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " crop=" + std::to_string(cropLeft_) + "," + std::to_string(cropTop_) + "," + std::to_string(cropRight_) +
             "," + std::to_string(cropBottom_);
   status += " deltaBeforeKey=" + std::to_string(deltaBeforeKeyDrops_);
+  // apk-decoder-liveness r1: the worker's side.
+  status += " codecState=" + std::string(codecState_);
+  status += " codecFail=" + std::to_string(codecFailures_);
+  status += " codecVoid=" + std::to_string(codecVoidStarts_);
+  status += " inbox=" + std::to_string(inbox_.size());
+  status += " inboxDrops=" + std::to_string(inboxDrops_);
+  status += " gapDrops=" + std::to_string(inboxGapDrops_);
+  status += " resetPending=" + std::to_string(CodecResetPendingLocked() ? 1 : 0);
   return status;
 }
 
 uint64_t AndroidVideoDecoderSink::VideoSizePacked() {
   LockedState lock(this);
-  PumpCodecLocked();
   const uint32_t width = outputWidth_ > 0 ? outputWidth_ : configuredWidth_;
   const uint32_t height = outputHeight_ > 0 ? outputHeight_ : configuredHeight_;
   return (static_cast<uint64_t>(width) << 32u) | static_cast<uint64_t>(height);
@@ -691,13 +838,11 @@ uint64_t AndroidVideoDecoderSink::VideoSizePacked() {
 
 uint64_t AndroidVideoDecoderSink::ReadySelectionGeneration() {
   LockedState lock(this);
-  PumpCodecLocked();
   return readySelectionGeneration_;
 }
 
 uint64_t AndroidVideoDecoderSink::LastOutputPresentationUs() {
   LockedState lock(this);
-  PumpCodecLocked();
   return lastOutputPresentationUs_;
 }
 
@@ -710,48 +855,71 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
   }
 
   ResetCodecLocked();
+  if (CodecResetPendingLocked()) return false;  // asked to drop the codec meanwhile: the next pass makes it
 
-  codec_ = AMediaCodec_createDecoderByType(kMimeTypeAvc);
-  if (!codec_) {
-    log_error("AMediaCodec_createDecoderByType(video/avc) failed");
+  // apk-decoder-liveness r1: made with mu_ RELEASED (CodecCall) -- on a loaded device this took seconds
+  // (ke-r23: 26.4 -> 29.6 s) and nobody may wait on it. Everything it uses is copied first; the window is the
+  // worker's own (only the worker replaces it). If a reset was asked for while it was made, it is void.
+  const uint64_t resetSeq = codecResetSeq_;
+  ANativeWindow* window = window_;
+  const std::vector<uint8_t> csd0 = csd0_;
+  const std::vector<uint8_t> csd1 = csd1_;
+  codecState_ = "creating";
+  const char* failed = nullptr;
+  AMediaCodec* codec = CodecCall([&]() -> AMediaCodec* {
+    AMediaCodec* c = AMediaCodec_createDecoderByType(kMimeTypeAvc);
+    if (!c) {
+      failed = "AMediaCodec_createDecoderByType(video/avc) failed";
+      return nullptr;
+    }
+    AMediaFormat* format = AMediaFormat_new();
+    AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, kMimeTypeAvc);
+    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH, static_cast<int32_t>(width));
+    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT, static_cast<int32_t>(height));
+    assert(!csd0.empty() && !csd1.empty());
+    AMediaFormat_setBuffer(format, AMEDIAFORMAT_KEY_CSD_0, csd0.data(), csd0.size());
+    AMediaFormat_setBuffer(format, AMEDIAFORMAT_KEY_CSD_1, csd1.data(), csd1.size());
+    // Remote control is interactive, so ask the decoder not to build an output reorder queue.
+    // "low-latency" is API 30+; older or non-supporting codecs ignore unknown keys, and the
+    // vendor spellings cover devices that shipped the behaviour before it was standardised.
+    AMediaFormat_setInt32(format, "low-latency", 1);
+    AMediaFormat_setInt32(format, "vendor.low-latency.enable", 1);
+    AMediaFormat_setInt32(format, "vdec-lowlatency", 1);
+    // 0 selects realtime priority.
+    AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_PRIORITY, 0);
+    const media_status_t status = AMediaCodec_configure(c, format, window, nullptr, 0);
+    AMediaFormat_delete(format);
+    if (status != AMEDIA_OK) {
+      failed = "AMediaCodec_configure failed";
+    } else if (AMediaCodec_start(c) != AMEDIA_OK) {
+      failed = "AMediaCodec_start failed";
+    }
+    if (failed) {
+      AMediaCodec_stop(c);
+      AMediaCodec_delete(c);
+      return nullptr;
+    }
+    return c;
+  });
+  if (!codec) {
+    log_error(failed ? failed : "codec failed");
+    codecState_ = "failed";
+    ++codecFailures_;
     return false;
   }
-
-  AMediaFormat* format = AMediaFormat_new();
-  AMediaFormat_setString(format, AMEDIAFORMAT_KEY_MIME, kMimeTypeAvc);
-  AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_WIDTH, static_cast<int32_t>(width));
-  AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_HEIGHT, static_cast<int32_t>(height));
-  const uint8_t* csd0Data = csd0_.data();
-  const uint8_t* csd1Data = csd1_.data();
-  const size_t csd0Size = csd0_.size();
-  const size_t csd1Size = csd1_.size();
-  // Capture stable pointers once and keep the backing vectors immutable until configure().
-  assert(csd0Data != nullptr && csd1Data != nullptr);
-  assert(csd0_.capacity() >= csd0Size);
-  assert(csd1_.capacity() >= csd1Size);
-  AMediaFormat_setBuffer(format, AMEDIAFORMAT_KEY_CSD_0, csd0Data, csd0Size);
-  AMediaFormat_setBuffer(format, AMEDIAFORMAT_KEY_CSD_1, csd1Data, csd1Size);
-  // Remote control is interactive, so ask the decoder not to build an output reorder queue.
-  // "low-latency" is API 30+; older or non-supporting codecs ignore unknown keys, and the
-  // vendor spellings cover devices that shipped the behaviour before it was standardised.
-  AMediaFormat_setInt32(format, "low-latency", 1);
-  AMediaFormat_setInt32(format, "vendor.low-latency.enable", 1);
-  AMediaFormat_setInt32(format, "vdec-lowlatency", 1);
-  // 0 selects realtime priority.
-  AMediaFormat_setInt32(format, AMEDIAFORMAT_KEY_PRIORITY, 0);
-
-  media_status_t status = AMediaCodec_configure(codec_, format, window_, nullptr, 0);
-  AMediaFormat_delete(format);
-  if (status != AMEDIA_OK) {
-    log_error("AMediaCodec_configure failed");
-    ResetCodecLocked();
+  if (resetSeq != codecResetSeq_ || window != window_ || workerStop_) {
+    // Made for a surface / owner / selection that is gone: never used.
+    CodecCall([&] {
+      AMediaCodec_stop(codec);
+      AMediaCodec_delete(codec);
+    });
+    ++codecVoidStarts_;
+    codecState_ = "none";
+    log_info("codec made after a reset was asked for: discarded");
     return false;
   }
-  if (AMediaCodec_start(codec_) != AMEDIA_OK) {
-    log_error("AMediaCodec_start failed");
-    ResetCodecLocked();
-    return false;
-  }
+  codec_ = codec;
+  codecState_ = "started";
 
   ++codecsStarted_;
   codecEpoch_.store(static_cast<uint32_t>(codecsStarted_), std::memory_order_release);
@@ -768,13 +936,18 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
   configuredHeight_ = height;
   outputWidth_ = width;
   outputHeight_ = height;
-  StartOutputPumpLocked();
   char line[224];
-  char* codecName = nullptr;
-  const bool named = AMediaCodec_getName(codec_, &codecName) == AMEDIA_OK && codecName;
+  std::string name = CodecCall([&] {
+    char* codecName = nullptr;
+    std::string n = "?";
+    if (AMediaCodec_getName(codec, &codecName) == AMEDIA_OK && codecName) {
+      n = codecName;
+      AMediaCodec_releaseName(codec, codecName);
+    }
+    return n;
+  });
   std::snprintf(line, sizeof(line), "MediaCodec started width=%u height=%u csd0=%zu csd1=%zu name=%s",
-                width, height, csd0_.size(), csd1_.size(), named ? codecName : "?");
-  if (named) AMediaCodec_releaseName(codec_, codecName);
+                width, height, csd0.size(), csd1.size(), name.c_str());
   log_info(line);
   return true;
 }
@@ -820,17 +993,24 @@ void AndroidVideoDecoderSink::PumpCodecLocked() {
   DrainOutputLocked();
 }
 
+// apk-decoder-liveness r1: the worker only (the frame is the worker's -- a local or its pending slot); every codec
+// call with mu_ released. The decisions around them (gate, PTS, counts, the owed key) are made under mu_.
 bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264AssembledFrame& frame) {
-  if (!codec_) return false;
+  if (!codec_ || CodecResetPendingLocked()) return false;
+  AMediaCodec* const codec = codec_;
+  const uint64_t resetSeq = codecResetSeq_;
 
-  const ssize_t inputIndex = AMediaCodec_dequeueInputBuffer(codec_, 0);
+  size_t inputBufferSize = 0;
+  uint8_t* inputBuffer = nullptr;
+  const ssize_t inputIndex = CodecCall([&]() -> ssize_t {
+    const ssize_t index = AMediaCodec_dequeueInputBuffer(codec, 0);
+    if (index >= 0) inputBuffer = AMediaCodec_getInputBuffer(codec, static_cast<size_t>(index), &inputBufferSize);
+    return index;
+  });
   lastInputDequeue_ = static_cast<int64_t>(inputIndex);
   if (inputIndex < 0) {
     return false;
   }
-
-  size_t inputBufferSize = 0;
-  uint8_t* inputBuffer = AMediaCodec_getInputBuffer(codec_, inputIndex, &inputBufferSize);
   if (!inputBuffer) {
     log_error("AMediaCodec_getInputBuffer returned null");
     ResetCodecLocked();
@@ -848,17 +1028,22 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
     return false;
   }
 
-  std::memcpy(inputBuffer, frame.payload.data(), frame.payload.size());
   const int64_t ptsUs = static_cast<int64_t>(ComputeQueuedPtsUsLocked(frame));
-  if (AMediaCodec_queueInputBuffer(codec_, inputIndex, 0,
-                                   static_cast<size_t>(frame.payload.size()),
-                                   ptsUs, 0) != AMEDIA_OK) {
+  const media_status_t queued = CodecCall([&] {
+    std::memcpy(inputBuffer, frame.payload.data(), frame.payload.size());
+    return AMediaCodec_queueInputBuffer(codec, static_cast<size_t>(inputIndex), 0,
+                                        static_cast<size_t>(frame.payload.size()), ptsUs, 0);
+  });
+  if (queued != AMEDIA_OK) {
     log_error("AMediaCodec_queueInputBuffer failed");
     ResetCodecLocked();
     return false;
   }
 
   ++inputFrameCount_;
+  // A reset asked for while it was queued: the codec is about to go -- the frame went into a codec that will not
+  // show it, so it pays no owed key and starts no bootstrap.
+  if (resetSeq != codecResetSeq_) return true;
   if (queueingReplay_) RememberReplayPtsLocked(ptsUs);
   lastInputQueueSteadyUs_ = steady_now_us();
   // r5 N1: this is where an owed IDR is paid -- it is in the decoder's input, not just past the gate.
@@ -930,12 +1115,18 @@ void AndroidVideoDecoderSink::ResetCodecLocked() {
   // that has been torn down and rebuilt would target an unrelated buffer.
   heldOutputValid_ = false;
   if (codec_) {
-    AMediaCodec_stop(codec_);
-    AMediaCodec_delete(codec_);
+    // apk-decoder-liveness r1: stopped with mu_ released (the worker; inline in the destructor).
+    AMediaCodec* const codec = codec_;
     codec_ = nullptr;
+    codecState_ = "none";
+    CodecCall([&] {
+      AMediaCodec_stop(codec);
+      AMediaCodec_delete(codec);
+    });
   }
 }
 
+// The destructor only (the worker hands windows over through windowsToRelease_).
 void AndroidVideoDecoderSink::ReleaseSurfaceLocked() {
   if (window_) {
     ANativeWindow_release(window_);
@@ -977,7 +1168,8 @@ bool AndroidVideoDecoderSink::UpdateCodecConfigLocked(const std::vector<uint8_t>
 void AndroidVideoDecoderSink::UpdateOutputFormatLocked() {
   if (!codec_) return;
 
-  AMediaFormat* format = AMediaCodec_getOutputFormat(codec_);
+  AMediaCodec* const codec = codec_;
+  AMediaFormat* format = CodecCall([&] { return AMediaCodec_getOutputFormat(codec); });
   if (!format) return;
 
   // The coded (buffer) size, then the visible part of it. viewer-sharpness r1 A: Codec2 decoders report the
@@ -1036,7 +1228,10 @@ void AndroidVideoDecoderSink::UpdateOutputFormatLocked() {
 
 void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
   if (!heldOutputValid_ || !codec_) return;
+  if (CodecResetPendingLocked()) return;  // the codec is about to go: its picture is not shown (r1)
   heldOutputValid_ = false;
+  AMediaCodec* const codec = codec_;
+  const uint64_t resetSeq = codecResetSeq_;
 
   // sh-filter: both releases stamp the buffer with heldOutputPresentUs_ (the scheduled time, or the PTS of
   // an immediate release -- the same number, in the steady domain); that timestamp is the frame's key in
@@ -1062,19 +1257,21 @@ void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
   // order (release, delay, publish) as the counter-case -- android_video_decoder_sh_seam.hpp.
   const bool publishAfter = sh_seam_publish_after_release();
   const size_t slot = publishAfter ? kHandoffRing : publish();
-  if (!publishAfter) sh_seam_handoff_delay();
+  // apk-decoder-liveness r1: the delay with the state lock released (the worker) -- RX and control never wait on it.
+  if (!publishAfter) CodecCall([] { sh_seam_handoff_delay(); });
 #else
   const size_t slot = publish();
 #endif
 
   media_status_t status;
+  const size_t index = heldOutputIndex_;
   if (heldOutputScheduled_) {
     // NDK timestamps use CLOCK_MONOTONIC, the same domain as steady_clock on Android.
-    status = AMediaCodec_releaseOutputBufferAtTime(
-        codec_, heldOutputIndex_, static_cast<int64_t>(heldOutputPresentUs_ * 1000ULL));
+    const int64_t atNs = static_cast<int64_t>(heldOutputPresentUs_ * 1000ULL);
+    status = CodecCall([&] { return AMediaCodec_releaseOutputBufferAtTime(codec, index, atNs); });
     ++presentScheduledCount_;
   } else {
-    status = AMediaCodec_releaseOutputBuffer(codec_, heldOutputIndex_, true);
+    status = CodecCall([&] { return AMediaCodec_releaseOutputBuffer(codec, index, true); });
     ++presentImmediateCount_;
   }
   if (status != AMEDIA_OK) {
@@ -1125,7 +1322,8 @@ void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
   // frames are handed over. It sat in the drain loop, which now returns early for every
   // normally-paced frame -- leaving the viewer waiting for an acknowledgement that had
   // already happened, and dropping back to the target list on a timeout while video played.
-  if (gate_.pending() != 0 &&
+  // r1: not a picture of a codec a reset (a new selection among them) was asked for while it was released.
+  if (resetSeq == codecResetSeq_ && gate_.pending() != 0 &&
       readySelectionGeneration_ != gate_.pending()) {
     readySelectionGeneration_ = gate_.pending();
     bootstrapFrame_.reset();
@@ -1158,8 +1356,11 @@ void AndroidVideoDecoderSink::DrainOutputLocked() {
 
   AMediaCodecBufferInfo info{};
   for (;;) {
-    const ssize_t outputIndex = AMediaCodec_dequeueOutputBuffer(codec_, &info, 0);
+    if (!codec_ || CodecResetPendingLocked()) return;  // r1: the codec is about to go
+    AMediaCodec* const codec = codec_;
+    const ssize_t outputIndex = CodecCall([&] { return AMediaCodec_dequeueOutputBuffer(codec, &info, 0); });
     lastOutputDequeue_ = static_cast<int64_t>(outputIndex);
+    if (CodecResetPendingLocked()) return;
     if (outputIndex >= 0) {
       ++outputDequeued_;
       // mobile-abr r1: a decoded picture, counted here once (see decodedTotal_). A codec-config (2)

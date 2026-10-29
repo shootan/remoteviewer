@@ -1095,7 +1095,7 @@ target_include_directories(remote60_android_decoder_owed_key_test PRIVATE
   src
   ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
 )
-target_compile_definitions(remote60_android_decoder_owed_key_test PRIVATE NOMINMAX)
+target_compile_definitions(remote60_android_decoder_owed_key_test PRIVATE NOMINMAX REMOTE60_DECODER_TEST_HOOKS)
 
 # viewer-sharpness r1 A: the APK sink's visible size from the decoder's output format (crop rect / keys / none),
 # android_video_decoder.cpp itself against the stand-in NDK.
@@ -1109,7 +1109,7 @@ target_include_directories(remote60_android_decoder_geometry_test PRIVATE
   src
   ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
 )
-target_compile_definitions(remote60_android_decoder_geometry_test PRIVATE NOMINMAX)
+target_compile_definitions(remote60_android_decoder_geometry_test PRIVATE NOMINMAX REMOTE60_DECODER_TEST_HOOKS)
 
 # keepalive-multi r1: one decoder, one PC bound at a time -- the binding token on every sink call, the APK's
 # decoder itself against the stand-in NDK (a parked / closing PC's late callbacks touch nothing of the bound one).
@@ -1123,7 +1123,7 @@ target_include_directories(remote60_android_decoder_binding_test PRIVATE
   src
   ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
 )
-target_compile_definitions(remote60_android_decoder_binding_test PRIVATE NOMINMAX)
+target_compile_definitions(remote60_android_decoder_binding_test PRIVATE NOMINMAX REMOTE60_DECODER_TEST_HOOKS)
 
 # mobile-abr r1: what the APK sink reports as decoded -- android_video_decoder.cpp itself against the stand-in
 # NDK, whose codec hands out the outputs the test queues (dequeue vs release, flags, format, replay, validity).
@@ -1137,7 +1137,48 @@ target_include_directories(remote60_android_decoder_decode_stats_test PRIVATE
   src
   ${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp
 )
-target_compile_definitions(remote60_android_decoder_decode_stats_test PRIVATE NOMINMAX)
+target_compile_definitions(remote60_android_decoder_decode_stats_test PRIVATE NOMINMAX REMOTE60_DECODER_TEST_HOOKS)
+
+# apk-decoder-liveness r1 (Codex codex_apk_decoder_liveness_design_r1.md (3)): the APK sink against the stand-in NDK
+# whose codec is held (create / configure / start / stop) longer than the control retransmit budget -- RX, control
+# and UI calls must not wait for it. REMOTE60_LIVENESS_SINK_DIR picks the sink source: the product (default), or a
+# copy of an older / mutated sink for the negative runs (a separate build directory). TEST ONLY.
+set(REMOTE60_LIVENESS_SINK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../android_direct_client/app/src/main/cpp" CACHE PATH
+    "android_video_decoder.cpp/.hpp the liveness tests build (negative runs point it at another copy)")
+add_executable(remote60_android_decoder_liveness_test
+  src/android_decoder_liveness_test.cpp
+  src/test_fake_ndk/fake_ndk.cpp
+  ${REMOTE60_LIVENESS_SINK_DIR}/android_video_decoder.cpp
+)
+target_include_directories(remote60_android_decoder_liveness_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
+  ${REMOTE60_LIVENESS_SINK_DIR}
+  src
+)
+target_compile_definitions(remote60_android_decoder_liveness_test PRIVATE NOMINMAX)
+
+# apk-decoder-liveness r1 contrast 2: the product receive loop (VideoReceiveMain, which carries the UDP control
+# channel) delivering into the APK sink while its codec is held; a fake host over loopback with its own control
+# channel. TEST ONLY. The same REMOTE60_LIVENESS_SINK_DIR choice as above.
+add_executable(remote60_android_decoder_session_liveness_test
+  src/android_decoder_session_liveness_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+  src/test_fake_ndk/fake_ndk.cpp
+  ${REMOTE60_LIVENESS_SINK_DIR}/android_video_decoder.cpp
+)
+target_include_directories(remote60_android_decoder_session_liveness_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
+  ${REMOTE60_LIVENESS_SINK_DIR}
+  src
+)
+target_compile_definitions(remote60_android_decoder_session_liveness_test PRIVATE NOMINMAX)
+target_link_libraries(remote60_android_decoder_session_liveness_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_android_decoder_session_liveness_test PRIVATE /utf-8)
+endif()
 
 # keepalive r1: the park's held-input record and its fence (pure, against the product input queue).
 # keepalive r3: a second client through the fixture directory's relay (the other device that takes a host

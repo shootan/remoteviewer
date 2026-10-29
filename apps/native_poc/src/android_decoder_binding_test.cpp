@@ -63,6 +63,11 @@ bool last_queued(uint8_t tag) {
 }
 int surfaceToken = 1;
 jobject surface() { return &surfaceToken; }
+// apk-decoder-liveness r1: the codec is the sink's worker's -- what reached it is read once the worker has taken
+// everything handed over before (WaitIdleForTest, test build only).
+void settle(AndroidVideoDecoderSink& d) {
+  if (!d.WaitIdleForTest(5000)) check("the decoder's worker settled within 5 s", false);
+}
 ControlWindowSelectedMessage answer(uint64_t gen) {
   ControlWindowSelectedMessage m{};
   m.flags = 0x1u;
@@ -87,6 +92,7 @@ int main() {
     a.SetToken(tokA);
     a.OnEncodedH264Frame(frame(7, true, 0x20));  // A's IDR
     a.OnEncodedH264Frame(frame(7, false, 0x21));
+    settle(dec);
     check("A's IDR and delta are in the codec", last_queued(0x21));
     const size_t q0 = queued();
     b.OnVideoStreamReset();       // B's controller tearing down (Disconnect -> OnVideoStreamReset)
@@ -95,9 +101,11 @@ int main() {
     b.OnDecodeEpisodeStart();
     b.OnWindowSelectionControlResultFor(answer(5), 1);
     const bool bUnbound = dec.Unbind(tokB);       // and B "releasing" the decoder
+    settle(dec);
     check("B's late frame is not queued", queued() == q0);
     check("B's late unbind is refused: A stays bound", !bUnbound && dec.Binding() == tokA);
     a.OnEncodedH264Frame(frame(7, false, 0x22));
+    settle(dec);
     check("A's next DELTA still goes in -- B's late reset did not reset A's codec", last_queued(0x22));
     ClientDecodeStats st{};
     check("B's stats drain gets nothing of A's decode", !b.DrainDecodeStats(&st) && b.DecodeGeneration() == 0);
@@ -135,6 +143,7 @@ int main() {
     check("B (stale) cannot turn A's armed selection local", !b.BeginLocalSelectionFor(41));
     check("A turns its own armed selection local", a.BeginLocalSelectionFor(41));
     a.OnEncodedH264Frame(frame(77, true, 0x41));  // A's first IDR binds its local selection
+    settle(dec);
     check("B reads nothing of A's local binding", b.LocalSelectionBoundFor(41) == 0 && a.LocalSelectionBoundFor(41) != 0);
     bool bCommitted = false;
     const auto bc = b.CommitLocalSelectionFor(41, [&](uint64_t) { bCommitted = true; });
@@ -164,10 +173,12 @@ int main() {
     const uint64_t oldTok = 300;
     b.SetToken(302);
     b.OnEncodedH264Frame(frame(4, true, 0x42));
+    settle(dec);
     const size_t q0 = queued();
     dec.OnEncodedH264FrameAs(oldTok, frame(3, false, 0x43));  // a frame queued under B's first binding
     dec.OnVideoStreamResetAs(oldTok);
     b.OnEncodedH264Frame(frame(4, false, 0x44));
+    settle(dec);
     check("the old binding's frame is dropped and its reset ignored; the new binding's delta goes in",
           queued() == q0 + 1 && last_queued(0x44));
     dec.SetSurface(env, nullptr);
@@ -178,9 +189,12 @@ int main() {
     AndroidVideoDecoderSink dec;
     dec.SetSurface(env, surface());
     dec.OnEncodedH264Frame(frame(7, true, 0x50));  // A, through the decoder directly
+    settle(dec);
     dec.OnVideoStreamReset();                       // B's late teardown, through the same decoder
+    settle(dec);
     const size_t q0 = queued();
     dec.OnEncodedH264Frame(frame(7, false, 0x51));  // A's next delta
+    settle(dec);
     check("NEGATIVE: after B's late reset, A's delta no longer reaches a codec (A's picture stops)", queued() == q0);
     dec.SetSurface(env, nullptr);
   }

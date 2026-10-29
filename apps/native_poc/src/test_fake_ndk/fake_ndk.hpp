@@ -4,9 +4,12 @@
 // codec takes input into a buffer and records what was queued. It produces output only when the test
 // queues one (mobile-abr r1: `outputs`); otherwise it never does, as before. The test can make the codec
 // fail to be created / configured / started, or have no free input buffer.
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <mutex>
+#include <set>
+#include <thread>
 #include <vector>
 
 namespace fake_ndk {
@@ -42,9 +45,29 @@ struct Controls {
   int32_t outputCropL = 0, outputCropT = 0, outputCropR = 0, outputCropB = 0;
   int dequeued = 0;          // pictures handed out
   int released = 0;          // releaseOutputBuffer / AtTime calls
+  // apk-decoder-liveness r1: who touched the codec, what was made and let go, and which window a codec was configured
+  // with (the stand-in's window is the Surface pointer itself).
+  std::set<std::thread::id> codecThreads;
+  int codecsDeleted = 0;
+  int windowsAcquired = 0;
+  int windowsReleased = 0;
+  const void* lastConfiguredWindow = nullptr;
+  std::vector<const void*> queuedWindow;  // the window of the codec each queued payload went into
 };
 
 std::mutex& mu();
 Controls& controls();  // take mu() around reads/writes from the test
+
+// apk-decoder-liveness r1: a slow codec, deterministically. While `held`, AMediaCodec_createDecoderByType /
+// configure / start / stop (the ones whose `which` bit is set) wait -- WITHOUT mu() -- until the test lets go.
+// `waiting` counts the calls blocked there right now.
+enum HoldWhich : uint32_t { kHoldCreate = 1, kHoldConfigure = 2, kHoldStart = 4, kHoldStop = 8 };
+struct Barrier {
+  std::atomic<uint32_t> which{0};
+  std::atomic<bool> held{false};
+  std::atomic<int> waiting{0};
+  std::atomic<int> passed{0};  // calls that waited and went on
+};
+Barrier& barrier();
 
 }  // namespace fake_ndk

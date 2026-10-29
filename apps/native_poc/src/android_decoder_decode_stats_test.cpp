@@ -17,12 +17,14 @@
 #include <string>
 #include <thread>
 
+#include "android_decoder_settled_sink.hpp"
 #include "android_video_decoder.hpp"
 #include "client_telemetry_window.hpp"
 #include "fake_ndk.hpp"
 #include "poc_protocol.hpp"
 
 using remote60::android_direct::AndroidVideoDecoderSink;
+using remote60::android_direct::SettledSink;
 using namespace remote60::native_poc;
 
 namespace {
@@ -127,7 +129,7 @@ struct Drained {
   ClientDecodeStats s;
   uint64_t frames = 0;
 };
-Drained drain(AndroidVideoDecoderSink& sink) {
+Drained drain(SettledSink& sink) {
   Drained d;
   d.valid = sink.DrainDecodeStats(&d.s);
 #ifdef REMOTE60_DECODE_SPAN
@@ -147,7 +149,7 @@ Drained drain(AndroidVideoDecoderSink& sink) {
 
 int main() {
   JNIEnv* env = nullptr;
-  AndroidVideoDecoderSink sink;
+  SettledSink sink;
   {
     std::puts("\n--- 0. before a surface ---");
     const Drained d = drain(sink);
