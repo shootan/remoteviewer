@@ -19,6 +19,7 @@
 #include "viewer_frame_gate_state.hpp"
 #include "viewer_state.hpp"
 #include "viewer_video_receiver.hpp"
+#include "native_video_client_session.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -74,6 +75,19 @@ struct ViewerContext : ViewerState {
   std::atomic<bool> connectCancelledByOwner{false};
   std::thread cancelWatcher;
   std::atomic<bool> cancelWatcherStop{false};
+
+  /**
+   * ka-pc-impl r1 (KA ③): this session is a standby lease's ACTIVATION (the managed viewer, after a tap). The
+   * arguments come from StandbyRunner::TakeActivation and are used once: open_media_socket takes their socket
+   * (a duplicate of the lease's) instead of the directory, and connect_media_socket runs their handshake instead
+   * of a Hello. `standbyTaken` says the socket was taken -- the caller then owes the lease SessionOver after the
+   * session's threads joined; otherwise Abandon. Null: an ordinary session.
+   */
+  remote60::native_poc::ClientSessionConnectArgs* standby = nullptr;
+  bool standbyTaken = false;
+  // ka-pc-impl r2 (Codex N6): the session really connected -- handshake and control done, "connected host=" said.
+  // Not the same as standbyTaken (the socket was taken): a handshake that failed after the take is not a connect.
+  bool sessionConnected = false;
 };
 
 }  // namespace remote60::native_poc::viewer

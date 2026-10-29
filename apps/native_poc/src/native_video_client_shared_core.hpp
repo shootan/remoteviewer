@@ -29,6 +29,10 @@ struct QueuedControlInputMessage {
   uint64_t queuedAtMs = 0;  // local steady clock; not serialized, independent of peer/QPC clocks
 };
 
+// ka-pc-impl r7 (Codex N1): the ONE release rule -- nonzero for a key up, a mouse button up (left, right, middle, X1,
+// X2) and a physical key up; what DropAllButReleases keeps and what an owner fence's release-only drain may send.
+uint32_t control_input_release_identity(const QueuedControlInputMessage& msg);
+
 class ClientInputQueue {
  public:
   uint32_t NextSequence();

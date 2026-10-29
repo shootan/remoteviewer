@@ -586,6 +586,11 @@ void session_toolbar_destroy() {
   }
   g.owner = nullptr;
   g.buttons.clear();
+  // ka-pc-impl r1: the bar belongs to one session. A later session in the same process (the managed standby
+  // viewer) starts from a bar that is not expanded, not hovered and not holding the previous session's state.
+  g = Toolbar{};
+  std::lock_guard<std::mutex> lock(gStateMu);
+  gPendingState = SessionToolbarState{};
 }
 
 }  // namespace remote60::native_poc

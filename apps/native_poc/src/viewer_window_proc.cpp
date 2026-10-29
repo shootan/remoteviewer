@@ -1,6 +1,7 @@
 // See viewer_window_proc.hpp. Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0).
 
 #include "viewer_window_proc.hpp"
+#include "viewer_owner_fence.hpp"
 
 #include <imm.h>
 #pragma comment(lib, "imm32.lib")
@@ -30,6 +31,7 @@
 #include "viewer_session_watchdog.hpp"
 #include "viewer_restore.hpp"
 
+#include <cstdlib>
 #include <iostream>
 
 namespace remote60::native_poc::viewer {
@@ -399,6 +401,27 @@ struct PasteGesture {
   bool ext = false;
 };
 PasteGesture gLastFailed;
+
+// ka-pc-impl r1 (KA ③, step 1): this file's statics belong to ONE session (one window). A process that runs
+// another session after the first (the managed standby viewer, after a park) starts it from these defaults,
+// never from the last session's paste, IME or held keys. Called by create_window, on the UI thread.
+void reset_window_session_statics() {
+  gPrevHimc = nullptr;
+  gImeDetached = false;
+  gPhysicalDown.clear();
+  gPaste = PasteGate{};
+  gLatestCopy = LatestCopy{};
+  gWaitingSnap = PasteSnapshot{};
+  gGenAtLocalCopy = 0;
+  gGenAtLocalValid = false;
+  gLocalCopySeq = 0;
+  gLocalBasePending = false;
+  gProbeId = 0;
+  gProbeSnap = PasteSnapshot{};
+  gReleasedMods = 0;
+  gPasteLine = PasteLine{};
+  gLastFailed = PasteGesture{};
+}
 
 void paste_log(const std::string& line) { std::cout << "[native-video-client][paste] " << line << "\n"; }
 
@@ -1201,10 +1224,80 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
   if (!state) return DefWindowProcW(hwnd, msg, wp, lp);
   ViewerState& ctx = *state;
   ctx.session.uiHeartbeatUs.store(qpc_now_us(), std::memory_order_relaxed);
+  // ka-pc-impl r2/r3 (Codex N4, R3): fenced by its owner. The gate itself is inputEnabled (cleared by the fence):
+  // every input path -- keys, mouse, IME results, text, macro -- enqueues only while it is on. What is dropped
+  // here besides is what would START something: a typed or clicked message, an IME message, a clipboard change, a
+  // deferred / restored / refused pick. The three posts that carry a payload are freed, not applied.
+  if (ctx.session.ownerFenced) {
+    if (msg == kMsgApplyClipboard) {
+      std::unique_ptr<RemoteTextApply> owned(reinterpret_cast<RemoteTextApply*>(lp));
+      return 0;
+    }
+    if (msg == kMsgApplyWindowList) {
+      std::unique_ptr<ControlWindowListMessage> owned(reinterpret_cast<ControlWindowListMessage*>(lp));
+      return 0;
+    }
+    if (msg == kMsgDecideRemoteFiles) {
+      std::unique_ptr<RemoteFilesDecide> owned(reinterpret_cast<RemoteFilesDecide*>(lp));
+      return 0;
+    }
+    if ((msg >= WM_KEYFIRST && msg <= WM_KEYLAST) || (msg >= WM_MOUSEFIRST && msg <= WM_MOUSELAST) ||
+        msg == WM_INPUT || (msg >= WM_IME_STARTCOMPOSITION && msg <= WM_IME_KEYLAST) ||
+        (msg >= WM_IME_SETCONTEXT && msg <= WM_IME_KEYUP) || msg == WM_CLIPBOARDUPDATE ||
+        msg == kMsgPushClipboardNow || msg == kMsgRunDeferredPick || msg == kMsgUnsendableSelect ||
+        msg == kMsgRestoreStep) {
+      return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+  }
   switch (msg) {
+    case kMsgOwnerFence:
+      if (!ctx.session.ownerFenced) {
+        // 0. r6 (Codex F1/F2): the gate FIRST -- from this moment nothing but a counted release may start a control
+        //    write, no bulk (image / file) datagram goes, and the input-exchange baseline is taken in the same critical
+        //    section. Nothing here waits on a worker: the image / file workers are stopped by the session's own teardown
+        //    (shutdown_viewer); until then their sends are refused by the gate.
+        fence_raise(ctx.control.fenceGate);
+        //    r5 (Codex R3-b): what has not left yet and is not a release is cancelled at once -- every queued down /
+        //    text / move / wheel, the pending clipboard text (and the clipboard sync: no send, no poll), a typed
+        //    password waiting to be sealed (zeroed).
+        const uint32_t droppedInputs = owner_fence_cancel_pending(
+            ctx.control.inputQueue, ctx.control.clipboard, ctx.session.preloginCredMu, ctx.session.preloginCredPassword,
+            ctx.session.preloginCredRequested);
+        // 1. Whatever is held is released FIRST, while input is still on -- the same set the control channel's
+        //    resume sends: every modifier up, every key this window sent down, every mouse button, the scan keys
+        //    of host-IME routing, the mouse capture. (Turning input off first would drop these very releases.)
+        cancel_pastes(ctx, hwnd, PasteFailure::Silent, "owner fence");
+        int modifierUps = 0;
+        if (!kInputPolicyForceBlock) {
+          modifierUps = enqueue_release_all_modifiers(ctx);
+          enqueue_release_for_pressed_keys(ctx);
+          enqueue_release_for_pressed_mouse_buttons(ctx);
+          release_all_physical(ctx);
+          release_mouse_capture_if_idle(ctx, hwnd);
+        }
+        ctx.picker.CancelPress();
+        ctx.input.macro.StopPlayback();
+        ctx.input.macro.StopRecording();
+        // 2. Then the gate: nothing NEW is taken from this window, and nothing new starts. (What is already queued
+        //    -- the releases above -- still goes: the control thread drains the queue while the session runs.)
+        ctx.session.inputEnabled = false;
+        ctx.session.ownerFenced = true;
+        ctx.session.ownerFenceAtMs = GetTickCount64();
+        RemoveClipboardFormatListener(hwnd);
+        std::cout << "[native-video-client] owner fence: held input released (modifierUps=" << modifierUps
+                  << " queued), " << droppedInputs << " queued non-release input(s), the pending clipboard and any "
+                  << "waiting password dropped; input and clipboard cut; waiting for the releases to reach the host\n";
+        // 3. r4 (Codex R3): the teardown only once those releases have LEFT and been ACKNOWLEDGED by the host -- the
+        //    input queue empty and the reliable control channel holding nothing unacknowledged -- or, on a link that
+        //    is not answering, after a bounded budget. Closing at once could end the control loop with the releases
+        //    still queued.
+        SetTimer(hwnd, kOwnerFenceDrainTimerId, 20, nullptr);
+      }
+      return 0;
     case WM_CLOSE:
       ctx.session.running = false;
-      if (ctx.session.sock != INVALID_SOCKET) shutdown(ctx.session.sock, SD_BOTH);
+      // ka-pc-impl r1: a lease's socket is not shut down -- the lease pings on it after this session.
+      if (ctx.session.sock != INVALID_SOCKET && !ctx.session.sockSharedWithLease) shutdown(ctx.session.sock, SD_BOTH);
       DestroyWindow(hwnd);
       return 0;
     case WM_DESTROY:
@@ -1717,6 +1810,29 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
       // Avoid background erase flicker between frames.
       return 1;
     case WM_TIMER:
+      if (wp == kOwnerFenceDrainTimerId) {
+        const uint64_t waited = GetTickCount64() - ctx.session.ownerFenceAtMs.load();
+        // r5/r6 (Codex R3-a, F1): confirmed only by the host's InputAck for every input exchange since the fence, all of
+        // it read in one critical section with the control thread's takes (an empty queue or an idle channel is not an
+        // acknowledgement)
+        FenceTally t{};
+        const FenceVerdict v = fence_verdict(ctx.control.fenceGate, ctx.control.inputQueue, &t);
+        const bool confirmed = v == FenceVerdict::Confirmed && !ctx.control.udpControl.TxPending();
+        if (confirmed || v == FenceVerdict::Failed || waited >= kOwnerFenceDrainBudgetMs) {
+          KillTimer(hwnd, kOwnerFenceDrainTimerId);
+          // r7 (Codex): what the host acknowledged is said apart from what was deliberately not sent
+          std::cout << "[native-video-client] owner fence: releases "
+                    << (confirmed ? "confirmed"
+                                  : v == FenceVerdict::Failed ? "NOT confirmed (an exchange failed)"
+                                                              : "NOT confirmed within the budget")
+                    << " after " << waited << " ms -- since the fence: " << t.acked
+                    << " acknowledged by the host (InputAck), " << t.skipped << " not sent by the logon-screen gate, "
+                    << t.cancelled << " non-release(s) cancelled by the fence before a byte, " << t.failed
+                    << " failed, of " << t.taken << " taken; closing the session\n";
+          PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
+        return 0;
+      }
       if (wp == kRenderRetryTimerId) {
         KillTimer(hwnd, kRenderRetryTimerId);
         InvalidateRect(hwnd, nullptr, FALSE);
@@ -1758,6 +1874,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 // must be the explicit *W form -- DefWindowProcA on a Unicode window read the wide title as
 // ANSI and truncated it to "r", and delivered WM_CHAR as ANSI.
 bool create_window(ViewerState& ctx) {
+  reset_window_session_statics();
   HINSTANCE inst = GetModuleHandle(nullptr);
   const wchar_t* cls = L"Remote60NativeVideoClient";
   WNDCLASSEXW wc{};
@@ -1768,7 +1885,8 @@ bool create_window(ViewerState& ctx) {
   // Keep background unmanaged so WM_ERASEBKGND can suppress flicker.
   wc.hbrBackground = nullptr;
   wc.lpszClassName = cls;
-  if (!RegisterClassExW(&wc)) return false;
+  // A second session in the same process (ka-pc-impl r1) finds the class already registered -- that is fine.
+  if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return false;
 
   // The user sees this in the taskbar and in Alt-Tab. "remote60 native video client" is the
   // name of a prototype; set_viewer_window_title() puts the target beside it once one is chosen.
@@ -1788,7 +1906,18 @@ bool create_window(ViewerState& ctx) {
     SetWindowPos(ctx.session.hwnd, nullptr, 0, 0, dpi_scale(ctx, static_cast<int>(ctx.session.windowW)),
                  dpi_scale(ctx, static_cast<int>(ctx.session.windowH)), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
   }
+#if defined(REMOTE60_VIEWER_KA_TEST_SEAM)
+  // TEST BUILD ONLY (GNLinkViewerKaTest): REMOTE60_VIEWER_TEST_WINDOW_X/_Y place the window (off the user's
+  // monitors for an isolated run) and it is shown without taking the focus. The product shows it as below.
+  if (const char* x = std::getenv("REMOTE60_VIEWER_TEST_WINDOW_X")) {
+    const char* y = std::getenv("REMOTE60_VIEWER_TEST_WINDOW_Y");
+    SetWindowPos(ctx.session.hwnd, nullptr, std::atoi(x), y ? std::atoi(y) : 0, 0, 0,
+                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+  }
+  ShowWindow(ctx.session.hwnd, SW_SHOWNOACTIVATE);
+#else
   ShowWindow(ctx.session.hwnd, SW_SHOW);
+#endif
   UpdateWindow(ctx.session.hwnd);
   // Remote-cursor overlay cadence: 50ms is enough for a 30Hz feed and costs nothing when hidden.
   SetTimer(ctx.session.hwnd, kCursorOverlayTimerId, 50, nullptr);

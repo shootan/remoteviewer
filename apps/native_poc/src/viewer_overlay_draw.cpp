@@ -123,6 +123,8 @@ void draw_overlay(ViewerState& ctx, HDC hdc) {
       // it with the messages a mouse produces instead of guessing the layout.
       const CardGridMetrics cardGrid = compute_card_grid(ctx, layout.listRect);
       const RECT desktopCard = card_rect_for_slot(layout.listRect, cardGrid, 0);
+      // ka-pc-impl r1: the managed viewer's PickerReady (its activation's picker is on the screen).
+      if (ctx.session.milestone && !ctx.session.pickerReadySaid.exchange(true)) ctx.session.milestone("picker-ready");
       log_client_line(ctx, "[picker] first paint after show, client=" +
                                std::to_string(layout.clientRect.right - layout.clientRect.left) +
                                "x" +

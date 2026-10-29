@@ -46,6 +46,10 @@ struct DirectoryConnectTarget {
   std::string standbyRelay;
   std::string relayIp;
   uint16_t relayPort = 0;
+  // np-impl r1 (Codex NP contract 2), only when the connect asked for it: "accepted" means this connect's relay
+  // answers at once and the client owns the wait (PunchRaceOptions::relayCommitMs); anything else -- or empty,
+  // an older server -- means the relay (if any) answers after the server's own grace, as it always did.
+  std::string relayEarly;
 };
 
 /**
@@ -154,7 +158,7 @@ SessionCall directory_session_logout(const std::string& url, const std::string& 
 bool directory_connect(const std::string& url, const std::string& sessionToken,
                        const std::string& hostId, const std::string& observeToken,
                        DirectoryConnectTarget* outTarget, std::string* outError,
-                       uint32_t* outStatus = nullptr, bool standby = false);
+                       uint32_t* outStatus = nullptr, bool standby = false, bool relayEarly = false);
 
 /**
  * keepalive-r2 (2) (contract §2.7, Codex decision 2): whether this directory supports standby, read from /api/hosts

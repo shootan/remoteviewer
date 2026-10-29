@@ -1780,16 +1780,34 @@ function relayScheduleReply(clientIp, clientPort, eligible) {
   if (eligible.replied.has(key)) return;
   eligible.replied.add(key);
   const packet = buildPunchPacket();
+  // np-impl r1 (Codex NP design, contract 2): a connect that asked for relayEarly and was told
+  // 'accepted' holds the grace itself -- its viewer keeps a relay answer aside and prefers a direct one
+  // until its own commit point. Only the punch from that connect's own wire tuple: another client
+  // behind the same NAT (same wire IP, other port) is an older viewer that still takes whichever
+  // answer comes first, and it keeps the grace.
+  const early = !!eligible.early && eligible.earlyWirePort === clientPort;
+  const delayMs = early ? 0 : RELAY_GRACE_MS;
   for (let i = 0; i < RELAY_PUNCH_REPLIES; ++i) {
     setTimeout(() => {
       if (!relaySock) return;
+      // np-impl r2 (Codex N1): a reply belongs to the connect it was scheduled for. By the time it is due,
+      // a newer connect may own this wire IP -- the same tuple even (a socket or NAT mapping reused) -- and
+      // an early reply left over from the old one would reach the new connect's race before its own grace.
+      // So the record that scheduled it must still be the current one, and unexpired, at the moment of
+      // sending; otherwise nothing more is sent for it. (A datagram already on the wire is not recalled.)
+      // A replaced connect's client keeps punching and is answered under the record that replaced it.
+      if (relayEligibleByWireIp.get(clientIp) !== eligible || Date.now() > eligible.expiresAt) {
+        console.log(`[relay] connect=${eligible.connectId} reply ${i + 1}/${RELAY_PUNCH_REPLIES} to ${key} dropped: ` +
+                    `${Date.now() > eligible.expiresAt ? 'expired' : 'superseded'}`);
+        return;
+      }
       relaySock.send(packet, clientPort, clientIp, (err) => {
         if (err) console.error(`[relay] punch reply failed: ${err.message}`);
       });
-    }, RELAY_GRACE_MS + i * 120).unref();
+    }, delayMs + i * 120).unref();
   }
   console.log(`[relay] connect=${eligible.connectId} punch from ${key}; ` +
-              `answering in ${RELAY_GRACE_MS}ms x${RELAY_PUNCH_REPLIES}`);
+              `answering in ${delayMs}ms x${RELAY_PUNCH_REPLIES}${early ? ' early=1' : ''}`);
 }
 
 // Diagnostics for datagrams the relay refuses: per (reason, source ip) lines, a hard cap on
@@ -2468,6 +2486,11 @@ async function handleConnect(req, res) {
   // simply has no relay candidate, and says why; the direct candidates are as always.
   let relayOffered = relayEligible;
   let standbyRelay = '';
+  // np-impl r1: what a connect that asked for relayEarly is told. Only asked-for, so a viewer that does
+  // not know the field gets the same response as before. 'accepted' only on the legacy relay lease made
+  // just below; a standby lease keeps its own class and timing (not mixed, Codex NP contract 2).
+  const relayEarlyAsked = body.relayEarly === true;
+  let relayEarly = '';
   if (body.standby === true && !relayEligible) {
     // r4 (Codex decision 2): a standby connect is told why there is no relay for it -- never left to guess.
     standbyRelay = RELAY_ENABLED ? 'not-eligible' : 'relay-disabled';
@@ -2513,9 +2536,13 @@ async function handleConnect(req, res) {
     const previous = relayLatestTokenByHost.get(host.hostId);
     if (previous && previous !== punchToken) relayAuthByToken.delete(previous);
     relayLatestTokenByHost.set(host.hostId, punchToken);
-    relayEligibleByWireIp.set(clientWireIp, { connectId, expiresAt, replied: new Set() });
+    const early = relayEarlyAsked && !!observation.obs.wirePort;
+    relayEligibleByWireIp.set(clientWireIp, { connectId, expiresAt, replied: new Set(),
+                                              ...(early ? { early: true, earlyWirePort: observation.obs.wirePort } : {}) });
+    if (relayEarlyAsked) relayEarly = early ? 'accepted' : 'no-wire-port';
     console.log(`[relay] connect=${connectId} eligible client=${clientIp}:${clientPort} ` +
-                `wire=${clientWireIp} host=${host.hostName}@${host.publicIp}:${host.publicUdpPort}`);
+                `wire=${clientWireIp} host=${host.hostName}@${host.publicIp}:${host.publicUdpPort}` +
+                (relayEarlyAsked ? ` relayEarly=${relayEarly}` : ''));
   }
 
   // Every connect, not just the relayed ones. On the relay the host would otherwise never hear
@@ -2526,6 +2553,9 @@ async function handleConnect(req, res) {
   // startWakeResend about why the burst is not simply repeated.
   startWakeResend(observeSock, host, connectId);
 
+  if (relayEarlyAsked && !relayEarly) {
+    relayEarly = body.standby === true ? 'standby' : (relayOffered ? 'not-accepted' : 'no-relay');
+  }
   sendJson(res, 200, {
     // Kept for clients that predate candidates; they dial this one and behave as before.
     hostPublicIp: host.publicIp,
@@ -2534,6 +2564,9 @@ async function handleConnect(req, res) {
     punchToken,
     // keepalive-r2 (a), only when a standby connect was asked for: 'reserved' or why not.
     ...(standbyRelay ? { standbyRelay } : {}),
+    // np-impl r1, only when asked: 'accepted' means this connect's relay answers at once and the viewer
+    // owns the wait; anything else means the relay (if any) keeps the server grace.
+    ...(relayEarly ? { relayEarly } : {}),
     // pc2-connect-diag: the id that already ties the server's own lines together, handed to
     // the caller so its logs join the same thread. Additive -- a client that does not know
     // the field ignores it -- and it is a random 4-byte label, not a credential.

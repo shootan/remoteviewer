@@ -630,6 +630,8 @@ add_executable(remote60_native_video_client_poc
   src/url_origin.cpp
   # The macro window is a page too, so the viewer needs the same shell the client uses.
   src/macro_shell_bridge.cpp
+  # ka-pc-impl r1 (KA ③): the managed standby mode -- one PC's lease, activated by the shell.
+  src/viewer_managed_standby.cpp
 )
 # Korean literals reach the user from this target: the macro window's messages, and the picker's
 # header and status lines. The flag used to sit inside the WebView2 conditional, which made the
@@ -715,6 +717,64 @@ foreach(_mutant MONITOR_AS_DESKTOP REPORT_ON_REVEAL)
     REMOTE60_VIEWER_PRESENT_FAIL_TEST_SEAM=1 REMOTE60_RESTORE_MUTANT_${_mutant}=1)
   set_target_properties(remote60_viewer_r3_mutant_${_mutant_lower}_test PROPERTIES
     OUTPUT_NAME "GNLinkViewerR3Mutant_${_mutant_lower}")
+endforeach()
+
+# ka-pc-impl r1 (KA ③): the shell <-> managed viewer channel and the recent-PC store (no viewer, no network).
+add_executable(remote60_ka_pc_units_test src/ka_pc_units_test.cpp)
+target_include_directories(remote60_ka_pc_units_test PRIVATE src)
+# ka-pc-impl r2 (Codex N5): Channel::Close bounded in the orderings one CancelSynchronousIo misses (real header, real pipes).
+add_executable(remote60_ka_pc_ipc_close_race_test src/ka_pc_ipc_close_race_test.cpp)
+target_include_directories(remote60_ka_pc_ipc_close_race_test PRIVATE src)
+
+# ka-pc e2e (Codex test SOURCE r1 N2): the shared e2e Child (ka_pc_e2e_child.hpp) on its own -- its end verdict, a
+# failed set-up step creating no process, a real child (this exe) judged, evidence on disk before a refusing Finalize.
+# No host, viewer, window, network or WebView. Writes only under REMOTE60_TEST_TMP.
+add_executable(remote60_ka_pc_e2e_child_test src/ka_pc_e2e_child_test.cpp)
+target_include_directories(remote60_ka_pc_e2e_child_test PRIVATE src)
+
+# ka-pc V1 (Codex evidence candidate r2): why a WGC capture of the static picker came back white -- an off-screen
+# flip-model window presenting one frame, captured first-frame vs. with a present during the capture. No host/viewer.
+add_executable(remote60_ka_pc_wgc_offscreen_probe src/ka_pc_wgc_offscreen_probe.cpp)
+target_include_directories(remote60_ka_pc_wgc_offscreen_probe PRIVATE src)
+target_link_libraries(remote60_ka_pc_wgc_offscreen_probe PRIVATE d3d11 dxgi windowsapp)
+
+# ka-pc-impl r1 (KA ③): the managed standby viewer end to end (this test plays the shell): real server.js, real
+# hosts (this build + the published 0.2.163), GNLinkViewerKaTest --managed-standby. Writes only under REMOTE60_TEST_TMP.
+add_executable(remote60_ka_pc_managed_e2e_test
+  src/ka_pc_managed_e2e_test.cpp
+  src/directory_session_client.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_ka_pc_managed_e2e_test PRIVATE src)
+target_link_libraries(remote60_ka_pc_managed_e2e_test PRIVATE common ws2_32 windowsapp d3d11 dxgi)
+add_dependencies(remote60_ka_pc_managed_e2e_test remote60_viewer_ka_test remote60_native_video_host_poc)
+
+# ka-pc-impl r1 (KA ③): the same viewer with REMOTE60_VIEWER_KA_TEST_SEAM -- N sessions in one process
+# (REMOTE60_VIEWER_TEST_SESSIONS) and a window placed off the user's monitors, shown without focus
+# (REMOTE60_VIEWER_TEST_WINDOW_X/_Y). Same sources, libraries and options as GNLinkViewer; one define. Never shipped.
+add_executable(remote60_viewer_ka_test ${_viewer_sources})
+foreach(_prop INCLUDE_DIRECTORIES LINK_LIBRARIES COMPILE_DEFINITIONS COMPILE_OPTIONS)
+  get_target_property(_value remote60_native_video_client_poc ${_prop})
+  if(_value)
+    set_property(TARGET remote60_viewer_ka_test PROPERTY ${_prop} "${_value}")
+  endif()
+endforeach()
+target_compile_definitions(remote60_viewer_ka_test PRIVATE REMOTE60_VIEWER_KA_TEST_SEAM=1)
+set_target_properties(remote60_viewer_ka_test PROPERTIES OUTPUT_NAME "GNLinkViewerKaTest")
+
+# ka-pc-impl r5 (Codex R3-a / R3-b): the owner fence's verdict and cancellation on the viewer's own code (its sources
+# without its main); no window, host, network, clipboard API or real password.
+set(_viewer_sources_nomain ${_viewer_sources})
+list(FILTER _viewer_sources_nomain EXCLUDE REGEX "native_video_client_main\\.cpp$")
+add_executable(remote60_ka_pc_fence_test src/ka_pc_fence_test.cpp ${_viewer_sources_nomain})
+foreach(_prop INCLUDE_DIRECTORIES LINK_LIBRARIES COMPILE_DEFINITIONS COMPILE_OPTIONS)
+  get_target_property(_value remote60_native_video_client_poc ${_prop})
+  if(_value)
+    set_property(TARGET remote60_ka_pc_fence_test PROPERTY ${_prop} "${_value}")
+  endif()
 endforeach()
 
 # prelogin r21 (E2): RequestWindowList's role gate + park through the product ClientSessionController,
@@ -3563,6 +3623,21 @@ add_executable(remote60_directory_retry_test
 target_include_directories(remote60_directory_retry_test PRIVATE src)
 target_link_libraries(remote60_directory_retry_test PRIVATE common ws2_32)
 
+# np-impl r1 TEST TOOL (never shipped): the product's directory_session_open against a real test directory,
+# driven by apps/directory/test/np_early_bootstrap_e2e.js (new/old server x new/old viewer).
+add_executable(remote60_np_early_bootstrap_probe
+  src/np_early_bootstrap_probe.cpp
+  src/directory_session_client.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+  src/directory_session_bootstrap.cpp
+  src/directory_rendezvous.cpp
+)
+target_include_directories(remote60_np_early_bootstrap_probe PRIVATE src)
+target_link_libraries(remote60_np_early_bootstrap_probe PRIVATE common ws2_32)
+
 # The stored sign-in: the files, the lock, and what a sign-in, a return and a sign-out each leave
 # behind. The store and the flow are the product's; the directory is functions the test owns,
 # because a real one cannot be told to answer after a sign-out.
@@ -4514,4 +4589,26 @@ if(GNLINK_HAVE_WEBVIEW2)
   target_include_directories(remote60_client_reconnect_restore_e2e_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
   target_link_libraries(remote60_client_reconnect_restore_e2e_test PRIVATE ${_recovery_shell_links})
   add_dependencies(remote60_client_reconnect_restore_e2e_test remote60_client_shell remote60_native_video_client_poc)
+
+  # ka-pc-impl r2 (Codex N1-N4, N6): kept PCs through the product shell (entry renamed, REMOTE60_SHELL_TEST_SEAM) --
+  # its page, bridge and handlers -- with the real viewer (GNLinkViewerKaTest), a real directory and four real hosts.
+  # Writes only under REMOTE60_TEST_TMP; its own window and the viewers' are placed beyond the screen's right edge.
+  add_executable(remote60_ka_pc_shell_e2e_test src/ka_pc_shell_e2e_test.cpp ${_recovery_shell_sources})
+  target_compile_definitions(remote60_ka_pc_shell_e2e_test PRIVATE REMOTE60_SHELL_TEST_SEAM=1)
+  if(MSVC)
+    target_compile_options(remote60_ka_pc_shell_e2e_test PRIVATE /utf-8)
+  endif()
+  target_include_directories(remote60_ka_pc_shell_e2e_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+  target_link_libraries(remote60_ka_pc_shell_e2e_test PRIVATE ${_recovery_shell_links})
+  add_dependencies(remote60_ka_pc_shell_e2e_test remote60_client_shell remote60_viewer_ka_test remote60_native_video_host_poc)
+
+  # ka-pc-impl r5 (Codex R1-a): the shell's own PC-count functions on an in-memory registry (no process, window,
+  # WebView or network); files under REMOTE60_TEST_TMP only.
+  add_executable(remote60_ka_pc_shell_logic_test src/ka_pc_shell_logic_test.cpp ${_recovery_shell_sources})
+  target_compile_definitions(remote60_ka_pc_shell_logic_test PRIVATE REMOTE60_SHELL_TEST_SEAM=1)
+  if(MSVC)
+    target_compile_options(remote60_ka_pc_shell_logic_test PRIVATE /utf-8)
+  endif()
+  target_include_directories(remote60_ka_pc_shell_logic_test PRIVATE src "${GNLINK_WEBVIEW2_DIR}/include")
+  target_link_libraries(remote60_ka_pc_shell_logic_test PRIVATE ${_recovery_shell_links})
 endif()

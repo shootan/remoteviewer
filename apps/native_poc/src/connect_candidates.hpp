@@ -28,6 +28,9 @@ enum class CandidateKind : uint8_t {
   Private = 0,   // a LAN address; avoids the router entirely when both ends are on it
   Public = 1,    // the address the directory observed, which is the one NAT mapped
   PublicAlt = 2, // the same host on a second port, for networks that filter the first
+  // The directory's relay. np-impl r1 (10-22 analysis §6): it used to land here as Public, so the
+  // viewer's log and its relayPath flag could not tell a relayed session from a direct one.
+  Relay = 3,
 };
 
 struct ConnectCandidate {
@@ -44,6 +47,7 @@ inline const char* candidate_kind_name(CandidateKind kind) {
   switch (kind) {
     case CandidateKind::Private: return "private";
     case CandidateKind::PublicAlt: return "public-alt";
+    case CandidateKind::Relay: return "relay";
     default: return "public";
   }
 }
@@ -53,6 +57,7 @@ inline bool candidate_kind_from_name(const std::string& name, CandidateKind* out
   if (name == "private") { *out = CandidateKind::Private; return true; }
   if (name == "public-alt") { *out = CandidateKind::PublicAlt; return true; }
   if (name == "public") { *out = CandidateKind::Public; return true; }
+  if (name == "relay") { *out = CandidateKind::Relay; return true; }
   return false;
 }
 

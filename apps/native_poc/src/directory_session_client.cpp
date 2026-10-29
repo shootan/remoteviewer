@@ -452,7 +452,7 @@ bool directory_standby_support(const std::string& url, const std::string& sessio
 bool directory_connect(const std::string& url, const std::string& sessionToken,
                        const std::string& hostId, const std::string& observeToken,
                        DirectoryConnectTarget* outTarget, std::string* outError,
-                       uint32_t* outStatus, bool standby) {
+                       uint32_t* outStatus, bool standby, bool relayEarly) {
   std::string host;
   uint16_t port = 0;
   bool secure = false;
@@ -460,7 +460,8 @@ bool directory_connect(const std::string& url, const std::string& sessionToken,
 
   std::ostringstream body;
   body << "{\"hostId\":\"" << json_escape(hostId) << "\",\"observeToken\":\""
-       << json_escape(observeToken) << "\"" << (standby ? ",\"standby\":true" : "") << "}";
+       << json_escape(observeToken) << "\"" << (standby ? ",\"standby\":true" : "")
+       << (relayEarly ? ",\"relayEarly\":true" : "") << "}";
 
   uint32_t status = 0;
   std::string response;
@@ -480,6 +481,7 @@ bool directory_connect(const std::string& url, const std::string& sessionToken,
   json_get_string(response, "punchToken", &outTarget->punchToken);
   json_get_string(response, "connectId", &outTarget->connectId);  // pc2-connect-diag
   json_get_string(response, "standbyRelay", &outTarget->standbyRelay);  // keepalive-r2 (2)
+  if (relayEarly) json_get_string(response, "relayEarly", &outTarget->relayEarly);  // np-impl r1, asked only
   json_get_string(response, "hostPublicIp", &outTarget->hostPublicIp);
   uint32_t publicPort = 0;
   if (json_get_u32(response, "hostPublicUdpPort", &publicPort)) {

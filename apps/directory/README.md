@@ -159,6 +159,18 @@ The grace period is the only expression of "prefer direct" available: the client
 candidate answers first, not whichever is best, so the relay has to be slower than a working
 direct path and still inside the client's punch budget.
 
+**`relayEarly` (np-impl r1).** A client that holds the relay's answer itself can say so:
+`/api/connect {relayEarly:true}`. On a legacy relay lease the response then carries
+`relayEarly:"accepted"` and that connect's punch -- from its own wire tuple only -- is answered at
+once; the client prefers a direct answer until 1000 ms after its first punch and takes the relay
+then. Anything else is told why (`standby`, `no-relay`, `not-accepted`, `no-wire-port`) and keeps
+the grace. A client that does not send the flag gets the same response and the same grace as
+before, and so does another socket behind the same wire IP. Every scheduled reply, early or after the grace, is sent
+only if the record that scheduled it is still the current one for that wire IP and unexpired (np-impl r2):
+a newer connect -- even from the same tuple -- never receives a reply left over from an older one. Tests: `test/relay_early_test.js` (in
+`run.js`), and the whole viewer path across new/old server x new/old viewer in
+`test/np_early_bootstrap_e2e.js` (needs the probe exe and an older server copy; see its header).
+
 Payloads are forwarded unmodified and unencrypted. Media encryption (N4) is a prerequisite before
 this carries anything but test screens.
 

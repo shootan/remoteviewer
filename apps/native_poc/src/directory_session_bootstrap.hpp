@@ -54,6 +54,15 @@ struct DirectorySessionRequest {
    * already replaced spent all of it before it could notice.
    */
   const std::atomic<bool>* stop = nullptr;
+  /**
+   * np-impl r1 (Codex NP design, contracts 2-4): ask the directory for relayEarly. Only when the
+   * server answers 'accepted' does the race hold the relay's answer until relayCommitMs after the
+   * first punch (and the server then answers at once instead of after its own grace). Any other
+   * answer -- or an older server that does not know the field -- leaves the race exactly as before.
+   * Off by default so a caller that does not set it is unchanged; the PC viewer turns it on.
+   */
+  bool relayEarly = false;
+  uint32_t relayCommitMs = 1000;
 };
 
 struct DirectorySessionResult {
@@ -63,9 +72,9 @@ struct DirectorySessionResult {
   // surfacing: some NATs pass the hello even after dropping the punch, so this is a warning
   // rather than a failure, and it explains a slow start when it happens.
   bool answered = false;
-  // True when the winner was the server-side relay. `chosen.kind` cannot say so on its own:
-  // relay is newer than the candidate enum, so it lands there as an ordinary public address.
-  // The session shows this because relay bytes are billed and direct ones are not.
+  // True when the winner was the server-side relay (chosen.kind is CandidateKind::Relay since
+  // np-impl r1; before it the enum had no name for it and it read as public). The session shows
+  // this because relay bytes are billed and direct ones are not.
   bool relay = false;
   std::string punchToken;
 };

@@ -4,6 +4,7 @@
 #include "prelogin_control_allowlist.hpp"
 #include "prelogin_input_gate.hpp"
 #include "viewer_control_client.hpp"
+#include "viewer_owner_fence.hpp"
 
 #include <iostream>
 #include <memory>
@@ -303,9 +304,12 @@ int ControlClient::pump_clipboard_sync(remote60::native_poc::ControlLink& link) 
     }
   }
   if (haveOutbound) {
-    if (!remote60::native_poc::send_clipboard_update(link, seq, outText, outHash, qpc_now_us())) {
-      return -1;
-    }
+    const bool sent = remote60::native_poc::send_clipboard_update(link, seq, outText, outHash, qpc_now_us());
+    // r6 (Codex F2): taken off the shared pending already -- whether it went or the owner fence refused its write,
+    // this copy is zeroed now
+    if (!outText.empty()) SecureZeroMemory(&outText[0], outText.size() * sizeof(char16_t));
+    outText.clear();
+    if (!sent) return -1;
     return 1;
   }
   // (b) Otherwise poll the host for a change, on an interval -- the host cannot push, so this is the
@@ -589,6 +593,8 @@ bool ControlClient::control_round_trip(remote60::native_poc::ControlLink& link) 
 }
 
 bool ControlClient::begin_control_resume(uint64_t nowUs) {
+  // ka-pc-impl r6 (Codex F2): after the owner fence nothing is resumed -- the session is ending; only releases go.
+  if (gate_is_fenced(ctx.control.fenceGate)) return false;
   // Only the tunnelled path. A direct TCP control socket that dies is a different failure with
   // a different repair, and this one would be re-keying a stream that is not there.
   if (!ctx.control.overUdp.load(std::memory_order_acquire)) return false;
@@ -615,7 +621,7 @@ bool ControlClient::pump_control_resume(
   ctx.control.udpControl.Tick();
 
   remote60::native_poc::ResumePumpHooks hooks;
-  hooks.cancelled = [this] { return !ctx.session.running.load(); };
+  hooks.cancelled = [this] { return !ctx.session.running.load() || gate_is_fenced(ctx.control.fenceGate); };
   hooks.nowUs = [] { return qpc_now_us(); };
   hooks.videoAlive = [this] { return video_alive(qpc_now_us()); };
   hooks.proveChannel = [this, &link] {
@@ -624,7 +630,8 @@ bool ControlClient::pump_control_resume(
     // the point, because it belongs to a stream neither end is listening on any more.
     link = std::make_unique<remote60::native_poc::UdpControlLink>(&ctx.control.udpControl,
                                                                  kUdpControlReadTimeoutMs);
-    return control_round_trip(*link);
+    FenceGatedLink gatedProbe(link, ctx.control.fenceGate);  // r6: no probe write after the owner fence
+    return control_round_trip(gatedProbe);
   };
   hooks.onResumed = [this](uint64_t toFirstSendUs, uint64_t toRunningUs) {
     std::ostringstream os;
@@ -702,6 +709,9 @@ void ControlClient::Run() {
   } else {
     controlLink = std::make_unique<remote60::native_poc::TcpControlLink>(controlSock);
   }
+  // ka-pc-impl r6 (Codex F2): every write of this loop asks the owner-fence gate first (viewer_owner_fence.hpp): after
+  // the fence only a counted release's exchange starts a write -- whichever branch of the loop it comes from.
+  FenceGatedLink gated(controlLink, ctx.control.fenceGate);
 
   // P0 telemetry accumulators (input serialization diagnosis, #351): one line per second.
   // Move-specific (BLOCKER 1) + coalesce delta (BLOCKER 2) + queue age (HIGH 3) + windowUs.
@@ -733,6 +743,11 @@ void ControlClient::Run() {
 
   while (ctx.session.running.load()) {
     if (workerState == remote60::native_poc::ControlWorkerState::Resuming) {
+      // r6 (Codex F2): a resume already under way stops at the owner fence (the session is ending)
+      if (gate_is_fenced(ctx.control.fenceGate)) {
+        std::cout << "[native-video-client][control] owner fence during a resume: not resumed\n";
+        break;
+      }
       if (!pump_control_resume(controlLink, workerState)) break;
       continue;
     }
@@ -740,6 +755,66 @@ void ControlClient::Run() {
     if (ctx.control.overUdp.load(std::memory_order_acquire)) ctx.control.udpControl.Tick();
     bool didWork = false;
     const uint64_t nowUs = qpc_now_us();
+    // ka-pc-impl r5/r6 (Codex R3-b, F1, F2): after the owner fence this thread sends RELEASES ONLY -- each taken off the
+    // queue and counted in one critical section of the gate (gate_take_release), through the same logon-screen gates
+    // as any input, written through the gated link (only a counted release may write now). No ping-scheduled work, no
+    // pick, no stream state, no clipboard, no credential, no IME align. A release whose exchange fails is not resumed.
+    if (gate_is_fenced(ctx.control.fenceGate)) {
+#if defined(REMOTE60_VIEWER_KA_TEST_SEAM)
+      // TEST BUILD ONLY (GNLinkViewerKaTest): REMOTE60_VIEWER_TEST_HOLD_SEND_AFTER_FENCE_MS=N holds this sender for N ms
+      // after the fence -- a sender slow at exactly the wrong moment. (A refused release write is
+      // REMOTE60_VIEWER_TEST_REFUSE_RELEASE_WRITE_AFTER_FENCE, in the gate itself.)
+      {
+        static const uint64_t holdMs = [] {
+          const char* v = std::getenv("REMOTE60_VIEWER_TEST_HOLD_SEND_AFTER_FENCE_MS");
+          return v ? std::strtoull(v, nullptr, 10) : 0ull;
+        }();
+        if (holdMs && GetTickCount64() - ctx.session.ownerFenceAtMs.load() < holdMs) {
+          Sleep(5);
+          continue;
+        }
+      }
+#endif
+      ControlOutboundAction release{};
+      if (!gate_take_release(ctx.control.fenceGate, ctx.control.inputQueue, nowUs, &release)) {
+        ctx.control.inputQueue.WaitForInput(5);
+        continue;
+      }
+      // the same last look as any input (r7 H6 / r9): a release the logon-screen gates would not send is not sent
+      const bool keyUpOfHeldBackDown = release.kind == ControlOutboundActionKind::InputEvent &&
+                                       release.inputEvent.kind == 6 && release.inputEvent.keyCode < 256 &&
+                                       heldDownAtSend[release.inputEvent.keyCode];
+      if (keyUpOfHeldBackDown) heldDownAtSend[release.inputEvent.keyCode] = false;
+      const bool mayGo =
+          !keyUpOfHeldBackDown &&
+          remote60::native_poc::prelogin::ViewerMaySendAction(
+              remote60::native_poc::prelogin::EffectiveHostFlags(ctx.session.hostRoleKnown.load(std::memory_order_acquire),
+                                                                 ctx.session.hostCaptureFlags.load(std::memory_order_relaxed)),
+              release) &&
+          !(ctx.session.hostRoleKnown.load(std::memory_order_acquire) &&
+            (ctx.session.hostCaptureFlags.load(std::memory_order_relaxed) & remote60::native_poc::kCaptureFlagPreloginV1) != 0 &&
+            !remote60::native_poc::prelogin::IsControlAllowedInPrelogin(remote60::native_poc::outbound_message_type(release)));
+      if (!mayGo) {
+        gate_end_input(ctx.control.fenceGate, InputOutcome::Skipped);
+        continue;
+      }
+      TcpControlResponse releaseResponse{};
+      const bool releaseOk = execute_control_action(gated, release, &releaseResponse);
+      if (releaseOk && releaseResponse.kind == TcpControlResponseKind::InputAck) {
+        gate_end_input(ctx.control.fenceGate, InputOutcome::Acked);
+      } else {
+        // a release is never "cancelled": the gate admits it, so whatever went wrong is a failure (r7, Codex N2)
+        const ExchangeFailure why = gate_take_failure(ctx.control.fenceGate);
+        gate_end_input(ctx.control.fenceGate, InputOutcome::Failed);
+        std::cout << "[native-video-client][control] a release after the owner fence was not acknowledged ("
+                  << (why == ExchangeFailure::HookRefused ? "its write was refused by the test hook"
+                      : why == ExchangeFailure::Broken     ? "the message was cut"
+                                                           : "the exchange failed")
+                  << "); no resume (the session is ending)\n";
+        break;
+      }
+      continue;
+    }
     // P0: once a second, print mouse-moves the UI generated vs coalesced vs actually sent, with the
     // send->ack RTT and generate->send queue age. moveGen>>moveSent (and coalesced making up the
     // gap) means the drag is serialized 1-per-RTT. windowUs is emitted because the control thread
@@ -786,7 +861,7 @@ void ControlClient::Run() {
         if (load_unlock_password(0, &pw)) {
           std::string status;
           bool clearCred = false;
-          (void)run_unlock_exchange_result(*controlLink, pw, &stage, &win32, &clearCred, &status);
+          (void)run_unlock_exchange_result(gated, pw, &stage, &win32, &clearCred, &status);
           if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
           if (clearCred) {  // wrong/corrupt/refused: drop it so it is not auto-reused (lockout guard)
             clear_unlock_password(0);
@@ -842,7 +917,7 @@ void ControlClient::Run() {
         if (askedRole == kLoginRoleLockScreen) {
           LockCredProgress progress;
           const bool exchanged =
-              run_lock_cred_exchange(*controlLink, pw, &stage, &win32, &waiting, &lockRequestId, &status, supersedes, &progress);
+              run_lock_cred_exchange(gated, pw, &stage, &win32, &waiting, &lockRequestId, &status, supersedes, &progress);
           // lk-ux-retry r2 (Codex N2): the earlier wait is over exactly when the host issued THIS retry's challenge
           // -- whatever then happened to the new password. 18, a refusal or no answer: it still waits (followed).
           // (Superseded as the retry's own answer: the earlier wait ended, but no new challenge could be had.)
@@ -869,7 +944,7 @@ void ControlClient::Run() {
             waiting = true;
           }
         } else {
-          (void)run_prelogin_cred_exchange(*controlLink, pw, &stage, &win32, &status);
+          (void)run_prelogin_cred_exchange(gated, pw, &stage, &win32, &status);
         }
       }
       if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
@@ -894,7 +969,7 @@ void ControlClient::Run() {
       uint16_t stage = 0;
       bool terminal = false;
       uint32_t win32 = 0;
-      const bool polled = poll_lock_cred_status(*controlLink, lockCredPollRequestId, &stage, &terminal, &win32);
+      const bool polled = poll_lock_cred_status(gated, lockCredPollRequestId, &stage, &terminal, &win32);
       const bool expired = qpc_now_us() >= lockCredPollDeadlineUs;
       if ((polled && terminal) || expired) {
         if (!(polled && terminal)) stage = static_cast<uint16_t>(remote60::native_poc::UnlockStage::UnlockUnconfirmed);
@@ -945,7 +1020,7 @@ void ControlClient::Run() {
         action.expectedResponseType = MessageType::ControlRebootReply;
         action.expectedResponseSize = sizeof(remote60::native_poc::ControlRebootReplyMessage);
         TcpControlResponse resp{};
-        if (execute_control_action(*controlLink, action, &resp) &&
+        if (execute_control_action(gated, action, &resp) &&
             resp.kind == TcpControlResponseKind::RebootReply && resp.rebootReply.requestId == rid) {
           std::cout << "[native-video-client][reboot] requestId=" << rid
                     << " result=" << static_cast<unsigned>(resp.rebootReply.result)
@@ -976,7 +1051,7 @@ void ControlClient::Run() {
         action.expectedResponseType = MessageType::ControlPreloginStatus;
         action.expectedResponseSize = sizeof(remote60::native_poc::ControlPreloginStatusMessage);
         TcpControlResponse resp{};
-        if (execute_control_action(*controlLink, action, &resp) && resp.kind == TcpControlResponseKind::PreloginStatus &&
+        if (execute_control_action(gated, action, &resp) && resp.kind == TcpControlResponseKind::PreloginStatus &&
             resp.preloginStatus.requestId == rid) {
           std::cout << "[native-video-client][sas] requestId=" << rid
                     << " result=" << static_cast<unsigned>(resp.preloginStatus.result)
@@ -1008,7 +1083,8 @@ void ControlClient::Run() {
       imeAction.imeStateReq.action = 1;  // set to English, then query
       imeAction.imeStateReq.clientSendQpcUs = qpc_now_us();
       TcpControlResponse imeResp{};
-      if (!execute_control_action(*controlLink, imeAction, &imeResp)) {
+      if (!execute_control_action(gated, imeAction, &imeResp)) {
+        if (gate_take_failure(ctx.control.fenceGate) == ExchangeFailure::NotStarted) continue;  // r7: a fence cancellation
         std::cout << "[native-video-client][control] action failed kind=ime-align\n";
         break;
       }
@@ -1042,11 +1118,32 @@ void ControlClient::Run() {
       std::lock_guard<std::mutex> lock(ctx.control.bandwidthMu);
       bandwidthSnapshot = ctx.control.bandwidth;
     }
-    if (ctx.control.scheduler.NextAction(
-            nowUs, capture_client_control_metrics_snapshot(ctx), &ctx.picker.windowPanel,
-            &ctx.control.streamState, &ctx.control.captureModeRequests, &ctx.control.keyframeRequests, &ctx.control.runtimeTune,
-            &ctx.control.inputQueue, &action, nullptr,
-            bandwidthObserve ? &bandwidthSnapshot : nullptr)) {
+    // r6 (Codex F1/F2): the scheduler's pick -- which may take an input off the queue -- is made and admitted in ONE
+    // critical section of the owner-fence gate: an input taken is counted at once; after a fence anything but a
+    // release is refused there and dropped, never written.
+    const GateAdmit admit = gate_begin_action(ctx.control.fenceGate, &action, [&](ControlOutboundAction* out) {
+      return ctx.control.scheduler.NextAction(
+          nowUs, capture_client_control_metrics_snapshot(ctx), &ctx.picker.windowPanel,
+          &ctx.control.streamState, &ctx.control.captureModeRequests, &ctx.control.keyframeRequests, &ctx.control.runtimeTune,
+          &ctx.control.inputQueue, out, nullptr,
+          bandwidthObserve ? &bandwidthSnapshot : nullptr);
+    });
+    if (admit == GateAdmit::Refused) {
+      std::cout << "[native-video-client][control] owner fence: a picked action (kind=" << static_cast<int>(action.kind)
+                << ") dropped, not sent\n";
+      continue;
+    }
+    if (admit == GateAdmit::Admitted) {
+      // Every way out of this block settles the admitted exchange in the gate (an input: acked / failed / not sent).
+      struct AdmitEnd {
+        OwnerFenceGate& g;
+        bool input;
+        InputOutcome outcome = InputOutcome::Skipped;
+        ~AdmitEnd() {
+          if (input) gate_end_input(g, outcome);
+          else gate_end_other(g);
+        }
+      } admitEnd{ctx.control.fenceGate, action_is_input(action)};
       // r7 H6: the last look before an input leaves -- it may have been queued before the host's role was
       // known, or before it changed. Held back here exactly as at the keyboard.
       if (!remote60::native_poc::prelogin::ViewerMaySendAction(
@@ -1087,7 +1184,13 @@ void ControlClient::Run() {
       }
       TcpControlResponse response{};
       const uint64_t actionStartUs = qpc_now_us();
-      const bool actionOk = execute_control_action(*controlLink, action, &response);
+      const bool actionOk = execute_control_action(gated, action, &response);
+      // r5/r6/r7 (Codex R3-a, N2): an input is acknowledged only by the host's InputAck. Otherwise WHY it did not go is
+      // taken from the gate: refused by the fence before any byte (a down the fence caught between its admission and
+      // its write) is a cancellation -- nothing was sent, the drain goes on; anything else is a failure.
+      const bool inputAcked = actionOk && response.kind == TcpControlResponseKind::InputAck;
+      const ExchangeFailure failure = inputAcked ? ExchangeFailure::Transport : gate_take_failure(ctx.control.fenceGate);
+      admitEnd.outcome = inputAcked ? InputOutcome::Acked : outcome_of_failure(failure);
       // One exchange that never gets its reply stalls every later one behind it,
       // including input. Naming the slow action is the only way to see which.
       const uint64_t actionDoneUs = qpc_now_us();
@@ -1147,6 +1250,9 @@ void ControlClient::Run() {
         // not the same as its reply being redelivered. It fails here; the UI asks again if
         // it still wants the answer. A reply that turns up later is dropped by the re-key,
         // which gives the resumed channel stream ids the old reply does not carry.
+        // r7 (Codex N2): only a write the fence refused before any byte is a cancellation the drain may go on after;
+        // a cut message or a transport failure is what it is (no resume after the fence: the loop ends)
+        if (failure == ExchangeFailure::NotStarted) continue;
         if (begin_control_resume(qpc_now_us())) {
           workerState = remote60::native_poc::ControlWorkerState::Resuming;
           continue;
@@ -1206,7 +1312,7 @@ void ControlClient::Run() {
             versionReported = true;
             std::string peer;
             const bool supported = (response.pong.captureTargetFlags & kCaptureFlagPeerVersion) != 0;
-            versionExchangeFailed = !exchange_peer_version(*controlLink, supported, response.pong.seq, &peer);
+            versionExchangeFailed = !exchange_peer_version(gated, supported, response.pong.seq, &peer);
             log_client_line(ctx, "[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=" +
                                 local_product_version() + " peerProcess=GNLinkStream peerVersion=" + peer +
                                 " peerVersionSource=" + (supported ? "peer-report" : "unsupported"));
@@ -1240,7 +1346,8 @@ void ControlClient::Run() {
 
     // Clipboard sync runs whether or not the picker is up (unlike previews), so it comes first.
     if (!didWork) {
-      const int synced = pump_clipboard_sync(*controlLink);
+      const int synced = pump_clipboard_sync(gated);
+      if (synced < 0 && gate_take_failure(ctx.control.fenceGate) == ExchangeFailure::NotStarted) continue;  // r7
       if (synced < 0) {
         // The same door as a failed action: on the tunnel a clipboard poll that cannot complete
         // is the link having gone, not the clipboard having a problem.
@@ -1253,7 +1360,8 @@ void ControlClient::Run() {
       didWork = (synced > 0);
     }
     if (!didWork && ctx.picker.visible.load(std::memory_order_relaxed)) {
-      const int fetched = fetch_one_thumbnail(*controlLink);
+      const int fetched = fetch_one_thumbnail(gated);
+      if (fetched < 0 && gate_take_failure(ctx.control.fenceGate) == ExchangeFailure::NotStarted) continue;  // r7
       if (fetched < 0) {
         if (begin_control_resume(qpc_now_us())) {
           workerState = remote60::native_poc::ControlWorkerState::Resuming;

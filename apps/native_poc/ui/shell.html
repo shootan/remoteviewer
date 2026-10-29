@@ -106,6 +106,17 @@
   .host[data-connecting="1"] .state { color: var(--accent); }
   .host[data-connecting="1"] .dot { background: var(--accent); box-shadow: none; }
   .empty { color: var(--muted); font-size: 12.5px; text-align: center; padding: 26px 0; }
+  /* ka-pc-impl r2 (Codex N3): a kept PC's own "연결 해제" -- a button BESIDE the card (a button inside a button is
+     not a button), over the card's right edge; the card leaves room for it. */
+  .hostRow { position: relative; }
+  .hostRow[data-kept="1"] .host { padding-right: 96px; }
+  .keepRelease {
+    position: absolute; right: 10px; top: 50%; transform: translateY(-50%);
+    width: auto; margin: 0; padding: 6px 10px; font-size: 12px; font-weight: normal;
+    background: none; border: 1px solid var(--line); border-radius: 7px; color: var(--muted); cursor: pointer;
+  }
+  .keepRelease:hover:not(:disabled) { color: var(--text); border-color: #33404f; background: none; }
+  .keepRelease:disabled { opacity: .45; cursor: default; }
 
   .row { display: flex; justify-content: space-between; margin-top: 4px; }
   .hint { color: var(--text); font-weight: 600; float: right; }
@@ -328,6 +339,20 @@
   // Remembered so the list can be redrawn when only the connecting target changes.
   let lastHosts = [];
   let connectingId = '';
+  // ka-pc-impl r1 (KA ③): what the shell says about each kept PC -- only what a managed viewer reported
+  // (hostKeep), never inferred here.
+  // ka-pc-impl r2 (Codex D1/D2): "대기 중" (ready) = this PC handed its session back here and its standby entry is
+  // alive -- NOT a statement that the PC has finished cleaning up the previous connection; for some seconds after a
+  // session that may still be going on there ("returning", said as such). An unanswered standby is "not confirmed",
+  // never a diagnosis ("PC update needed" was one): connecting to that PC again tries again.
+  const keepState = {};
+  const keepText = {
+    ready: '대기 중', returning: '대기 중 · 이전 연결 정리 중일 수 있음', preparing: '대기 준비 중', starting: '대기 준비 중',
+    retry: '대기 다시 준비 중', connecting: '여는 중', active: '연결됨',
+    unsupported: '대기 확인 안 됨 (다시 연결하면 재시도)', failed: '대기 유지 안 됨',
+  };
+  // The states in which a kept PC can be released by the user (its standby viewer exists).
+  const keepReleasable = { ready: 1, returning: 1, preparing: 1, starting: 1, retry: 1, connecting: 1, active: 1 };
 
   function renderHosts(hosts) {
     lastHosts = hosts;
@@ -338,13 +363,19 @@
       return;
     }
     for (const host of hosts) {
+      const row = document.createElement('div');
+      row.className = 'hostRow';
       const button = document.createElement('button');
       const connecting = host.hostId === connectingId;
       button.className = 'host';
       button.dataset.online = host.online ? '1' : '0';
       if (connecting) button.dataset.connecting = '1';
-      button.disabled = !host.online || busy;
-      const state = connecting ? '연결하는 중…' : (host.online ? '연결 가능' : '오프라인');
+      // Per card (ka-pc-impl r1): the PC being connected is the one that waits; another PC can still be
+      // chosen -- the newest choice is what counts.
+      button.disabled = !host.online || connecting;
+      const kept = keepText[keepState[host.hostId]];
+      const state = connecting ? '연결하는 중…'
+                               : (host.online ? (kept ? kept : '연결 가능') : '오프라인');
       button.innerHTML =
         (connecting ? '<span class="spinner"></span>'
                     : '<span class="dot' + (host.online ? ' on' : '') + '"></span>') +
@@ -352,14 +383,30 @@
       // textContent, not innerHTML: the name came off another machine.
       button.querySelector('.name').textContent = host.hostName || host.hostId;
       button.onclick = () => {
-        if (busy) return;
+        if (host.hostId === connectingId) return;
         connectingId = host.hostId;
-        setBusy(true);
         message($('hostsMsg'), (host.hostName || 'PC') + '에 연결하는 중');
         renderHosts(lastHosts);
         send({ type: 'connect', hostId: host.hostId, hostName: host.hostName });
       };
-      list.appendChild(button);
+      row.appendChild(button);
+      // ka-pc-impl r2 (Codex N3): this PC's standby (and its open session, if any) ends, and it is not kept again
+      // on its own -- until the user connects to it.
+      if (keepReleasable[keepState[host.hostId]]) {
+        row.dataset.kept = '1';
+        const release = document.createElement('button');
+        release.className = 'keepRelease';
+        release.textContent = '연결 해제';
+        release.dataset.hostId = host.hostId;
+        release.onclick = (e) => {
+          e.stopPropagation();
+          release.disabled = true;
+          message($('hostsMsg'), (host.hostName || 'PC') + ' 연결을 해제하는 중');
+          send({ type: 'releaseKept', hostId: host.hostId });
+        };
+        row.appendChild(release);
+      }
+      list.appendChild(row);
     }
   }
 
@@ -443,7 +490,14 @@
       renderHosts(msg.hosts || []);
       return;
     }
+    if (msg.type === 'hostKeep') {
+      if (msg.state && msg.state !== 'none') keepState[msg.hostId] = msg.state;
+      else delete keepState[msg.hostId];
+      if (lastHosts.length) renderHosts(lastHosts);
+      return;
+    }
     if (msg.type === 'signedOut') {
+      for (const k of Object.keys(keepState)) delete keepState[k];
       show($('cancelReconnect'), false);
       setBusy(false);
       updateVersion = '';
@@ -479,7 +533,10 @@
       show($('cancelReconnect'), msg.state === 'reconnecting');
       if (msg.state === 'reconnecting') setBusy(true);
       const failed = msg.state === 'error';
-      if (failed || msg.state === 'idle') setBusy(false);
+      // ka-pc-impl r3 (Codex R4): a status about ONE PC (hostId) ends only that PC's "connecting" mark -- another
+      // PC's result (its window opened, closed, failed) must not unlock the card that is still being connected.
+      const aboutAnotherPc = !!msg.hostId && msg.hostId !== connectingId;
+      if ((failed || msg.state === 'idle') && !aboutAnotherPc) setBusy(false);
       if (!$('settingsCard').classList.contains('hidden')) {
         message($('settingsMsg'), msg.detail, msg.state === 'error');
         return;

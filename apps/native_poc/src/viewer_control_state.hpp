@@ -32,6 +32,24 @@
 
 namespace remote60::native_poc::viewer {
 
+// ka-pc-impl r6 (Codex R3-a, F1, F2): the owner fence's ONE state, under ONE lock -- see viewer_owner_fence.hpp for
+// every operation on it (they are the only code that touches these fields).
+struct OwnerFenceGate {
+  mutable std::mutex mu;
+  bool fenced = false;           // the owner ended this session: only a release may start a write
+  bool releaseExchange = false;  // the exchange the control thread is running is a counted release
+  bool inFlight = false;         // an input taken off the queue whose exchange has not ended
+  // input exchanges: started / ended in the host's InputAck / failed (a write or reply that went wrong, a refused
+  // release) / not sent by the logon-screen gate / not started because the fence refused it (r7, Codex N2)
+  uint64_t taken = 0, acked = 0, failed = 0, skipped = 0, cancelled = 0;
+  uint64_t taken0 = 0, acked0 = 0, failed0 = 0, skipped0 = 0, cancelled0 = 0;  // as they stood when the fence was raised
+  // r7 (Codex N2): why the latest write was refused -- the gated link records it, the caller of a failed exchange takes
+  // it: refused by the fence before any byte of that message (not started), refused in the middle of a message
+  // (broken), refused by the test build's release hook. None: no refusal -- a failure was the transport's own.
+  enum class Refusal : uint8_t { None, FenceBeforeAnyByte, FenceMidMessage, TestHook };
+  Refusal lastRefusal = Refusal::None;
+};
+
 // Clipboard text sync (K1). The UI thread hears local clipboard changes (WM_CLIPBOARDUPDATE) and
 // leaves the ones worth sending as a pending outbound; the control thread drains that pending item,
 // sends it, and polls the host for changes the other way. `enabled` is the viewer's on/off toggle
@@ -123,6 +141,10 @@ struct ControlChannelState {
   remote60::native_poc::StreamStateControl streamState;
   CaptureModeRequestState captureModeRequests;
   ClientInputQueue inputQueue;
+  // ka-pc-impl r4 (Codex R3): raised by the control thread BEFORE it takes the next action while input is queued,
+  // lowered once that action's exchange (its ack) is over -- so "the queue is empty and nothing is in flight" means
+  // every queued input was acknowledged by the host. The owner fence waits on it.
+  OwnerFenceGate fenceGate;
   // C0 stage 1: the receive thread's latest bandwidth observation, for the control thread to
   // send. Guarded; copied out whole so a report is never sent half-updated.
   std::mutex bandwidthMu;

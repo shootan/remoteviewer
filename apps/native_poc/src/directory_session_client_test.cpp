@@ -650,8 +650,9 @@ int main() {
   check("every candidate is found", candidateObjects.size() == 3,
         "count=" + std::to_string(candidateObjects.size()));
 
-  // The relay kind is newer than this parser's enum, and dropping it would silently remove the
-  // only route that works on a network with no direct path at all.
+  // Dropping the relay would silently remove the only route that works on a network with no direct
+  // path at all. np-impl r1: it is a named kind now (CandidateKind::Relay), so a relayed session can be
+  // told from a direct one in the log and in the relayPath flag (10-22 analysis §6).
   std::string relayIp;
   uint32_t relayPort = 0;
   std::string relayKind;
@@ -662,8 +663,9 @@ int main() {
   }
   CandidateKind parsed = CandidateKind::Private;
   const bool known = candidate_kind_from_name(relayKind, &parsed);
-  check("the relay candidate is kept even though its kind is unknown here",
-        relayIp == "223.130.132.180" && relayPort == 43000 && !known,
+  check("the relay candidate is kept, and named relay",
+        relayIp == "223.130.132.180" && relayPort == 43000 && known && parsed == CandidateKind::Relay &&
+            std::string(candidate_kind_name(parsed)) == "relay",
         "ip=" + relayIp + " kind=" + relayKind);
 
   // Order is the server's preference, and it matters: the client punches all of them but falls
