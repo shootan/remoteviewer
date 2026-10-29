@@ -21,6 +21,12 @@ log: the test host's `[input-trace]` lines (input injection none: the events are
   3 / 6b / 6r pick that window: its id from the host's own log (capture target hwnd == window-list selectedId), the
   Windows tab, the one card whose title is that window's; judged on the app's select_request (that id, tab=WINDOWS), the
   host's window-select applied=1 for that id, and select_ready. Any other card (the Desktop card, id 0) is a FAIL.
+  r7 (Codex codex_old_apk_lane_pinned_scope_r7.md): the pick is tied end to end -- the ONE non-zero target THIS run's host
+  listed, the app's requested id and selection gen, the host's applied id and streamGen (= the app's select_ack
+  streamGen), select_ready of the same gen, then a frame out after it. A listed id 0 or an id the host's own lines do
+  not agree on is refused with NO tap. 4 is the tap's own events: a button down then up on the host after it, inside
+  the window's picture -- not a count of lines. The seam is never relaxed and id 0 is never redirected to the window.
+  Scope: S window 3 4 + park 5 / reuse 6; P window 3 4, P-5d, P-6r (5 6 NOT RUN), 7 with P.
 No clipboard is changed. No real password is shown: adb errors and steps are cleaned (oa_adb._clean).
 
   python -I oa_avd.py <run folder> <S|P> <apk> <out>"""
@@ -177,22 +183,60 @@ def card_shows(text, title):
 
 
 def judge_pick(app_since, host_since, pinned):
-    """r7: (ok, detail) for one pick, from what the app and the host logged after it. PASS only if the app's FIRST
-    select_request is the pinned id on the Windows tab, the host applied a window-select of that id (applied=1) and
-    refused none, and the app logged select_ready for that id -- a frame after a request for another target (id 0 =
-    the desktop) is NOT a pass."""
-    reqs = re.findall(r'\[select_request\] targetId=(-?\d+) label=(.*?) tab=(\S+)', app_since)
-    ready = re.findall(r'\[select_ready\] targetId=(-?\d+)[^\n]* ms=(-?\d+)', app_since)
+    """r7: (ok, detail) for one pick, from what the app and the host logged after it. PASS only if ALL hold:
+    - the app's FIRST select_request is the pinned id on the Windows tab (its gen G)
+    - the host's window-select of that id says applied=1 (its streamGen S) and no window-select was refused
+    - the app's select_ack is gen G, streamGen S (the same selection on both ends)
+    - select_ready of the pinned id and gen G, and a video_debug after it with out > 0 (the first picture)
+    A frame after a request for another target (id 0 = the desktop) is NOT a pass."""
+    reqs = re.findall(r'\[select_request\] targetId=(-?\d+) label=(.*?) tab=(\S+) gen=(\d+)', app_since)
+    acks = re.findall(r'\[select_ack\] targetId=(-?\d+) gen=(\d+) streamGen=(\d+)', app_since)
+    m_ready = re.search(r'\[select_ready\] targetId=(-?\d+) gen=(\d+)[^\n]* ms=(-?\d+)', app_since)
     failed = re.findall(r'\[select_failed\][^\n]*', app_since)
-    applied = re.findall(r'window-select seq=\d+ requestedId=(\d+) applied=(\d)[^\n]*', host_since)
+    applied = re.findall(r'window-select seq=\d+ requestedId=(\d+) applied=(\d)(?: selectedId=\d+ streamGen=(\d+))?', host_since)
     first = reqs[0] if reqs else None
-    ok = (first is not None and int(first[0]) == pinned and first[2] == 'WINDOWS'
-          and any(int(i) == pinned and a == '1' for i, a in applied) and not any(a != '1' for _, a in applied)
-          and any(int(i) == pinned for i, _ in ready) and not failed)
-    detail = (f'pinned={pinned} request={"targetId=%s tab=%s label=%r" % (first[0], first[2], first[1]) if first else "none"}'
-              f' host window-select={applied[:3]} ready={[(i, ms) for i, ms in ready][:2]}'
+    gen = int(first[3]) if first else None
+    host_ok = [int(sg) for i, a, sg in applied if a == '1' and int(i) == pinned and sg]
+    stream_gen = host_ok[0] if host_ok else None
+    ack_ok = any(int(t) == pinned and int(g) == gen and int(sg) == stream_gen for t, g, sg in acks) if stream_gen else False
+    ready_ok = bool(m_ready) and int(m_ready.group(1)) == pinned and int(m_ready.group(2)) == gen
+    after = app_since[m_ready.end():] if m_ready else ''
+    outs = [int(o) for o in re.findall(r'\[video_debug\][^\n]* out=(\d+)', after)]
+    video_ok = any(o > 0 for o in outs)
+    ok = (first is not None and int(first[0]) == pinned and first[2] == 'WINDOWS' and stream_gen is not None
+          and not any(a != '1' for _, a, _ in applied) and ack_ok and ready_ok and video_ok and not failed)
+    detail = (f'pinned={pinned} request={"targetId=%s tab=%s gen=%s" % (first[0], first[2], first[3]) if first else "none"}'
+              f' host window-select={[(i, a, sg) for i, a, sg in applied][:3]} ack={acks[:2]}'
+              f' ready={m_ready.group(0)[:90] if m_ready else "none"} video out after ready={outs[:3]}'
               + (f' failed={failed[0][:120]}' if failed else ''))
     return ok, detail
+
+
+def window_size(hl):
+    """r7: the window's picture size as the host encodes it (its last [keyframe] size=WxH)."""
+    m = re.findall(r'\[keyframe\][^\n]* size=(\d+)x(\d+)', hl)
+    return (int(m[-1][0]), int(m[-1][1])) if m else None
+
+
+def judge_input(host_since, size):
+    """r7 (4): the tap's own events, from the host's [input-trace] lines after it (kind 1 move, 2 button down, 3 button
+    up, 4 wheel; the PinnedSelectTest seam logs every pointer event, injection none): PASS only if a button down is
+    followed by a button up (a higher seq), both inside the window's picture (0 <= x < W, 0 <= y < H). Lines that are
+    not this pair (moves alone, an up without its down, a key) do not count."""
+    ev = [(int(q), int(k), int(x), int(y)) for q, k, x, y in
+          re.findall(r'\[input-trace\] seq=(\d+) kind=(\d+) x=(-?\d+) y=(-?\d+)', host_since)]
+    inside = (lambda x, y: size is not None and 0 <= x < size[0] and 0 <= y < size[1])
+    downs = [e for e in ev if e[1] == 2 and inside(e[2], e[3])]
+    pair = None
+    for d in downs:
+        ups = [e for e in ev if e[1] == 3 and e[0] > d[0] and inside(e[2], e[3])]
+        if ups:
+            pair = (d, ups[0])
+            break
+    detail = (f'window={size} events={len(ev)} kinds={[e[1] for e in ev][:8]} '
+              + (f'down seq={pair[0][0]} at {pair[0][2]},{pair[0][3]} -> up seq={pair[1][0]} at {pair[1][2]},{pair[1][3]}'
+                 if pair else 'no down->up pair inside the window'))
+    return pair is not None, detail
 
 
 def targets_ui(name):
@@ -246,17 +290,32 @@ def pick_pinned(tag):
     step(f'tapped the pinned card at {(x1 + x2) // 2},{(y1 + y2) // 2} text={mine[0]["text"]!r}')
     t0 = time.time()
     wait_log(r'\[select_(?:ready|failed)\][^\n]*', n0, 30)
+    if '[select_ready]' in since(n0):
+        wait_log(r'\[select_ready\][\s\S]*\[video_debug\]', n0, 8)
     time.sleep(1.0)
     ok, detail = judge_pick(since(n0), host_log()[hl0:], pinned)
     if not ok:
         verdict(f'{tag}: the pinned window picked (id {pinned}, Windows tab) -> first frame', False, detail[:400])
         return None
     time.sleep(0.5)
-    digest = shot(tag.split()[0] + '_first_frame')
+    digest = shot(tag.split()[0] + '_window_first_frame')
     vd = re.findall(r'\[video_debug\][^\n]* out=(\d+)', since(n0))
     verdict(f'{tag}: the pinned window picked (id {pinned}, Windows tab) -> first frame', True,
             f'{detail[:300]} (wall {time.time() - t0:.1f} s) screenshot={digest[:16]} video_debug out={vd[-1] if vd else "?"}')
     return digest
+
+
+def input_check():
+    """r7 (4): one tap on the window's picture; judged by judge_input on the host's lines after it."""
+    hl = host_log()
+    h0 = len(hl)
+    ka.adb('shell', 'input', 'tap', '1200', '540')
+    step('  one tap on the window picture at 1200,540')
+    time.sleep(3)
+    ok, detail = judge_input(host_log()[h0:], window_size(hl))
+    verdict('4 the tap on the window reaches the host as its own button down -> up inside the window '
+            '([input-trace]; not injected: input none)', ok, detail[:300])
+    return ok
 
 
 class Invalid(Exception):
@@ -484,14 +543,8 @@ def main():
         if not pick_pinned('3 the pinned window picked'):
             return 1
 
-        # 4: one tap on the picture -> the host's log says it arrived (injection none: logged, not injected)
-        n_in = len(re.findall(r'\[input-trace\][^\n]*', host_log()))
-        ka.adb('shell', 'input', 'tap', '1200', '540')
-        step('  one tap on the picture at 1200,540')
-        time.sleep(3)
-        traces = re.findall(r'\[input-trace\][^\n]*', host_log())[n_in:]
-        verdict('4 one input reaches the host (its [input-trace]; not injected: input none)', len(traces) > 0,
-                f'new={len(traces)} ' + ' | '.join(traces[:3])[:240])
+        # 4: one tap on the window's picture -> its own down/up on the host (injection none: logged, not injected)
+        input_check()
 
         # 5 + 6
         if ARM == 'S':
