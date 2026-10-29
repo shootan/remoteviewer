@@ -107,13 +107,18 @@ inline void wake_display_for_remote_session() {
 
 class HostPowerKeepalive {
  public:
-  HostPowerKeepalive() {
-    Apply(false);
+  // old-ref r1 safety port (53fced4): bound to the local startup policy BEFORE the object exists; OFF -> no
+  // execution-state request, no release, no display wake (synthetic mouse move / monitor-power broadcast).
+  explicit HostPowerKeepalive(bool enabled) : enabled_(enabled) {
+    if (enabled_) Apply(false);
   }
 
   ~HostPowerKeepalive() {
-    (void)SetThreadExecutionState(ES_CONTINUOUS);
+    if (enabled_) (void)SetThreadExecutionState(ES_CONTINUOUS);
   }
+
+  HostPowerKeepalive(const HostPowerKeepalive&) = delete;
+  HostPowerKeepalive& operator=(const HostPowerKeepalive&) = delete;
 
   void SetStreaming(bool streaming, bool wakeDisplay = false) {
     // Only a real not-streaming -> streaming edge may wake the display. The wake injects
@@ -123,6 +128,7 @@ class HostPowerKeepalive {
     const bool startedStreaming = streaming && !streaming_;
     if (streaming_ == streaming) return;
     streaming_ = streaming;
+    if (!enabled_) return;  // old-ref r1: the local policy is OFF -- a call site's request changes nothing here
     Apply(streaming);
     if (startedStreaming && wakeDisplay) wake_display_for_remote_session();
   }
@@ -134,6 +140,7 @@ class HostPowerKeepalive {
     (void)SetThreadExecutionState(flags);
   }
 
+  const bool enabled_;
   bool streaming_ = false;
 };
 

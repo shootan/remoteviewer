@@ -23,10 +23,13 @@
 #include <vector>
 
 #include "env_util.hpp"
+#include "host_power_policy.hpp"  // old-ref r1 safety port
 
 namespace remote60::native_poc {
 
 struct Args {
+  // old-ref r1 safety port (53fced4 ba2eaf2): --host-power-management on|off, read by parse_args
+  HostPowerPolicy hostPower;
   uint16_t bindPort = 43000;
   // Ordered fallback list for the media socket; the first port that binds wins. Corporate
   // firewalls commonly permit outbound UDP only to a whitelist of destination ports, so a host

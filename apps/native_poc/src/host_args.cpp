@@ -99,6 +99,23 @@ Args parse_args(int argc, char** argv) {
       ++i;
       continue;
     }
+    if (k == "--host-power-management") {
+      // old-ref r1 safety port (53fced4 host_args.cpp): this switch's own operand, the next token; the last one wins
+      if (i + 1 >= argc) {
+        a.hostPower.ok = false;
+        a.hostPower.bad = "(missing)";
+      } else {
+        const std::string v = argv[++i];
+        if (v == "on" || v == "off") {
+          a.hostPower.enabled = (v == "on");
+          a.hostPower.fromCommandLine = true;
+        } else {
+          a.hostPower.ok = false;
+          a.hostPower.bad = v;
+        }
+      }
+      continue;
+    }
     if (k == "--bind-port" && i + 1 < argc) {
       // Accepts one port or an ordered comma-separated fallback list.
       a.bindPortCandidates = remote60::native_poc::parse_bind_port_candidates(argv[++i]);

@@ -248,14 +248,22 @@ int main(int argc, char** argv) {
   } drainWorkerLogAtReturn;
   // A remote host cannot wake itself after Windows enters S3. Keep the machine reachable
   // while the host is running; the display requirement is enabled only for an active stream.
-  HostPowerKeepalive powerKeepalive;
+  // old-ref r1 safety port (53fced4): the ONE parser first -- it reads arguments and a --config profile only -- so
+  // the power policy is bound before the keepalive object exists and before any of its effects.
+  const Args args = parse_args(argc, argv);
+  const remote60::native_poc::HostPowerPolicy& powerPolicy = args.hostPower;
+  if (!powerPolicy.ok) {
+    std::cerr << "[native-video-host] invalid --host-power-management value: " << powerPolicy.bad
+              << " (on|off) -- not started\n";
+    return 65;
+  }
+  std::cout << "[native-video-host] " << remote60::native_poc::host_power_policy_line(powerPolicy) << "\n";
+  HostPowerKeepalive powerKeepalive(powerPolicy.enabled);
   // Outlive every capture/encoder/session owner, including their destructors after shutdown_host.
   // A GPU resource Release may block too; disarming before those destructors left a teardown gap.
   WatchdogState watchdog;
   MainLoopWatchdogThread mainLoopWatchdog;
   startup_process_setup();
-
-  const Args args = parse_args(argc, argv);
 #ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
   {
     // TEST BUILD ONLY (r2 K6): fail-closed -- this host never starts without its pinned window.
