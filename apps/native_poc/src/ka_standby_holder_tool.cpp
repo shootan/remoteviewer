@@ -13,7 +13,8 @@
 // (each viewer message: time, type, state / lost / entry / reason -- no session, no token), standby_ready.txt (the first
 // `ready`), viewer\viewer.log and viewer\lad (the viewer's LOCALAPPDATA). The viewer runs in a kill-on-close job of
 // this process. The tool ends on --stop-file (then Release, and the viewer's exit is waited for) or at --max-sec.
-// Exit: 0 the lease was ready and released / 2 setup / 3 never ready / 4 the viewer died.
+// Exit (r3, ka_standby_holder_verdict.hpp): 0 ready, released, ended by itself, child verdict clean / 2 setup /
+// 3 never ready / 4 the viewer died / 5 Release not sent or not ended within 15 s after it (cleanup) / 6 child verdict.
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -34,6 +35,7 @@
 #include "directory_session_client.hpp"
 #include "e2e_isolation.hpp"
 #include "ka_pc_e2e_child.hpp"
+#include "ka_standby_holder_verdict.hpp"
 #include "managed_viewer_ipc.hpp"
 #include "native_socket.hpp"
 
@@ -215,18 +217,29 @@ int main(int argc, char** argv) {
       break;
     }
   }
+  // r3 (Codex codex_old_apk_lane_src_r2.md N2): the exit is decided from the whole end -- Release sent, the viewer
+  // ended by itself within its deadline, and the shared child verdict (end confirmed, output read to EOF, log kept).
+  // A viewer the job has to end is CLEANUP only: it is reported as such and never makes a pass.
+  ka_standby::HolderEnd end;
+  end.ready = ready;
+  end.died = died;
   if (!died) {
-    send(Type::Release, {{"reason", "test"}});
+    end.releaseSent = send(Type::Release, {{"reason", "test"}});
+    if (!end.releaseSent) note("Release could NOT be sent");
     const uint64_t endBy = now_ms() + 15000;
-    while (now_ms() < endBy && !proc.Exited(0)) pump(200);
-    released = proc.Exited(0);
-    note(std::string("viewer ") + (released ? "ended after Release" : "did NOT end within 15 s of Release (the job ends it)"));
+    while (end.releaseSent && now_ms() < endBy && !proc.Exited(0)) pump(200);
+    released = end.releaseSent && proc.Exited(0);
+    end.endedAfterRelease = released;
+    if (!released) note("viewer did NOT end by itself within 15 s of Release -- CLEANUP: its job ends it (not a pass)");
+    else note("viewer ended after Release");
   }
   ch.Close();
-  proc.End();
-  note(std::string("RESULT ready=") + (ready ? "1" : "0") + " lastState=" + lastState + " died=" + (died ? "1" : "0") +
-       " released=" + (released ? "1" : "0"));
-  if (died) return 4;
-  if (!ready) return 3;
-  return 0;
+  proc.End();                                       // its job ended, its output read to EOF, its log kept -- or a failure
+  end.childFailures = ka_pc_e2e::children_end_all();  // the shared verdict of every child this tool started
+  const int rc = ka_standby::holder_exit(end);
+  note(std::string("RESULT rc=") + std::to_string(rc) + " (" + ka_standby::holder_exit_why(end) + ") ready=" +
+       (ready ? "1" : "0") + " lastState=" + lastState + " died=" + (died ? "1" : "0") + " releaseSent=" +
+       (end.releaseSent ? "1" : "0") + " released=" + (released ? "1" : "0") + " childFailures=" +
+       std::to_string(end.childFailures));
+  return rc;
 }

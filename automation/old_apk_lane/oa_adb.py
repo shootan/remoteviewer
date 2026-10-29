@@ -23,6 +23,13 @@ import xml.etree.ElementTree as ET
 
 SERIAL = os.environ.get('KA_SERIAL', 'emulator-5614')
 ADB = os.path.join(os.environ['LOCALAPPDATA'], 'Android', 'Sdk', 'platform-tools', 'adb.exe')
+# old-APK lane r3 (Codex codex_old_apk_lane_src_r2.md N1): the device-free contrast (oa_pmclear_test.py) runs
+# oa_avd.py against a FAKE adb. Only there: a real run is pinned (KE_ADB_SHA256, set by oa_slot.ps1, which also clears
+# this variable), and a pin with a fake client refuses below -- so a fake can never stand in for the SDK client.
+if os.environ.get('OA_TEST_FAKE_ADB'):
+    if os.environ.get('KE_ADB_SHA256'):
+        raise RuntimeError('OA_TEST_FAKE_ADB is for the device-free test only -- never with an adb pin')
+    ADB = os.environ['OA_TEST_FAKE_ADB']
 # AVD r8 (Codex design r3 D3): this ONE client, by absolute path, for every call (no PATH lookup anywhere). With
 # KE_ADB_SHA256 set (ke_slot passes its pin) a different file refuses to run at all.
 ADB_SHA256_PIN = os.environ.get('KE_ADB_SHA256', '').lower()

@@ -176,6 +176,22 @@ class Invalid(Exception):
     """A precondition of the arm did not hold: nothing is judged (exit 2)."""
 
 
+def clear_app_data():
+    """r3 N1: `pm clear` of the test package, judged: (True, detail) only for exit 0 AND stdout exactly "Success". A
+    non-zero exit, any other / empty answer, a timeout (OA_PM_CLEAR_TIMEOUT_SEC, default 60) or an error is False."""
+    timeout = float(os.environ.get('OA_PM_CLEAR_TIMEOUT_SEC', '60'))
+    try:
+        r = subprocess.run([ka.ADB, '-s', ka.SERIAL, 'shell', 'pm', 'clear', PKG], capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, f'timeout after {timeout:g} s'
+    except Exception as e:  # noqa: BLE001 -- any failure to run it is a failure of the clear
+        return False, f'could not run: {type(e).__name__}: {e}'
+    out = r.stdout.decode('utf-8', 'replace').strip()
+    err = r.stderr.decode('utf-8', 'replace').strip()
+    ok = r.returncode == 0 and out == 'Success'
+    return ok, f'rc={r.returncode} stdout={out[:80]!r} stderr={err[:120]!r} -> {"Success" if ok else "NOT a success"}'
+
+
 def tcp_clients(log):
     return len(re.findall(r'\[native-video-host\]\[control\] client connected', log))
 
@@ -297,9 +313,9 @@ def main():
         threading.Thread(target=_watch, args=(logcat,), daemon=True).start()
         def install():
             r = subprocess.run([ka.ADB, '-s', ka.SERIAL, 'install', '-r', '-d', APK], capture_output=True, timeout=180)
-            return (r.stdout + r.stderr).decode(errors='replace').strip()
-        res = install()
-        step('install: ' + res[-300:])
+            return r.returncode, (r.stdout + r.stderr).decode(errors='replace').strip()
+        irc, res = install()
+        step(f'install: rc={irc} ' + res[-300:])
         if 'INSTALL_FAILED_UPDATE_INCOMPATIBLE' in res:
             # the package on the AVD is signed by another key -- NOT expected between the two arms (r2: the published
             # 0.2.32 and the fixture build are both signed with the same Android Debug key, cert sha256 dcc806ae...);
@@ -309,10 +325,19 @@ def main():
                 step('SETUP: another signer\'s build of the package is installed -- rerun with OA_REINSTALL=1 to uninstall it first')
                 return 2
             step('  uninstall (OA_REINSTALL=1): ' + adb('uninstall', PKG).strip()[:120])
-            res = install()
-            step('install (again): ' + res[-300:])
-        rc, out, err = ka.run('shell', 'pm', 'clear', PKG)
-        step(f'  pm clear: rc={rc} stdout={out.strip()[:80]!r} stderr={err.strip()[:120]!r}')
+            irc, res = install()
+            step(f'install (again): rc={irc} ' + res[-300:])
+        # r3 (Codex codex_old_apk_lane_src_r2.md N1): the app is started ONLY after its install AND its data clear both
+        # said so -- rc 0 and an explicit "Success" each. A failed / timed-out / silent clear could leave a sign-in or an
+        # owed sign-out in place, and arm P's onCreate would act on it before any check after the start: so then the
+        # arm is INVALID with no app start and no tap at all (the post-start NO_CREDENTIAL check stays, as a second
+        # line). A failed clear is never retried into a success. Scope: this ONE package on the test AVD.
+        if irc != 0 or not re.search(r'(?m)^Success\s*$', res):
+            raise Invalid(f'install did not say Success (rc={irc}): {res[-160:]!r} -- no app start')
+        ok, why = clear_app_data()
+        step(f'  pm clear {PKG}: {why}')
+        if not ok:
+            raise Invalid(f'the app data clear did not succeed ({why}) -- no app start, no tap')
         time.sleep(2)
         pkg = adb('shell', 'dumpsys', 'package', PKG)
         version_name = (re.findall(r'versionName=(\S+)', pkg) or ['?'])[0]

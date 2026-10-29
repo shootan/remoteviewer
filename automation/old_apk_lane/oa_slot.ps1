@@ -98,6 +98,7 @@ if ($AvdCmd.Count -eq 0) {
   Say "  adb client $adb sha256=$($adbHash.Substring(0,16)) $($adbVer -join ' / ') pin=$(if ($AdbSha256) { $AdbSha256.Substring(0,16) } else { 'none' })"
   if ($AdbSha256 -and $adbHash -ne $AdbSha256.ToLower()) { Say "  NO AVD: the adb client is not the pinned one"; "FAIL  SETUP slot: adb pin`nRESULT: INVALID"; exit 2 }
   $env:KE_ADB_SHA256 = $adbHash
+  Remove-Item env:OA_TEST_FAKE_ADB -ErrorAction SilentlyContinue  # r3: the fake adb is for oa_pmclear_test.py only
   Say "  adb listener 5037 (before): $(Adb-Listener)"
 }
 

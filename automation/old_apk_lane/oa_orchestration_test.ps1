@@ -81,6 +81,10 @@ $r = Run-Case 'orch-sb-late' 'a=ok' @{ OA_STUB_HOLDER = 'readydie'; OA_STUB_AVD_
 Check 'standby late: the AVD ran and passed, the bundle still fails (rc 3)' ($r.avd -and $r.rc -eq 3 -and
   $r.fx -match 'LATE FAILURE: standby ended' -and $r.left -eq 0) "rc=$($r.rc) left=$($r.left)"
 
+"--- r3 N2: the holder was ready, but its end was not a clean Release (exit 5): the bundle fails"
+$r = Run-Case 'orch-sb-rel5' 'a=ok' @{ OA_STUB_HOLDER = 'release5' } @('-WithStandby')
+Check 'standby rc 5 at its stop: the AVD ran, the fixture counts it (standby exit 5), the bundle fails (rc 3)' ($r.avd -and
+  $r.rc -eq 3 -and $r.result -match '  standby exit 5' -and $r.left -eq 0) "rc=$($r.rc) left=$($r.left)"
 "--- the host's harness ends at once (staging / launch / guard failure), standby asked"
 $r = Run-Case 'orch-exit2' 'a=exit2' @{} @('-WithStandby')
 Check 'host exit2: holder never started, no AVD, rc != 0, nothing left' (-not $r.avd -and $r.hostStarted -and -not $r.holderStarted -and
