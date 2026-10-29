@@ -390,6 +390,12 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   // The IDR the worker is handing to the codec right now (mu_ released around the codec calls): a candidate too.
   bool inFlightKey_ = false;
   uint32_t inFlightKeySeq_ = 0;
+  // C r2 (Codex N1-b): the last IDR this codec instance took (CommitQueue) -- a loss at a seq BEFORE it is already
+  // recovered (the pending slot's replaced delta, a late await-key note). Forgotten with the codec, the inbox, the asks.
+  bool committedKeyValid_ = false;
+  uint32_t committedKeySeq_ = 0;
+  uint64_t lossAlreadyRecovered_ = 0;  // losses noted behind a committed IDR (no episode, no gap)
+  uint64_t beyondGapDrops_ = 0;        // the worker's defensive drop of a delta past the open gap (expected 0)
   // One-shot causes outside the episode (r4 N3 codec up, mobile-abr r5 abort); each taken once, kept as its cause.
   bool wantCodecUp_ = false;
   bool wantSelectionAbort_ = false;

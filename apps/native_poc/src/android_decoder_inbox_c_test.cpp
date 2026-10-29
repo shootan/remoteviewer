@@ -498,6 +498,96 @@ int main() {
     sink.SetSurface(env, nullptr);
   }
 
+  std::puts("\n--- [C9] C r2 N1-b (Codex's product-sink sequence): a pending IDR replaces a delta, commits -- the next delta goes in");
+  {
+    AndroidVideoDecoderSink sink;
+    Rx rx{sink};
+    const uint64_t g = start(sink, rx, 33, 331);  // IDR1 (0x80) is in the codec
+    const size_t q0 = queued();
+    const uint64_t ep0 = field(sink.DebugStatus(), "episodes");
+    input_available(false);
+    rx.send(frame(g, false, 0xB2));  // delta2: no input buffer -> pending
+    wait_until([&] { return field(sink.DebugStatus(), "pending") == 1; }, 1000);
+    rx.send(frame(g, true, 0xB3));   // IDR3 replaces delta2 (the slot's loss: delta2)
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const std::string mid = sink.DebugStatus();
+    input_available(true);
+    wait_until([&] { for (uint8_t t : tags_from(q0)) if (t == 0xB3) return true; return false; }, 1500);
+    rx.send(frame(g, false, 0xB4));  // delta4, IDR3's suffix
+    wait_until([&] { return tags_from(q0).size() >= 2; }, 1500);
+    const std::string st = sink.DebugStatus();
+    const auto t = tags_from(q0);
+    check("[C9] N1-b: the codec takes IDR3 then delta4 (fed 0xB3, 0xB4); no tail gap; no new episode after the commit",
+          t == std::vector<uint8_t>{0xB3, 0xB4} && field(st, "tailGap") == 0 && sfield(st, "recovery") == "idle" &&
+              field(st, "episodes") <= ep0 + 1 && field(st, "gapDrops") == 0,
+          "fed=" + std::to_string(t.size()) + " tailGap(mid)=" + std::to_string(field(mid, "tailGap")) + " tailGap=" +
+              std::to_string(field(st, "tailGap")) + " episodes " + std::to_string(ep0) + "->" +
+              std::to_string(field(st, "episodes")) + " gapDrops=" + std::to_string(field(st, "gapDrops")));
+    // a loss AFTER IDR3 keeps its gap
+    make_loss(sink, rx, g);
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));  // the delta held in the dequeue goes in first
+    const size_t q1 = queued();
+    rx.send(frame(g, false, 0xB5));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const auto t1 = tags_from(q1);
+    check("[C9] a loss after IDR3 keeps its own gap: the next delta is refused, not fed",
+          field(sink.DebugStatus(), "tailGap") == 1 && std::find(t1.begin(), t1.end(), 0xB5) == t1.end(),
+          "tailGap=" + std::to_string(field(sink.DebugStatus(), "tailGap")) + " fed after=" + std::to_string(t1.size()));
+    sink.SetSurface(env, nullptr);
+  }
+  {
+    AndroidVideoDecoderSink sink;
+    Rx rx{sink};
+    const uint64_t g = start(sink, rx, 34, 341);
+    hold(fake_ndk::kHoldDequeueInput);
+    rx.send(frame(g, true, 0xC3));  // IDR going in (held in its dequeue)
+    wait_until(held_now, 2000);
+    for (int i = 0; i < 9; ++i) rx.send(frame(g, false, 0xC4));  // a loss after it: the gap opens past it
+    sink.OnVideoDiscontinuity();    // the codec reset before that IDR commits
+    let_go();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    const size_t q1 = queued();
+    rx.send(frame(g, false, 0xC5));
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    check("[C9] a reset before the IDR commits does not clear the later loss's gap (the next delta refused)",
+          field(sink.DebugStatus(), "tailGap") == 1 && tags_from(q1).empty(),
+          "tailGap=" + std::to_string(field(sink.DebugStatus(), "tailGap")));
+    sink.SetSurface(env, nullptr);
+  }
+  std::puts("\n--- [C10] C r2 N1-a at the sink: the pending slot drops a delta while the codec keeps its references");
+  {
+    AndroidVideoDecoderSink sink;
+    Rx rx{sink};
+    const uint64_t g = start(sink, rx, 35, 351);
+    const size_t q0 = queued();
+    input_available(false);
+    rx.send(frame(g, false, 0xD1));  // d1: held for an input buffer (before any loss: valid)
+    wait_until([&] { return field(sink.DebugStatus(), "pending") == 1; }, 1000);
+    hold(fake_ndk::kHoldDequeueInput);
+    input_available(true);
+    wait_until(held_now, 2000);      // the worker's retry of d1 is now held in its dequeue
+    rx.send(frame(g, false, 0xD2));  // d2: the slot will drop it (a loss at d2)
+    rx.send(frame(g, false, 0xD3));  // d3: references d2 -- must never reach the codec
+    rx.send(frame(g, true, 0xD4));   // IDR4: the chain restarts here
+    rx.send(frame(g, false, 0xD5));  // d5: IDR4's suffix
+    input_available(false);          // the held dequeue answers "no buffer": d1 stays pending
+    let_go();
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    input_available(true);
+    wait_until([&] { return tags_from(q0).size() >= 3; }, 2000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    const auto t = tags_from(q0);
+    const std::string st = sink.DebugStatus();
+    // The pending slot's own rule (apk-0232 r2, unchanged by C) also acts here: while d1 is held, IDR4 replaces it and
+    // d5 (arriving while IDR4 is held) is dropped. What C r2 adds: the slot's loss at d2 TRIMS d3 out of the queue
+    // (chainTrim) -- it is never handed to the worker. (In this sequence the slot would drop d3 as well; the r1-vs-r2
+    // contrast of the trim itself is the pure test's Codex counterexample.)
+    check("[C10] N1-a: the loss at d2 trims d3 out of the queue; the codec's next input is IDR4, never d3",
+          !t.empty() && t.front() == 0xD4 && std::find(t.begin(), t.end(), 0xD3) == t.end() && field(st, "chainTrim") >= 1,
+          "fed=" + [&] { std::string s; for (uint8_t x : t) s += std::to_string(x) + ","; return s; }() +
+              " chainTrim=" + std::to_string(field(st, "chainTrim")) + " tailGap=" + std::to_string(field(st, "tailGap")));
+    sink.SetSurface(env, nullptr);
+  }
   std::printf("\nandroid_decoder_inbox_c_test: %d checks, %d failed\nRESULT: %s\n", gChecks, gFailures,
               gFailures == 0 ? "PASS" : "FAIL");
   return gFailures == 0 ? 0 : 1;

@@ -140,11 +140,13 @@ void AndroidVideoDecoderSink::RequestCodecResetLocked() {
 
 void AndroidVideoDecoderSink::ClearInboxLocked() {
   inbox_.Clear();
+  committedKeyValid_ = false;  // C r2
 }
 
 // apk-inbox C (D8): every ask made before this moment is moot -- the session drops it at its held / accepted point.
 void AndroidVideoDecoderSink::InvalidateKeyAsksLocked() {
   ++keyEpoch_;
+  committedKeyValid_ = false;  // C r2
   recovery_.Invalidate();
   wantCodecUp_ = false;
   wantSelectionAbort_ = false;
@@ -161,10 +163,22 @@ bool AndroidVideoDecoderSink::RecoveryCandidateLocked() const {
   return held && (held->header.flags & 1u) != 0 && remote60::native_poc::chain_seq_after(held->header.seq, loss);
 }
 
-// A loss of the chain the decoder saw itself (await-key, its pending slot): the episode, and the tail gap.
+// A loss of the chain the decoder saw itself (await-key, its pending slot) at `seq`.
+// C r2 (Codex N1): (b) an IDR after `seq` already went into this codec -- recovered, nothing opens; an IDR after it held
+// outside the inbox (the pending slot, going in now) -- the queue is its suffix: no trim, no gap, and the episode sees
+// it as the candidate; (a) otherwise the queued deltas before the next usable IDR are dropped (never handed out), or
+// everything and the tail gap when none is queued.
 void AndroidVideoDecoderSink::NoteChainLossLocked(int cause, uint32_t seq) {
   NoteKeyWantLocked(cause);
-  inbox_.MarkLoss(seq);
+  if (committedKeyValid_ && remote60::native_poc::chain_seq_after(committedKeySeq_, seq)) {
+    ++lossAlreadyRecovered_;
+    return;
+  }
+  const auto* held = pendingFrame_.held();
+  const bool keyOutside =
+      (held && (held->header.flags & 1u) != 0 && remote60::native_poc::chain_seq_after(held->header.seq, seq)) ||
+      (inFlightKey_ && remote60::native_poc::chain_seq_after(inFlightKeySeq_, seq));
+  inbox_.MarkLoss(seq, keyOutside);
   recovery_.OnLoss(remote60::native_poc::kKeyCauseRecovery, seq, steady_now_us());
 }
 
@@ -226,6 +240,11 @@ void AndroidVideoDecoderSink::WorkerMain() {
     while (!inbox_.empty() && !workerStop_ && surfaceApplied_ == surfaceSeq_ && !CodecResetPendingLocked()) {
       InboxFrame item;
       inbox_.Pop(&item);
+      // C r2: defensive -- a delta past the open gap's loss point is not fed (the trim and the door keep it out)
+      if (inbox_.BeyondGap(item.frame.header.seq, (item.frame.header.flags & 1u) != 0)) {
+        ++beyondGapDrops_;
+        continue;
+      }
       REMOTE60_LT({
         ++ltPassFrames_;
         if (item.enqueueUs) LtAge(ltAgePop_, LtNowUs() - item.enqueueUs);
@@ -1029,7 +1048,9 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " gapDrops=" + std::to_string(inbox_.gapDeltas());
   // apk-inbox C: the chain inbox and the recovery episode
   status += " chainSkipped=" + std::to_string(inbox_.skipped()) + " chainDup=" + std::to_string(inbox_.duplicates()) +
-            " chainStale=" + std::to_string(inbox_.stale()) + " tailGap=" + std::to_string(inbox_.gapOpen() ? 1 : 0);
+            " chainStale=" + std::to_string(inbox_.stale()) + " tailGap=" + std::to_string(inbox_.gapOpen() ? 1 : 0) +
+            " chainTrim=" + std::to_string(inbox_.trimmed()) + " lossRecovered=" + std::to_string(lossAlreadyRecovered_) +
+            " beyondGap=" + std::to_string(beyondGapDrops_);
   status += " recovery=" + std::string(recovery_.StateName()) + " episode=" + std::to_string(recovery_.id()) +
             " asks=" + std::to_string(recovery_.attempts()) + " episodes=" + std::to_string(recovery_.opened()) +
             " recClosed=" + std::to_string(recovery_.closed()) + " recExhausted=" + std::to_string(recovery_.exhausted()) +
@@ -1429,6 +1450,11 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
   if (queueingReplay_) RememberReplayPtsLocked(ptsUs);
   lastInputQueueSteadyUs_ = steady_now_us();
   if (isKey) codecAwaitsKey_ = false;  // keepalive r5 D1: this instance has its IDR
+  if (isKey) {  // C r2 (Codex N1-b): this codec's chain restarts here; a gap opened for a loss before it closes
+    committedKeyValid_ = true;
+    committedKeySeq_ = frame.header.seq;
+    inbox_.OnKeyCommitted(frame.header.seq);
+  }
   // apk-inbox C (design r3 §2): the episode ends only here -- an IDR after the loss point committed to the codec.
   if (isKey && recovery_.OnKeyCommitted(frame.header.seq)) {
     char cline[160];
@@ -1507,6 +1533,7 @@ void AndroidVideoDecoderSink::ResetCodecLocked() {
   pendingFrame_.Reset();
   pendingFrameCount_ = 0;
   pendingFrameQueueRetryCount_ = 0;
+  committedKeyValid_ = false;  // C r2: what this codec took goes with it
   bootstrapFrame_.reset();
   lastInputQueueSteadyUs_ = 0;
   bootstrapReplayCount_ = 0;
