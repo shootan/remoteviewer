@@ -13,6 +13,11 @@
 // (each viewer message: time, type, state / lost / entry / reason -- no session, no token), standby_ready.txt (the first
 // `ready`), viewer\viewer.log and viewer\lad (the viewer's LOCALAPPDATA). The viewer runs in a kill-on-close job of
 // this process. The tool ends on --stop-file (then Release, and the viewer's exit is waited for) or at --max-sec.
+// r5: the viewer's own environment block carries REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1 (h264) and the window seam's
+// X / Y explicitly (ka_standby_holder_env.hpp) -- nothing is left to the caller's environment. The device-free check
+// (automation/old_apk_lane/oa_holder_viewer_check.ps1) uses two options of its own:
+//   --host-id <id>              Init names this id; no directory host lookup (a check with no Host);
+//   --omit-viewer-encoded-env 1 NEGATIVE CONTRAST ONLY: the viewer launched as r4 did (no FORCE in its block).
 // Exit (r3, ka_standby_holder_verdict.hpp): 0 ready, released, ended by itself, child verdict clean / 2 setup /
 // 3 never ready / 4 the viewer died / 5 Release not sent or not ended within 15 s after it (cleanup) / 6 child verdict.
 #ifndef NOMINMAX
@@ -35,6 +40,7 @@
 #include "directory_session_client.hpp"
 #include "e2e_isolation.hpp"
 #include "ka_pc_e2e_child.hpp"
+#include "ka_standby_holder_env.hpp"
 #include "ka_standby_holder_verdict.hpp"
 #include "managed_viewer_ipc.hpp"
 #include "native_socket.hpp"
@@ -80,6 +86,8 @@ int main(int argc, char** argv) {
   const std::string url = a["--url"], hostName = a["--host-name"], accountFile = a["--account-file"],
                     viewer = a["--viewer"], root = a["--root"], stopFile = a["--stop-file"];
   const int maxSec = a.count("--max-sec") ? std::atoi(a["--max-sec"].c_str()) : 900;
+  const std::string givenHostId = a["--host-id"];                        // r5: the device-free check only
+  const bool omitEncodedEnv = a["--omit-viewer-encoded-env"] == "1";     // r5: the negative contrast only
   if (url.empty() || hostName.empty() || accountFile.empty() || viewer.empty() || root.empty() || stopFile.empty() ||
       maxSec <= 0 || maxSec > 3600) {
     std::printf("SETUP  usage: --url --host-name --account-file --viewer --root --stop-file [--max-sec <=3600]\n");
@@ -116,6 +124,12 @@ int main(int argc, char** argv) {
   std::string session, hostId;
   directory::ObserveEndpoint adv;
   const uint64_t listUntil = now_ms() + 60000;
+  if (!givenHostId.empty()) {
+    hostId = givenHostId;  // r5: no lookup -- signed in only (Init carries a real session)
+    for (int i = 0; i < 20 && session.empty(); ++i) {
+      if (!directory_login(url, account, password, &session, &err, &adv)) Sleep(500);
+    }
+  }
   while (now_ms() < listUntil && hostId.empty()) {
     if (session.empty()) directory_login(url, account, password, &session, &err, &adv);
     std::vector<DirectoryHostEntry> hosts;
@@ -126,8 +140,9 @@ int main(int argc, char** argv) {
     if (hostId.empty()) Sleep(500);
   }
   password.assign(password.size(), '\0');
-  if (hostId.empty()) {
-    note("SETUP host \"" + hostName + "\" not online for the account within 60 s");
+  if (hostId.empty() || session.empty()) {
+    note(hostId.empty() ? "SETUP host \"" + hostName + "\" not online for the account within 60 s"
+                        : std::string("SETUP could not sign in"));
     return 2;
   }
   note("host " + hostName + " id=" + hostId);
@@ -145,9 +160,15 @@ int main(int argc, char** argv) {
   CreateDirectoryW((vdir + L"lad").c_str(), nullptr);
   // the test window seam: beyond the right edge of the virtual screen
   const int right = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN);
-  SetEnvironmentVariableW(L"REMOTE60_VIEWER_TEST_WINDOW_X", std::to_wstring(right + 200).c_str());
-  SetEnvironmentVariableW(L"REMOTE60_VIEWER_TEST_WINDOW_Y", std::to_wstring(GetSystemMetrics(SM_YVIRTUALSCREEN) + 40).c_str());
-  const auto env = e2e::e2e_isolated_environment(vdir + L"lad");
+  // r5: written INTO the viewer's block (not this process's environment, not inherited from the caller)
+  std::vector<std::pair<std::wstring, std::wstring>> viewerEnv = {
+      {L"REMOTE60_VIEWER_TEST_WINDOW_X", std::to_wstring(right + 200)},
+      {L"REMOTE60_VIEWER_TEST_WINDOW_Y", std::to_wstring(GetSystemMetrics(SM_YVIRTUALSCREEN) + 40)}};
+  if (!omitEncodedEnv) viewerEnv.push_back({L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1"});
+  const auto env = ka_standby::env_block_with(e2e::e2e_isolated_environment(vdir + L"lad"), viewerEnv);
+  note(std::string("viewer env: REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=") +
+       (ka_standby::env_block_value(env, L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE") == L"1" ? "1" : "(absent)") +
+       (omitEncodedEnv ? " -- NEGATIVE CONTRAST (--omit-viewer-encoded-env)" : ""));
   const std::wstring wviewer = W(viewer);
   const std::wstring vbuild = wviewer.substr(0, wviewer.find_last_of(L"\\/") + 1);
   const std::wstring cmd = L"\"" + wviewer + L"\" --transport udp --codec h264 --enable-input-channel --initial-view targets"
