@@ -14,6 +14,7 @@ Each case runs in its own new folder under <worktree>/.claude/oa_runs (nothing o
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -35,7 +36,8 @@ def check(what, ok, detail=''):
     print(f'{"PASS" if ok else "FAIL"}  {what}' + (f'  {detail}' if detail else ''), flush=True)
 
 
-def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novideo=False, back='ime', scene=None):
+def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novideo=False, back='ime', scene=None,
+         avd=None):
     """A fresh run folder, the fake's state, and oa_avd loaded anew against it. -> (module, paths)"""
     run_id = f'{tag}-{time.strftime("%Y%m%d%H%M%S")}-{os.getpid()}'
     root = os.path.join(RUNS, run_id)
@@ -47,6 +49,12 @@ def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novide
         f.write(CAPTURE + f'10-30 00:00:00.000 [native-video-host][control] window-list seq=1 count=1 selectedId={listed_id}\n')
     with open(os.path.join(root, 'a', 'directoryhost_ready.txt'), 'w', encoding='ascii') as f:
         f.write(f'ready run={run_id}-a harness_pid=1 host_pid=2 host_log={host_log}\n')
+    # r7e: what oa_avd.main reads before it starts (a fixture, an APK the fake hands back as the installed one)
+    with open(os.path.join(root, 'fixture_ready.txt'), 'w', encoding='ascii') as f:
+        f.write(f'ready run={run_id} hosts=a standby=none controlPort=0 relay=10.0.2.2\n')
+    apk = os.path.join(root, 'none.apk')
+    with open(apk, 'wb') as f:
+        f.write(b'PK fake apk for ' + run_id.encode())
     applog = os.path.join(root, 'app.log')
     with open(applog, 'w', encoding='utf-8') as f:
         f.write('2026-10-30 00:00:00.000 [targets_ready] origin=connect ms=1 items=1\n')
@@ -56,12 +64,13 @@ def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novide
     open(calls, 'w').close()
     os.environ.update({'OA_FAKE_ADB_LOG': calls, 'OA_FAKE_UI_STATE': st, 'OA_FAKE_APPLOG': applog,
                        'OA_FAKE_HOSTLOG': host_log, 'OA_FAKE_UI_VARIANT': variant, 'OA_FAKE_INPUT': input_mode,
-                       'OA_FAKE_IME': ime, 'OA_FAKE_NOVIDEO': '1' if novideo else '0', 'OA_FAKE_BACK': back})
+                       'OA_FAKE_IME': ime, 'OA_FAKE_NOVIDEO': '1' if novideo else '0', 'OA_FAKE_BACK': back,
+                       'OA_FAKE_ADB_APK': apk})
     sys.argv = ['oa_avd.py', root, 'S', os.path.join(root, 'none.apk'), os.path.join(root, 'avd')]
-    spec = importlib.util.spec_from_file_location(f'oa_avd_{tag.replace("-", "_")}', os.path.join(E, 'oa_avd.py'))
+    spec = importlib.util.spec_from_file_location(f'oa_avd_{tag.replace("-", "_")}', avd or os.path.join(E, 'oa_avd.py'))
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
-    return m, {'calls': calls, 'host': host_log, 'app': applog, 'out': os.path.join(root, 'avd')}
+    return m, {'calls': calls, 'host': host_log, 'app': applog, 'out': os.path.join(root, 'avd'), 'root': root}
 
 
 def taps(paths):
@@ -193,6 +202,34 @@ def main():
     src = open(os.path.join(E, 'oa_avd.py'), encoding='utf-8').read()
     check('r8 (source): a 4 FAIL ends the arm before the menu / 5 / 6 / P-5d',
           'if not input_check():\n            return 1' in src.replace('\r\n', '\n'))
+    # r7e: arm S driven from the install to 4 (the fake's login -> PC list -> pick); 4 FAILs (no input events). The
+    # arm must end there: no tap of any kind after 4's, and 5 / 6 / 7 NOT RUN in result.json. The contrast: the same
+    # flow against c468c27's oa_avd.py (it threw 4's answer away and went on into the menu).
+    def run_flow(tag, avd=None):
+        m, p = case(tag, 'ok', input_mode='none', scene='login', avd=avd)
+        try:
+            rc = m.main()
+        except RuntimeError as e:  # c468c27 went on into the menu and raised there (its result.json is still written)
+            rc = f'raised {e}'
+        res = json.load(open(os.path.join(p['out'], 'result.json'), encoding='utf-8'))
+        all_taps = taps(p)
+        # 4's tap: the FIRST at the video view's centre (a later wake tap of the menu lands there too)
+        i4 = min([i for i, t in enumerate(all_taps) if t == ['540', '1268']], default=-1)
+        after = all_taps[i4 + 1:] if i4 >= 0 else all_taps
+        four = [r for r in res['results'] if r[0].startswith('4 ')]
+        nr = sorted({n for n, _ in res['not_run']})
+        return rc, four, nr, i4, after
+    rc, four, nr, i4, after = run_flow('flow-4fail')
+    check('r7e: arm S, 4 FAILs -> the arm ends there: no tap after 4 (no menu wake / menu), 5 6 7 NOT RUN',
+          rc != 0 and four and four[-1][1] is False and i4 >= 0 and not after and all(c in nr for c in '567'),
+          f'rc={rc} 4={[f[1] for f in four]} taps after 4={after} not run={nr}')
+    old = os.path.join(RUNS, f'oa_avd_c468c27-{os.getpid()}.py')
+    with open(old, 'wb') as f:
+        f.write(subprocess.run(['git', '-C', WT, 'show', 'c468c27:automation/old_apk_lane/oa_avd.py'], capture_output=True,
+                               check=True).stdout)
+    rc, four, nr, i4, after = run_flow('flow-4fail-c468c27', avd=old)
+    check('r7e contrast: c468c27 (4 answer thrown away) on the same flow went on tapping after 4 -- the check sees it',
+          i4 >= 0 and len(after) > 0, f'taps after 4={len(after)} first={after[:2]} not run={nr}')
     m, p = case('hosts-ime-hide', 'ok', ime='shown', scene='hosts')
     ok = m.hide_ime_on_hosts('1b the sign-in keyboard')
     check('control 1b r7d: on the PC list a keyboard up is put away with BACK (it takes it); the list stays, no dialog',

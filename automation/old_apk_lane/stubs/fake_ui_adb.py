@@ -21,6 +21,9 @@ the PinnedSelectTest host log when a card / the picture is tapped. Every call is
        OA_FAKE_BACK       what BACK does on the PC list with the keyboard up: ime (the keyboard takes it and hides) |
                           leak (the app takes it: the exit question, android:id/button1; the keyboard stays)
   The ui state's "scene": "hosts" (the PC list: hostCardName oa-pc-a), "targets" (default) or "viewer" (set by a pick).
+  r7e: "login" too (loginIdInput / loginPasswordInput / loginButton; Sign-in -> the PC list, the card -> the targets), and
+  what oa_avd.main asks before the app starts (install, pm clear, pm path, dumpsys package, pull of base.apk =
+  OA_FAKE_ADB_APK) -- so the stub can drive arm S from the install to 4 and see what it does after.
 """
 import json
 import os
@@ -62,7 +65,13 @@ def card_text():
     return 'Notepad' if variant == 'nopinned' else 'remote60 mobile abr…'
 
 
+LOGIN = {'loginIdInput': (40, 480, 1040, 560, 'ID'), 'loginPasswordInput': (40, 630, 1040, 720, 'Password'),
+         'loginButton': (40, 800, 1040, 900, 'Sign In')}
+
+
 def nodes():
+    if state.get('scene') == 'login':
+        return [(k, v[:4], v[4]) for k, v in LOGIN.items()]
     if state.get('scene') == 'hosts':
         out = [('hostCardName', HOSTCARD, 'oa-pc-a')]
         if state.get('dialog'):
@@ -109,7 +118,15 @@ elif cmd.startswith('shell input tap'):
     x, y = int(args[3]), int(args[4])
     hit = [n for n in nodes() if n[1][0] <= x <= n[1][2] and n[1][1] <= y <= n[1][3]]
     rid = hit[0][0] if hit else ''
-    if rid == 'listWindowsButton':
+    if rid == 'loginButton':
+        state['scene'] = 'hosts'
+        app('[login_attempt] server=http://10.0.2.2:18410 id=oatest')
+    elif rid == 'hostCardName':
+        state['scene'] = 'targets'
+        app('[directory_chosen] 10.0.2.2:18443|relay')
+        app('[targets_ready] origin=connect ms=1 items=1 gen=1')
+        host('client connected transport=udp', tag=' ')
+    elif rid == 'listWindowsButton':
         state['tab'] = 'windows'
         app('[tab_switch] tab=windows')
         host(f'window-list seq=2 count=1 selectedId={PINNED}')
@@ -157,7 +174,18 @@ elif cmd == 'shell input keyevent 4':
         state['dialog'] = True
     json.dump(state, open(state_path, 'w', encoding='utf-8'))
 elif args[:1] == ['pull']:
-    shutil.copyfile(os.environ['OA_FAKE_APPLOG'], args[2])
+    if args[1].endswith('base.apk'):
+        shutil.copyfile(os.environ['OA_FAKE_ADB_APK'], args[2])
+    else:
+        shutil.copyfile(os.environ['OA_FAKE_APPLOG'], args[2])
+elif args[:1] == ['install']:
+    print('Performing Streamed Install\nSuccess')
+elif cmd.startswith('shell pm clear'):
+    print('Success')
+elif cmd.startswith('shell pm path'):
+    print('package:/data/app/~~fake/com.remote60.androiddirect-1/base.apk')
+elif cmd.startswith('shell dumpsys package'):
+    print('    versionCode=31 minSdk=28 targetSdk=34\n    versionName=0.2.32')
 elif cmd.startswith('exec-out screencap'):
     sys.stdout.buffer.write(b'\x89PNG fake')
 sys.exit(0)
