@@ -844,13 +844,17 @@ int main(int argc, char** argv) {
     const bool stillOnA = wait_until([&] { auto q = queued_from(q0); return !q.empty() && q.back().second == sa(); }, 2000);
     const Snapshot s1 = snap();
     const std::string st = sink.DebugStatus();
+    // apk-inbox C: read BEFORE the next real attach -- once r2 is applied the worker lets A's window go and the released
+    // seq moves legitimately (a race in r1-r5: 1 in 3 runs on C's build read it after the worker had applied r2).
+    const uint64_t relAfterRefused = released_seq(sink);
     const int64_t r2 = set_surface(sink, sb());
     check("[13] the failed attach answers 0 (refused), not a detach seq", r0 > 0 && r1 == 0, "result=" + std::to_string(r1));
     check("[13] the current surface and its codec go on: the next frame goes into the codec on A, none deleted",
           stillOnA && s1.deleted == s0.deleted && st.find("surface=on") != std::string::npos,
           "deleted+" + std::to_string(s1.deleted - s0.deleted));
     check("[13] no detach was started (released seq unchanged) and the next real attach is taken",
-          released_seq(sink) == rel0 && r2 > 0, "next attach=" + std::to_string(r2));
+          relAfterRefused == rel0 && r2 > 0, "released " + std::to_string(rel0) + "->" + std::to_string(relAfterRefused) +
+              " next attach=" + std::to_string(r2));
     set_surface(sink, nullptr);
   }
 

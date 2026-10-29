@@ -426,28 +426,36 @@ int main() {
     r.Down();
   }
 
-  std::puts("\n--- [S3] D8 at the HELD point: the retry refused by the limiter, another PC bound before it goes again");
+  std::puts("\n--- [S3] D8 at the HELD point: the retry refused by the limiter (min interval), another PC bound before it goes again");
   {
     Rig r;
     const bool up = r.Up(31);
     check("[S3] connected and ready", up);
     if (up) {
       r.host.ignoreKeyRequests = true;
-      r.c.TestConfigureKeyframeLimiter(0, 1500000, 1);  // one token, back after 1.5 s
-      std::this_thread::sleep_for(std::chrono::milliseconds(1700));
-      std::atomic<int> fired{0};
+      // the limiter's minimum interval: 3 s between taken requests (tokens plenty) -- the +1 s retry is refused (held),
+      // the one after it would be taken at +3 s. (r1 used one token per 1.5 s: 2 of 3 runs took the +1 s retry.)
+      r.c.TestConfigureKeyframeLimiter(3000000, 1, 100);
+      // past one whole interval: a request of the setup (the pick's own asks) must not refuse the loss's FIRST one
+      std::this_thread::sleep_for(std::chrono::milliseconds(3500));
+      std::atomic<int> fired{0}, acceptedAfter{0};
       r.c.SetTestKeyRequestHook([&](const char* point) {
         if (std::strcmp(point, "held") == 0 && fired.fetch_add(1) == 0) r.sink.Bind(32);
+        // after the held drop nothing of this PC may reach the send point: dropped at the HELD point, not later at the
+        // accepted one (that would be the limiter charged for it -- the held check missing, the send check catching it)
+        if (std::strcmp(point, "accepted") == 0 && fired.load() > 0) acceptedAfter.fetch_add(1);
       });
       const uint64_t dropped0 = r.c.KeyRequestsDroppedStale();
       const auto t0 = Clock::now();
       r.Loss();
       std::this_thread::sleep_for(std::chrono::milliseconds(4500));  // past the limiter's next token
       const auto reqs = r.host.RequestsSinceMs(t0);
-      check("[S3] the first request went; the held retry was dropped at the held point and never sent",
-            fired.load() >= 1 && reqs.size() == 1 && r.c.KeyRequestsDroppedStale() > dropped0,
+      check("[S3] the first request went; the held retry was dropped AT the held point (never re-entered the limiter, "
+            "never reached the send point) and never sent",
+            fired.load() >= 1 && reqs.size() == 1 && r.c.KeyRequestsDroppedStale() > dropped0 && acceptedAfter.load() == 0,
             "hook=" + std::to_string(fired.load()) + " host requests=" + list(reqs) + " droppedStale=" +
-                std::to_string(r.c.KeyRequestsDroppedStale() - dropped0));
+                std::to_string(r.c.KeyRequestsDroppedStale() - dropped0) + " accepted after the held drop=" +
+                std::to_string(acceptedAfter.load()));
     }
     r.Down();
   }
