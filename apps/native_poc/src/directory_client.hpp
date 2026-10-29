@@ -20,6 +20,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -290,6 +291,10 @@ class HostAgent {
     uint32_t ipv4NetworkOrder = 0;
     uint16_t port = 0;
     std::string punchToken;
+    // keepalive-r2 r4 (Codex N1): a relay lease's own host-facing socket, not a peer. The punch toward it carries
+    // this proof (from this heartbeat only) so the relay pins THIS host's tuple and nobody else's; such a target
+    // is no capability -- it is never authorised as a peer.
+    std::string hostProof;
   };
 
   struct AuthorizedPeer {
@@ -383,6 +388,40 @@ class HostAgent {
 
   std::thread thread_;
   std::atomic<bool> running_{false};
+  // keepalive-r2 FINDING (작업용2 report_ka_pc_impl_r1.md; e2e kae_relapse5): the punch trains run on their own thread,
+  // beside the agent's cycle -- not in it. A train is kPunchPackets x kPunchIntervalMs (5 s); run inside the cycle it
+  // kept the agent from acting on the next wake, so a capability minted meanwhile (a second connect, a standby
+  // re-admission) waited for the train and the next cycle -- longer than a client's Hellos last (~3 s): it read as
+  // "no answer" / "unsupported". Punch() now hands its targets to this thread and returns.
+  struct PunchJob {
+    PunchTarget target;
+    int left = 0;
+  };
+  void PunchLoop();
+  // r2 (Codex codex_ka_punch_thread_src_r1.md N1): the queue lives exactly as long as one Start..Stop. Stop discards it
+  // only after BOTH threads ended (the cycle -- the producer, which may still be inside Punch() -- and the punch thread),
+  // Start begins with it empty, and Punch() queues nothing once the agent is stopping: a train cut short by a Stop is
+  // never carried into the next Start (its old targets / host proofs never go out again).
+  std::mutex punchMu_;
+  std::condition_variable punchCv_;
+  std::vector<PunchJob> punchJobs_;
+  std::thread punchThread_;
+
+#ifdef REMOTE60_HOST_AGENT_TEST_HOOKS
+ public:
+  // TEST BUILD ONLY: the private Punch() and the queue's size (host_agent_punch_test). Never in the product.
+  void PunchForTest(uint32_t ipv4NetworkOrder, uint16_t port, const std::string& hostProof) {
+    PunchTarget t;
+    t.ipv4NetworkOrder = ipv4NetworkOrder;
+    t.port = port;
+    t.hostProof = hostProof;
+    Punch({t});
+  }
+  size_t PendingPunchJobsForTest() {
+    std::lock_guard<std::mutex> lock(punchMu_);
+    return punchJobs_.size();
+  }
+#endif
   // A peer punch means /api/connect has just queued a capability for this host. Wake the
   // heartbeat loop instead of making the controller wait for the ordinary 25-second poll.
   std::atomic<bool> refreshRequested_{false};

@@ -169,6 +169,25 @@ enum class UdpPacketKind : uint16_t {
   // -- and a host that does not know the kind ignores it, which is the same outcome.
   ControlResume = 309,
   ControlResumeAck = 310,
+  // keepalive-r2 A (spike/host-admission): control-only STANDBY entries -- an authenticated client that
+  // keeps its place at this host without being the session. All six are UdpStandbyPacket. A host that
+  // does not know them ignores them (they fall through to directoryAgent.ConsumeUdpPacket, which only
+  // takes punches and observe replies), so StandbyHello is also the support probe: no answer = an old
+  // host, and a client must then NOT send it a Hello on its own -- that would take its session.
+  //   StandbyHello    c->h  capability (as a Hello's) + device id + client generation -> one entry
+  //   StandbyAck      h->c  entry id + entry secret + lease, or status Busy
+  //   StandbyPing     c->h  entry id + secret: keeps the entry (and follows a moved endpoint)
+  //   StandbyPong     h->c  status Ok / Unknown
+  //   StandbyActivate c->h  entry id + secret + generation: the explicit user activation -- takes the
+  //                         session through the same admission an authenticated Hello uses; the reply
+  //                         is an ordinary HelloAck
+  //   StandbyRelease  c->h  entry id + secret: drop the entry (no reply)
+  StandbyHello = 311,
+  StandbyAck = 312,
+  StandbyPing = 313,
+  StandbyPong = 314,
+  StandbyActivate = 315,
+  StandbyRelease = 316,
 };
 
 // Control messages are numbered per direction so a peer can tell a retransmission from a new
@@ -766,6 +785,34 @@ constexpr uint32_t kUdpProtocolVersion = 2u;
 // is ~300 chunks; at the low real loss this path targets, a handful are missing, and the client can
 // send more than one NACK if needed. Fixed-size so the packet is a single small datagram.
 constexpr uint16_t kUdpVideoNackMaxMissing = 48;
+
+// keepalive-r2 A: one layout for every Standby* kind (fields a kind does not use are zero).
+constexpr uint32_t kUdpStandbyStatusOk = 0;
+constexpr uint32_t kUdpStandbyStatusBusy = 1;     // the host holds as many entries as it allows
+constexpr uint32_t kUdpStandbyStatusUnknown = 2;  // no such entry (expired, released, replaced) or wrong secret
+constexpr uint32_t kUdpStandbyStatusSuperseded = 3;  // Activate: an old generation (a late packet), not a new activation
+// keepalive-r2 A r3 (Codex decision 2): an activation's RESULT names its operation. The host answers an
+// accepted StandbyActivate with a StandbyPong {entryId, clientGen = the activation's generation, status Ok,
+// features |= this flag} right before the HelloAck; a refused one with a StandbyPong {entryId, clientGen,
+// status Unknown/Superseded}. A client takes an activation as done only on the Pong of ITS entry and ITS
+// generation -- a late Ack of an earlier activation, or of a cancelled one, carries another generation.
+constexpr uint32_t kUdpStandbyPongActivationGranted = 0x1;
+struct UdpStandbyPacket {
+  uint32_t magic = kMagic;
+  uint16_t kind = 0;
+  uint16_t size = 0;  // set to sizeof(UdpStandbyPacket) by the sender
+  uint32_t version = kUdpProtocolVersion;
+  uint32_t status = 0;          // Ack / Pong
+  uint8_t deviceId[16] = {};    // Hello: the client install's stable id (one entry per device)
+  uint64_t entryId = 0;         // Ack (issued) / Ping / Pong / Activate / Release
+  uint8_t entrySecret[16] = {}; // Ack (issued) / Ping / Activate / Release (proof of the entry)
+  uint32_t clientGen = 0;       // Hello / Activate: the client's attempt number (a retransmit repeats it)
+  uint32_t leaseMs = 0;         // Ack / Pong: the entry lapses this long after its last Ping
+  uint32_t features = 0;        // Hello: the Hello features to use at activation; Ack: host standby features
+  char authToken[33] = {};      // Hello: the one-time directory capability (as UdpHelloPacket's)
+  uint8_t reserved[3] = {};
+};
+static_assert(sizeof(UdpStandbyPacket) == 104, "standby packet wire drift");
 
 struct UdpHelloPacket {
   uint32_t magic = kMagic;

@@ -89,6 +89,7 @@
 #include "host_control_session.hpp"
 #include "host_main_loop.hpp"
 #include "host_startup.hpp"
+#include "os_input_effects.hpp"
 
 #ifndef REMOTE60_NATIVE_ENCODED_EXPERIMENT
 #define REMOTE60_NATIVE_ENCODED_EXPERIMENT 0
@@ -394,6 +395,16 @@ void startup_log_config(HostContext& hx) {
                                                                          4ULL))
               << "\n";
   }
+  // Finding-2 (2026-10-28): a record-only test build says so first, as its own state -- not "injection on/off"
+  // (its policy and dispatch run; no OS input effect exists in it: os_input_effects.hpp)
+#if defined(REMOTE60_OS_INPUT_RECORD_ONLY)  // the string itself never exists in a product build
+  // r5 (Codex N1): exactly what this build records instead of performing -- and what it does not (the clipboard's
+  // writes are not in it: a test that may not touch the clipboard turns the sync off, REMOTE60_CLIPBOARD_SYNC=0)
+  std::cout << "[native-video-host] os-input-record: os input effects=record-only (test build: SendInput, input "
+               "PostMessage, SetCursorPos, AttachThreadInput, ImmSetOpenStatus, ImmSetConversionStatus, UIA SetValue, "
+               "SetThreadExecutionState and the secure broker are recorded, never performed; clipboard writes are "
+               "not covered)\n";
+#endif
   if (kInputPolicyForceBlock) {
     std::cout << "[native-video-host] input injection blocked by compile-time policy\n";
   } else if (!args.enableInputInjection) {

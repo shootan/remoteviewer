@@ -34,6 +34,7 @@
 // would be unsafe here, since SendInput types wherever focus happens to be.
 
 #include "e2e_isolation.hpp"
+#include "e2e_injection_guard.hpp"
 #include "control_resume_e2e_support.hpp"
 
 #include <memory>
@@ -79,6 +80,8 @@ void macro_window_toggle(HINSTANCE, HWND, const MacroWindowHooks&) {}
 
 int wmain(int argc, wchar_t** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  // 2026-10-28: injection into this PC's real input path -- refused unless asked for (e2e_injection_guard.hpp)
+  if (remote60::native_poc::e2e::e2e_real_input_refused("viewer_release_all_e2e", "held keys and their releases are injected by the host (SendInput when its window has the focus)")) return 3;
   std::cout.setf(std::ios::unitbuf);
 
   if (!host_e2e_allowed()) {

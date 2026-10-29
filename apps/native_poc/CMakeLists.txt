@@ -231,6 +231,27 @@ target_link_libraries(remote60_native_video_host_migration_seam PRIVATE
   bcrypt windowscodecs shlwapi winmm
 )
 
+# TEST BUILD (2026-10-28, Codex codex_test_injection_finding.md Finding-2): the migration seam's host (the same
+# sources and libraries as GNLinkStream, REMOTE60_STREAM_TEST_SEAM as above) with every OS input effect RECORDED and
+# none performed (REMOTE60_OS_INPUT_RECORD_ONLY, in os_input_effects.hpp and nowhere else): SendInput, input
+# PostMessage, SetCursorPos and the secure-desktop broker. Receipt, policy, routing and dispatch are the product's.
+# Its own output name, never packaged; automation/gnlink_check_fixed_server.py refuses a shipped GNLinkStream.exe that
+# carries its marker ("os-input-record").
+add_executable(remote60_native_video_host_input_record ${_migration_host_sources})
+set_target_properties(remote60_native_video_host_input_record PROPERTIES
+  OUTPUT_NAME "GNLinkStreamInputRecordTest")
+target_include_directories(remote60_native_video_host_input_record PRIVATE src)
+target_compile_definitions(remote60_native_video_host_input_record PRIVATE
+  REMOTE60_STREAM_TEST_SEAM=1
+  REMOTE60_OS_INPUT_RECORD_ONLY=1
+  REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+)
+target_link_libraries(remote60_native_video_host_input_record PRIVATE
+  remote60_file_copy_host
+  capture common ws2_32 d3d11 mfplat mf mfuuid wmcodecdspuuid ole32 runtimeobject windowsapp advapi32
+  bcrypt windowscodecs shlwapi winmm
+)
+
 # TEST BUILD (dxgi-wedge-fix r1, Codex B1): the D3D multithread-protection A/B for the field PC. The same
 # sources and libraries as GNLinkStream, with REMOTE60_MT_AB_TEST_SEAM: the arm comes from
 # GNLinkStream.mt-ab.txt beside the exe ("on" sets protection right after the device is created; anything
@@ -1900,6 +1921,65 @@ if(MSVC)
 endif()
 add_dependencies(remote60_host_punch_reply_e2e_test remote60_native_video_host_poc)
 
+# keepalive-r2 A (spike/host-admission): standby entries -- the table as logic, and at a real host.
+add_executable(remote60_host_standby_table_test src/host_standby_table_test.cpp)
+target_include_directories(remote60_host_standby_table_test PRIVATE src)
+target_link_libraries(remote60_host_standby_table_test PRIVATE ws2_32)  # r3: the Standby* handling cases (htons)
+
+# keepalive-r2 ② (a, b): the client side of a standby entry -- a pure state machine and the durable generation counter.
+add_executable(remote60_standby_entry_client_test src/standby_entry_client_test.cpp)
+target_include_directories(remote60_standby_entry_client_test PRIVATE src)
+# keepalive-r2 ② r3 (Codex scope2 N1, N2): the lease and the runner against a fake host on loopback -- the activation's
+# HelloAck test and the lifetime counterexamples (no product process).
+# 2026-10-28: the e2e input-injection gate, its negative controls (pure: no host, no input API)
+# 2026-10-28 (Codex Finding-3): the host power policy through the product's HostPowerKeepalive, RECORD-ONLY (pure)
+add_executable(remote60_host_power_policy_record_test src/host_power_policy_record_test.cpp src/host_args.cpp)
+target_include_directories(remote60_host_power_policy_record_test PRIVATE src)
+target_compile_definitions(remote60_host_power_policy_record_test PRIVATE REMOTE60_OS_INPUT_RECORD_ONLY=1)
+# 2026-10-28 r5 (Codex T1): the record matcher's negative controls (pure)
+add_executable(remote60_os_input_record_match_test src/os_input_record_match_test.cpp)
+target_include_directories(remote60_os_input_record_match_test PRIVATE src)
+# 2026-10-28 r6 (Codex ba2eaf2 G1 / F): the guard's run-time half and the child helpers through their real paths
+# (no host: a fixed string and this executable sleeping in a kill-on-close job)
+add_executable(remote60_e2e_guard_runtime_test src/e2e_guard_runtime_test.cpp)
+target_include_directories(remote60_e2e_guard_runtime_test PRIVATE src)
+target_link_libraries(remote60_e2e_guard_runtime_test PRIVATE ws2_32)
+
+add_executable(remote60_e2e_injection_guard_test src/e2e_injection_guard_test.cpp)
+target_include_directories(remote60_e2e_injection_guard_test PRIVATE src)
+
+# 2026-10-28 (Codex Finding-3 (4)): an OLDER host's silence against the product's lease / runner (pure, loopback) --
+# the stand-in for the --old-host cases NOT RUN here; not a run of the published host
+add_executable(remote60_standby_legacy_host_test src/standby_legacy_host_test.cpp)
+target_include_directories(remote60_standby_legacy_host_test PRIVATE src)
+target_link_libraries(remote60_standby_legacy_host_test PRIVATE ws2_32)
+
+add_executable(remote60_standby_lease_test src/standby_lease_test.cpp)
+target_include_directories(remote60_standby_lease_test PRIVATE src)
+target_link_libraries(remote60_standby_lease_test PRIVATE ws2_32)
+# r3 N2-b: the pump's read start / end hooks (test build only; the product header compiles without them)
+target_compile_definitions(remote60_standby_lease_test PRIVATE REMOTE60_STANDBY_TEST_HOOKS)
+add_executable(remote60_host_standby_admission_e2e_test
+  src/host_standby_admission_e2e_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_session.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/directory_rendezvous.cpp
+  # keepalive-r2 (2): the product client's own directory calls (standby support, standby connect)
+  src/directory_session_client.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_host_standby_admission_e2e_test PRIVATE src)
+target_link_libraries(remote60_host_standby_admission_e2e_test PRIVATE common ws2_32 remote60_test_scratch_dir winhttp)
+if(MSVC)
+  target_compile_options(remote60_host_standby_admission_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_host_standby_admission_e2e_test remote60_native_video_host_poc)
+
 # The cached-sign-in migration, run as a process: a real streaming host (the test-seam build
 # above) started the way GNLinkHost starts it, against fixture directories that record what they
 # were sent. What is judged is the requests each address received and the bytes of the cache.
@@ -3164,6 +3244,22 @@ target_compile_definitions(remote60_reboot_menu_vectors_test PRIVATE
   "REMOTE60_REBOOT_MENU_VECTORS_PATH=\"${CMAKE_CURRENT_SOURCE_DIR}/../shared/reboot_menu_vectors.txt\""
 )
 
+# 2026-10-28 (Codex Finding-2): the record-only OS-effect boundary end to end -- a phone session controller -> the
+# RECORD-ONLY test host (GNLinkStreamInputRecordTest) -> dispatch -> recorded, never performed. REMOTE60_ALLOW_HOST_E2E=1.
+add_executable(remote60_os_input_record_e2e_test
+  src/os_input_record_e2e_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  src/native_video_client_session.cpp
+)
+target_include_directories(remote60_os_input_record_e2e_test PRIVATE src)
+target_link_libraries(remote60_os_input_record_e2e_test PRIVATE common ws2_32 advapi32 remote60_test_scratch_dir)
+if(MSVC)
+  target_compile_options(remote60_os_input_record_e2e_test PRIVATE /utf-8)
+endif()
+add_dependencies(remote60_os_input_record_e2e_test remote60_native_video_host_input_record)
+
 # prelogin-ui r1 (item 8): the phone's session controller -> 84 -> a real host (started WITHOUT
 # SeShutdownPrivilege) -> 85 back. REMOTE60_ALLOW_HOST_E2E=1.
 add_executable(remote60_android_session_reboot_e2e_test
@@ -3442,6 +3538,18 @@ target_link_libraries(remote60_directory_session_client_test PRIVATE common ws2_
 
 # Counts what the clients ask for when the directory refuses with 409. The outcome alone does not
 # separate "repaired it once" from "retried in a loop", so the assertions are about the counts.
+# keepalive-r2 FINDING r2 (Codex codex_ka_punch_thread_src_r1.md N1): the host agent's punch queue lives one Start..Stop.
+add_executable(remote60_host_agent_punch_test
+  src/host_agent_punch_test.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_host_agent_punch_test PRIVATE src)
+target_compile_definitions(remote60_host_agent_punch_test PRIVATE REMOTE60_HOST_AGENT_TEST_HOOKS)
+target_link_libraries(remote60_host_agent_punch_test PRIVATE common ws2_32 winhttp)
+
 add_executable(remote60_directory_retry_test
   src/directory_retry_test.cpp
   src/directory_session_client.cpp

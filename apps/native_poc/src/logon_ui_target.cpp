@@ -2,6 +2,7 @@
 // field's identity includes the focused element itself, and the replacing typing checks it around the clear).
 
 #include "logon_ui_target.hpp"
+#include "os_input_effects.hpp"
 
 #include <windows.h>
 
@@ -178,7 +179,7 @@ bool send_units(const uint16_t* units, uint16_t count, bool selectAllFirst, uint
       e.ki.dwFlags = KEYEVENTF_UNICODE | (k == 1 ? KEYEVENTF_KEYUP : 0);
     }
   }
-  const UINT sent = in.empty() ? 0 : SendInput(static_cast<UINT>(in.size()), in.data(), sizeof(INPUT));
+  const UINT sent = in.empty() ? 0 : os_input::send_input(static_cast<UINT>(in.size()), in.data(), sizeof(INPUT));
   const DWORD e = GetLastError();
   if (!in.empty()) SecureZeroMemory(in.data(), in.size() * sizeof(INPUT));
   if (sent != in.size()) {
@@ -193,7 +194,7 @@ bool send_units(const uint16_t* units, uint16_t count, bool selectAllFirst, uint
         up.ki.wVk = r.code;
         up.ki.dwFlags = KEYEVENTF_KEYUP;
       }
-      SendInput(1, &up, sizeof(INPUT));
+      os_input::send_input(1, &up, sizeof(INPUT));
       SecureZeroMemory(&up, sizeof(up));
     }
     for (ReleaseStep& r : ups) r.code = 0;
@@ -240,7 +241,7 @@ bool ReplaceWithUnicode(uint64_t expectedIdentity, const uint16_t* units, uint16
     BOOL readOnly = TRUE;
     const bool cleared = SUCCEEDED(value->get_CurrentIsReadOnly(&readOnly)) && !readOnly && [&] {
       BSTR empty = SysAllocString(L"");
-      const bool ok = empty && SUCCEEDED(value->SetValue(empty));
+      const bool ok = empty && SUCCEEDED(os_input::uia_set_value(value, empty));
       if (empty) SysFreeString(empty);
       return ok;
     }();

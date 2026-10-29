@@ -108,10 +108,20 @@ struct ClientSessionConnectArgs {
   // punch was performed with: a fresh one would sit behind a different NAT mapping and the
   // host's packets would be dropped. The session takes ownership.
   SocketHandle preparedUdpSocket = kInvalidSocket;
+  // keepalive-r2 ② e: preparedUdpSocket is a DUPLICATE of a socket someone else keeps using (a standby lease's own,
+  // StandbyLease::ActivationArgs). The session then never shuts it down: on POSIX shutdown() acts on the shared socket
+  // itself (not on this descriptor), so the lease would lose its endpoint for good (AVD ke_r3: the next activation and
+  // every observe after it went nowhere). Its reader leaves on its own receive tick; the descriptor is only closed.
+  bool preparedSocketShared = false;
   // The uplink keepalive interval; see kClientControlIntervalMsDefault.
   uint32_t controlIntervalMs = kClientControlIntervalMsDefault;
   uint32_t udpHandshakeTimeoutMs = 800;
   ClientEncodedFrameSink* encodedFrameSink = nullptr;
+  // keepalive-r2 (2): the UDP handshake to run on the (prepared) socket INSTEAD of the Hello -- a standby entry's
+  // activation (StandbyLease): it returns true once the host admitted this session, with the HelloAck's features.
+  // Empty = the ordinary authenticated Hello (udp_hello_handshake), as before.
+  std::function<bool(SocketHandle socket, const std::atomic<bool>& stop, std::string* error, uint32_t* ackFeatures)>
+      udpHandshake;
 };
 
 struct ClientSessionSnapshot {
@@ -355,6 +365,8 @@ class ClientSessionController {
   std::atomic<bool> stopRequested_{false};
   SocketHandle tcpControlSocket_ = kInvalidSocket;
   SocketHandle udpVideoSocket_ = kInvalidSocket;
+  bool udpVideoSocketShared_ = false;  // ClientSessionConnectArgs::preparedSocketShared (under mu_)
+  void ShutdownVideoSocketLocked();
   UdpControlChannel udpControl_;
   std::atomic<bool> controlOverUdp_{false};
 

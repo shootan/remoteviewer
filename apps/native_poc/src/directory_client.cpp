@@ -491,14 +491,64 @@ bool HostAgent::Start(const HostAgentConfig& cfg, SendFn send, std::string* outE
   }
 
   refreshRequested_.store(false, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lock(punchMu_);
+    punchJobs_.clear();  // r2 N1: nothing of an earlier Start..Stop (Stop already cleared it; this is the belt)
+  }
   running_.store(true);
   thread_ = std::thread([this] { Run(); });
+  punchThread_ = std::thread([this] { PunchLoop(); });
   return true;
 }
 
 void HostAgent::Stop() {
   if (!running_.exchange(false)) return;
+  {
+    std::lock_guard<std::mutex> lock(punchMu_);  // the loop checks running_ under this lock: no lost wake
+  }
+  punchCv_.notify_all();
+  if (punchThread_.joinable()) punchThread_.join();
   if (thread_.joinable()) thread_.join();
+  // r2 N1: both ended -- the cycle may have queued a train after the punch thread left (Punch() checks running_, this
+  // covers the step between its check and its push): discarded, never sent by a later Start.
+  std::lock_guard<std::mutex> lock(punchMu_);
+  punchJobs_.clear();
+}
+
+// The punch trains (see punchThread_): every target queued gets one punch per kPunchIntervalMs until it has had
+// kPunchPackets -- the same packets, the same spacing as before, now beside the cycle rather than inside it.
+void HostAgent::PunchLoop() {
+  UdpHelloPacket packet{};
+  packet.kind = static_cast<uint16_t>(UdpPacketKind::Punch);
+  std::unique_lock<std::mutex> lock(punchMu_);
+  while (running_.load()) {
+    punchCv_.wait(lock, [this] { return !running_.load() || !punchJobs_.empty(); });
+    if (!running_.load()) break;
+    std::vector<PunchTarget> now;
+    now.reserve(punchJobs_.size());
+    for (auto& job : punchJobs_) {
+      now.push_back(job.target);
+      --job.left;
+    }
+    punchJobs_.erase(std::remove_if(punchJobs_.begin(), punchJobs_.end(), [](const PunchJob& j) { return j.left <= 0; }),
+                     punchJobs_.end());
+    lock.unlock();
+    for (const auto& t : now) {
+      sockaddr_in to{};
+      to.sin_family = AF_INET;
+      to.sin_addr.s_addr = t.ipv4NetworkOrder;
+      to.sin_port = htons(t.port);
+      // keepalive-r2 r4 (Codex N1): toward a relay lease's host-facing socket, the punch carries that lease's
+      // host proof -- what the relay pins this host's tuple by. Every other punch stays empty (a client's token
+      // is never put on the wire here).
+      UdpHelloPacket p = packet;
+      if (!t.hostProof.empty()) std::memcpy(p.authToken, t.hostProof.data(), (std::min)(t.hostProof.size(), sizeof(p.authToken) - 1));
+      send_(&p, sizeof(p), to);
+    }
+    lock.lock();
+    // the spacing, cut short only by Stop()
+    punchCv_.wait_for(lock, std::chrono::milliseconds(kPunchIntervalMs), [this] { return !running_.load(); });
+  }
 }
 
 void HostAgent::SetStatus(const std::string& status) {
@@ -1392,12 +1442,15 @@ bool HostAgent::HeartbeatAttempt(std::vector<PunchTarget>* outPunch, uint32_t* o
         std::string ip;
         uint32_t port = 0;
         std::string punchToken;
+        std::string hostProof;
         if (json_get_string(entry, "ip", &ip) && json_get_u32(entry, "port", &port) &&
             json_get_string(entry, "punchToken", &punchToken) && punchToken.size() == 32 && port &&
             port <= 65535) {
+          // keepalive-r2 r4: an optional relay host-facing proof (32 hex); anything else is not one.
+          if (!json_get_string(entry, "hostProof", &hostProof) || hostProof.size() != 32) hostProof.clear();
           in_addr parsed{};
           if (inet_pton(AF_INET, ip.c_str(), &parsed) == 1) {
-            outPunch->push_back({parsed.s_addr, static_cast<uint16_t>(port), punchToken});
+            outPunch->push_back({parsed.s_addr, static_cast<uint16_t>(port), punchToken, hostProof});
           }
         }
         cursor = objEnd + 1;
@@ -1427,6 +1480,7 @@ void HostAgent::Punch(const std::vector<PunchTarget>& targets) {
                        [&](const AuthorizedPeer& peer) { return peer.expiresAt <= now; }),
         authorizedPeers_.end());
     for (const auto& target : targets) {
+      if (!target.hostProof.empty()) continue;  // keepalive-r2 r4: a relay socket of ours, not a peer
       authorizedPeers_.push_back(
           AuthorizedPeer{target, now + std::chrono::seconds(30)});
     }
@@ -1445,18 +1499,23 @@ void HostAgent::Punch(const std::vector<PunchTarget>& targets) {
               << remote60::native_poc::kPunchReplyWindowMs << "ms (capability collected)\n";
   }
 
-  UdpHelloPacket packet{};
-  packet.kind = static_cast<uint16_t>(UdpPacketKind::Punch);
-  for (int i = 0; i < kPunchPackets && running_.load(); ++i) {
+  // To the punch thread, and back to the cycle at once (its next wake is not held up by a 5 s train). A target already
+  // being punched starts its count over.
+  {
+    std::lock_guard<std::mutex> lock(punchMu_);
+    if (!running_.load()) return;  // r2 N1: stopping -- nothing new for a thread that is leaving (or gone)
     for (const auto& t : targets) {
-      sockaddr_in to{};
-      to.sin_family = AF_INET;
-      to.sin_addr.s_addr = t.ipv4NetworkOrder;
-      to.sin_port = htons(t.port);
-      send_(&packet, sizeof(packet), to);
+      auto same = std::find_if(punchJobs_.begin(), punchJobs_.end(), [&](const PunchJob& j) {
+        return j.target.ipv4NetworkOrder == t.ipv4NetworkOrder && j.target.port == t.port && j.target.hostProof == t.hostProof;
+      });
+      if (same != punchJobs_.end()) {
+        same->left = kPunchPackets;
+      } else {
+        punchJobs_.push_back(PunchJob{t, kPunchPackets});
+      }
     }
-    std::this_thread::sleep_for(std::chrono::milliseconds(kPunchIntervalMs));
   }
+  punchCv_.notify_all();
 }
 
 /**
@@ -1651,6 +1710,8 @@ void HostAgent::Run() {
               << remaining.count() << " workMs=" << elapsed.count() << "\n";
     const auto sleepStart = std::chrono::steady_clock::now();
     const char* wake = "elapsed";
+    // a wake that came while the work ran past the interval is this cycle's cause, not a leftover for the next one
+    if (remaining.count() <= 0 && refreshRequested_.exchange(false, std::memory_order_acq_rel)) wake = "refresh";
     while (running_.load() && remaining.count() > 0) {
       if (refreshRequested_.exchange(false, std::memory_order_acq_rel)) {
         wake = "refresh";

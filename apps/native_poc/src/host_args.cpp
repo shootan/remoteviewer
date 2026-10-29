@@ -142,6 +142,21 @@ Args parse_args(int argc, char** argv) {
       if (parse_u32(argv[++i], &v)) {
         a.directoryObservePort = static_cast<uint16_t>(std::min<uint32_t>(v, 65535));
       }
+    } else if (k == "--host-power-management") {
+      // r5 P2-1: this switch's own operand, by the same rule as the others (the next token); the last one wins
+      if (i + 1 >= argc) {
+        a.hostPower.ok = false;
+        a.hostPower.bad = "(missing)";
+      } else {
+        const std::string v = argv[++i];
+        if (v == "on" || v == "off") {
+          a.hostPower.enabled = (v == "on");
+          a.hostPower.fromCommandLine = true;
+        } else {
+          a.hostPower.ok = false;
+          a.hostPower.bad = v;
+        }
+      }
     } else if (k == "--input-injection-mode" && i + 1 < argc) {
       a.inputInjectionMode = argv[++i];
     } else if (k == "--input-target-pid" && i + 1 < argc) {

@@ -3,16 +3,20 @@
 const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
+const testTmp = require('./test_tmp');  // r5 (Codex N4): every file of the suite under REMOTE60_TEST_TMP
 
 const serverPath = path.join(__dirname, '..', 'server.js');
-const dataPath = path.join(os.tmpdir(), `remote60-directory-test-${process.pid}.json`);
-const env = { ...process.env, REMOTE60_DIR_DATA: dataPath,
+const testRoot = testTmp.root();
+const dataPath = testTmp.file(`remote60-directory-test-${process.pid}.json`);
+// The children's os.tmpdir() is the test root too (TEMP/TMP on Windows, TMPDIR elsewhere), and the scratch-folder
+// tests read REMOTE60_TEST_TMP: nothing the suite starts writes or deletes outside it.
+const env = { ...process.env, REMOTE60_TEST_TMP: testRoot, TEMP: testRoot, TMP: testRoot, TMPDIR: testRoot,
+              REMOTE60_DIR_DATA: dataPath,
               REMOTE60_DIR_PORT: '18080', REMOTE60_DIR_UDP_PORT: '18081',
               REMOTE60_DIR_SIGNUP_KEY: 'test-signup-key',
               T_PORT: '18080', T_UDP: '18081' };
 
-fs.rmSync(dataPath, { force: true });
+testTmp.remove(dataPath);
 spawnSync(process.execPath, [serverPath, '--add-account', 'tester', 'test-pass-1234'],
           { env, stdio: 'ignore' });
 // relay_test needs a second account that can sign in. It used to sign one up itself; an
@@ -48,7 +52,7 @@ function stopServer(server) {
 }
 
 function cleanup() {
-  fs.rmSync(dataPath, { force: true });
+  testTmp.remove(dataPath);
 }
 
 (async () => {
@@ -207,6 +211,38 @@ function cleanup() {
     process.exit(relay);
   }
 
+  // keepalive-r2 relay decision (a): standby leases, each with its own host-facing socket (loopback-bound),
+  // beside the legacy lease. Its own server: the reserved sockets are counted per process.
+  console.log('\n--- relay standby leases (keepalive-r2 (a)) ---');
+  const standbyEnv = { ...relayEnv, REMOTE60_RELAY_HOST_FACING_IP: '127.0.0.1',
+                       REMOTE60_RELAY_HOST_FACING_BIND: '127.0.0.1',
+                       // r4: every test client is 127.0.0.1 and the tester account -- raised so the per-host
+                       // bound (8) is what the cases meet
+                       REMOTE60_RELAY_STANDBY_MAX_PER_ACCOUNT: '200', REMOTE60_RELAY_STANDBY_MAX_PER_WIRE_IP: '200' };
+  server = spawn(process.execPath, [serverPath], { env: standbyEnv, stdio: 'ignore' });
+  await sleep(1500);
+  const standby = await new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(__dirname, 'relay_standby_test.js')],
+                        { env: standbyEnv, stdio: 'inherit' });
+    child.on('exit', (code) => resolve(code ?? 1));
+  }) || await new Promise((resolve) => {
+    // r4 (Codex N1, N3): the first pin needs the host's proof; the eight hold either way round
+    const child = spawn(process.execPath, [path.join(__dirname, 'relay_standby_r4_test.js')],
+                        { env: standbyEnv, stdio: 'inherit' });
+    child.on('exit', (code) => resolve(code ?? 1));
+  }) || await new Promise((resolve) => {
+    // r4 (Codex N3): bad bounds in the environment fall back (its own server, own ports)
+    const child = spawn(process.execPath, [path.join(__dirname, 'relay_env_bound_test.js')],
+                        { env, stdio: 'inherit' });
+    child.on('exit', (code) => resolve(code ?? 1));
+  });
+  await stopServer(server);
+  if (standby !== 0) {
+    cleanup();
+    console.log('\nRESULT: FAILED');
+    process.exit(standby);
+  }
+
   // Its own server again, because the correction only exists when the server knows its own
   // public address, and "unset means the raw observation" is what the other passes rely on.
   console.log('\n--- observe correction (own lan) ---');
@@ -229,8 +265,8 @@ function cleanup() {
   // The log sink writes files, so it gets a scratch directory of its own and a budget small
   // enough that a handful of small batches can prove the limiter actually bites.
   console.log('\n--- log collection ---');
-  const logDir = path.join(os.tmpdir(), `remote60-directory-logs-${process.pid}`);
-  fs.rmSync(logDir, { recursive: true, force: true });
+  const logDir = testTmp.file(`remote60-directory-logs-${process.pid}`);
+  testTmp.remove(logDir, { recursive: true });
   const logEnv = { ...env, REMOTE60_LOG_DIR: logDir, REMOTE60_LOG_RATE_KB_PER_MIN: '8' };
   server = spawn(process.execPath, [serverPath], { env: logEnv, stdio: 'ignore' });
   await sleep(1500);
@@ -241,7 +277,7 @@ function cleanup() {
   });
 
   await stopServer(server);
-  fs.rmSync(logDir, { recursive: true, force: true });
+  testTmp.remove(logDir, { recursive: true });
   if (logs !== 0) {
     cleanup();
     console.log('\nRESULT: FAILED');
@@ -251,8 +287,8 @@ function cleanup() {
   // The update endpoint gets its own server and its own scratch publish directory, because
   // "unset means off" is the state every other pass in this file depends on.
   console.log('\n--- update manifest endpoint ---');
-  const updateDir = path.join(os.tmpdir(), `remote60-update-${process.pid}`);
-  fs.rmSync(updateDir, { recursive: true, force: true });
+  const updateDir = testTmp.file(`remote60-update-${process.pid}`);
+  testTmp.remove(updateDir, { recursive: true });
   fs.mkdirSync(updateDir, { recursive: true });
   {
     // Published straight from the shared vectors, so the bytes served are the bytes the other
@@ -271,7 +307,7 @@ function cleanup() {
     child.on('exit', (code) => resolve(code ?? 1));
   });
   await stopServer(server);
-  fs.rmSync(updateDir, { recursive: true, force: true });
+  testTmp.remove(updateDir, { recursive: true });
   if (updateRoute !== 0) {
     cleanup();
     console.log('\nRESULT: FAILED');

@@ -25,11 +25,14 @@
 #include <cstdio>
 #include <cstring>
 #include <functional>
+#include <fstream>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "e2e_isolation.hpp"
+#include "e2e_injection_guard.hpp"
 #include "directory_fake_server.hpp"
 #include "directory_rendezvous.hpp"
 #include "native_video_client_tcp_control.hpp"
@@ -97,9 +100,14 @@ std::wstring directory_of(const std::wstring& path) {
 struct SpawnedHost {
   PROCESS_INFORMATION pi{};
   HANDLE job = nullptr;
+  // r6 G1: this launch's monitor (after its initial gate); stopped first in Stop()
+  std::unique_ptr<remote60::native_poc::e2e::E2eInjectionMonitor> injMonitor;
   HANDLE readEnd = nullptr;
   std::thread reader;
   std::atomic<bool> reading{false};
+  // r8 N1: how the reader's read ended (E2eReadEnd) and its error -- EOF is the only "output complete"
+  std::atomic<int> readResult{0};
+  std::atomic<unsigned long> readErr{0};
   std::mutex mu;
   std::string output;
   std::wstring dir;
@@ -158,16 +166,36 @@ struct SpawnedHost {
   }
 
   void Stop() {
-    reading = false;
-    if (job) {
-      CloseHandle(job);  // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE takes the host with it
-      job = nullptr;
+    if (injMonitor) injMonitor->StopPolling();  // r7 N1: polling ends; the final judgement comes after the host and its reader
+    // r7 N1: the producer is ended (its job: every process of it, confirmed), its output read to the end (the reader
+    // gets EOF once the last writer is gone), THEN the final snapshot is judged. An end not confirmed: the read is cut
+    // and the output is NOT complete -- the final judgement says so (INVALID).
+    // r8 N1: complete = the producer's end confirmed AND the reader's own EOF (not its join) AND the OFF lines in that
+    // final text (e2e_final_verdict); the job stays open until the final judgement is made, then it closes.
+    bool producerEnded = false;
+    if (job) producerEnded = remote60::native_poc::e2e::e2e_end_job_confirmed(job);
+    if (!producerEnded) {
+      reading = false;
+      if (readEnd) {
+        CloseHandle(readEnd);
+        readEnd = nullptr;
+      }
     }
+    if (reader.joinable()) reader.join();
     if (readEnd) {
       CloseHandle(readEnd);
       readEnd = nullptr;
     }
-    if (reader.joinable()) reader.join();
+    if (injMonitor) {
+      injMonitor->Finalize(producerEnded, remote60::native_poc::e2e::e2e_final_pipe(
+                                              static_cast<remote60::native_poc::e2e::E2eReadEnd>(readResult.load()),
+                                              readErr.load(), log()));
+      injMonitor.reset();
+    }
+    if (job) {
+      CloseHandle(job);  // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (already ended above when confirmed)
+      job = nullptr;
+    }
     if (pi.hThread) CloseHandle(pi.hThread);
     bool exited = true;
     DWORD wait = WAIT_OBJECT_0;
@@ -206,6 +234,10 @@ struct SpawnedHost {
  * makes the pre-launch check refuse, so the host that would have written the real cache is
  * never started.
  */
+// 2026-10-28 (verifier, after worker2's finding): GNLinkStream injects input by default (host_args.hpp
+// enableInputInjection = true) -- a test host must not drive THIS PC's input. Every host here is started with its
+// injection off (e2e_injection_guard.hpp), and a test client connects only after the host itself said
+// "input injection disabled (unsupported mode) mode=none" -- else the test ends INVALID there (StartHost).
 std::wstring isolation_args(const std::wstring& stagingDir) {
   return L" --directory-cache \"" + stagingDir + L"host_cache.json\"";
 }
@@ -238,7 +270,11 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
   {
     wchar_t oldBin[MAX_PATH] = {};
     if (GetEnvironmentVariableW(L"REMOTE60_E2E_OLD_BIN", oldBin, MAX_PATH) != 0 && oldBin[0] != L'\0') {
-      streamSrc = oldBin;
+      // 2026-10-28 (Codex Finding-3 (4)): an older build has no --host-power-management -- it would ignore the
+      // argument and keep its power effects on. Never started here to "check" that; this case is unverified.
+      std::printf("NOT RUN  %s: an older binary (no --host-power-management) is not started on this PC -- unverified "
+                  "(Codex Finding-3 (4))\n", tag);
+      return false;
     }
   }
   if (!CopyFileW(streamSrc.c_str(), (host->dir + L"GNLinkStream.exe").c_str(), FALSE) ||
@@ -274,7 +310,10 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
                      L" --control-port " + std::to_wstring(controlPort) +
                      L" --directory-url " + url +
                      L" --directory-id tester --directory-pw e2e-pass-1234" +
-                     L" --seconds 90" + isolation_args(host->dir);
+                     L" --seconds 90" + isolation_args(host->dir) +
+                     // input injection OFF and host power management OFF (e2e_injection_guard.hpp; Finding-3) -- for a
+                     // --prelogin worker too: its power object exists from its first line, client or not
+                     remote60::native_poc::e2e::e2e_injection_off_arg(host->dir);
 
   // Checked BEFORE anything starts. A host that talks to a directory writes a token cache, and
   // without --directory-cache that is the user's own %LOCALAPPDATA%\remote60\host.json --
@@ -325,23 +364,36 @@ bool StartHost(SpawnedHost* host, const std::string& directoryUrl, uint16_t medi
                      host->dir.c_str(), &si, &host->pi) != FALSE;
   CloseHandle(writeEnd);
   if (!launched) return false;
-  AssignProcessToJobObject(host->job, host->pi.hProcess);
-  ResumeThread(host->pi.hThread);
+  // r5 (Codex N2): resumed only inside a verified kill-on-close job, else INVALID
+  remote60::native_poc::e2e::e2e_adopt_or_invalid(host->job, host->pi, "host_punch_reply");
 
   host->reading = true;
-  host->reader = std::thread([host] {
-    char buf[4096];
-    DWORD got = 0;
-    while (host->reading.load() && host->readEnd &&
-           ReadFile(host->readEnd, buf, sizeof(buf), &got, nullptr) && got > 0) {
-      std::lock_guard<std::mutex> lock(host->mu);
-      host->output.append(buf, got);
-    }
+  host->reader = std::thread([host, h = host->readEnd] {
+    // r8 N1: read to a confirmed end of output (EOF / broken pipe), any other end kept apart (e2e_read_to_end)
+    DWORD err = 0;
+    const auto end = remote60::native_poc::e2e::e2e_read_to_end(
+        h, [host] { return host->reading.load(); },
+        [host](const char* p, size_t n) {
+          std::lock_guard<std::mutex> lock(host->mu);
+          host->output.append(p, n);
+        },
+        &err);
+    host->readErr = err;
+    host->readResult = static_cast<int>(end);
   });
   // r6 V5: a --prelogin worker given directory arguments ignores them and never starts its directory
   // agent, so it never names a cache -- it has nothing to write. Its isolation is the empty ProgramData
   // above; the case checks the offline result itself.
   if (prelogin) return host->WaitFor("[native-video-host][prelogin]", 20000);
+  // fail closed: no test client reaches a host that has not said its input injection is off
+  {
+    std::string injWhy;
+    if (!remote60::native_poc::e2e::e2e_wait_injection_off([host] { return host->log(); }, 20000, &injWhy)) {
+      remote60::native_poc::e2e::e2e_injection_setup_failed(tag, injWhy);
+    }
+    check("the host said its input injection is OFF (--input-injection-mode none) before any client", true);
+    host->injMonitor = std::make_unique<remote60::native_poc::e2e::E2eInjectionMonitor>([host] { return host->log(); }, host->job, tag);
+  }
   // The host says which cache it will write, before it registers. Confirmed from its own words
   // rather than from the argument this test passed: the question is what the process DID.
   const std::string wantPath(host->cachePath.begin(), host->cachePath.end());
@@ -1252,6 +1304,7 @@ int wmain(int argc, wchar_t** argv) {
   // and C2 is where that is being built. Until then this file exercises duplicates and
   // re-sends, and says so rather than letting the gap look closed.
 
+  remote60::native_poc::e2e::e2e_injection_final_check_all();  // r6 G1: judged again before the result
   std::printf("\n%s  (%d checks, %d failed)\n",
               gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED", gChecks, gFailures);
   WSACleanup();

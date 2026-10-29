@@ -31,6 +31,7 @@
 #include <cstdio>
 #include <functional>
 #include <mutex>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,6 +39,7 @@
 #include "stream_child_env.hpp"
 #include "directory_fake_server.hpp"
 #include "e2e_isolation.hpp"
+#include "e2e_injection_guard.hpp"
 #include "native_video_client_session.hpp"
 #include "poc_protocol.hpp"
 #include "prelogin_admin_pipe.hpp"
@@ -116,9 +118,14 @@ int process_has_shutdown_privilege(HANDLE process) {
 struct Host {
   PROCESS_INFORMATION pi{};
   HANDLE job = nullptr;
+  // r6 G1: this launch's monitor (after its initial gate); stopped first in Stop()
+  std::unique_ptr<remote60::native_poc::e2e::E2eInjectionMonitor> injMonitor;
   HANDLE readEnd = nullptr;
   std::thread reader;
   std::atomic<bool> reading{false};
+  // r8 N1: how the reader's read ended (E2eReadEnd) and its error -- EOF is the only "output complete"
+  std::atomic<int> readResult{0};
+  std::atomic<unsigned long> readErr{0};
   std::mutex mu;
   std::string output;
   std::wstring dir;
@@ -137,16 +144,36 @@ struct Host {
     return n;
   }
   void Stop() {
-    reading = false;
-    if (job) {
-      CloseHandle(job);
-      job = nullptr;
+    if (injMonitor) injMonitor->StopPolling();  // r7 N1: polling ends; the final judgement comes after the host and its reader
+    // r7 N1: the producer is ended (its job: every process of it, confirmed), its output read to the end (the reader
+    // gets EOF once the last writer is gone), THEN the final snapshot is judged. An end not confirmed: the read is cut
+    // and the output is NOT complete -- the final judgement says so (INVALID).
+    // r8 N1: complete = the producer's end confirmed AND the reader's own EOF (not its join) AND the OFF lines in that
+    // final text (e2e_final_verdict); the job stays open until the final judgement is made, then it closes.
+    bool producerEnded = false;
+    if (job) producerEnded = remote60::native_poc::e2e::e2e_end_job_confirmed(job);
+    if (!producerEnded) {
+      reading = false;
+      if (readEnd) {
+        CloseHandle(readEnd);
+        readEnd = nullptr;
+      }
     }
+    if (reader.joinable()) reader.join();
     if (readEnd) {
       CloseHandle(readEnd);
       readEnd = nullptr;
     }
-    if (reader.joinable()) reader.join();
+    if (injMonitor) {
+      injMonitor->Finalize(producerEnded, remote60::native_poc::e2e::e2e_final_pipe(
+                                              static_cast<remote60::native_poc::e2e::E2eReadEnd>(readResult.load()),
+                                              readErr.load(), log()));
+      injMonitor.reset();
+    }
+    if (job) {
+      CloseHandle(job);  // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE (already ended above when confirmed)
+      job = nullptr;
+    }
     if (pi.hProcess) {
       WaitForSingleObject(pi.hProcess, 20000);
       CloseHandle(pi.hProcess);
@@ -182,7 +209,7 @@ bool StartHost(Host* host, const std::string& url, uint16_t mediaPort, uint16_t 
                      L" --bind-port " + std::to_wstring(mediaPort) + L" --control-port " + std::to_wstring(tcpControlPort) +
                      L" --directory-url " + wurl +
                      L" --directory-id tester --directory-pw e2e-pass-1234 --seconds 90" + L" --directory-cache \"" + host->dir +
-                     L"host_cache.json\"";
+                     L"host_cache.json\"" + remote60::native_poc::e2e::e2e_injection_off_arg(host->dir);  // input injection off (e2e_injection_guard.hpp)
   std::string why;
   if (!remote60::native_poc::e2e::e2e_command_is_isolated(cmd, host->dir, &why)) {
     std::printf("FAIL  the host command is not isolated: %s\n", why.c_str());
@@ -214,16 +241,21 @@ bool StartHost(Host* host, const std::string& url, uint16_t mediaPort, uint16_t 
                                              host->dir.c_str(), &si, &host->pi) != FALSE;
   CloseHandle(writeEnd);
   if (!launched) return false;
-  AssignProcessToJobObject(host->job, host->pi.hProcess);
-  ResumeThread(host->pi.hThread);
+  // r5 (Codex N2): resumed only inside a verified kill-on-close job, else INVALID
+  remote60::native_poc::e2e::e2e_adopt_or_invalid(host->job, host->pi, "host_reboot_delegate");
   host->reading = true;
-  host->reader = std::thread([host] {
-    char buf[4096];
-    DWORD got = 0;
-    while (host->reading.load() && host->readEnd && ReadFile(host->readEnd, buf, sizeof(buf), &got, nullptr) && got > 0) {
-      std::lock_guard<std::mutex> l(host->mu);
-      host->output.append(buf, got);
-    }
+  host->reader = std::thread([host, h = host->readEnd] {
+    // r8 N1: read to a confirmed end of output (EOF / broken pipe), any other end kept apart (e2e_read_to_end)
+    DWORD err = 0;
+    const auto end = remote60::native_poc::e2e::e2e_read_to_end(
+        h, [host] { return host->reading.load(); },
+        [host](const char* p, size_t n) {
+          std::lock_guard<std::mutex> l(host->mu);
+          host->output.append(p, n);
+        },
+        &err);
+    host->readErr = err;
+    host->readResult = static_cast<int>(end);
   });
   return true;
 }
@@ -404,8 +436,14 @@ int wmain(int argc, wchar_t** argv) {
   const int priv = started ? process_has_shutdown_privilege(host.pi.hProcess) : -1;
   const bool safe = priv == 0;
   check("SAFETY: the host's token holds no SeShutdownPrivilege at all", safe, std::to_string(priv));
+  // fail closed (e2e_injection_guard.hpp): nothing reaches a host that has not said its input injection is off
+  std::string injWhy;
+  const bool injOff = started && remote60::native_poc::e2e::e2e_wait_injection_off([&host] { return host.log(); }, 20000, &injWhy);
+  if (started && !injOff) remote60::native_poc::e2e::e2e_injection_setup_failed("host_reboot_delegate", injWhy);
+  check("the host said its input injection is OFF (--input-injection-mode none) before any client", injOff, injWhy);
+  if (injOff) host.injMonitor = std::make_unique<remote60::native_poc::e2e::E2eInjectionMonitor>([&host] { return host.log(); }, host.job, "host_reboot_delegate");
   Service service;
-  if (started && safe) {
+  if (started && safe && injOff) {
     service.heartbeatSeen = [&host] { return host.log().find("step=heartbeat ok=1") != std::string::npos; };
     service.start(pipe, host.dir + L"GNLinkStream.exe");
 
@@ -528,6 +566,7 @@ int wmain(int argc, wchar_t** argv) {
   host.Stop();
   if (clientSock != INVALID_SOCKET) closesocket(clientSock);
   if (restricted) CloseHandle(restricted);
+  remote60::native_poc::e2e::e2e_injection_final_check_all();  // r6 G1: judged again before the result
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

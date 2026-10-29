@@ -1526,7 +1526,7 @@ void ClientSessionController::StopWorker() {
     std::lock_guard<std::mutex> lock(mu_);
     snapshot_.controlLoopActive = false;
     shutdown_socket(&tcpControlSocket_);
-    shutdown_socket(&udpVideoSocket_);
+    ShutdownVideoSocketLocked();
   }
   if (workerThread_.joinable()) {
     workerThread_.join();
@@ -1566,6 +1566,14 @@ void ClientSessionController::SignalRuntimeFailure(const std::string& error) {
   snapshot_.lastError = error.empty() ? "session failed" : error;
   snapshot_.controlLoopActive = false;
   shutdown_socket(&tcpControlSocket_);
+  ShutdownVideoSocketLocked();
+}
+
+// Wakes the video reader by shutting its socket down -- unless that socket is shared with a standby lease
+// (preparedSocketShared): then it is left alone (the reader sees stopRequested_ on its next receive tick, <= 100 ms) and
+// only this descriptor is closed later (CloseSocketsUnlocked, after the join).
+void ClientSessionController::ShutdownVideoSocketLocked() {
+  if (udpVideoSocketShared_) return;
   shutdown_socket(&udpVideoSocket_);
 }
 
@@ -1670,7 +1678,10 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
                                               : std::max<uint32_t>(3000, args.udpHandshakeTimeoutMs);
   hello.requestNack = true;  // ask for selective retransmit (video NACK.)
   uint32_t ackFeatures = 0;
-  if (!udp_hello_handshake(connected, hello, &stopRequested_, error, &ackFeatures)) {
+  // keepalive-r2 (2): a standby activation replaces the Hello on this socket (the lease's); everything after it is the same
+  const bool admitted = args.udpHandshake ? args.udpHandshake(connected, stopRequested_, error, &ackFeatures)
+                                          : udp_hello_handshake(connected, hello, &stopRequested_, error, &ackFeatures);
+  if (!admitted) {
     close_socket(&connected);
     return false;
   }
@@ -1699,6 +1710,7 @@ bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& ar
     return false;
   }
   udpVideoSocket_ = connected;
+  udpVideoSocketShared_ = args.preparedUdpSocket != kInvalidSocket && args.preparedSocketShared;
   snapshot_.transport.udpVideoReady = true;
   return true;
 }
@@ -1799,6 +1811,7 @@ void ClientSessionController::ResetUnlocked() {
 void ClientSessionController::CloseSocketsUnlocked() {
   close_socket(&tcpControlSocket_);
   close_socket(&udpVideoSocket_);
+  udpVideoSocketShared_ = false;
 }
 
 }  // namespace remote60::native_poc
