@@ -732,6 +732,12 @@ target_include_directories(remote60_ka_pc_ipc_close_race_test PRIVATE src)
 add_executable(remote60_ka_pc_e2e_child_test src/ka_pc_e2e_child_test.cpp)
 target_include_directories(remote60_ka_pc_e2e_child_test PRIVATE src)
 
+# ka-pc V1 (Codex evidence candidate r2): why a WGC capture of the static picker came back white -- an off-screen
+# flip-model window presenting one frame, captured first-frame vs. with a present during the capture. No host/viewer.
+add_executable(remote60_ka_pc_wgc_offscreen_probe src/ka_pc_wgc_offscreen_probe.cpp)
+target_include_directories(remote60_ka_pc_wgc_offscreen_probe PRIVATE src)
+target_link_libraries(remote60_ka_pc_wgc_offscreen_probe PRIVATE d3d11 dxgi windowsapp)
+
 # ka-pc-impl r1 (KA ③): the managed standby viewer end to end (this test plays the shell): real server.js, real
 # hosts (this build + the published 0.2.163), GNLinkViewerKaTest --managed-standby. Writes only under REMOTE60_TEST_TMP.
 add_executable(remote60_ka_pc_managed_e2e_test

@@ -38,6 +38,7 @@
 #include "e2e_injection_guard.hpp"
 #include "ka_pc_e2e_child.hpp"
 #include "ka_pc_e2e_webview.hpp"
+#include "ka_pc_e2e_picker_judge.hpp"
 #include "e2e_isolation.hpp"
 #include "e2e_window_capture.hpp"
 #include "client_managed_viewers.hpp"
@@ -243,17 +244,7 @@ HWND viewer_window(DWORD pid) {
   return f.hwnd;
 }
 
-// How varied a capture is (distinct colors in a coarse sample): a blank or a single fill reads as 1-2.
-size_t variety(const e2e::WindowCapture& c) {
-  std::vector<uint32_t> seen;
-  for (int y = 0; y < c.h; y += 7)
-    for (int x = 0; x < c.w; x += 7) {
-      const uint32_t v = c.px[static_cast<size_t>(y) * c.w + x] & 0xF0F0F0;
-      if (std::find(seen.begin(), seen.end(), v) == seen.end()) seen.push_back(v);
-      if (seen.size() > 64) return seen.size();
-    }
-  return seen.size();
-}
+// (V1: the whole-window color count that let a white window pass is gone -- ka_pc_e2e_picker_judge.hpp judges now.)
 
 }  // namespace
 
@@ -457,6 +448,7 @@ int main() {
     const std::string op = std::to_string(round);
     const size_t from = a.Count();
     const uint64_t t0 = now_ms();
+    const size_t textFrom = a.proc.Text().size();  // V1: this activation's own log starts here
     a.Send(Type::Activate, {{"op", op}});
     const int pr = a.WaitMsg(Type::PickerReady, from, 15000, [&](const Message& m) { return m.get("op") == op; });
     check("[" + op + "] Activate -> the product picker on the screen (PickerReady)", pr >= 0,
@@ -469,18 +461,30 @@ int main() {
           "left=" + std::to_string(wr.left) + " virtualRight=" + std::to_string(right));
     if (w) {
       Sleep(400);
-      const auto shot = e2e::e2e_capture_window(w, [] {}, 3000);
-      if (shot.ok) e2e::e2e_save_bmp(gRoot + L"A-round" + W(op) + L"-picker.bmp", shot);
-      check("[" + op + "] ...a WGC capture of it shows the picker (not blank)", shot.ok && variety(shot) > 4,
-            shot.ok ? "variety=" + std::to_string(variety(shot)) + " " + std::to_string(shot.w) + "x" + std::to_string(shot.h)
-                    : shot.why);
-      // the desktop card, from the viewer's own log (the product layout), pressed the way a mouse does
+      // V1 (Codex evidence candidate r2): the desktop card THIS activation logged (only the text written since its
+      // Activate), and the picker judged on the window's client area against it -- not a whole-window color count
+      // (a white window with its title bar passed that). Captured by PrintWindow: the fresh window's first picker is
+      // GDI-drawn, which WGC returns as white for a window off every monitor (ka_pc_wgc_offscreen_probe C/C2, D).
       std::smatch mm;
-      const std::string t = a.proc.Text();
+      const std::string full = a.proc.Text();
+      const std::string t = full.size() > textFrom ? full.substr(textFrom) : std::string();
       const std::regex re("desktopCard=(\\d+),(\\d+),(\\d+),(\\d+)");
       std::string last;
       for (std::sregex_iterator it(t.begin(), t.end(), re), end; it != end; ++it) last = it->str();
-      if (std::regex_search(last, mm, re)) {
+      const bool haveCard = std::regex_search(last, mm, re);
+      RECT card{};
+      if (haveCard) card = RECT{std::stoi(mm[1]), std::stoi(mm[2]), std::stoi(mm[3]), std::stoi(mm[4])};
+      ka_pc_e2e::Image client;
+      std::string printWhy;
+      const bool printed = ka_pc_e2e::print_client(w, &client, &printWhy);
+      if (printed) ka_pc_e2e::save_image_bmp(gRoot + L"A-round" + W(op) + L"-picker-client.bmp", client);
+      const std::string pickerWhy =
+          !haveCard ? "this activation logged no desktop card" : !printed ? printWhy : ka_pc_e2e::picker_visible_why(client, card);
+      check("[" + op + "] ...the picker is visible in the client area (PrintWindow): its background and the desktop card "
+            "this activation logged",
+            pickerWhy.empty(),
+            pickerWhy.empty() ? std::to_string(client.w) + "x" + std::to_string(client.h) + " card=" + last : pickerWhy);
+      if (haveCard && pickerWhy.empty()) {
         const int x = (std::stoi(mm[1]) + std::stoi(mm[3])) / 2, y = (std::stoi(mm[2]) + std::stoi(mm[4])) / 2;
         const size_t from2 = a.Count();
         PostMessageW(w, WM_MOUSEMOVE, 0, MAKELPARAM(x, y));
@@ -491,12 +495,23 @@ int main() {
         check("[" + op + "] desktop pressed -> the first picture presented (Presented)", pres >= 0,
               pres >= 0 ? "ms(since Activate)=" + a.At(pres).get("ms") : "");
         Sleep(800);
+        // the fresh frame after the selection: WGC (a flip-swapchain present is returned as drawn off-screen, probe
+        // A/B), judged on its interior -- a picture, and not the picker
         const auto shot2 = e2e::e2e_capture_window(w, [] {}, 3000);
         if (shot2.ok) e2e::e2e_save_bmp(gRoot + L"A-round" + W(op) + L"-presented.bmp", shot2);
-        check("[" + op + "] ...a WGC capture after it is a picture (not blank)", shot2.ok && variety(shot2) > 4,
-              shot2.ok ? "variety=" + std::to_string(variety(shot2)) : shot2.why);
+        ka_pc_e2e::Image video;
+        if (shot2.ok) {
+          video.w = shot2.w;
+          video.h = shot2.h;
+          video.px.assign(shot2.px.begin(), shot2.px.end());
+          for (auto& v : video.px) v &= 0xFFFFFF;
+        }
+        const std::string videoWhy = shot2.ok ? ka_pc_e2e::video_frame_why(video) : shot2.why;
+        check("[" + op + "] ...after the selection a fresh picture is presented (WGC, interior: a picture, not the picker)",
+              videoWhy.empty(), videoWhy);
       } else {
-        check("[" + op + "] the viewer logged where its desktop card is", false);
+        check("[" + op + "] the desktop card is pressed only on a visible picker", false,
+              haveCard ? "the picker was not visible" : "no desktop card logged by this activation");
       }
     }
     const size_t from3 = a.Count();

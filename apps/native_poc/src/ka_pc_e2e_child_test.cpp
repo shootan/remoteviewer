@@ -14,11 +14,13 @@
 #endif
 #include <windows.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <string>
 
 #include "ka_pc_e2e_child.hpp"
 #include "ka_pc_e2e_webview.hpp"
+#include "ka_pc_e2e_picker_judge.hpp"
 
 namespace {
 
@@ -335,6 +337,74 @@ int main(int argc, char** argv) {
     c.End();
     check("a host (monitor attached): the crash step refuses and does nothing (its job still ends it normally)",
           up && !crashed && !c.crash.done && ka_pc_e2e::child_failures() == before, why);
+  }
+
+  // ---------------------------------------------------------------- 7. V1: what counts as "the picker is visible"
+  {
+    // synthetic: the picker's background with a drawn desktop card passes; white, or a background without the card, not
+    ka_pc_e2e::Image pick;
+    pick.w = 1584;
+    pick.h = 860;
+    pick.px.assign(static_cast<size_t>(pick.w) * pick.h, ka_pc_e2e::kPickerBackground);
+    const RECT card{24, 78, 320, 293};
+    for (int y = card.top; y < card.bottom; ++y)
+      for (int x = card.left; x < card.right; ++x) {
+        const bool edge = y == card.top || y == card.bottom - 1 || x == card.left || x == card.right - 1;
+        pick.px[static_cast<size_t>(y) * pick.w + x] =
+            edge ? ka_pc_e2e::kCardFrame : (y < card.top + 40 ? 0x1C2230u : ((x / 9 + y / 7) % 3 ? 0x6E7682u : 0xECEFF3u));
+      }
+    ka_pc_e2e::Image white = pick;
+    std::fill(white.px.begin(), white.px.end(), 0xFFFFFFu);
+    ka_pc_e2e::Image bare = pick;
+    std::fill(bare.px.begin(), bare.px.end(), ka_pc_e2e::kPickerBackground);
+    check("picker judge (synthetic): background + drawn desktop card -> visible; all white, or no card drawn -> not",
+          ka_pc_e2e::picker_visible_why(pick, card).empty() && !ka_pc_e2e::picker_visible_why(white, card).empty() &&
+              !ka_pc_e2e::picker_visible_why(bare, card).empty(),
+          ka_pc_e2e::picker_visible_why(pick, card));
+    check("video judge (synthetic): the picker image is not a fresh frame", !ka_pc_e2e::video_frame_why(pick).empty());
+  }
+  {
+    // the real white captures of 10-29 (A-round1/2-picker.bmp, sha256 f62e2dba...), which the old whole-window color count
+    // passed (variety 9 > 4): they must FAIL now. The folder is named by REMOTE60_KA_V1_FIXTURES (not run without it).
+    wchar_t dir[1024] = {};
+    if (!GetEnvironmentVariableW(L"REMOTE60_KA_V1_FIXTURES", dir, 1024)) {
+      std::printf("NOT RUN  V1 negatives on the real white captures (REMOTE60_KA_V1_FIXTURES not set)\n");
+    } else {
+      const std::wstring d = std::wstring(dir) + L"\\";
+      struct Neg {
+        const wchar_t* file;
+        RECT card;  // the desktop card that run's viewer logged for that round
+      };
+      for (const Neg& n : {Neg{L"A-round1-picker.bmp", {24, 78, 320, 293}}, Neg{L"A-round2-picker.bmp", {24, 78, 268, 260}}}) {
+        ka_pc_e2e::Image win;
+        const bool loaded = ka_pc_e2e::load_bmp(d + n.file, &win);
+        // the old judgement on the whole window: distinct coarse colors (a 7-pixel grid), > 4 = "shows the picker"
+        std::vector<uint32_t> seen;
+        for (int y = 0; loaded && y < win.h; y += 7)
+          for (int x = 0; x < win.w; x += 7) {
+            const uint32_t v = win.at(x, y) & 0xF0F0F0;
+            if (std::find(seen.begin(), seen.end(), v) == seen.end()) seen.push_back(v);
+          }
+        // the client part of that 1586x893 window capture (client 1584x860: 1 px sides, title above, 1 px below)
+        const ka_pc_e2e::Image clientPart = loaded ? ka_pc_e2e::crop(win, 1, win.h - 1 - 860, 1 + 1584, win.h - 1)
+                                                   : ka_pc_e2e::Image{};
+        const std::string why = ka_pc_e2e::picker_visible_why(clientPart, n.card);
+        check(std::string("V1 negative ") + ka_pc_e2e::narrow_path(n.file) +
+                  ": the old whole-window count passed it, the client-area judge refuses it",
+              loaded && seen.size() > 4 && !why.empty(),
+              "old variety=" + std::to_string(seen.size()) + " | " + why);
+      }
+      ka_pc_e2e::Image presented;
+      if (ka_pc_e2e::load_bmp(d + L"A-round1-presented.bmp", &presented)) {
+        const ka_pc_e2e::Image clientPart = ka_pc_e2e::crop(presented, 1, presented.h - 1 - 860, 1 + 1584, presented.h - 1);
+        check("V1: the real presented frame of that run is a fresh picture and not a picker",
+              ka_pc_e2e::video_frame_why(presented).empty() &&
+                  !ka_pc_e2e::picker_visible_why(clientPart, RECT{24, 78, 320, 293}).empty(),
+              ka_pc_e2e::video_frame_why(presented));
+      } else {
+        check("V1: the real presented frame of that run could be read", false);
+      }
+    }
   }
 
   const int childFailures = ka_pc_e2e::child_failures() - setupFailures - expectedFailures;
