@@ -35,7 +35,7 @@ def check(what, ok, detail=''):
     print(f'{"PASS" if ok else "FAIL"}  {what}' + (f'  {detail}' if detail else ''), flush=True)
 
 
-def case(tag, variant, listed_id=PINNED, input_mode='pair'):
+def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novideo=False, back='ime', scene=None):
     """A fresh run folder, the fake's state, and oa_avd loaded anew against it. -> (module, paths)"""
     run_id = f'{tag}-{time.strftime("%Y%m%d%H%M%S")}-{os.getpid()}'
     root = os.path.join(RUNS, run_id)
@@ -51,11 +51,12 @@ def case(tag, variant, listed_id=PINNED, input_mode='pair'):
     with open(applog, 'w', encoding='utf-8') as f:
         f.write('2026-10-30 00:00:00.000 [targets_ready] origin=connect ms=1 items=1\n')
     st = os.path.join(root, 'ui_state.json')
-    json.dump({'tab': 'desktop'}, open(st, 'w', encoding='utf-8'))
+    json.dump({'tab': 'desktop', **({'scene': scene} if scene else {})}, open(st, 'w', encoding='utf-8'))
     calls = os.path.join(root, 'adb_calls.txt')
     open(calls, 'w').close()
     os.environ.update({'OA_FAKE_ADB_LOG': calls, 'OA_FAKE_UI_STATE': st, 'OA_FAKE_APPLOG': applog,
-                       'OA_FAKE_HOSTLOG': host_log, 'OA_FAKE_UI_VARIANT': variant, 'OA_FAKE_INPUT': input_mode})
+                       'OA_FAKE_HOSTLOG': host_log, 'OA_FAKE_UI_VARIANT': variant, 'OA_FAKE_INPUT': input_mode,
+                       'OA_FAKE_IME': ime, 'OA_FAKE_NOVIDEO': '1' if novideo else '0', 'OA_FAKE_BACK': back})
     sys.argv = ['oa_avd.py', root, 'S', os.path.join(root, 'none.apk'), os.path.join(root, 'avd')]
     spec = importlib.util.spec_from_file_location(f'oa_avd_{tag.replace("-", "_")}', os.path.join(E, 'oa_avd.py'))
     m = importlib.util.module_from_spec(spec)
@@ -141,6 +142,51 @@ def main():
         before = mode != 'pretap' or ('[input-trace] seq=1 kind=2' in open(p['host'], encoding='utf-8').read())
         check(f'NEGATIVE 4 {mode}: {what} -> FAIL', not ok4 and r[1] is False and r[0].startswith('4 ') and before,
               r[2][:200] + ('' if mode != 'pretap' else f' | pair logged before the tap: {before}'))
+
+    # r7d (verifier oa-s-20261030025800: the sign-in keyboard stayed up over the viewer; 4's fixed 1200,540 went into it)
+    def keys(paths):
+        return [l.strip() for l in open(paths['calls'], encoding='utf-8') if l.startswith('shell input keyevent')]
+
+    for ime, novideo, what in (('shown', False, 'a soft keyboard is up'), ('unknown', False, 'the keyboard state cannot be read'),
+                               ('hidden', True, 'no video view on screen')):
+        m, p = case(f'input-ime-{ime}{"-novideo" if novideo else ""}', 'ok', ime=ime, novideo=novideo)
+        m.pick_pinned('3 the pinned window picked')
+        n_taps = len(taps(p))
+        ok4 = m.input_check()
+        r = last(m)
+        check(f'NEGATIVE 4 r7d: {what} -> FAIL with NO tap on the picture', not ok4 and r[1] is False and
+              'NO tap' in r[2] and len(taps(p)) == n_taps, f'taps after the pick={len(taps(p)) - n_taps} {r[2][:160]}')
+    m, p = case('input-video-centre', 'ok')
+    m.pick_pinned('3 the pinned window picked')
+    n_taps = len(taps(p))
+    ok4 = m.input_check()
+    t4 = taps(p)[n_taps:]
+    check('control 4 r7d: keyboard hidden, the ONE tap lands at the video view centre (from the UI dump) -> PASS',
+          ok4 and t4 == [['540', '1268']], f'taps={t4}')
+    m, p = case('menu-ime-shown', 'ok', ime='shown')
+    m.pick_pinned('3 the pinned window picked')
+    n_taps = len(taps(p))
+    try:
+        m.menu('viewerMenuHostsButton')
+        raised = False
+    except RuntimeError:
+        raised = True
+    check('NEGATIVE menu r7d: a keyboard up -> no wake tap on the picture (the menu is not reached; nothing typed)',
+          raised and len(taps(p)) == n_taps and not keys(p), f'taps={len(taps(p)) - n_taps} keys={keys(p)}')
+
+    m, p = case('hosts-ime-hide', 'ok', ime='shown', scene='hosts')
+    ok = m.hide_ime_on_hosts('1b the sign-in keyboard')
+    check('control 1b r7d: on the PC list a keyboard up is put away with BACK (it takes it); the list stays, no dialog',
+          ok and last(m)[1] is True and keys(p) == ['shell input keyevent 4'], last(m)[2][:160])
+    m, p = case('hosts-ime-leak', 'ok', ime='shown', back='leak', scene='hosts')
+    ok = m.hide_ime_on_hosts('1b the sign-in keyboard')
+    check('NEGATIVE 1b r7d: BACK reaches the app instead (the exit question appears) -> FAIL', not ok and
+          last(m)[1] is False, last(m)[2][:160])
+    m, p = case('hosts-ime-unknown', 'ok', ime='unknown', scene='hosts')
+    ok = m.hide_ime_on_hosts('1b the sign-in keyboard')
+    check('NEGATIVE 1b r7d: the keyboard state unreadable -> FAIL, no key sent', not ok and not keys(p), f'keys={keys(p)}')
+    m, p = case('hosts-ime-hidden', 'ok', ime='hidden', scene='hosts')
+    check('1b r7d: no keyboard up -> nothing sent, goes on', m.hide_ime_on_hosts('1b the sign-in keyboard') and not keys(p))
 
     print(f'\n{checks} checks, {fails} failed\nRESULT: {"PASS" if fails == 0 else "FAIL"}')
     return 0 if fails == 0 else 1

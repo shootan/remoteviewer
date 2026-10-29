@@ -15,6 +15,12 @@ the PinnedSelectTest host log when a card / the picture is tapped. Every call is
   OA_FAKE_INPUT       what the host logs for a tap on the picture (1200,540):
                       pair (move, down, up inside 480x270) | none | uponly (an up alone) | outside (down/up at 900,700)
                       | moveonly | downonly (no up) | moved (up elsewhere) | pretap (a pair logged at the pick, none after)
+  r7d: OA_FAKE_IME        the soft keyboard as `dumpsys input_method` says it: hidden | shown | unknown (the ui state's
+                          "ime" overrides it once set)
+       OA_FAKE_NOVIDEO=1  the viewer shows no video view (videoTextureView)
+       OA_FAKE_BACK       what BACK does on the PC list with the keyboard up: ime (the keyboard takes it and hides) |
+                          leak (the app takes it: the exit question, android:id/button1; the keyboard stays)
+  The ui state's "scene": "hosts" (the PC list: hostCardName oa-pc-a), "targets" (default) or "viewer" (set by a pick).
 """
 import json
 import os
@@ -26,6 +32,9 @@ TITLE = 'remote60 mobile abr target pid 43948 92abc8fe'
 PKG = 'com.remote60.androiddirect'
 TABS = {'listWindowsButton': (0, 380, 400, 430, 'Windows'), 'listDevicesButton': (420, 380, 660, 430, 'Desktop')}
 CARD = (100, 1000, 470, 1100)
+HOSTCARD = (40, 400, 1040, 560)
+VIDEO = (0, 136, 1080, 2400)
+DIALOG_OK = (700, 1300, 1000, 1400)
 
 args = sys.argv[1:]
 if args[:1] == ['-s']:
@@ -54,15 +63,27 @@ def card_text():
 
 
 def nodes():
+    if state.get('scene') == 'hosts':
+        out = [('hostCardName', HOSTCARD, 'oa-pc-a')]
+        if state.get('dialog'):
+            out.append(('android:id/button1', DIALOG_OK, 'OK'))
+        return out
     out = [(k, v[:4], v[4]) for k, v in TABS.items()]
     if state.get('scene') != 'viewer':
         out.append(('targetCardTitle', CARD, card_text()))
+    elif os.environ.get('OA_FAKE_NOVIDEO') != '1':
+        out.append(('videoTextureView', VIDEO, ''))
     return out
 
 
 def node_xml(rid, b, text):
-    return (f'<node resource-id="{PKG}:id/{rid}" text="{text}" content-desc="" enabled="true" clickable="true" '
+    full = rid if ':' in rid else f'{PKG}:id/{rid}'
+    return (f'<node resource-id="{full}" text="{text}" content-desc="" enabled="true" clickable="true" '
             f'bounds="[{b[0]},{b[1]}][{b[2]},{b[3]}]" />')
+
+
+def ime():
+    return state.get('ime', os.environ.get('OA_FAKE_IME', 'hidden'))
 
 
 def picture_tap():
@@ -118,8 +139,22 @@ elif cmd.startswith('shell input tap'):
         else:
             host(f'window-select seq=1 requestedId={tid} applied=0 reason=pinned_test_seam_refused')
             app(f'[select_failed] targetId={tid} gen=1 seq=1 status=window_select_failed: pinned_test_only')
-    elif state.get('scene') == 'viewer' and (x, y) == (1200, 540):
+    elif rid == 'videoTextureView':
         picture_tap()
+    json.dump(state, open(state_path, 'w', encoding='utf-8'))
+elif cmd.startswith('shell dumpsys input_method'):
+    st = ime()
+    if st == 'shown':
+        print('  mInputShown=true mVisibleBound=true\n  mWindowVisible=true mDecorViewVisible=true')
+    elif st == 'hidden':
+        print('  mInputShown=false mVisibleBound=false\n  mWindowVisible=false mDecorViewVisible=false')
+    else:
+        print('  (no state lines this build prints)')
+elif cmd == 'shell input keyevent 4':
+    if ime() == 'shown' and os.environ.get('OA_FAKE_BACK', 'ime') == 'ime':
+        state['ime'] = 'hidden'
+    elif state.get('scene') == 'hosts':
+        state['dialog'] = True
     json.dump(state, open(state_path, 'w', encoding='utf-8'))
 elif args[:1] == ['pull']:
     shutil.copyfile(os.environ['OA_FAKE_APPLOG'], args[2])
