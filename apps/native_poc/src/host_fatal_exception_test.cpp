@@ -218,6 +218,10 @@ void startup_fault_judged(const std::wstring& tag, const std::string& label, boo
 DWORD run(const std::wstring& dir, const std::wstring& tag, const std::string& step, std::string* out, int timeoutMs) {
   const std::wstring log = gRun + L"fatal_" + tag + L".log";
   SetEnvironmentVariableA("GNLINK_STREAM_TEST_THROW_AT_STEP", step.empty() ? nullptr : step.c_str());
+  // r10 D2 (verifier VERIFY_RECORD_ba2eaf2 r1): the stream build takes --codec h264 only with the encoded experiment on
+  // (host_startup_config.cpp: "unsupported codec: h264 ... REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE=1", exit 11) -- set
+  // here, in the environment the child's block is built from, so the normal control takes the real normal path
+  SetEnvironmentVariableA("REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", "1");
   SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};
   HANDLE h = CreateFileW(log.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
   STARTUPINFOW si{};
@@ -246,6 +250,7 @@ DWORD run(const std::wstring& dir, const std::wstring& tag, const std::string& s
   }
   CloseHandle(h);
   SetEnvironmentVariableA("GNLINK_STREAM_TEST_THROW_AT_STEP", nullptr);
+  SetEnvironmentVariableA("REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", nullptr);
   *out = final_output_or_invalid(tag, log);  // r8 N1
   return code;
 }
@@ -380,7 +385,18 @@ int wmain() {
 
   // r5 F2: the NORMAL control -- no fault injected, a plain 3 s start (not a startup fault); no client of this test
   code = run(dir, L"none", "", &out, 30000);
-  check("normal control (nothing injected): no FATAL line", out.find("FATAL:") == std::string::npos, "exit " + std::to_string(code));
+  // r10 D2: a normal control is a NORMAL START, not merely "no FATAL line": it got past its configuration (no codec
+  // refusal, no early exit), said both OFF lines (below), reached "waiting client", and ended by this test's own
+  // deadline (killed, its end confirmed) or by itself with 0 -- anything else means the control did not take the normal
+  // path: INVALID, not a pass and not a product FAIL.
+  if (out.find("unsupported codec") != std::string::npos || out.find("FATAL:") != std::string::npos ||
+      out.find("[native-video-host] waiting client bindPort=") == std::string::npos ||
+      !(code == 0xFFFFFFFFu || code == 0)) {
+    fatal_invalid(L"none", "the normal control did not start normally (exit " + std::to_string(code) + ")");
+  }
+  check("normal control (nothing injected): a normal start -- configured, 'waiting client' reached, no FATAL line, ended "
+        "by the test's deadline (or 0)",
+        true, "exit " + std::to_string(code));
   {
     // r8 N1: the normal control's whole output (read to EOF): both OFF lines, whole, and no contradiction -- else INVALID
     const std::string why = remote60::native_poc::e2e::e2e_final_verdict(true, remote60::native_poc::e2e::e2e_final_pipe(remote60::native_poc::e2e::E2eReadEnd::Eof, 0, out));
