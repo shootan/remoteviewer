@@ -218,25 +218,35 @@ def window_size(hl):
     return (int(m[-1][0]), int(m[-1][1])) if m else None
 
 
-def judge_input(host_since, size):
-    """r7 (4): the tap's own events, from the host's [input-trace] lines after it (kind 1 move, 2 button down, 3 button
-    up, 4 wheel; the PinnedSelectTest seam logs every pointer event, injection none): PASS only if a button down is
-    followed by a button up (a higher seq), both inside the window's picture (0 <= x < W, 0 <= y < H). Lines that are
-    not this pair (moves alone, an up without its down, a key) do not count."""
+def judge_input(host_since, size, aim=None):
+    """r7 (4): the tap's own events, from the host's [input-trace] lines written AFTER it (the caller passes only the
+    log past the offset taken just before the tap). The PinnedSelectTest seam logs every pointer event (injection none;
+    host_control_session.cpp:1296, kinds: 1 move, 2 button down, 3 button up, 4 wheel). PASS only if the FIRST button
+    down after the tap is followed by a button up (a higher seq) at the SAME position (within 2 px), both inside the
+    pinned window's picture (0 <= x < W, 0 <= y < H; W x H = the host's [keyframe] size). Moves alone, an up without
+    its down, a down without an up, a pair outside the window or at two positions: FAIL.
+    LIMIT: 0.2.32's DIRECT tap sends the view point mapped into the picture (b554e76 MainActivity.kt:3057-3125,
+    mapTouchToVideoCoords; MOVE, DOWN at the mapped pixel, then UP); that mapping depends on the device's view layout and is NOT judged here. `aim` (the
+    expected picture point for a tap at the view's centre) is only recorded: the distance is reported, not judged."""
     ev = [(int(q), int(k), int(x), int(y)) for q, k, x, y in
           re.findall(r'\[input-trace\] seq=(\d+) kind=(\d+) x=(-?\d+) y=(-?\d+)', host_since)]
     inside = (lambda x, y: size is not None and 0 <= x < size[0] and 0 <= y < size[1])
-    downs = [e for e in ev if e[1] == 2 and inside(e[2], e[3])]
-    pair = None
-    for d in downs:
-        ups = [e for e in ev if e[1] == 3 and e[0] > d[0] and inside(e[2], e[3])]
-        if ups:
-            pair = (d, ups[0])
-            break
-    detail = (f'window={size} events={len(ev)} kinds={[e[1] for e in ev][:8]} '
-              + (f'down seq={pair[0][0]} at {pair[0][2]},{pair[0][3]} -> up seq={pair[1][0]} at {pair[1][2]},{pair[1][3]}'
-                 if pair else 'no down->up pair inside the window'))
-    return pair is not None, detail
+    downs = [e for e in ev if e[1] == 2]
+    down = downs[0] if downs else None
+    up = None
+    if down:
+        ups = [e for e in ev if e[1] == 3 and e[0] > down[0]]
+        up = ups[0] if ups else None
+    same = bool(down and up and abs(down[2] - up[2]) <= 2 and abs(down[3] - up[3]) <= 2)
+    ok = bool(down and up and same and inside(down[2], down[3]) and inside(up[2], up[3]))
+    where = ''
+    if down and aim:
+        where = f' aim={aim} off={abs(down[2] - aim[0])},{abs(down[3] - aim[1])} (recorded, not judged)'
+    detail = (f'window={size} events after the tap={len(ev)} kinds={[e[1] for e in ev][:8]} '
+              + (f'down seq={down[0]} at {down[2]},{down[3]}' if down else 'no down')
+              + (f' -> up seq={up[0]} at {up[2]},{up[3]}' if up else ' -> no up')
+              + ('' if not (down and up) else (' same position' if same else ' MOVED')) + where)
+    return ok, detail
 
 
 def targets_ui(name):
@@ -255,8 +265,13 @@ def pick_pinned(tag):
     picture shown'), judged by judge_pick."""
     n0 = cursor()
     hl0 = len(host_log())
-    if not ka.wait('listWindowsButton', 30):
-        verdict(f'{tag}: the targets screen is shown', False)
+    tab = ka.wait('listWindowsButton', 30)
+    if not tab:
+        verdict(f'{tag}: the targets screen is shown (listWindowsButton visible)', False)
+        return None
+    tab_note = f"windowsTab shown={tab['bounds']} enabled={int(tab['enabled'])}"
+    if not tab['enabled']:
+        verdict(f'{tag}: the Windows tab (listWindowsButton) is visible and enabled', False, tab_note)
         return None
     pinned, title, why = None, None, ''
     end = time.time() + 15
@@ -301,7 +316,7 @@ def pick_pinned(tag):
     digest = shot(tag.split()[0] + '_window_first_frame')
     vd = re.findall(r'\[video_debug\][^\n]* out=(\d+)', since(n0))
     verdict(f'{tag}: the pinned window picked (id {pinned}, Windows tab) -> first frame', True,
-            f'{detail[:300]} (wall {time.time() - t0:.1f} s) screenshot={digest[:16]} video_debug out={vd[-1] if vd else "?"}')
+            f'{tab_note} {detail[:300]} (wall {time.time() - t0:.1f} s) screenshot={digest[:16]} video_debug out={vd[-1] if vd else "?"}')
     return digest
 
 
@@ -312,9 +327,10 @@ def input_check():
     ka.adb('shell', 'input', 'tap', '1200', '540')
     step('  one tap on the window picture at 1200,540')
     time.sleep(3)
-    ok, detail = judge_input(host_log()[h0:], window_size(hl))
-    verdict('4 the tap on the window reaches the host as its own button down -> up inside the window '
-            '([input-trace]; not injected: input none)', ok, detail[:300])
+    size = window_size(hl)
+    ok, detail = judge_input(host_log()[h0:], size, (size[0] // 2, size[1] // 2) if size else None)
+    verdict('4 the tap on the window reaches the host as its own button down -> up, one position, inside the window '
+            '([input-trace] after the tap; not injected: input none)', ok, detail[:340])
     return ok
 
 

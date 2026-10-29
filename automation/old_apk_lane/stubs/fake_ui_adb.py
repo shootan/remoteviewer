@@ -14,6 +14,7 @@ the PinnedSelectTest host log when a card / the picture is tapped. Every call is
                       novideo     as ok, but no video_debug after select_ready
   OA_FAKE_INPUT       what the host logs for a tap on the picture (1200,540):
                       pair (move, down, up inside 480x270) | none | uponly (an up alone) | outside (down/up at 900,700)
+                      | moveonly | downonly (no up) | moved (up elsewhere) | pretap (a pair logged at the pick, none after)
 """
 import json
 import os
@@ -68,7 +69,9 @@ def picture_tap():
     mode = os.environ.get('OA_FAKE_INPUT', 'pair')
     seq = state.get('inseq', 0)
     events = {'pair': [(1, 240, 135), (2, 240, 135), (3, 240, 135)], 'none': [], 'uponly': [(3, 240, 135)],
-              'outside': [(2, 900, 700), (3, 900, 700)]}[mode]
+              'outside': [(2, 900, 700), (3, 900, 700)], 'moveonly': [(1, 240, 135), (1, 241, 136)],
+              'downonly': [(1, 240, 135), (2, 240, 135)], 'moved': [(2, 240, 135), (3, 300, 200)],
+              'pretap': []}[mode]
     for kind, x, y in events:
         seq += 1
         host(f'seq={seq} kind={kind} x={x} y={y} buttons={1 if kind == 2 else 0}', tag='[input-trace] ')
@@ -108,6 +111,10 @@ elif cmd.startswith('shell input tap'):
             if variant != 'novideo':
                 app('[video_debug] surface=on codec=on in=3 out=3')
             state['scene'] = 'viewer'
+            if os.environ.get('OA_FAKE_INPUT') == 'pretap':  # a down/up BEFORE the picture tap: not its events
+                for kind in (2, 3):
+                    state['inseq'] = state.get('inseq', 0) + 1
+                    host(f"seq={state['inseq']} kind={kind} x=240 y=135 buttons=0", tag='[input-trace] ')
         else:
             host(f'window-select seq=1 requestedId={tid} applied=0 reason=pinned_test_seam_refused')
             app(f'[select_failed] targetId={tid} gen=1 seq=1 status=window_select_failed: pinned_test_only')

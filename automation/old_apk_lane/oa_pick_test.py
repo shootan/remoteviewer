@@ -6,7 +6,9 @@ no adb server, no emulator). The pinned window's card and the tap's own down->up
      (wrongid); id 0 applied with a frame after it (zeroready); the app's ack naming another streamGen (genmismatch);
      no picture after select_ready (novideo); no pinned card listed (nopinned: no card tap); the host listing id 0, or
      its capture target and window-list disagreeing (NO tap at all)
-  4  no events, an up alone, a down/up outside the window
+  4  no events, an up alone, a down/up outside the window, a pair logged before the tap, moves only, a down without
+     an up, a down and an up at two positions (the tap is the offset: only the host's lines after it count)
+  the Windows tab: its node must be visible AND enabled (recorded on the 3 line)
 Each case runs in its own new folder under <worktree>/.claude/oa_runs (nothing outside it is written).
   python -I oa_pick_test.py"""
 import importlib.util
@@ -127,12 +129,18 @@ def main():
               f'taps={len(taps(p))} {r[2][:160]}')
 
     for mode, what in (('none', 'no events'), ('uponly', 'an up without its down'),
-                       ('outside', 'a down/up outside the window')):
+                       ('outside', 'a down/up outside the window'),
+                       ('pretap', 'a down/up logged BEFORE the tap (at the pick), nothing after it'),
+                       ('moveonly', 'moves only'), ('downonly', 'a down without an up'),
+                       ('moved', 'a down and an up at two positions')):
         m, p = case(f'input-{mode}', 'ok', input_mode=mode)
         m.pick_pinned('3 the pinned window picked')
         ok4 = m.input_check()
         r = last(m)
-        check(f'NEGATIVE 4 {mode}: {what} -> FAIL', not ok4 and r[1] is False and r[0].startswith('4 '), r[2][:200])
+        # pretap is a contrast only if the host log really holds a down/up from before the tap
+        before = mode != 'pretap' or ('[input-trace] seq=1 kind=2' in open(p['host'], encoding='utf-8').read())
+        check(f'NEGATIVE 4 {mode}: {what} -> FAIL', not ok4 and r[1] is False and r[0].startswith('4 ') and before,
+              r[2][:200] + ('' if mode != 'pretap' else f' | pair logged before the tap: {before}'))
 
     print(f'\n{checks} checks, {fails} failed\nRESULT: {"PASS" if fails == 0 else "FAIL"}')
     return 0 if fails == 0 else 1
