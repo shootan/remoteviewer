@@ -181,6 +181,14 @@ class ChainInbox {
   bool BeyondGap(uint32_t seq, bool key) const { return gapOpen_ && !key && chain_seq_after(seq, gapAfterSeq_); }
   uint64_t trimmed() const { return trimmed_; }
 
+  // C r2: any IDR queued (the covered duty's final window: a usable IDR on its way).
+  bool HoldsAnyKey() const {
+    for (const T& t : items_) {
+      if (info_(t).key) return true;
+    }
+    return false;
+  }
+
   size_t frames() const { return items_.size(); }
   size_t bytes() const { return bytes_; }
   bool empty() const { return items_.empty(); }
@@ -358,6 +366,16 @@ class KeyRecoveryEpisode {
     state_ = State::Idle;
     wantOut_ = false;
     ++closed_;
+    return true;
+  }
+
+  // C r2 (Codex §8 (a)): the owed duty that covered this episode is spent and its final window passed with no usable
+  // IDR preserved -- the episode is exhausted too (it never asked: owed was asking for the same IDR). true: it was open.
+  bool MarkExhausted() {
+    if (state_ != State::Open) return false;
+    state_ = State::Exhausted;
+    wantOut_ = false;
+    ++exhausted_;
     return true;
   }
 

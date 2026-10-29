@@ -588,6 +588,62 @@ int main() {
               " chainTrim=" + std::to_string(field(st, "chainTrim")) + " tailGap=" + std::to_string(field(st, "tailGap")));
     sink.SetSurface(env, nullptr);
   }
+  std::puts("\n--- [C11] C r2 §8 (a): the owed duty's asks spent -- covered, a final window, exhausted; a late IDR clears it");
+  {
+    AndroidVideoDecoderSink sink;
+    Rx rx{sink};
+    const uint64_t g = start(sink, rx, 36, 361);
+    input_available(false);
+    rx.send(frame(g, true, 0xE1));  // an IDR of the answered generation, held for a buffer ...
+    wait_until([&] { return field(sink.DebugStatus(), "pending") == 1; }, 1000);
+    sink.OnVideoDiscontinuity();    // ... and lost with the codec: KeyLost -> owed
+    wait_until([&] { return field(sink.DebugStatus(), "pending") == 0; }, 1000);
+    input_available(true);
+    const uint64_t token = sink.KeyframeOwedFor();
+    sink.OnDecoderKeyOwedExhausted(token + 1000, 0);  // a stale notice (another duty)
+    const std::string s0 = sink.DebugStatus();
+    check("[C11] owed armed; a stale token's notice changes nothing", token != 0 && field(s0, "covered") == 0 &&
+          field(s0, "coveredStale") == 1);
+    sink.OnDecoderKeyOwedExhausted(token, 0);
+    DecoderKeyRequest r;
+    const bool asked = sink.TakeDecoderKeyRequest(&r);
+    const std::string s1 = sink.DebugStatus();
+    check("[C11] the current token's notice: covered, NOT yet exhausted (the final window), and no ask of the sink's own",
+          field(s1, "covered") == 1 && field(s1, "coveredExh") == 0 && !asked);
+    std::this_thread::sleep_for(std::chrono::milliseconds(4400));
+    const bool asked2 = sink.TakeDecoderKeyRequest(&r);
+    const std::string s2 = sink.DebugStatus();
+    check("[C11] after the 4 s final window with no usable IDR: covered-exhausted; still no ask; the gate still owes (not "
+          "falsely paid)", field(s2, "coveredExh") == 1 && !asked2 && sink.KeyframeOwedFor() == token);
+    const size_t q0 = queued();
+    rx.send(frame(g, true, 0xE2));  // the host's late IDR
+    rx.send(frame(g, false, 0xE3));
+    wait_until([&] { return tags_from(q0).size() >= 2; }, 1500);
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const std::string s3 = sink.DebugStatus();
+    check("[C11] the late IDR is fed (exhausted blocks nothing), pays the duty and ends the covered state",
+          tags_from(q0).size() >= 2 && tags_from(q0).front() == 0xE2 && sink.KeyframeOwedFor() == 0 &&
+              field(s3, "covered") == 0 && field(s3, "coveredExh") == 0);
+    sink.SetSurface(env, nullptr);
+  }
+  {
+    AndroidVideoDecoderSink sink;
+    Rx rx{sink};
+    const uint64_t g = start(sink, rx, 37, 371);
+    input_available(false);
+    rx.send(frame(g, true, 0xE4));
+    wait_until([&] { return field(sink.DebugStatus(), "pending") == 1; }, 1000);
+    sink.OnVideoDiscontinuity();
+    wait_until([&] { return field(sink.DebugStatus(), "pending") == 0; }, 1000);
+    input_available(true);
+    const uint64_t token = sink.KeyframeOwedFor();
+    sink.OnDecoderKeyOwedExhausted(token, 0);
+    sink.SetSurface(env, &surfaceA);  // a new surface: the duty is re-armed (a new token, the session's 8 again)
+    const std::string st = sink.DebugStatus();
+    check("[C11] a new surface re-arms the duty (new token): the covered state of the old one is gone",
+          sink.KeyframeOwedFor() != 0 && sink.KeyframeOwedFor() != token && field(st, "covered") == 0);
+    sink.SetSurface(env, nullptr);
+  }
   std::printf("\nandroid_decoder_inbox_c_test: %d checks, %d failed\nRESULT: %s\n", gChecks, gFailures,
               gFailures == 0 ? "PASS" : "FAIL");
   return gFailures == 0 ? 0 : 1;

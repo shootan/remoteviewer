@@ -147,6 +147,8 @@ void AndroidVideoDecoderSink::ClearInboxLocked() {
 void AndroidVideoDecoderSink::InvalidateKeyAsksLocked() {
   ++keyEpoch_;
   committedKeyValid_ = false;  // C r2
+  coveredToken_ = 0;           // C r2 §8
+  coveredExhausted_ = false;
   recovery_.Invalidate();
   wantCodecUp_ = false;
   wantSelectionAbort_ = false;
@@ -189,7 +191,31 @@ void AndroidVideoDecoderSink::NoteInboxOfferLocked(const remote60::native_poc::C
   recovery_.OnLoss(remote60::native_poc::kKeyCauseRecovery, r.lossSeq, steady_now_us());
 }
 
+bool AndroidVideoDecoderSink::AnyKeyPreservedLocked() const {
+  if (inFlightKey_ || inbox_.HoldsAnyKey()) return true;
+  const auto* held = pendingFrame_.held();
+  return held && (held->header.flags & 1u) != 0;
+}
+
 void AndroidVideoDecoderSink::TickRecoveryLocked() {
+  // C r2 (Codex §8 (a)): the covered duty -- over when the gate's token moved (paid by a commit, re-armed, reset);
+  // exhausted once its final window passed with no usable IDR preserved (and the episode with it).
+  if (coveredToken_ != 0) {
+    if (gate_.OwedToken() != coveredToken_) {
+      coveredToken_ = 0;
+      coveredExhausted_ = false;
+    } else if (!coveredExhausted_ && steady_now_us() >= coveredDeadlineUs_ && !AnyKeyPreservedLocked()) {
+      coveredExhausted_ = true;
+      ++coveredExhaustedCount_;
+      recovery_.MarkExhausted();
+      char line[192];
+      std::snprintf(line, sizeof(line),
+                    "decoder: the owed IDR's asks are spent (token=%llu) and its final window passed -- exhausted; the "
+                    "next usable IDR (the host's periodic one) still decodes",
+                    static_cast<unsigned long long>(coveredToken_));
+      log_error(line);
+    }
+  }
   recovery_.Tick(steady_now_us(), RecoveryCandidateLocked());
   if (recovery_.exhausted() != recoveryExhaustedLogged_) {
     recoveryExhaustedLogged_ = recovery_.exhausted();
@@ -821,6 +847,25 @@ uint32_t AndroidVideoDecoderSink::DecoderKeyRequestValidCausesAs(uint64_t token,
   return valid;
 }
 
+// C r2 (Codex §8 (a)): the session's asks for the owed IDR `owedToken` are spent (the last one left or was dropped).
+// No new asks come of it (the episode stays covered: owed is the same IDR); the final window starts now.
+void AndroidVideoDecoderSink::OnDecoderKeyOwedExhaustedAs(uint64_t token, uint64_t owedToken, uint64_t /* session clock */) {
+  LockedState lock(this);
+  if (!OwnerLocked(token)) return;
+  if (owedToken == 0 || gate_.OwedToken() != owedToken) {
+    ++coveredStale_;  // re-armed / paid / another selection since: not this duty
+    return;
+  }
+  coveredToken_ = owedToken;
+  coveredDeadlineUs_ = steady_now_us() + remote60::native_poc::KeyRecoveryEpisode::kFinalWindowUs;
+  coveredExhausted_ = false;
+  char line[160];
+  std::snprintf(line, sizeof(line), "decoder: the owed IDR's asks are spent (token=%llu): a final %llu ms window, no new asks",
+                static_cast<unsigned long long>(owedToken),
+                static_cast<unsigned long long>(remote60::native_poc::KeyRecoveryEpisode::kFinalWindowUs / 1000));
+  log_info(line);
+}
+
 // apk-inbox C: the control exchange for this request started -- the episode's attempt, on the sink's own clock.
 void AndroidVideoDecoderSink::OnDecoderKeyRequestSentAs(uint64_t token, const remote60::native_poc::DecoderKeyRequest& r,
                                                         uint64_t /* nowUs: the session's clock */) {
@@ -1056,6 +1101,8 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
             " recClosed=" + std::to_string(recovery_.closed()) + " recExhausted=" + std::to_string(recovery_.exhausted()) +
             " recWants=" + std::to_string(recovery_.wants()) + " recSent=" + std::to_string(recovery_.sent()) +
             " recMoot=" + std::to_string(recoveryDroppedMoot_) + " keyTaken=" + std::to_string(keyRequestsTaken_) +
+            " covered=" + std::to_string(coveredToken_ != 0 ? 1 : 0) + " coveredExh=" + std::to_string(coveredExhausted_ ? 1 : 0) +
+            " coveredStale=" + std::to_string(coveredStale_) +
             " keyEpoch=" + std::to_string(keyEpoch_);
   status += " resetPending=" + std::to_string(CodecResetPendingLocked() ? 1 : 0);
   status += " codecRetries=" + std::to_string(codecAutoRetries_);       // r4 N3

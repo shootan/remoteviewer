@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -69,6 +70,11 @@ class ClientEncodedFrameSink {
   }
   virtual uint32_t DecoderKeyRequestValidCauses(const DecoderKeyRequest& request) { return request.causes; }
   virtual void OnDecoderKeyRequestSent(const DecoderKeyRequest& /* request */, uint64_t /* nowUs */) {}
+  // C r2 (Codex codex_apk_inbox_c_src_r1.md §8 (a)): the session's asks for the owed IDR `owedToken` are used up (8 taken
+  // by the limiter -- queued, not "8 on the wire") and the last of them has left or been dropped. The sink records the
+  // duty as covered-and-spent: no recovery asks of its own on top, a final answer window, then exhausted -- a late IDR
+  // still decodes and ends it. A stale token (the duty re-armed or paid since) changes nothing.
+  virtual void OnDecoderKeyOwedExhausted(uint64_t /* owedToken */, uint64_t /* nowUs */) {}
   virtual void OnWindowSelectionControlResult(const ControlWindowSelectedMessage& /* msg */) {}
   // t-970r4zgo: the local selection a select request belongs to -- read when the request is
   // queued (the Android sink: the generation PrepareForWindowSelection armed). 0 = not tracked.
@@ -247,9 +253,18 @@ class ClientSessionController {
     std::lock_guard<std::mutex> lk(testHookMu_);
     testKeyHook_ = std::move(hook);
   }
+  // ("publish", C r2: INSIDE the request's publish section, between the limiter taking it and its descriptor -- the
+  // hook may only call the sink, never this session.)
   // TEST BUILD ONLY (apk-inbox C): the keyframe limiter's parameters, so a test can make it refuse (a HELD request).
   void TestConfigureKeyframeLimiter(uint64_t minIntervalUs, uint64_t tokenRefillUs, uint32_t tokenCapacity) {
     keyframeRequests_.Configure(minIntervalUs, tokenRefillUs, tokenCapacity);
+  }
+  // TEST BUILD ONLY (apk-inbox C r2): one key request with these causes, through the same section every path uses.
+  bool TestRequestKey(uint32_t causes) {
+    DecoderKeyRequest r;
+    r.causes = causes;
+    return RequestKey(r, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                     std::chrono::steady_clock::now().time_since_epoch()).count()));
   }
   // TEST BUILD ONLY (apk-0232 r2 N1): called when a queued desktop pick has just been turned local in the sink,
   // before the panel and the tracked tag follow -- a test holds it there and makes a newer pick.
@@ -272,13 +287,11 @@ class ClientSessionController {
   uint64_t UdpHelloCount() const { return udpHelloCount_.load(std::memory_order_relaxed); }
 
   // The viewer abandoned a switch (nativeAbortVideoSwitch): an IDR it was still owed is not asked for.
-  void ClearPendingDecoderKeyframe() {
-    decoderRekeyPending_.store(false, std::memory_order_release);
-    std::lock_guard<std::mutex> lk(keyLedgerMu_);
-    keyHeld_.Clear();
-  }
+  void ClearPendingDecoderKeyframe() { ClearKeyLedger(); }  // C r2: the ledger and the limiter's pending together
   // apk-inbox C (D8): requests not sent because no cause of theirs was valid any more (held / at the send point).
   uint64_t KeyRequestsDroppedStale() const { return keyDroppedStale_.load(std::memory_order_relaxed); }
+  // C r2: KeyframeRequest actions whose descriptor was cancelled (a new pick / reset) -- not sent.
+  uint64_t KeyRequestsDroppedCancelled() const { return keyDroppedCancelled_.load(std::memory_order_relaxed); }
   bool RequestRuntimeConfig(uint32_t bitrate, uint32_t fps);
   bool RequestDesktopCaptureBackend(uint16_t backend);
   // capture-lifecycle r1 (UA-2): what the host said runs for THIS connection's session (its answer to a
@@ -488,12 +501,22 @@ class ClientSessionController {
   // apk-inbox C (design r3 §4 D8): the descriptors of the key request HELD (refused by the limiter, decoderRekeyPending_)
   // and of the one ACCEPTED (the limiter took it; the scheduler's next KeyframeRequest action sends it). Coalesced
   // (DecoderKeyRequest::Merge); under keyLedgerMu_ (RX and control threads), never held across a sink call or a send.
+  // C r2 (Codex N2): the limiter's pending flag and the accepted descriptor are published together (RequestKey: the
+  // limiter's Request and the merge in ONE section of keyLedgerMu_) and consumed together (the scheduler's NextAction
+  // and the take, in one section). A KeyframeRequest action with no descriptor was cancelled (ClearKeyLedger consumes
+  // the pending flag too) -- it is not sent. keyHeldVersion_ moves with every change of keyHeld_: the held check returns
+  // only its own snapshot. Lock order: parkMu_ before keyLedgerMu_; the limiter's own lock inside; no sink call and no
+  // network under it.
   std::mutex keyLedgerMu_;
   DecoderKeyRequest keyHeld_;
   DecoderKeyRequest keyAccepted_;
+  uint64_t keyHeldVersion_ = 0;
   std::atomic<uint64_t> keyDroppedStale_{0};
-  void NoteKeyRequest(const DecoderKeyRequest& request, bool queued);
+  std::atomic<uint64_t> keyDroppedCancelled_{0};
+  bool RequestKey(const DecoderKeyRequest& request, uint64_t nowUs);
   void ClearKeyLedger();
+  // C r2 (§8 (a)): the owed duty whose 8th ask was taken; told to the sink once that ask has left or been dropped.
+  uint64_t owedExhaustToken_ = 0;
   // r4 M1-A: asking for the IDR a selection is owed (ClientEncodedFrameSink::KeyframeOwedFor).
   // Control-loop thread only.
   uint64_t owedSelection_ = 0;

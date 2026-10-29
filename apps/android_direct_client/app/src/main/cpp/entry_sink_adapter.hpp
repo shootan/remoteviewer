@@ -50,6 +50,9 @@ class EntrySinkAdapter : public remote60::native_poc::ClientEncodedFrameSink {
   void OnDecoderKeyRequestSent(const remote60::native_poc::DecoderKeyRequest& request, uint64_t nowUs) override {
     if (const uint64_t t = Token()) decoder_->OnDecoderKeyRequestSentAs(t, request, nowUs);
   }
+  void OnDecoderKeyOwedExhausted(uint64_t owedToken, uint64_t nowUs) override {  // C r2 §8
+    if (const uint64_t t = Token()) decoder_->OnDecoderKeyOwedExhaustedAs(t, owedToken, nowUs);
+  }
   bool DrainPresentationStats(remote60::native_poc::ClientPresentationStats* out) override {
     const uint64_t t = Token();
     return t != 0 && decoder_->DrainPresentationStatsAs(t, out);

@@ -135,6 +135,9 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void OnDecoderKeyRequestSent(const remote60::native_poc::DecoderKeyRequest& request, uint64_t nowUs) override {
     OnDecoderKeyRequestSentAs(kAnyBinding, request, nowUs);
   }
+  void OnDecoderKeyOwedExhausted(uint64_t owedToken, uint64_t nowUs) override {
+    OnDecoderKeyOwedExhaustedAs(kAnyBinding, owedToken, nowUs);
+  }
   bool DrainPresentationStats(remote60::native_poc::ClientPresentationStats* out) override {
     return DrainPresentationStatsAs(kAnyBinding, out);
   }
@@ -175,6 +178,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   bool TakeDecoderKeyRequestAs(uint64_t token, remote60::native_poc::DecoderKeyRequest* out);
   uint32_t DecoderKeyRequestValidCausesAs(uint64_t token, const remote60::native_poc::DecoderKeyRequest& request);
   void OnDecoderKeyRequestSentAs(uint64_t token, const remote60::native_poc::DecoderKeyRequest& request, uint64_t nowUs);
+  void OnDecoderKeyOwedExhaustedAs(uint64_t token, uint64_t owedToken, uint64_t nowUs);
   bool DrainPresentationStatsAs(uint64_t token, remote60::native_poc::ClientPresentationStats* out);
   bool DrainDecodeStatsAs(uint64_t token, remote60::native_poc::ClientDecodeStats* out);
   uint64_t DecodeGenerationAs(uint64_t token);
@@ -395,6 +399,15 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   bool committedKeyValid_ = false;
   uint32_t committedKeySeq_ = 0;
   uint64_t lossAlreadyRecovered_ = 0;  // losses noted behind a committed IDR (no episode, no gap)
+  // C r2 (Codex §8 (a)): the owed duty the session spent its asks on (covered) -- its token, the end of the final
+  // answer window, and whether it ran out with no usable IDR (coveredExhausted). Ends when the gate's token moves (paid,
+  // re-armed, reset). A stale token's notice changes nothing (coveredStale counts it).
+  uint64_t coveredToken_ = 0;
+  uint64_t coveredDeadlineUs_ = 0;
+  bool coveredExhausted_ = false;
+  uint64_t coveredStale_ = 0;
+  uint64_t coveredExhaustedCount_ = 0;
+  bool AnyKeyPreservedLocked() const;  // a usable IDR is in the inbox, the pending slot or going in
   uint64_t beyondGapDrops_ = 0;        // the worker's defensive drop of a delta past the open gap (expected 0)
   // One-shot causes outside the episode (r4 N3 codec up, mobile-abr r5 abort); each taken once, kept as its cause.
   bool wantCodecUp_ = false;
