@@ -161,6 +161,32 @@ inline std::string child_end_why(bool producerEnded, e2e::E2eReadEnd readEnd, un
   return {};
 }
 
+// r3 (Codex evidence candidate r1): a test step that ends a child by CLOSING its job itself (the shell's crash, as the
+// managed test plays it) records what it saw -- the end is never inferred from a job that is just gone. Only for one
+// ready, non-host child with a single process in its job. Every item must hold, else its end is NOT confirmed.
+struct CrashClose {
+  bool done = false;          // the explicit step ran (Child::CrashCloseJob)
+  bool killOnClose = false;   // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE read back from the job, before the close
+  bool member = false;        // IsProcessInJob(root, job), before the close
+  bool singleRoot = false;    // the job's listed members were the root and only console hosts, before the close
+  int consoleHosts = 0;       // how many of those were the OS console host (conhost.exe)
+  bool rootAlive = false;     // the root had not ended yet, before the close
+  bool closed = false;        // CloseHandle(job) succeeded
+  unsigned long closeErr = 0;
+  bool rootEnded = false;     // the root's handle signalled within the bound after the close
+};
+// Empty = the crash-close evidence is whole; otherwise what is missing. Pure (ka_pc_e2e_child_test).
+inline std::string crash_close_why(const CrashClose& c) {
+  if (!c.done) return "no crash-close record";
+  if (!c.killOnClose) return "kill-on-close was not read back from the job";
+  if (!c.member) return "the root was not confirmed in the job";
+  if (!c.singleRoot) return "the job did not hold the root alone (a process other than the root and its console host)";
+  if (!c.rootAlive) return "the root had already ended before the close";
+  if (!c.closed) return "the job's handle could not be closed (error " + std::to_string(c.closeErr) + ")";
+  if (!c.rootEnded) return "the root did not end after the close";
+  return {};
+}
+
 struct Child;
 inline std::vector<Child*>& started_children() {
   static std::vector<Child*> v;
@@ -184,6 +210,8 @@ struct Child {
   bool started = false;
   bool ended = false;
   std::unique_ptr<e2e::E2eInjectionMonitor> monitor;
+  CrashClose crash;  // r3: set only by CrashCloseJob
+  std::string endEvidence;  // r3: what End's producer verdict rests on (written to the trailer)
 
   Child() = default;
   Child(const Child&) = delete;
@@ -311,10 +339,56 @@ struct Child {
   }
   bool Exited(int ms) { return pi.hProcess && WaitForSingleObject(pi.hProcess, ms) == WAIT_OBJECT_0; }
 
+  // r3: the explicit crash step -- this test closes the child's job itself, recording what it saw before and after
+  // (CrashClose). Refused for a host (its end is the guard's Finalize) and for a child not running or already
+  // crash-closed. Returns whether the evidence is whole; End judges the same record.
+  bool CrashCloseJob(DWORD rootEndMs, std::string* why) {
+    if (!started || ended || crash.done || !job || monitor) {
+      *why = monitor ? "a host's job is never crash-closed (its end is the guard's)" : "not a running child with its job";
+      return false;
+    }
+    crash.done = true;
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION lim{};
+    crash.killOnClose = QueryInformationJobObject(job, JobObjectExtendedLimitInformation, &lim, sizeof(lim), nullptr) &&
+                        (lim.BasicLimitInformation.LimitFlags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE);
+    BOOL in = FALSE;
+    crash.member = IsProcessInJob(pi.hProcess, job, &in) && in;
+    crash.singleRoot = job_holds_root_alone(&crash.consoleHosts);
+    crash.rootAlive = WaitForSingleObject(pi.hProcess, 0) == WAIT_TIMEOUT;
+    // (the contrast seam is asked BEFORE the close: a refused close leaves the handle really open, never a dead value)
+    crash.closed = start_step_ok(true, "crashclose") && CloseHandle(job) != 0;
+    if (crash.closed) {
+      job = nullptr;  // closed by this step: nothing later may use the value
+    } else {
+      crash.closeErr = GetLastError();  // kept: End still ends it through the job, but never counts that as the evidence
+    }
+    crash.rootEnded = crash.closed && WaitForSingleObject(pi.hProcess, rootEndMs) == WAIT_OBJECT_0;
+    *why = crash_close_why(crash);
+    return why->empty();
+  }
+
   void End() {
     if (!started || ended) return;  // never started (NOT RUN), or already ended and judged
     ended = true;
-    const bool producerEnded = e2e::e2e_end_job_confirmed(job);  // every process of its job, confirmed
+    // The producer's end, with what it rests on. r3: a crash-closed child is judged on its own record ONLY (a job left
+    // open by a failed close is still ended here, but that does not count); a job that is just gone is not an end.
+    bool producerEnded = false;
+    if (crash.done) {
+      if (job) (void)e2e::e2e_end_job_confirmed(job);  // cleanup only
+      const std::string cw = crash_close_why(crash);
+      producerEnded = cw.empty();
+      endEvidence = producerEnded ? "crash-close by this test, single root: kill-on-close read back, the root in the "
+                                    "job, its listed members the root + " + std::to_string(crash.consoleHosts) +
+                                    " console host(s) only before the close, CloseHandle succeeded, the root's handle "
+                                    "signalled after it"
+                                  : "crash-close record incomplete: " + cw;
+    } else if (job) {
+      producerEnded = e2e::e2e_end_job_confirmed(job);  // every process of its job, confirmed
+      endEvidence = producerEnded ? "job terminated, its active process count read 0"
+                                  : "job terminated, its active process count NOT read 0";
+    } else {
+      endEvidence = "no job and no crash-close record";
+    }
     // its reader: EOF comes once every writer is gone; a read still blocked after that is cancelled (bounded)
     for (int i = 0; i < 100 && readResult.load() == 0; ++i) Sleep(50);
     if (readResult.load() == 0) {
@@ -355,6 +429,40 @@ struct Child {
   }
 
  private:
+  // r3: the job's members, listed (JobObjectBasicProcessIdList): the root is among them, and every other one is the
+  // OS console host Windows attaches to a console child (%SystemRoot%\System32\conhost.exe, even with
+  // CREATE_NO_WINDOW). Any other process -- a descendant of the root -- refuses. *consoleHosts: how many.
+  bool job_holds_root_alone(int* consoleHosts) {
+    *consoleHosts = 0;
+    struct List {
+      JOBOBJECT_BASIC_PROCESS_ID_LIST head;
+      ULONG_PTR more[63];
+    } list{};
+    if (!QueryInformationJobObject(job, JobObjectBasicProcessIdList, &list, sizeof(list), nullptr)) return false;
+    if (list.head.NumberOfAssignedProcesses != list.head.NumberOfProcessIdsInList) return false;  // not all listed
+    wchar_t sys[MAX_PATH] = {};
+    const UINT n = GetSystemDirectoryW(sys, MAX_PATH);
+    if (n == 0 || n >= MAX_PATH) return false;
+    const std::wstring conhost = std::wstring(sys, n) + L"\\conhost.exe";
+    bool rootSeen = false;
+    for (DWORD i = 0; i < list.head.NumberOfProcessIdsInList; ++i) {
+      const DWORD pid = static_cast<DWORD>(list.head.ProcessIdList[i]);
+      if (pid == pi.dwProcessId) {
+        rootSeen = true;
+        continue;
+      }
+      HANDLE q = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+      if (!q) return false;  // unnamed: refused
+      wchar_t image[MAX_PATH] = {};
+      DWORD len = MAX_PATH;
+      const bool named = QueryFullProcessImageNameW(q, 0, image, &len) != 0;
+      CloseHandle(q);
+      if (!named || !same_path(std::wstring(image, len), conhost)) return false;  // a descendant of the root
+      ++*consoleHosts;
+    }
+    return rootSeen;
+  }
+
   bool WriteTrailer(bool producerEnded) {
     const auto readEnd = static_cast<e2e::E2eReadEnd>(readResult.load());
     size_t bytes = 0;
@@ -363,6 +471,7 @@ struct Child {
       bytes = text.size();
     }
     const std::string t = std::string("producer end: ") + (producerEnded ? "confirmed" : "NOT confirmed") +
+                          "\nproducer end evidence: " + endEvidence +
                           "\nread: " + (readResult.load() == 0 ? "still running" : e2e::e2e_read_end_name(readEnd)) +
                           " (error " + std::to_string(readErr.load()) + ") after " + std::to_string(bytes) + " bytes" +
                           "\nlog: " + (sinkFailed.load() ? "NOT kept whole (error " + std::to_string(sinkErr.load()) + ")"

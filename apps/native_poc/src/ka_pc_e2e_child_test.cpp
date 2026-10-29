@@ -89,6 +89,20 @@ int scenario_finalize_invalid(const std::wstring& dir) {
 
 int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
+  if (argc >= 2 && std::strcmp(argv[1], "--spawn-and-sleep") == 0) {
+    // a descendant in the same job (no breakaway), sharing this stdout; both say the line
+    STARTUPINFOW si{sizeof(si)};
+    PROCESS_INFORMATION pi{};
+    std::wstring cmd = L"\"" + self_path() + L"\" --print-and-sleep";
+    if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi)) {
+      CloseHandle(pi.hThread);
+      CloseHandle(pi.hProcess);
+    }
+    std::printf("%s\n", kEvidence);
+    std::fflush(stdout);
+    Sleep(60000);
+    return 0;
+  }
   if (argc >= 2 && std::strcmp(argv[1], "--print-and-sleep") == 0) {
     std::printf("%s\n", kEvidence);
     std::fflush(stdout);
@@ -216,7 +230,114 @@ int main(int argc, char** argv) {
     check("no macro window of a process of this build exists now", !ka_pc_e2e::own_macro_window_exists(self_dir()));
   }
 
-  const int childFailures = ka_pc_e2e::child_failures() - setupFailures;
+  // ---------------------------------------------------------------- 6. r3: a child ended by closing its job (crash step)
+  int expectedFailures = 0;  // the contrasts below that MUST count a failure
+  {
+    ka_pc_e2e::CrashClose all;
+    all.done = all.killOnClose = all.member = all.singleRoot = all.rootAlive = all.closed = all.rootEnded = true;
+    bool each = ka_pc_e2e::crash_close_why(all).empty();
+    for (bool ka_pc_e2e::CrashClose::*f : {&ka_pc_e2e::CrashClose::done, &ka_pc_e2e::CrashClose::killOnClose,
+                                           &ka_pc_e2e::CrashClose::member, &ka_pc_e2e::CrashClose::singleRoot,
+                                           &ka_pc_e2e::CrashClose::rootAlive, &ka_pc_e2e::CrashClose::closed,
+                                           &ka_pc_e2e::CrashClose::rootEnded}) {
+      ka_pc_e2e::CrashClose one = all;
+      one.*f = false;
+      each = each && !ka_pc_e2e::crash_close_why(one).empty();
+    }
+    check("crash-close record: whole -> accepted; any one item missing (no record, kill-on-close, membership, single root, "
+          "alive before, close, root ended) -> refused",
+          each);
+  }
+  auto start_self = [&](Child& c, const wchar_t* name, const wchar_t* mode) {
+    c.logPath = root + name;
+    return c.Start(L"\"" + self_path() + L"\" " + mode, self_dir(), nullptr) &&
+           c.WaitFor([](const std::string& t) { return t.find(kEvidence) != std::string::npos; }, 10000);
+  };
+  {
+    // before r3 (the managed test's old crash step): the job closed by hand, set null -- the child DID end (as in the
+    // 10-29 managed run), and that is still refused: a job that is just gone is no evidence
+    const int before = ka_pc_e2e::child_failures();
+    Child c;
+    const bool up = start_self(c, L"crash-by-hand.log", L"--print-and-sleep");
+    CloseHandle(c.job);
+    c.job = nullptr;
+    const bool exited = c.Exited(5000);
+    c.End();
+    const std::string tr = file_text(c.logPath + L".end");
+    check("the old crash step (job closed by hand, set null): the child ended, and its end is still NOT confirmed",
+          up && exited && ka_pc_e2e::child_failures() == before + 1 &&
+              tr.find("evidence: no job and no crash-close record") != std::string::npos,
+          tr);
+    ++expectedFailures;
+  }
+  {
+    // r3: the same end through the explicit step -- accepted, its trailer says what it rests on
+    const int before = ka_pc_e2e::child_failures();
+    Child c;
+    const bool up = start_self(c, L"crash-step.log", L"--print-and-sleep");
+    std::string why;
+    const bool crashed = up && c.CrashCloseJob(5000, &why);
+    c.End();
+    const std::string tr = file_text(c.logPath + L".end");
+    check("the r3 crash step: kill-on-close, membership, the root alone, the close and the root's end recorded -> its end "
+          "confirmed, EOF, log kept (no failure)",
+          crashed && ka_pc_e2e::child_failures() == before &&
+              tr.find("evidence: crash-close by this test, single root") != std::string::npos &&
+              tr.find("read: end of output") != std::string::npos,
+          why + " | " + tr);
+  }
+  {
+    // a child with a descendant in its job: not a single root -- refused (never widened to several processes)
+    const int before = ka_pc_e2e::child_failures();
+    Child c;
+    const bool up = start_self(c, L"crash-two.log", L"--spawn-and-sleep");
+    const bool two = up && c.WaitFor([](const std::string& t) {
+      size_t n = 0;
+      for (size_t at = t.find(kEvidence); at != std::string::npos; at = t.find(kEvidence, at + 1)) ++n;
+      return n >= 2;
+    }, 10000);
+    std::string why;
+    const bool crashed = c.CrashCloseJob(5000, &why);
+    c.End();
+    check("a job with a descendant (not the root alone): the crash step refuses, its end is NOT confirmed",
+          two && !crashed && why.find("other than the root") != std::string::npos &&
+              ka_pc_e2e::child_failures() == before + 1,
+          why);
+    ++expectedFailures;
+  }
+  {
+    // the close itself refused (the contrast seam, asked before the close): the job stays open, End ends the child
+    // through it -- and that cleanup is NOT taken as the crash step's evidence
+    const int before = ka_pc_e2e::child_failures();
+    Child c;
+    const bool up = start_self(c, L"crash-close-refused.log", L"--print-and-sleep");
+    ka_pc_e2e::start_step_refused_for_contrast() = "crashclose";
+    std::string why;
+    const bool crashed = c.CrashCloseJob(2000, &why);
+    ka_pc_e2e::start_step_refused_for_contrast() = nullptr;
+    const bool jobKept = c.job != nullptr;
+    c.End();
+    check("the job's close fails: the crash step refuses, the job is kept for cleanup, its end is NOT confirmed",
+          up && !crashed && jobKept && why.find("could not be closed") != std::string::npos &&
+              ka_pc_e2e::child_failures() == before + 1,
+          why);
+    ++expectedFailures;
+  }
+  {
+    // a host (a monitor is attached): never crash-closed
+    const int before = ka_pc_e2e::child_failures();
+    Child c;
+    const bool up = start_self(c, L"crash-host.log", L"--print-and-sleep");
+    c.monitor = std::make_unique<e2e::E2eInjectionMonitor>([&c] { return c.Text(); }, c.job, "contrast host", false);
+    std::string why;
+    const bool crashed = c.CrashCloseJob(2000, &why);
+    c.monitor.reset();  // not finalized on purpose (this is not a host run); its end is judged as any child's
+    c.End();
+    check("a host (monitor attached): the crash step refuses and does nothing (its job still ends it normally)",
+          up && !crashed && !c.crash.done && ka_pc_e2e::child_failures() == before, why);
+  }
+
+  const int childFailures = ka_pc_e2e::child_failures() - setupFailures - expectedFailures;
   check("no failure counted for the real children (the provoked set-up refusals aside)", childFailures == 0,
         std::to_string(childFailures));
   std::printf("\nka_pc_e2e_child_test: %s\n", gFailures ? (std::to_string(gFailures) + " FAILED").c_str() : "ALL PASS");

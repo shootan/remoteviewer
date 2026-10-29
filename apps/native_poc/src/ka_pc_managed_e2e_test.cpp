@@ -786,10 +786,12 @@ int main() {
     check("...ready again on the same PC key (its generation store reused, not locked by the ended one)", ready >= 0);
     lastAdmitAt = now_ms();
     const uint64_t t0 = now_ms();
-    CloseHandle(c.proc.job);  // the shell's last job handle goes (as when the shell crashes)
-    c.proc.job = nullptr;
-    check("closing the job's last handle ends the child (KILL_ON_JOB_CLOSE)", c.proc.Exited(5000),
-          std::to_string(now_ms() - t0) + " ms");
+    // the shell's last job handle goes (as when the shell crashes) -- r3: through the shared Child's explicit step, which
+    // records kill-on-close, membership, the root alone in the job and the close, and its end judges that record
+    std::string crashWhy;
+    const bool crashed = c.proc.CrashCloseJob(5000, &crashWhy);
+    check("closing the job's last handle ends the child (KILL_ON_JOB_CLOSE)", crashed && c.proc.Exited(0),
+          std::to_string(now_ms() - t0) + " ms" + (crashWhy.empty() ? "" : " -- " + crashWhy));
   }
   {
     // (r2: counted since the shared fix a7773e6) IMMEDIATELY after a crash (the child above ended by its job, its entry and relay
