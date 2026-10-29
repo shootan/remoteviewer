@@ -29,9 +29,25 @@ namespace remote60::native_poc {
 // a host known to be at the logon screen (kCaptureFlagPreloginV1) gets no answer -- that host takes no WindowSelect
 // and serves its one desktop. The same armed selection (same tag) then needs no ack, but keeps everything else:
 // pending, the first-picture wait, the straggler filter after it. Its generation is BOUND by its first IDR that
-// actually reaches the decoder (KeyDelivered of the key Admit let through as the candidate); until then it owes an
-// IDR (the session asks, bounded), deltas are dropped, and an IDR the decoder could not take binds nothing and is
-// owed again. A host answer never completes a local selection; a local selection never completes another's.
+// actually reaches the decoder; until then it owes an IDR (the session asks, bounded), deltas are dropped, and an
+// IDR the decoder could not take binds nothing and is owed again. A host answer never completes a local selection;
+// a local selection never completes another's.
+//
+// apk-decoder-liveness r4 (Codex codex_apk_decoder_liveness_src_r1.md N1): a queue is a RESERVATION, not a check.
+// The decoder's worker calls the codec with its state lock released (an input buffer dequeued, then the frame
+// queued), so a check made before those calls says nothing about the moment the bytes go in. r2-r3 let the
+// RECEIVE side choose the local selection's candidate (Admit): an IDR of generation 202 arriving while 101 was
+// being queued moved the candidate to 202, and both went into the codec. Now:
+//   * the candidate of an unbound local selection is chosen by the decoder's worker, at ReserveQueue, for the one
+//     frame it is about to queue. Admit lets an IDR through and changes nothing; KeyLost re-owes and leaves the
+//     candidate alone. Nothing the receive side does can move a reservation. The first IDR that really reaches the
+//     codec binds; an IDR of another generation is then refused at its own queue (PermitsQueue);
+//   * what can still change during an exchange -- a new pick (Prepare), an abandon / a stream reset / a new binding
+//     (Reset), BeginLocal, Refuse, an answer (OnAck) -- bumps the gate's epoch. CommitQueue pays / binds only under
+//     the epoch the frame was reserved in; a stale reservation pays nothing and binds nothing. The decoder asks for
+//     a codec reset with every such change, and voids the codec itself if a commit is ever stale without one. So an
+//     exchange begun before such a change completes, if at all, into a codec that change has voided; an exchange
+//     begun after it is judged against the new state.
 class SelectionAckGate {
  public:
   enum class AckResult { Ignored, Applied, Failed };
@@ -39,8 +55,16 @@ class SelectionAckGate {
     AckResult result = AckResult::Ignored;
     bool requestKeyframe = false;
   };
+  // r4 N1: one frame's queue into the codec, from its start (ReserveQueue) to its end (CommitQueue / AbortQueue).
+  struct Reservation {
+    bool valid = false;
+    uint64_t epoch = 0;
+    uint64_t generation = 0;
+    bool key = false;
+  };
 
   void Prepare(uint64_t selection) {
+    ++epoch_;
     pending_ = selection;
     awaiting_ = true;
     expected_ = 0;
@@ -55,6 +79,7 @@ class SelectionAckGate {
   // answered, refused or abandoned) -- then nothing changes.
   bool BeginLocal(uint64_t selection) {
     if (selection == 0 || pending_ != selection || !awaiting_ || local_) return false;
+    ++epoch_;
     awaiting_ = false;
     local_ = true;
     expected_ = 0;
@@ -68,6 +93,7 @@ class SelectionAckGate {
   // as a failure -- nothing passes for it (like a failed answer). Only that selection, only while it waits.
   bool Refuse(uint64_t selection) {
     if (selection == 0 || pending_ != selection || !awaiting_) return false;
+    ++epoch_;
     awaiting_ = false;
     local_ = false;
     expected_ = 0;
@@ -80,12 +106,45 @@ class SelectionAckGate {
     return (selection != 0 && local_ && pending_ == selection) ? expected_ : 0;
   }
 
+  // r4 N1: the worker is about to queue a frame of this generation: valid only if the gate admits it NOW
+  // (PermitsQueue). For an unbound local selection the IDR becomes the candidate -- the worker's own choice, which
+  // nothing but the end of this reservation or an epoch change undoes.
+  Reservation ReserveQueue(uint64_t frameStreamGeneration, bool isKey) {
+    Reservation r;
+    r.epoch = epoch_;
+    r.generation = frameStreamGeneration;
+    r.key = isKey;
+    r.valid = PermitsQueue(frameStreamGeneration, isKey);
+    if (r.valid && local_ && pending_ != 0 && expected_ == 0) candidate_ = frameStreamGeneration;
+    return r;
+  }
+
+  // Still the state the reservation was made in (no Prepare / Reset / BeginLocal / Refuse / OnAck since).
+  bool ReservationCurrent(const Reservation& r) const { return r.valid && r.epoch == epoch_; }
+
+  // r4 N1: the reserved frame is in the codec. An IDR pays the owed key / binds the unbound local selection -- only
+  // if the reservation is still current; false = stale (it paid and bound nothing; that codec must not be used).
+  bool CommitQueue(const Reservation& r) {
+    if (!ReservationCurrent(r)) return false;
+    if (r.key) KeyDelivered(r.generation);
+    return true;
+  }
+
+  // r4 N1: the reserved frame did not go in (no input buffer, a codec error, the exchange voided): its candidacy
+  // ends -- only within the reservation's epoch (a later state is not touched).
+  void AbortQueue(const Reservation& r) {
+    if (!ReservationCurrent(r)) return;
+    if (local_ && pending_ != 0 && expected_ == 0 && candidate_ == r.generation) candidate_ = 0;
+  }
+
   // An IDR of the answered generation reached the decoder (queued): the duty is paid.
-  // apk-0232 r1: for a local selection still unbound, the IDR Admit let through as its candidate binds it here.
+  // apk-0232 r1: for a local selection still unbound, the first IDR that reaches it binds it (r4: the candidate the
+  // worker reserved, or -- for a caller that does not reserve -- any IDR while none is reserved).
   void KeyDelivered(uint64_t frameStreamGeneration) {
     if (local_ && pending_ != 0 && expected_ == 0) {
-      if (candidate_ != 0 && frameStreamGeneration == candidate_) {
-        expected_ = candidate_;
+      if (frameStreamGeneration != 0 && (candidate_ == 0 || frameStreamGeneration == candidate_)) {
+        expected_ = frameStreamGeneration;
+        candidate_ = 0;
         keyOwed_ = false;
       }
       return;
@@ -97,8 +156,8 @@ class SelectionAckGate {
   // surface, codec not configured, ...): the selection is owed one (again).
   void KeyLost(uint64_t frameStreamGeneration) {
     if (local_ && pending_ != 0 && expected_ == 0) {
-      // apk-0232 r1: an unbound local selection's candidate the decoder did not take binds nothing.
-      if (candidate_ == frameStreamGeneration) candidate_ = 0;
+      // apk-0232 r1: an unbound local selection's IDR the decoder did not take binds nothing and is owed again.
+      // r4 N1: the candidate is the worker's reservation -- not undone from here.
       if (!keyOwed_) {
         keyOwed_ = true;
         ++owedToken_;
@@ -110,7 +169,8 @@ class SelectionAckGate {
     ++owedToken_;
   }
 
-  // The decoder became able to take an IDR (a surface arrived): if one is owed, ask afresh.
+  // The decoder became able to take an IDR (a surface arrived, r4 N3: a codec came back after a failure): if one is
+  // owed, ask afresh.
   void Rearm() {
     if (keyOwed_) ++owedToken_;
   }
@@ -119,6 +179,7 @@ class SelectionAckGate {
   uint64_t OwedToken() const { return keyOwed_ ? owedToken_ : 0; }
 
   void Reset() {
+    ++epoch_;
     pending_ = 0;
     awaiting_ = false;
     expected_ = 0;
@@ -131,6 +192,7 @@ class SelectionAckGate {
   Ack OnAck(bool ok, uint64_t streamGeneration, uint64_t requestTag) {
     // A local selection waits for no answer (awaiting_ is false): a host's answer never completes it.
     if (pending_ == 0 || !awaiting_ || requestTag != pending_) return {AckResult::Ignored, false};
+    ++epoch_;
     awaiting_ = false;
     if (!ok || streamGeneration == 0) {
       expected_ = 0;
@@ -144,15 +206,12 @@ class SelectionAckGate {
 
   // True = the frame may be decoded. Frames before the answer are dropped (and their generation
   // remembered); after it, only the answered generation passes.
-  // Whether the frame may go to the decoder. Passing here pays nothing (KeyDelivered does);
-  // isKey is kept for the callers' symmetry.
+  // Whether the frame may go to the decoder. Passing here pays nothing (KeyDelivered does).
   bool Admit(uint64_t frameStreamGeneration, bool isKey = false) {
     if (pending_ != 0 && local_ && expected_ == 0) {
-      // apk-0232 r1: an unbound local selection starts at an IDR. The one let through is its candidate; it binds
-      // once it really reaches the decoder (KeyDelivered). A delta binds nothing and does not pass.
-      if (!isKey || frameStreamGeneration == 0) return false;
-      candidate_ = frameStreamGeneration;
-      return true;
+      // apk-0232 r1: an unbound local selection starts at an IDR; a delta does not pass. r4 N1: passing changes
+      // nothing here -- the candidate is the worker's (ReserveQueue).
+      return isKey && frameStreamGeneration != 0;
     }
     if (pending_ != 0 && awaiting_) {
       RememberDropped(frameStreamGeneration);
@@ -165,11 +224,14 @@ class SelectionAckGate {
 
   // apk-0232 r2 (N2): may a frame of this generation go into the codec NOW -- asked again at the moment of queueing
   // (a frame held for an input buffer included), with no side effect. A selection waiting for its answer admits
-  // nothing; an unbound local selection only its current candidate IDR; an answered or bound one only its generation.
-  bool PermitsQueue(uint64_t frameStreamGeneration) const {
+  // nothing; an unbound local selection only an IDR (r4: of the reserved candidate's generation while one is
+  // reserved); an answered or bound one only its generation.
+  bool PermitsQueue(uint64_t frameStreamGeneration, bool isKey) const {
     if (pending_ == 0) return true;
     if (awaiting_) return false;
-    if (local_ && expected_ == 0) return candidate_ != 0 && frameStreamGeneration == candidate_;
+    if (local_ && expected_ == 0) {
+      return isKey && frameStreamGeneration != 0 && (candidate_ == 0 || frameStreamGeneration == candidate_);
+    }
     return expected_ != 0 && frameStreamGeneration == expected_;
   }
 
@@ -179,6 +241,7 @@ class SelectionAckGate {
   bool awaiting() const { return awaiting_; }
   uint64_t expected() const { return expected_; }
   bool local() const { return local_; }
+  uint64_t epoch() const { return epoch_; }
 
  private:
   static constexpr size_t kDroppedMemory = 4;
@@ -210,7 +273,8 @@ class SelectionAckGate {
   bool keyOwed_ = false;
   uint64_t owedToken_ = 0;
   bool local_ = false;      // apk-0232 r1: the armed selection needs no answer (see BeginLocal)
-  uint64_t candidate_ = 0;  // ...and the IDR generation let through for it, not yet bound
+  uint64_t candidate_ = 0;  // ...and r4: the IDR generation the worker has reserved for it (one queue in flight)
+  uint64_t epoch_ = 0;      // r4 N1: bumped by every change a reservation must not outlive
 };
 
 }  // namespace remote60::native_poc

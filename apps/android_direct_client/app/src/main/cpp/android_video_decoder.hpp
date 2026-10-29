@@ -41,9 +41,13 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   AndroidVideoDecoderSink() = default;
   ~AndroidVideoDecoderSink() override;
 
-  // r3 D1. surface != null: the request's seq (> 0), or 0 when refused (a detach is still pending, or too many
-  // windows are still to be let go). surface == null: the request's seq when the codec stopped and the old window was
+  // r3 D1. surface != null: the request's seq (> 0), or 0 when refused (a detach is still pending, too many
+  // windows are still to be let go, or -- r4 -- no ANativeWindow could be had for it: nothing of the current surface,
+  // codec or detach changes). surface == null: the request's seq when the codec stopped and the old window was
   // let go within the deadline; -seq when not (pending: SurfaceReleasedSeq() reaches seq once it is done).
+  // A surface whose detach went past the deadline stays BLOCKED until it is replaced: its late completion only
+  // releases it -- it never attaches anything, and the same blocked surface is not taken back by a later bind. A new
+  // surface that came while the detach was pending is attached at its own next bind, after the completion.
   int64_t SetSurface(JNIEnv* env, jobject surface);
   static constexpr int kDetachDeadlineMs = 2000;
   // Every surface request up to this seq is done: the codec of the old surface stopped and deleted, its window let
@@ -326,6 +330,10 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   std::vector<ANativeWindow*> windowsToRelease_;     // released by the worker, outside mu_
   // Frames from the receive thread, at most kInboxMaxFrames / kInboxMaxBytes; the oldest goes when full (an IDR
   // that goes is lost: KeyLost, a key asked for; the deltas after a gap are not fed before the next IDR).
+  // r4 N2: both bounds hold always -- a single frame over kInboxMaxBytes is refused at the door (lost the same way).
+  // The worker holds at most four more frames outside the inbox, each within the same cap: the one being processed,
+  // the one held for an input buffer (pendingFrame_), the selection's bootstrap IDR (bootstrapFrame_) and its replay
+  // copy during a replay -- at most kInboxMaxBytes + 4 x kInboxMaxBytes = 20 MB of frames in the sink.
   static constexpr size_t kInboxMaxFrames = 8;
   static constexpr size_t kInboxMaxBytes = 4u << 20;
   std::deque<InboxFrame> inbox_;
@@ -338,6 +346,25 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   const char* codecState_ = "none";
   uint64_t codecFailures_ = 0;
   uint64_t codecVoidStarts_ = 0;
+  // r4 N3 (Codex src r1): a codec that could not be made is tried again by the worker itself -- a host that sends
+  // nothing more (its IDRs spent on the failed attempts, the session's owed asks used up) would otherwise leave the
+  // decoder without a codec for good. Every kCodecRetryIntervalUs, at most kCodecAutoRetryMax times per surface /
+  // selection / binding; a codec made this way re-arms the owed IDR (SelectionAckGate::Rearm: a NEW token, the
+  // session's same bounded asks once more -- the rule a new surface already had). After the last try the state is
+  // failed_terminal and logged once: from there only a new surface, a new selection or an IDR the host sends
+  // brings a codec (an arriving IDR always tries). Nothing here asks the host for anything by itself.
+  static constexpr uint64_t kCodecRetryIntervalUs = 1000000ULL;
+  static constexpr uint32_t kCodecAutoRetryMax = 20;
+  uint64_t codecRetryAtUs_ = 0;    // 0: no retry due
+  uint32_t codecAutoRetries_ = 0;
+  void ResetCodecRetryLocked() {
+    codecRetryAtUs_ = 0;
+    codecAutoRetries_ = 0;
+  }
+  void RetryCodecLocked();
+  // r4 N1 / N2 diagnostics: exchanges voided by a selection / codec change, frames refused for being over the cap.
+  uint64_t queueVoided_ = 0;
+  uint64_t inboxOversizeDrops_ = 0;
   // apk-decoder-liveness r2 trace (written only with GNLINK_LIVENESS_TRACE).
   static uint64_t LtNowUs() {
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(

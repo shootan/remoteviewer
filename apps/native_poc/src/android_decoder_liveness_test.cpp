@@ -13,8 +13,13 @@
 // NEGATIVE: built against the sink of 9f9a91c (REMOTE60_LIVENESS_SINK_DIR, the codec created under the one lock the
 // callers take), the bounds FAIL -- the receive thread is held for the whole hold. See report_decoder_liveness_r1.md.
 //
+// r4 (Codex codex_apk_decoder_liveness_src_r1.md): [9]-[11] the gate decision against the actual queue (N1: the
+// input dequeue / queue held while RX or a new pick moves on; [9] is Codex's review schedule), [12] the inbox byte
+// cap for every frame (N2), [13] a window that could not be had (D1). NEGATIVE: the 7a79b09 sink + gate.
+//
 //   remote60_android_decoder_liveness_test [--hold-ms N]      (default 8000)
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -586,6 +591,247 @@ int main(int argc, char** argv) {
           s1.created - s0.created == s1.deleted - s0.deleted && s1.acquired - s0.acquired == s1.released - s0.released,
           "created=" + std::to_string(s1.created - s0.created) + " deleted=" + std::to_string(s1.deleted - s0.deleted) +
               " windows " + std::to_string(s1.acquired - s0.acquired) + "/" + std::to_string(s1.released - s0.released));
+  }
+
+  // ---- r4 (Codex codex_apk_decoder_liveness_src_r1.md): N1 the gate decision and the actual queue, N2 the byte cap,
+  // D1 a window that could not be had. The worker calls the codec with its lock released; another thread runs while
+  // it is inside dequeueInputBuffer (kHoldDequeueInput, the bit Codex's review probe used) or queueInputBuffer.
+  // Obsolete = a frame in the codec whose generation is not the one the selection ended bound / answered to.
+  auto tagGen = [](uint8_t tag) -> uint64_t {
+    switch (tag) {
+      case 0xA1: return 101;
+      case 0xB2: return 202;
+      default: return 0;
+    }
+  };
+
+  std::puts("\n--- [9] N1 (Codex's schedule): candidate 101's dequeue held, RX brings 202 -- one generation in the codec");
+  {
+    AndroidVideoDecoderSink sink;
+    sink.SetSurface(env, sa());
+    sink.PrepareForWindowSelection(42);
+    sink.BeginLocalSelectionFor(42);
+    const size_t q0 = snap().queued;
+    hold(fake_ndk::kHoldDequeueInput);
+    LetGoAfter safety(gHoldMs + 4000);
+    sink.OnEncodedH264Frame(frame(101, true, 0xA1));
+    const bool blocked = wait_until(held_now, 2000);
+    MaxUs rx;
+    timed(rx, [&] { sink.OnEncodedH264Frame(frame(202, true, 0xB2)); });  // admitted on RX while 101 is in the dequeue
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    let_go();
+    wait_until([&] { return !queued_from(q0).empty(); }, 2000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));  // whatever else would go in, goes in
+    const auto after = queued_from(q0);
+    const uint64_t bound = sink.LocalSelectionBoundFor(42);
+    std::string tags;
+    bool obsolete = false, b2 = false;
+    for (const auto& q : after) {
+      char t[8];
+      std::snprintf(t, sizeof(t), "%02X ", q.first);
+      tags += t;
+      obsolete = obsolete || tagGen(q.first) != bound;
+      b2 = b2 || q.first == 0xB2;
+    }
+    check("[9] the dequeue of 101 was really held while 202 was handed over", blocked);
+    check("[9] RX returned within the bound", rx.v < kCallBoundUs, rx.str());
+    check("[9] the selection is bound, and NOTHING of another generation went into the codec",
+          bound != 0 && !after.empty() && !obsolete, "bound=" + std::to_string(bound) + " queued=" + tags);
+    check("[9] first IDR into the codec binds (101); 202, refused at its own queue, never went in",
+          bound == 101 && !b2, "bound=" + std::to_string(bound) + " queued=" + tags);
+    sink.SetSurface(env, nullptr);
+  }
+
+  std::puts("\n--- [9b] N1 mirror: 101 waits for an input buffer (held in the slot), 202 replaces it -- 202 binds");
+  {
+    AndroidVideoDecoderSink sink;
+    sink.SetSurface(env, sa());
+    sink.PrepareForWindowSelection(43);
+    sink.BeginLocalSelectionFor(43);
+    const size_t q0 = snap().queued;
+    {
+      std::lock_guard<std::mutex> lk(fake_ndk::mu());
+      fake_ndk::controls().inputAvailable = false;
+    }
+    sink.OnEncodedH264Frame(frame(101, true, 0xA1));
+    const bool pending = wait_until([&] { return field(sink.DebugStatus(), "pending") == 1; }, 2000);
+    sink.OnEncodedH264Frame(frame(202, true, 0xB2));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    {
+      std::lock_guard<std::mutex> lk(fake_ndk::mu());
+      fake_ndk::controls().inputAvailable = true;
+    }
+    wait_until([&] { return !queued_from(q0).empty(); }, 2000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const auto after = queued_from(q0);
+    const uint64_t bound = sink.LocalSelectionBoundFor(43);
+    check("[9b] 101 was held for an input buffer", pending);
+    // (the same IDR may go in again: the decoder's bootstrap replay of the selection's IDR while no picture came)
+    bool onlyB2 = !after.empty();
+    std::string tags;
+    for (const auto& q : after) {
+      onlyB2 = onlyB2 && q.first == 0xB2;
+      char t[8];
+      std::snprintf(t, sizeof(t), "%02X ", q.first);
+      tags += t;
+    }
+    check("[9b] only 202 went in, and it binds", bound == 202 && onlyB2,
+          "bound=" + std::to_string(bound) + " queued=" + tags);
+    sink.SetSurface(env, nullptr);
+  }
+
+  std::puts("\n--- [10] N1: a NEW pick while the old selection's frame is in the dequeue -- that frame never goes in");
+  {
+    AndroidVideoDecoderSink sink;
+    sink.SetSurface(env, sa());
+    sink.PrepareForWindowSelection(50);
+    sink.OnWindowSelectionControlResultFor(answer(60), 50);
+    sink.OnEncodedH264Frame(frame(60, true, 0xC0));  // a codec for the answered selection, its IDR in
+    wait_until([&] { return snap().started > 0 && field(sink.DebugStatus(), "in") >= 1; }, 2000);
+    const Snapshot s0 = snap();
+    const size_t q0 = s0.queued;
+    hold(fake_ndk::kHoldDequeueInput);
+    LetGoAfter safety(gHoldMs + 4000);
+    sink.OnEncodedH264Frame(frame(60, false, 0x31));  // the old selection's delta: in the dequeue
+    const bool blocked = wait_until(held_now, 2000);
+    MaxUs prep;
+    timed(prep, [&] { sink.PrepareForWindowSelection(51); });  // the user picks another window meanwhile
+    let_go();
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    const auto during = queued_from(q0);
+    sink.OnWindowSelectionControlResultFor(answer(61), 51);
+    sink.OnEncodedH264Frame(frame(61, true, 0xC1));
+    wait_until([&] { return !queued_from(q0).empty() && queued_from(q0).back().first == 0xC1; }, 2000);
+    const auto after = queued_from(q0);
+    const Snapshot s1 = snap();
+    check("[10] the dequeue was really held when the new pick came", blocked);
+    check("[10] the new Prepare returned within the bound", prep.v < kCallBoundUs, prep.str());
+    check("[10] the old selection's frame was NOT queued after the pick", during.empty(),
+          "queued meanwhile=" + std::to_string(during.size()));
+    check("[10] the new selection's IDR is the next input, into a NEW codec",
+          after.size() == 1 && after[0].first == 0xC1 && s1.created > s0.created,
+          "queued=" + std::to_string(after.size()) + " codecs made " + std::to_string(s1.created - s0.created));
+    sink.SetSurface(env, nullptr);
+  }
+
+  std::puts("\n--- [11] N1: a NEW pick while the old frame's QUEUE call runs -- it went into a voided codec only");
+  {
+    AndroidVideoDecoderSink sink;
+    sink.SetSurface(env, sa());
+    sink.PrepareForWindowSelection(70);
+    sink.OnWindowSelectionControlResultFor(answer(80), 70);
+    const Snapshot s0 = snap();
+    hold(fake_ndk::kHoldQueueInput);
+    LetGoAfter safety(gHoldMs + 4000);
+    sink.OnEncodedH264Frame(frame(80, true, 0xC2));
+    const bool blocked = wait_until(held_now, 2000);
+    {
+      std::lock_guard<std::mutex> lk(fake_ndk::mu());
+      fake_ndk::Controls::Output o;  // a picture that codec would hand out
+      o.presentationTimeUs = 1;
+      fake_ndk::controls().outputs.push_back(o);
+    }
+    sink.PrepareForWindowSelection(71);
+    let_go();
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    const Snapshot s1 = snap();
+    const uint64_t readyAfter = sink.ReadySelectionGeneration();
+    {
+      std::lock_guard<std::mutex> lk(fake_ndk::mu());
+      fake_ndk::controls().outputs.clear();
+    }
+    const size_t q1 = s1.queued;
+    sink.OnWindowSelectionControlResultFor(answer(81), 71);
+    sink.OnEncodedH264Frame(frame(81, true, 0xC3));
+    wait_until([&] { return !queued_from(q1).empty(); }, 2000);
+    const Snapshot s2 = snap();
+    check("[11] the queue call was really held when the new pick came", blocked);
+    check("[11] the started exchange completed into the old codec, which was then deleted (voided)",
+          s1.queued == s0.queued + 1 && s1.deleted > s0.deleted,
+          "queued+" + std::to_string(s1.queued - s0.queued) + " deleted+" + std::to_string(s1.deleted - s0.deleted));
+    check("[11] the new selection is not made ready by it (no picture of that codec counts)", readyAfter != 71,
+          "ready=" + std::to_string(readyAfter));
+    check("[11] the new selection's IDR goes into a codec made after it",
+          s2.queued == q1 + 1 && s2.created > s1.created,
+          "codecs made " + std::to_string(s2.created - s0.created));
+    sink.SetSurface(env, nullptr);
+  }
+
+  std::puts("\n--- [12] N2: the inbox's byte cap holds for every frame -- one over the cap is refused and owed");
+  {
+    AndroidVideoDecoderSink sink;
+    sink.SetSurface(env, sa());
+    sink.PrepareForWindowSelection(90);
+    sink.OnWindowSelectionControlResultFor(answer(91), 90);
+    hold(fake_ndk::kHoldCreate);
+    LetGoAfter safety(gHoldMs + 4000);
+    sink.OnEncodedH264Frame(frame(91, true, 0xD0));  // its codec is being made (held): nothing leaves the inbox
+    const bool blocked = wait_until(held_now, 2000);
+    MaxUs rx;
+    timed(rx, [&] { sink.OnEncodedH264Frame(frame(91, true, 0xD1, 5u << 20)); });  // 5 MB > the 4 MB cap
+    const std::string st1 = sink.DebugStatus();
+    const uint64_t owedAfterBig = sink.KeyframeOwedFor();
+    const bool askedAfterBig = sink.ConsumeDecoderKeyframeRequest();
+    uint64_t bytesMax = 0;
+    for (int i = 0; i < 6; ++i) {  // big frames, each within the cap: the total stays within it
+      timed(rx, [&] { sink.OnEncodedH264Frame(frame(91, true, static_cast<uint8_t>(0xD2 + i), 1500000)); });
+      const uint64_t b = field(sink.DebugStatus(), "inboxBytes");
+      bytesMax = std::max<uint64_t>(bytesMax, b);
+    }
+    // a new pick with its own answer: what was refused / dropped for 90 is not owed by 92
+    sink.PrepareForWindowSelection(92);
+    const uint64_t owedAtPrepare = sink.KeyframeOwedFor();
+    sink.OnWindowSelectionControlResultFor(answer(93), 92);
+    const uint64_t owedNew = sink.KeyframeOwedFor();
+    let_go();
+    const size_t q0 = snap().queued;
+    sink.OnEncodedH264Frame(frame(93, true, 0xDF));
+    const bool newIn = wait_until([&] { auto q = queued_from(q0); return !q.empty() && q.front().first == 0xDF; }, 2000);
+    check("[12] the create was really held", blocked);
+    check("[12] RX returned within the bound, the 5 MB frame included", rx.v < kCallBoundUs, rx.str());
+    check("[12] the frame over the cap was refused at the door (inboxBytes 0, counted)",
+          field(st1, "inboxBytes") == 0 && field(st1, "inboxRefused") == 1,
+          "inboxBytes=" + std::to_string(field(st1, "inboxBytes")) + " refused=" + std::to_string(field(st1, "inboxRefused")));
+    check("[12] ...and the IDR it was is owed again, a key asked for", owedAfterBig != 0 && askedAfterBig);
+    check("[12] frames within the cap: the inbox never held more than 4 MB", bytesMax != ~0ull && bytesMax <= (4u << 20),
+          "max=" + std::to_string(bytesMax));
+    check("[12] a new pick owes nothing of the old one's losses; its IDR goes in",
+          owedAtPrepare == 0 && owedNew == 0 && newIn,
+          "owed at prepare=" + std::to_string(owedAtPrepare) + " after answer=" + std::to_string(owedNew));
+    sink.SetSurface(env, nullptr);
+  }
+
+  std::puts("\n--- [13] D1: an attach whose window cannot be had is refused (0) -- nothing of the current surface changes");
+  {
+    AndroidVideoDecoderSink sink;
+    const int64_t r0 = set_surface(sink, sa());
+    sink.OnEncodedH264Frame(frame(0, true, 0xE0));
+    wait_until([&] { return !queued_from(0).empty() && queued_from(0).back().first == 0xE0; }, 2000);
+    const uint64_t rel0 = released_seq(sink);
+    const Snapshot s0 = snap();
+    {
+      std::lock_guard<std::mutex> lk(fake_ndk::mu());
+      fake_ndk::controls().windowAcquireFails = true;
+    }
+    const int64_t r1 = set_surface(sink, sb());
+    {
+      std::lock_guard<std::mutex> lk(fake_ndk::mu());
+      fake_ndk::controls().windowAcquireFails = false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    const size_t q0 = snap().queued;
+    sink.OnEncodedH264Frame(frame(0, false, 0x32));
+    const bool stillOnA = wait_until([&] { auto q = queued_from(q0); return !q.empty() && q.back().second == sa(); }, 2000);
+    const Snapshot s1 = snap();
+    const std::string st = sink.DebugStatus();
+    const int64_t r2 = set_surface(sink, sb());
+    check("[13] the failed attach answers 0 (refused), not a detach seq", r0 > 0 && r1 == 0, "result=" + std::to_string(r1));
+    check("[13] the current surface and its codec go on: the next frame goes into the codec on A, none deleted",
+          stillOnA && s1.deleted == s0.deleted && st.find("surface=on") != std::string::npos,
+          "deleted+" + std::to_string(s1.deleted - s0.deleted));
+    check("[13] no detach was started (released seq unchanged) and the next real attach is taken",
+          released_seq(sink) == rel0 && r2 > 0, "next attach=" + std::to_string(r2));
+    set_surface(sink, nullptr);
   }
 
   std::printf("\nandroid_decoder_liveness_test: %d checks, %d failed\nRESULT: %s\n", gChecks, gFailures,

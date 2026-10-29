@@ -183,6 +183,8 @@ void AndroidVideoDecoderSink::WorkerMain() {
       ProcessFrameLocked(std::move(item));
     }
     if (surfaceApplied_ != surfaceSeq_ || CodecResetPendingLocked()) continue;
+    RetryCodecLocked();  // r4 N3
+    if (surfaceApplied_ != surfaceSeq_ || CodecResetPendingLocked()) continue;
     if (codec_) PumpCodecLocked();
     PublishDecodeStateLocked();
     ++workerPasses_;
@@ -208,6 +210,7 @@ void AndroidVideoDecoderSink::ApplySurfaceLocked() {
   requestedWindow_ = nullptr;
   surfaceApplied_ = surfaceSeq_;
   codecResetApplied_ = codecResetSeq_;  // this reset is the one the surface asked for
+  ResetCodecRetryLocked();              // r4 N3: a new surface, its own retries
   if (window_ && !EnsureCodecLocked(configuredWidth_, configuredHeight_)) {
     log_info("video surface set; codec waiting for keyframe/csd");
   }
@@ -242,7 +245,13 @@ int64_t AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
   ANativeWindow* window = nullptr;
   if (surface != nullptr) {
     window = ANativeWindow_fromSurface(env, surface);
-    if (!window) log_error("failed to acquire ANativeWindow from Surface");
+    if (!window) {
+      // r4 (Codex src r1 D1): an attach whose window could not be had is REFUSED (0) -- never turned into a detach of
+      // the current surface (that would answer a seq, or -seq, which the caller reads as taken / pending). Nothing
+      // of the sink's surface, codec or detach state changes; the caller keeps its surface and producer as they are.
+      log_error("failed to acquire ANativeWindow from Surface: attach refused");
+      return 0;
+    }
   }
   std::unique_lock<std::mutex> lk(mu_);
   if (window && (surfaceReleasedSeq_ < lastDetachSeq_ || windowsToRelease_.size() >= kMaxWindowsToRelease)) {
@@ -321,6 +330,24 @@ void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::nat
     return;
   }
 
+  // r4 N2 (Codex src r1): the byte cap holds for every frame -- r1-r3 kept one frame of ANY size (the last one was
+  // never dropped). A frame larger than the whole cap is refused here: it is lost like a dropped one (an IDR is owed
+  // again, a key asked for, the deltas after it not fed before the next IDR) and counted apart. The cap is more than
+  // one whole second of the highest bitrate the client asks for (kRuntimeBitrateMax 30 Mbit/s = 3.75 MB), so a
+  // stream within it never meets it; the assembler itself admits up to 16 MB (kMaxUdpAssembledPayloadBytes).
+  if (frame.payload.size() > kInboxMaxBytes) {
+    if (isKeyFrame) gate_.KeyLost(frame.header.streamGeneration);
+    ++inboxOversizeDrops_;
+    inboxGap_ = true;
+    decoderKeyframeRequest_ = true;
+    char line[192];
+    std::snprintf(line, sizeof(line), "decoder inbox: frame over the cap refused bytes=%zu cap=%zu key=%u refused=%llu",
+                  frame.payload.size(), kInboxMaxBytes, isKeyFrame ? 1u : 0u,
+                  static_cast<unsigned long long>(inboxOversizeDrops_));
+    log_error(line);
+    return;
+  }
+
   InboxFrame item;
   item.resetPts = latestInputStreamGeneration_ != 0 &&
                   latestInputStreamGeneration_ != frame.header.streamGeneration;
@@ -329,8 +356,9 @@ void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::nat
   item.frame = std::move(frame);
   inbox_.push_back(std::move(item));
   // Bounded: the oldest goes. Its loss is the codec's loss -- an IDR is owed again and asked for, and the deltas
-  // after the gap are not fed before the next IDR (ProcessFrameLocked).
-  while (inbox_.size() > kInboxMaxFrames || (inboxBytes_ > kInboxMaxBytes && inbox_.size() > 1)) {
+  // after the gap are not fed before the next IDR (ProcessFrameLocked). r4 N2: no exception for the last frame --
+  // the frame just added is within the cap by itself, so this stops with it in the inbox and the total <= the cap.
+  while (inbox_.size() > kInboxMaxFrames || inboxBytes_ > kInboxMaxBytes) {
     const auto& old = inbox_.front().frame;
     if ((old.header.flags & 1u) != 0) gate_.KeyLost(old.header.streamGeneration);
     inboxBytes_ -= std::min(inboxBytes_, old.payload.size());
@@ -412,6 +440,7 @@ void AndroidVideoDecoderSink::ProcessFrameLocked(InboxFrame&& item) {
 void AndroidVideoDecoderSink::ResetForBindingLocked() {
   RequestCodecResetLocked();
   ClearInboxLocked();
+  ResetCodecRetryLocked();  // r4 N3
   configuredWidth_ = 0;
   configuredHeight_ = 0;
   outputWidth_ = 0;
@@ -460,6 +489,7 @@ void AndroidVideoDecoderSink::OnVideoStreamResetAs(uint64_t token) {
   if (!OwnerLocked(token)) return;
   RequestCodecResetLocked();
   ClearInboxLocked();
+  ResetCodecRetryLocked();  // r4 N3
   configuredWidth_ = 0;
   configuredHeight_ = 0;
   outputWidth_ = 0;
@@ -749,6 +779,7 @@ bool AndroidVideoDecoderSink::PrepareForWindowSelectionAs(uint64_t token, uint64
   if (!OwnerLocked(token)) return false;
   RequestCodecResetLocked();
   ClearInboxLocked();
+  ResetCodecRetryLocked();  // r4 N3
   configuredWidth_ = 0;
   configuredHeight_ = 0;
   outputWidth_ = 0;
@@ -776,6 +807,7 @@ bool AndroidVideoDecoderSink::AbortWindowSelectionAs(uint64_t token) {
   if (!OwnerLocked(token)) return false;
   RequestCodecResetLocked();
   ClearInboxLocked();
+  ResetCodecRetryLocked();  // r4 N3
   configuredWidth_ = 0;
   configuredHeight_ = 0;
   outputWidth_ = 0;
@@ -853,9 +885,13 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " codecFail=" + std::to_string(codecFailures_);
   status += " codecVoid=" + std::to_string(codecVoidStarts_);
   status += " inbox=" + std::to_string(inbox_.size());
+  status += " inboxBytes=" + std::to_string(inboxBytes_);  // r4 N2
   status += " inboxDrops=" + std::to_string(inboxDrops_);
   status += " gapDrops=" + std::to_string(inboxGapDrops_);
   status += " resetPending=" + std::to_string(CodecResetPendingLocked() ? 1 : 0);
+  status += " codecRetries=" + std::to_string(codecAutoRetries_);       // r4 N3
+  status += " queueVoided=" + std::to_string(queueVoided_);             // r4 N1
+  status += " inboxRefused=" + std::to_string(inboxOversizeDrops_);     // r4 N2
   return status;
 }
 
@@ -953,6 +989,19 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
     log_error(failed ? failed : "codec failed");
     codecState_ = "failed";
     ++codecFailures_;
+    // r4 N3: tried again by the worker, bounded (RetryCodecLocked) -- unless the retries for this surface /
+    // selection are spent: then the failure is terminal until a new surface / selection / an IDR from the host.
+    if (codecAutoRetries_ < kCodecAutoRetryMax) {
+      codecRetryAtUs_ = steady_now_us() + kCodecRetryIntervalUs;
+    } else {
+      codecRetryAtUs_ = 0;
+      codecState_ = "failed_terminal";
+      char line[192];
+      std::snprintf(line, sizeof(line),
+                    "codec failed: %u retries spent -- no more until a new surface, a new selection or an IDR",
+                    codecAutoRetries_);
+      log_error(line);
+    }
     return false;
   }
   if (resetSeq != codecResetSeq_ || window != window_ || workerStop_) {
@@ -968,6 +1017,7 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
   }
   codec_ = codec;
   codecState_ = "started";
+  codecRetryAtUs_ = 0;  // r4 N3
 
   ++codecsStarted_;
   codecEpoch_.store(static_cast<uint32_t>(codecsStarted_), std::memory_order_release);
@@ -1000,6 +1050,22 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
   return true;
 }
 
+// r4 N3 (Codex src r1): the worker's own bounded retry of a codec that could not be made (see the members). The
+// SPS/PPS and size it needs are the stream's (kept); a codec made here can take an IDR again, so an owed one is
+// asked for afresh (Rearm: a new token) -- the session then asks with its same bounded budget.
+void AndroidVideoDecoderSink::RetryCodecLocked() {
+  if (codec_ || !window_ || codecRetryAtUs_ == 0 || steady_now_us() < codecRetryAtUs_) return;
+  codecRetryAtUs_ = 0;
+  ++codecAutoRetries_;
+  if (!EnsureCodecLocked(configuredWidth_, configuredHeight_) || !codec_) return;  // failed again: re-scheduled there
+  gate_.Rearm();
+  decoderKeyframeRequest_ = true;
+  char line[160];
+  std::snprintf(line, sizeof(line), "codec made on retry %u after a failure: an owed IDR is asked for afresh (token=%llu)",
+                codecAutoRetries_, static_cast<unsigned long long>(gate_.OwedToken()));
+  log_info(line);
+}
+
 void AndroidVideoDecoderSink::PumpCodecLocked() {
   const uint64_t nowUs = steady_now_us();
 
@@ -1015,7 +1081,7 @@ void AndroidVideoDecoderSink::PumpCodecLocked() {
 
   if (codec_ &&
       bootstrapFrame_.has_value() &&
-      gate_.PermitsQueue(bootstrapFrame_->header.streamGeneration) &&  // apk-0232 r2 (N2)
+      gate_.PermitsQueue(bootstrapFrame_->header.streamGeneration, true) &&  // apk-0232 r2 (N2)
       gate_.pending() != 0 &&
       readySelectionGeneration_ != gate_.pending() &&
       outputFrameCount_ == 0 &&
@@ -1043,10 +1109,33 @@ void AndroidVideoDecoderSink::PumpCodecLocked() {
 
 // apk-decoder-liveness r1: the worker only (the frame is the worker's -- a local or its pending slot); every codec
 // call with mu_ released. The decisions around them (gate, PTS, counts, the owed key) are made under mu_.
+//
+// r4 N1 (Codex src r1): the gate is RESERVED for the frame before the first codec call (SelectionAckGate::
+// ReserveQueue) and the frame counts only if that reservation is still current when the queue has returned
+// (CommitQueue). In between the receive side cannot move it (it no longer picks a candidate); a control-side change
+// (Prepare / Reset / an answer) makes it stale and always asks for a codec reset too. The contract, per exchange:
+//   * a change seen after the input buffer was dequeued and before the queue: the frame is NOT queued (that codec is
+//     voided: a reset is pending or asked for here, so its dequeued buffer goes with it);
+//   * a change while the queue call itself runs: the bytes went into a codec the change has voided -- they pay no
+//     owed key, bind nothing, start no bootstrap, and no picture of that codec is shown (the reset is pending);
+//   * an exchange that begins after the change is judged by the new state.
 bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264AssembledFrame& frame) {
   if (!codec_ || CodecResetPendingLocked()) return false;
   AMediaCodec* const codec = codec_;
   const uint64_t resetSeq = codecResetSeq_;
+  const bool isKey = (frame.header.flags & 1u) != 0;
+  const auto reservation = gate_.ReserveQueue(frame.header.streamGeneration, isKey);
+  if (!reservation.valid) return false;  // the callers asked PermitsQueue under this same lock: not reached
+  // Ends the exchange without the frame: its candidacy ends, and a codec whose buffer was dequeued for a voided
+  // exchange is not kept (a reset already pending covers it).
+  auto voidExchange = [&](const char* why) {
+    gate_.AbortQueue(reservation);
+    if (!CodecResetPendingLocked()) {
+      log_error(why);
+      RequestCodecResetLocked();
+    }
+    ++queueVoided_;
+  };
 
   size_t inputBufferSize = 0;
   uint8_t* inputBuffer = nullptr;
@@ -1057,14 +1146,22 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
   });
   lastInputDequeue_ = static_cast<int64_t>(inputIndex);
   if (inputIndex < 0) {
+    gate_.AbortQueue(reservation);  // no buffer: the frame is held (DecoderPendingSlot) and asked about again
+    return false;
+  }
+  if (resetSeq != codecResetSeq_ || codec_ != codec || !gate_.ReservationCurrent(reservation)) {
+    // Changed while the buffer was dequeued: the frame is not queued (r4 N1).
+    voidExchange("codec input: the selection / codec changed during the dequeue -- frame not queued, codec voided");
     return false;
   }
   if (!inputBuffer) {
+    gate_.AbortQueue(reservation);
     log_error("AMediaCodec_getInputBuffer returned null");
     ResetCodecLocked();
     return false;
   }
   if (frame.payload.size() > inputBufferSize) {
+    gate_.AbortQueue(reservation);
     ++oversizedInputFrameDropCount_;
     char line[192];
     std::snprintf(line, sizeof(line),
@@ -1083,6 +1180,7 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
                                         static_cast<size_t>(frame.payload.size()), ptsUs, 0);
   });
   if (queued != AMEDIA_OK) {
+    gate_.AbortQueue(reservation);
     log_error("AMediaCodec_queueInputBuffer failed");
     ResetCodecLocked();
     return false;
@@ -1090,15 +1188,20 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
 
   ++inputFrameCount_;
   // A reset asked for while it was queued: the codec is about to go -- the frame went into a codec that will not
-  // show it, so it pays no owed key and starts no bootstrap.
-  if (resetSeq != codecResetSeq_) return true;
+  // show it, so it pays no owed key and starts no bootstrap (r4: and its reservation ends, if still current).
+  if (resetSeq != codecResetSeq_) {
+    gate_.AbortQueue(reservation);
+    return true;
+  }
+  // r5 N1: this is where an owed IDR is paid -- it is in the decoder's input, not just past the gate. r4 N1: and only
+  // under the reservation it was queued in; a stale one (no reset with it -- not expected) voids this codec.
+  if (!gate_.CommitQueue(reservation)) {
+    voidExchange("codec input: queued under a stale selection with no reset asked for -- codec voided");
+    return true;
+  }
   if (queueingReplay_) RememberReplayPtsLocked(ptsUs);
   lastInputQueueSteadyUs_ = steady_now_us();
-  // r5 N1: this is where an owed IDR is paid -- it is in the decoder's input, not just past the gate.
-  if ((frame.header.flags & 1u) != 0) {
-    gate_.KeyDelivered(frame.header.streamGeneration);
-    codecAwaitsKey_ = false;  // keepalive r5 D1: this instance has its IDR
-  }
+  if (isKey) codecAwaitsKey_ = false;  // keepalive r5 D1: this instance has its IDR
   if ((frame.header.flags & 1u) != 0 && gate_.pending() != 0 &&
       readySelectionGeneration_ != gate_.pending()) {
     bootstrapFrame_ = frame;
@@ -1371,7 +1474,9 @@ void AndroidVideoDecoderSink::ReleaseHeldOutputLocked(uint64_t nowUs) {
   // normally-paced frame -- leaving the viewer waiting for an acknowledgement that had
   // already happened, and dropping back to the target list on a timeout while video played.
   // r1: not a picture of a codec a reset (a new selection among them) was asked for while it was released.
-  if (resetSeq == codecResetSeq_ && gate_.pending() != 0 &&
+  // r4 N1: and only for a selection whose generation is decided (answered, or a local one bound by an IDR committed
+  // into this codec) -- an unbound selection's codec holds nothing that may complete it.
+  if (resetSeq == codecResetSeq_ && gate_.pending() != 0 && gate_.expected() != 0 &&
       readySelectionGeneration_ != gate_.pending()) {
     readySelectionGeneration_ = gate_.pending();
     bootstrapFrame_.reset();

@@ -65,6 +65,7 @@ int __android_log_write(int prio, const char* tag, const char* text) {
 
 ANativeWindow* ANativeWindow_fromSurface(JNIEnv*, jobject surface) {
   std::lock_guard<std::mutex> lk(fake_ndk::mu());
+  if (surface && fake_ndk::controls().windowAcquireFails) return nullptr;  // r4: the platform gave no window
   if (surface) ++fake_ndk::controls().windowsAcquired;
   return static_cast<ANativeWindow*>(surface);
 }
@@ -148,6 +149,7 @@ media_status_t AMediaCodec_delete(AMediaCodec* c) {
   return AMEDIA_OK;
 }
 ssize_t AMediaCodec_dequeueInputBuffer(AMediaCodec*, int64_t) {
+  fake_ndk::hold_if(fake_ndk::kHoldDequeueInput);  // r4: Codex's review barrier (bit 16), now the stand-in's own
   std::lock_guard<std::mutex> lk(fake_ndk::mu());
   fake_ndk::note_thread();
   return fake_ndk::controls().inputAvailable ? 0 : AMEDIACODEC_INFO_TRY_AGAIN_LATER;
@@ -157,6 +159,7 @@ uint8_t* AMediaCodec_getInputBuffer(AMediaCodec* c, size_t, size_t* outSize) {
   return c->input.data();
 }
 media_status_t AMediaCodec_queueInputBuffer(AMediaCodec* c, size_t, int64_t, size_t size, uint64_t ptsUs, uint32_t) {
+  fake_ndk::hold_if(fake_ndk::kHoldQueueInput);
   std::lock_guard<std::mutex> lk(fake_ndk::mu());
   fake_ndk::note_thread();
   fake_ndk::controls().queued.emplace_back(c->input.begin(), c->input.begin() + static_cast<std::ptrdiff_t>(size));

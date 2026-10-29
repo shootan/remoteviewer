@@ -19,6 +19,7 @@ struct Controls {
   bool configureFails = false;
   bool startFails = false;
   bool inputAvailable = true;
+  bool windowAcquireFails = false;  // r4: ANativeWindow_fromSurface answers null for a non-null Surface
   int codecsCreated = 0;
   int codecsStarted = 0;
   std::vector<std::vector<uint8_t>> queued;  // payloads handed to a codec, in order
@@ -61,7 +62,11 @@ Controls& controls();  // take mu() around reads/writes from the test
 // apk-decoder-liveness r1: a slow codec, deterministically. While `held`, AMediaCodec_createDecoderByType /
 // configure / start / stop (the ones whose `which` bit is set) wait -- WITHOUT mu() -- until the test lets go.
 // `waiting` counts the calls blocked there right now.
-enum HoldWhich : uint32_t { kHoldCreate = 1, kHoldConfigure = 2, kHoldStart = 4, kHoldStop = 8 };
+// r4 (Codex src r1 N1): also the input side -- dequeueInputBuffer (16, the bit Codex's review probe used) and
+// queueInputBuffer (32) -- so another thread can run between the sink's gate decision and the queue.
+enum HoldWhich : uint32_t {
+  kHoldCreate = 1, kHoldConfigure = 2, kHoldStart = 4, kHoldStop = 8, kHoldDequeueInput = 16, kHoldQueueInput = 32
+};
 struct Barrier {
   std::atomic<uint32_t> which{0};
   std::atomic<bool> held{false};

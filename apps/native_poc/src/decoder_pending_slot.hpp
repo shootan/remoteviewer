@@ -29,7 +29,7 @@ class DecoderPendingSlot {
   // decoder needing an IDR.
   template <class TryQueue>
   void Offer(UdpH264AssembledFrame&& frame, const SelectionAckGate& gate, TryQueue&& tryQueue, bool* keyRequest) {
-    if (!gate.PermitsQueue(frame.header.streamGeneration)) {
+    if (!gate.PermitsQueue(frame.header.streamGeneration, (frame.header.flags & 1u) != 0)) {
       ++gateDrops_;
       return;
     }
@@ -54,7 +54,7 @@ class DecoderPendingSlot {
   template <class TryQueue>
   bool Pump(const SelectionAckGate& gate, TryQueue&& tryQueue) {
     if (!frame_.has_value()) return true;
-    if (!gate.PermitsQueue(frame_->header.streamGeneration)) {
+    if (!gate.PermitsQueue(frame_->header.streamGeneration, (frame_->header.flags & 1u) != 0)) {
       ++gateDrops_;
       frame_.reset();
       return true;
