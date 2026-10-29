@@ -19,6 +19,9 @@
 #include <map>
 #include <mutex>
 #include <vector>
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+#include <string>
+#endif
 
 #include "native_socket.hpp"
 #include "poc_protocol.hpp"
@@ -208,6 +211,11 @@ class UdpControlChannel {
     return closeReason_.load(std::memory_order_relaxed);
   }
 
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+  // TEST BUILD ONLY (old-ref r1): the channel's ACK / head record, one line (header fields only, no payload).
+  std::string CloseDiagLine() const;
+#endif
+
   struct Stats {
     uint64_t messagesSent = 0;
     uint64_t messagesReceived = 0;
@@ -226,6 +234,9 @@ class UdpControlChannel {
     uint16_t fragCount = 0;
     uint64_t lastSendUs = 0;
     uint32_t attempts = 0;
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+    uint64_t firstSendUs = 0;  // when it first went out as the head
+#endif
   };
 
   struct Inbound {
@@ -277,6 +288,26 @@ class UdpControlChannel {
   std::deque<std::vector<uint8_t>> rxReady_;
 
   Stats stats_;
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+  struct CloseDiag {
+    uint64_t acksSeen = 0;          // ControlAck / ControlNack datagrams that reached OnPacket while open
+    uint64_t acksWrongStream = 0;   //   of them: for another stream (ignored)
+    uint64_t acksAfterClose = 0;    // ... and those that came after this channel had closed (dropped)
+    uint64_t acksAccepted = 0;      // the head's ACK: the head popped
+    uint64_t acksStale = 0;         // an ACK for no head / not the head's seq
+    uint64_t probeAcks = 0;         // the liveness probe's answer
+    uint64_t nacks = 0;             // a NACK for the head (fragments resent)
+    uint32_t lastSeenSeq = 0;       // the seq of the last ACK / NACK seen
+    uint64_t lastSeenUs = 0;
+    uint64_t lastAcceptedUs = 0;
+    bool lost = false;              // the head as it stood when retransmits ran out (peer-lost)
+    uint32_t lostSeq = 0, lostAttempts = 0, lostFrags = 0;
+    uint64_t lostQueue = 0, lostFirstSendUs = 0, lostLastSendUs = 0, lostAtUs = 0;
+    int lostType = -1;
+  };
+  CloseDiag diag_;
+  static int HeaderType(const std::vector<uint8_t>& payload);  // the MessageHeader type field, or -1
+#endif
 };
 
 /**

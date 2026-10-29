@@ -74,6 +74,9 @@ void UdpControlChannel::Reset() {
   // Without this the next client's first message looks like one already delivered, and
   // HandleData answers it with an ack while dropping the data -- alive on the wire, deaf above.
   rxDeliveredSeq_ = 0;
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+  diag_ = CloseDiag{};
+#endif
   closeReason_.store(ControlCloseReason::None, std::memory_order_relaxed);
   shutdown_.store(false, std::memory_order_relaxed);  // Reset is a new session, as it always was
   closed_.store(false, std::memory_order_relaxed);
@@ -147,6 +150,50 @@ void UdpControlChannel::StartProbe(uint32_t maxAttempts, uint64_t intervalUs) {
   probeLastSendUs_ = now_us();
   SendProbeChunk();
 }
+
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+int UdpControlChannel::HeaderType(const std::vector<uint8_t>& payload) {
+  if (payload.size() < sizeof(MessageHeader)) return -1;
+  MessageHeader h{};
+  std::memcpy(&h, payload.data(), sizeof(h));  // the header only: magic, type, size
+  return h.magic == kMagic ? static_cast<int>(h.type) : -1;
+}
+
+std::string UdpControlChannel::CloseDiagLine() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  const uint64_t now = now_us();
+  auto ago = [now](uint64_t t) { return t == 0 ? std::string("-") : std::to_string((now - t) / 1000); };
+  std::string line = "diag{ack seen=" + std::to_string(diag_.acksSeen) +
+                     " wrongStream=" + std::to_string(diag_.acksWrongStream) +
+                     " accepted=" + std::to_string(diag_.acksAccepted) + " stale=" + std::to_string(diag_.acksStale) +
+                     " probe=" + std::to_string(diag_.probeAcks) + " nack=" + std::to_string(diag_.nacks) +
+                     " afterClose=" + std::to_string(diag_.acksAfterClose) +
+                     " lastSeenSeq=" + std::to_string(diag_.lastSeenSeq) + " lastSeenAgoMs=" + ago(diag_.lastSeenUs) +
+                     " lastAcceptedAgoMs=" + ago(diag_.lastAcceptedUs) +
+                     " lastAckedTxSeq=" + std::to_string(lastAckedTxSeq_) + "}";
+  if (txQueue_.empty()) {
+    line += " head{none}";
+  } else {
+    const Outbound& h = txQueue_.front();
+    line += " head{seq=" + std::to_string(h.seq) + " type=" + std::to_string(HeaderType(h.payload)) +
+            " attempts=" + std::to_string(h.attempts) + " frags=" + std::to_string(h.fragCount) +
+            " queue=" + std::to_string(txQueue_.size()) + " firstSendAgoMs=" + ago(h.firstSendUs) +
+            " lastSendAgoMs=" + ago(h.lastSendUs) + "}";
+  }
+  if (diag_.lost) {
+    line += " lost{seq=" + std::to_string(diag_.lostSeq) + " type=" + std::to_string(diag_.lostType) +
+            " attempts=" + std::to_string(diag_.lostAttempts) + " frags=" + std::to_string(diag_.lostFrags) +
+            " queue=" + std::to_string(diag_.lostQueue) + " waitedMs=" +
+            (diag_.lostFirstSendUs ? std::to_string((diag_.lostAtUs - diag_.lostFirstSendUs) / 1000) : std::string("-")) +
+            " agoMs=" + ago(diag_.lostAtUs) + "}";
+  } else {
+    line += " lost{none}";
+  }
+  line += " rx{deliveredSeq=" + std::to_string(rxDeliveredSeq_) + " pending=" + std::to_string(rxPending_.size()) +
+          " ready=" + std::to_string(rxReady_.size()) + "}";
+  return line;
+}
+#endif
 
 const char* to_string(ControlCloseReason reason) {
   switch (reason) {
@@ -235,6 +282,9 @@ bool UdpControlChannel::Send(const void* data, size_t len) {
   msg.fragCount = static_cast<uint16_t>((len + fragBytes_ - 1) / fragBytes_);
   msg.lastSendUs = now_us();
   msg.attempts = 1;
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+  msg.firstSendUs = txQueue_.empty() ? msg.lastSendUs : 0;  // a queued one starts when it becomes the head
+#endif
   txQueue_.push_back(std::move(msg));
   ++stats_.messagesSent;
 
@@ -324,11 +374,22 @@ void UdpControlChannel::HandleAck(const UdpControlAckPacket& packet) {
       packet.kind == static_cast<uint16_t>(UdpPacketKind::ControlAck)) {
     probeState_ = ControlProbeState::Alive;
     probeDecidedUs_ = now_us();
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+    ++diag_.probeAcks;
+#endif
     return;
   }
-  if (txQueue_.empty() || txQueue_.front().seq != packet.messageSeq) return;
+  if (txQueue_.empty() || txQueue_.front().seq != packet.messageSeq) {
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+    ++diag_.acksStale;
+#endif
+    return;
+  }
 
   if (packet.kind == static_cast<uint16_t>(UdpPacketKind::ControlNack)) {
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+    ++diag_.nacks;
+#endif
     std::vector<uint16_t> missing(packet.missing, packet.missing + packet.missingCount);
     if (!missing.empty()) SendFragments(txQueue_.front(), &missing);
     txQueue_.front().lastSendUs = now_us();
@@ -337,6 +398,11 @@ void UdpControlChannel::HandleAck(const UdpControlAckPacket& packet) {
 
   lastAckedTxSeq_ = packet.messageSeq;
   txQueue_.pop_front();
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+  ++diag_.acksAccepted;
+  diag_.lastAcceptedUs = now_us();
+  if (!txQueue_.empty()) txQueue_.front().firstSendUs = diag_.lastAcceptedUs;
+#endif
   if (!txQueue_.empty()) {
     txQueue_.front().lastSendUs = now_us();
     txQueue_.front().attempts = 1;
@@ -383,6 +449,11 @@ bool UdpControlChannel::OnPacket(const void* data, size_t len) {
   if (!mine) return false;
 
   std::lock_guard<std::mutex> lock(mu_);
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+  if (closed_.load(std::memory_order_relaxed) && kind != static_cast<uint16_t>(UdpPacketKind::ControlData)) {
+    ++diag_.acksAfterClose;
+  }
+#endif
   if (closed_.load(std::memory_order_relaxed)) return true;
   if (kind == static_cast<uint16_t>(UdpPacketKind::ControlData)) {
     if (len < sizeof(UdpControlChunkHeader)) return true;
@@ -399,6 +470,12 @@ bool UdpControlChannel::OnPacket(const void* data, size_t len) {
     if (len < sizeof(UdpControlAckPacket)) return true;
     UdpControlAckPacket packet{};
     std::memcpy(&packet, bytes, sizeof(packet));
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+    ++diag_.acksSeen;
+    diag_.lastSeenSeq = packet.messageSeq;
+    diag_.lastSeenUs = now_us();
+    if (packet.streamId != txStreamId_) ++diag_.acksWrongStream;
+#endif
     // Acks refer to the stream we transmit on.
     if (packet.streamId != txStreamId_) return true;
     if (packet.missingCount > kUdpControlMaxMissingPerNack) return true;
@@ -432,6 +509,17 @@ void UdpControlChannel::Tick() {
     Outbound& head = txQueue_.front();
     if (now - head.lastSendUs >= timings_.retransmitIntervalUs) {
       if (++head.attempts > timings_.maxAttempts) {
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+        diag_.lost = true;
+        diag_.lostSeq = head.seq;
+        diag_.lostAttempts = head.attempts;
+        diag_.lostFrags = head.fragCount;
+        diag_.lostQueue = txQueue_.size();
+        diag_.lostFirstSendUs = head.firstSendUs;
+        diag_.lostLastSendUs = head.lastSendUs;
+        diag_.lostAtUs = now;
+        diag_.lostType = HeaderType(head.payload);
+#endif
         auto expected = ControlCloseReason::None;
         closeReason_.compare_exchange_strong(expected, ControlCloseReason::PeerLost,
                                              std::memory_order_relaxed);
