@@ -8,8 +8,10 @@
 #include <string>
 #include <vector>
 
-#include "decoder_chain_inbox.hpp"
-#include "decoder_key_request.hpp"
+// <> (not ""): the header is taken from the include path -- REMOTE60_CHAIN_INBOX_DIR first (a mutated copy in the
+// negative runs), never this file's own directory.
+#include <decoder_chain_inbox.hpp>
+#include <decoder_key_request.hpp>
 
 using namespace remote60::native_poc;
 

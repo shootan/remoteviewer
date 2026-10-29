@@ -966,6 +966,9 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         std::lock_guard<std::mutex> lk(keyLedgerMu_);
         held = keyHeld_;
       }
+#ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+      if (!held.empty()) RunTestKeyHook("held");
+#endif
       uint32_t valid = held.causes;
       if (!held.empty() && encodedFrameSink_) {
         REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkSinkHook, now_us()));
@@ -1078,6 +1081,9 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
           sentKey = keyAccepted_;
           keyAccepted_.Clear();
         }
+#ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+        if (!sentKey.empty()) RunTestKeyHook("accepted");
+#endif
         if (!sentKey.empty() && encodedFrameSink_) {
           REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkSinkHook, now_us()));
           sentKey.causes = encodedFrameSink_->DecoderKeyRequestValidCauses(sentKey);

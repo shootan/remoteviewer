@@ -1195,6 +1195,34 @@ target_include_directories(remote60_android_decoder_inbox_c_test PRIVATE
 )
 target_compile_definitions(remote60_android_decoder_inbox_c_test PRIVATE NOMINMAX)
 
+# apk-inbox C: the episode and the D8 descriptors through the PRODUCT shared session into the APK sink (its binding
+# adapter), a fake host on loopback -- the schedule as the host receives it, and the held / accepted points with a race
+# put there by the session's test hook (REMOTE60_CLIENT_SESSION_TEST_HOOKS). TEST ONLY.
+# REMOTE60_INBOX_SESSION_SRC: the session source this test builds -- src's (default), or a mutated copy for the negative
+# runs (the held / accepted checks taken out).
+set(REMOTE60_INBOX_SESSION_SRC "${CMAKE_CURRENT_SOURCE_DIR}/src/native_video_client_session.cpp" CACHE FILEPATH
+    "native_video_client_session.cpp the inbox session test builds (negative runs point it at a mutated copy)")
+add_executable(remote60_android_decoder_inbox_session_test
+  src/android_decoder_inbox_session_test.cpp
+  src/native_video_client_shared_core.cpp
+  src/native_video_client_tcp_control.cpp
+  src/udp_control_channel.cpp
+  ${REMOTE60_INBOX_SESSION_SRC}
+  src/test_fake_ndk/fake_ndk.cpp
+  ${REMOTE60_LIVENESS_SINK_DIR}/android_video_decoder.cpp
+)
+target_include_directories(remote60_android_decoder_inbox_session_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
+  ${REMOTE60_LIVENESS_SINK_DIR}
+  ${REMOTE60_CHAIN_INBOX_DIR}
+  src
+)
+target_compile_definitions(remote60_android_decoder_inbox_session_test PRIVATE NOMINMAX REMOTE60_CLIENT_SESSION_TEST_HOOKS=1)
+target_link_libraries(remote60_android_decoder_inbox_session_test PRIVATE common ws2_32)
+if(MSVC)
+  target_compile_options(remote60_android_decoder_inbox_session_test PRIVATE /utf-8)
+endif()
+
 # apk-decoder-liveness r1 contrast 2: the product receive loop (VideoReceiveMain, which carries the UDP control
 # channel) delivering into the APK sink while its codec is held; a fake host over loopback with its own control
 # channel. TEST ONLY. The same REMOTE60_LIVENESS_SINK_DIR choice as above.

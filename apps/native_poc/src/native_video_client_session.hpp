@@ -240,6 +240,17 @@ class ClientSessionController {
     std::lock_guard<std::mutex> lk(testHookMu_);
     testPassHook_ = std::move(hook);
   }
+  // TEST BUILD ONLY (apk-inbox C, D8): called at the session's two key-request points -- "held" (before a request the
+  // limiter refused goes to it again) and "accepted" (before a KeyframeRequest exchange starts) -- right before the
+  // sink is asked which causes still hold: a test changes the sink's state there (another binding, a pick).
+  void SetTestKeyRequestHook(std::function<void(const char* point)> hook) {
+    std::lock_guard<std::mutex> lk(testHookMu_);
+    testKeyHook_ = std::move(hook);
+  }
+  // TEST BUILD ONLY (apk-inbox C): the keyframe limiter's parameters, so a test can make it refuse (a HELD request).
+  void TestConfigureKeyframeLimiter(uint64_t minIntervalUs, uint64_t tokenRefillUs, uint32_t tokenCapacity) {
+    keyframeRequests_.Configure(minIntervalUs, tokenRefillUs, tokenCapacity);
+  }
   // TEST BUILD ONLY (apk-0232 r2 N1): called when a queued desktop pick has just been turned local in the sink,
   // before the panel and the tracked tag follow -- a test holds it there and makes a newer pick.
   void SetTestAfterLocalSinkBeginHook(std::function<void(uint64_t tag)> hook) {
@@ -525,6 +536,15 @@ class ClientSessionController {
 #ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
   std::mutex testHookMu_;
   std::function<void(bool)> testPassHook_;
+  std::function<void(const char*)> testKeyHook_;  // apk-inbox C
+  void RunTestKeyHook(const char* point) {
+    std::function<void(const char*)> hook;
+    {
+      std::lock_guard<std::mutex> lk(testHookMu_);
+      hook = testKeyHook_;
+    }
+    if (hook) hook(point);
+  }
   std::function<void(uint64_t)> testAfterLocalSinkBeginHook_;
   std::function<void(uint64_t, uint64_t)> testBeforeLocalCommitHook_;
 #endif
