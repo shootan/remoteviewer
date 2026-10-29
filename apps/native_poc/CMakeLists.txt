@@ -752,6 +752,28 @@ target_include_directories(remote60_ka_pc_managed_e2e_test PRIVATE src)
 target_link_libraries(remote60_ka_pc_managed_e2e_test PRIVATE common ws2_32 windowsapp d3d11 dxgi)
 add_dependencies(remote60_ka_pc_managed_e2e_test remote60_viewer_ka_test remote60_native_video_host_poc)
 
+# rel-0164 old-APK lane (Codex codex_rel_0164_split_decision.md (2), legacy combination 1, case 7): ONE PC-side standby
+# lease held on a host (the product managed viewer, GNLinkViewerKaTest --managed-standby, driven as the shell drives
+# it: Init, then Release) while a phone uses that host. TEST TOOL ONLY, never shipped.
+add_executable(remote60_ka_standby_holder_tool
+  src/ka_standby_holder_tool.cpp
+  src/directory_session_client.cpp
+  src/directory_client.cpp
+  src/update_endpoint.cpp
+  src/url_origin.cpp
+  src/winhttp_transport.cpp
+)
+target_include_directories(remote60_ka_standby_holder_tool PRIVATE src)
+target_link_libraries(remote60_ka_standby_holder_tool PRIVATE common ws2_32 windowsapp d3d11 dxgi)
+
+# rel-0164 old-APK lane: the verified kill-on-close job runner and its start test, from feat/apk-0.2.33 (de2d60a / 4f04415)
+# as they are -- the AVD bundle runs its fixture in it. TEST TOOLS ONLY.
+add_executable(remote60_e2e_job_run src/e2e_job_run_tool.cpp)
+target_include_directories(remote60_e2e_job_run PRIVATE src)
+set_target_properties(remote60_e2e_job_run PROPERTIES OUTPUT_NAME "e2e_job_run")
+add_executable(remote60_e2e_job_run_start_test src/e2e_job_run_start_test.cpp)
+target_include_directories(remote60_e2e_job_run_start_test PRIVATE src)
+
 # ka-pc-impl r1 (KA ③): the same viewer with REMOTE60_VIEWER_KA_TEST_SEAM -- N sessions in one process
 # (REMOTE60_VIEWER_TEST_SESSIONS) and a window placed off the user's monitors, shown without focus
 # (REMOTE60_VIEWER_TEST_WINDOW_X/_Y). Same sources, libraries and options as GNLinkViewer; one define. Never shipped.

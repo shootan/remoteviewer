@@ -62,6 +62,7 @@
 //   (REMOTE60_ALLOW_HOST_E2E=1)
 
 #include "e2e_isolation.hpp"
+#include "e2e_injection_guard.hpp"
 #include "e2e_station_lock.hpp"
 #include "control_resume_e2e_support.hpp"
 
@@ -105,6 +106,9 @@ void say(const std::string& s) {
 // quality-6m r1: the captured window's size (--target-size WxH). 480x270 is a UI/protocol fixture; a resolution
 // claim needs the source it is about (1920x1080).
 int gTargetW = 480, gTargetH = 270;
+// keepalive-multi r1: --target-mark RRGGBB paints a large square of that colour in the middle, so the phone's screenshot
+// says which of two fixture hosts it shows (-1 = none).
+long gTargetMark = -1;
 
 class CadenceTarget {
  public:
@@ -154,6 +158,12 @@ class CadenceTarget {
         HBRUSH b = CreateSolidBrush(k.c);
         FillRect(dc, &k.r, b);
         DeleteObject(b);
+      }
+      if (gTargetMark >= 0) {
+        const RECT mark{cw / 2 - ch / 4, ch / 4, cw / 2 + ch / 4, ch * 3 / 4};
+        HBRUSH m = CreateSolidBrush(RGB((gTargetMark >> 16) & 0xff, (gTargetMark >> 8) & 0xff, gTargetMark & 0xff));
+        FillRect(dc, &mark, m);
+        DeleteObject(m);
       }
       EndPaint(hwnd, &ps);
       return 0;
@@ -661,7 +671,11 @@ int wmain(int argc, wchar_t** argv) {
   int keyDropFrom = -1, keyDropTo = -1;  // r5 external: drop keyframes over [from, to) s from the first report
   std::string externalPlan = "app";
   std::wstring dirUrl, dirId, dirPw, dirHostName = L"ka-test-pc";  // keepalive r1 directoryhost
-  std::wstring hostExe = L"GNLinkStream.exe";  // keepalive r1: --host-exe GNLinkStreamPinnedSelectTest.exe
+  // rel-0164 old-APK lane: the host's TCP control listener (0: none, as before) -- APK 0.2.32's manual connect speaks
+  // TCP control; the host binds it on --bind-address (127.0.0.1), which the AVD reaches as 10.0.2.2.
+  uint32_t hostControlPort = 0;
+  std::wstring hostExe = L"GNLinkStream.exe";
+  std::wstring runId;  // keepalive-r2 e (AVD guard r2 N1/N2): directoryhost's readiness names the run it belongs to  // keepalive r1: --host-exe GNLinkStreamPinnedSelectTest.exe
   int parkLongSec = 65;  // keepalive r1: --park-sec
   std::string parkVariant = "main";  // keepalive r2: --park-variant main | fail | expire
   uint32_t runtimeBitrate = 0;  // quality-6m r1: asked for after connecting, the app's runtime path
@@ -699,8 +713,13 @@ int wmain(int argc, wchar_t** argv) {
       dirPw = argv[++i];
     } else if (a == L"--host-name" && more) {
       dirHostName = argv[++i];
+    } else if (a == L"--host-control-port" && more) {
+      hostControlPort = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
+      if (hostControlPort > 65535) hostControlPort = 0;
     } else if (a == L"--host-exe" && more) {
       hostExe = argv[++i];
+    } else if (a == L"--run-id" && more) {
+      runId = argv[++i];
     } else if (a == L"--park-sec" && more) {
       parkLongSec = _wtoi(argv[++i]);
     } else if (a == L"--park-variant" && more) {
@@ -708,11 +727,31 @@ int wmain(int argc, wchar_t** argv) {
       parkVariant.assign(v.begin(), v.end());
     } else if (a == L"--runtime-bitrate" && more) {
       runtimeBitrate = static_cast<uint32_t>(_wtoi(argv[++i]));
+    } else if (a == L"--target-mark" && more) {
+      gTargetMark = std::wcstol(argv[++i], nullptr, 16);
     } else if (a == L"--target-size" && more) {
       std::swscanf(argv[++i], L"%dx%d", &gTargetW, &gTargetH);
     }
   }
   const bool directoryHost = scenario == "directoryhost";
+  // AVD guard r2 (Codex codex_avd_guard_src_r1.md N1/N2): directoryhost writes its readiness ONLY once its host passed
+  // the guard, naming this run, into an --out folder that holds none yet -- anything else: INVALID, nothing started.
+  auto setup_invalid = [&](const std::string& why) {
+    say("FAIL  SETUP mobile_abr: " + why + " -- no readiness written, no client\nRESULT: INVALID");
+    return 2;
+  };
+  if (directoryHost) {
+    bool plainRun = !runId.empty() && runId.size() <= 64;
+    for (wchar_t ch : runId) {
+      plainRun = plainRun && ((ch >= L'a' && ch <= L'z') || (ch >= L'A' && ch <= L'Z') || (ch >= L'0' && ch <= L'9') ||
+                              ch == L'-' || ch == L'_');
+    }
+    if (!plainRun) return setup_invalid("directoryhost needs --run-id (ASCII letters, digits, - _)");
+    if (outDir.empty()) return setup_invalid("directoryhost needs --out");
+    if (GetFileAttributesW((outDir + L"directoryhost_ready.txt").c_str()) != INVALID_FILE_ATTRIBUTES) {
+      return setup_invalid("--out already holds a readiness file (an earlier run's): not reused");
+    }
+  }
   const bool parkClip = scenario == "parkclip";
   const bool parkScenario = scenario == "park" || parkClip;
   const bool external = scenario == "external" || directoryHost;
@@ -784,6 +823,7 @@ int wmain(int argc, wchar_t** argv) {
   // Staged as GNLinkStream.exe whichever build it is, so the isolation check below knows it is the host.
   const bool staged = CopyFileW((myDir + hostExe).c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) != 0;
   check("the host could be staged", staged);
+  if (!staged) return setup_invalid("the host could not be staged");  // before any window, any host
 
   if (scenario == "static") gSourceStill.store(true);
   CadenceTarget target;
@@ -847,7 +887,9 @@ int wmain(int argc, wchar_t** argv) {
     std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
                        L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(hostPort) +
                        L" --fps " + std::to_wstring(fps) + L" --bitrate " + std::to_wstring(bitrate) +
-                       L" --seconds " + std::to_wstring(hostSec) + L" --input-injection-mode none" +
+                       L" --seconds " + std::to_wstring(hostSec) +
+                       // the shared guard (e2e_injection_guard.hpp): input injection AND host power management off
+                       remote60::native_poc::e2e::e2e_injection_off_arg(dir) +
                        (parkClip ? L" --capture-window-pid " + std::to_wstring(stationFixturePid) +
                                        L" --capture-window-title \"" + kTargetTitle + L"\""
                                  : e2e_capture_window_args(kTargetTitle));
@@ -858,6 +900,7 @@ int wmain(int argc, wchar_t** argv) {
       cmd += L" --directory-url " + dirUrl + L" --directory-cache \"" + dir + L"dircache.json\"" +
              L" --directory-id " + dirId + L" --directory-pw " + dirPw + L" --host-name " + dirHostName +
              L" --input-log-every 1";
+      if (hostControlPort != 0) cmd += L" --control-port " + std::to_wstring(hostControlPort);
     }
     std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
     mutableCmd.push_back(L'\0');
@@ -884,18 +927,66 @@ int wmain(int argc, wchar_t** argv) {
                                        CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, isoEnv.data(),
                                        dir.c_str(), &si, &hostPi) != 0;
     if (launched) {
-      AssignProcessToJobObject(job, hostPi.hProcess);
-      ResumeThread(hostPi.hThread);
+      // resumed only inside a verified kill-on-close job, else INVALID (the shared guard)
+      remote60::native_poc::e2e::e2e_adopt_or_invalid(job, hostPi, "mobile_abr");
     }
   }
   check("the host started", launched);
+  if (!launched) {  // AVD guard r2 N1: not started is no gate passed -- no readiness, no client, no relay
+    if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
+    CloseHandle(job);
+    return setup_invalid("the host did not start");
+  }
+  // fail closed (e2e_injection_guard.hpp): no client -- the APK on the AVD for directoryhost -- reaches a host that has
+  // not said, in THIS launch's own output, both whole OFF lines (input injection none, host power management off)
+  std::string injWhy;
+  const bool injOff = launched && remote60::native_poc::e2e::e2e_wait_injection_off(
+      [&] { return remote60::native_poc::e2e::e2e_read_text_file(hostLogPath); }, 20000, &injWhy);
+  if (launched && !injOff) remote60::native_poc::e2e::e2e_injection_setup_failed("mobile_abr", injWhy);
+  check("the host said its input injection and its power management OFF before any client", injOff, injWhy);
+  // the same judgement keeps running while the host lives (a contradiction -> INVALID, its job ended)
+  std::unique_ptr<remote60::native_poc::e2e::E2eInjectionMonitor> injMon;
+  if (launched && injOff) {
+    injMon = std::make_unique<remote60::native_poc::e2e::E2eInjectionMonitor>(
+        [&] { return remote60::native_poc::e2e::e2e_read_text_file(hostLogPath); }, job, "mobile_abr");
+  }
+  // the end, for every path: polling stops, the host's job is ended (confirmed or not), the log read to EOF, the final
+  // snapshot judged (end + EOF + both OFF lines + no contradiction, else INVALID); the job closes only after that
+  auto endHostJudged = [&] {
+    if (injMon) injMon->StopPolling();
+    const bool hostEnded = remote60::native_poc::e2e::e2e_end_job_confirmed(job);
+    if (hostLog != INVALID_HANDLE_VALUE) {
+      CloseHandle(hostLog);
+      hostLog = INVALID_HANDLE_VALUE;
+    }
+    if (injMon) {
+      injMon->Finalize(hostEnded, remote60::native_poc::e2e::e2e_final_file(hostLogPath));
+      injMon.reset();
+    }
+    if (job) {
+      CloseHandle(job);
+      job = nullptr;
+    }
+  };
   if (directoryHost) {
     // keepalive r1: no phone here -- the APK on the AVD is the client. Stay up, then take the host down.
-    if (!outDir.empty()) {
-      CreateDirectoryW(outDir.c_str(), nullptr);
-      std::ofstream(outDir + L"directoryhost_ready.txt") << (launched ? "ready" : "failed") << "\n";
+    {
+      // launched and the guard's gate passed (else this run already ended INVALID): the readiness, written whole
+      // (a temporary renamed into place -- a reader never sees half of it), naming this run, this harness, its host and
+      // the host's exact log (ke_avd.py reads that path, never a guess by pid)
+      const std::wstring tmp = outDir + L"directoryhost_ready.tmp";
+      {
+        std::ofstream r(tmp, std::ios::binary | std::ios::trunc);
+        r << "ready run=" << std::string(runId.begin(), runId.end()) << " harness_pid=" << GetCurrentProcessId()
+          << " host_pid=" << hostPi.dwProcessId << " host_log=" << std::string(hostLogPath.begin(), hostLogPath.end())
+          << "\n";
+      }
+      if (!MoveFileExW(tmp.c_str(), (outDir + L"directoryhost_ready.txt").c_str(), MOVEFILE_WRITE_THROUGH)) {
+        endHostJudged();
+        return setup_invalid("the readiness could not be written");
+      }
     }
-    say(std::string("DIRECTORY_HOST ") + (launched ? "ready" : "failed"));
+    say("DIRECTORY_HOST ready");
     const std::wstring stopFile = outDir + L"stop";
     for (int t = 0; launched && t < externalSec; ++t) {
       if (!outDir.empty() && GetFileAttributesW(stopFile.c_str()) != INVALID_FILE_ATTRIBUTES) break;
@@ -905,14 +996,12 @@ int wmain(int argc, wchar_t** argv) {
       }
       std::this_thread::sleep_for(std::chrono::seconds(1));
     }
+    endHostJudged();  // the shared guard's end (replaces a bare TerminateProcess of the host alone)
     if (hostPi.hProcess) {
-      TerminateProcess(hostPi.hProcess, 0);
       WaitForSingleObject(hostPi.hProcess, 5000);
       CloseHandle(hostPi.hProcess);
     }
     if (hostPi.hThread) CloseHandle(hostPi.hThread);
-    if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
-    CloseHandle(job);
     if (launched) {
       std::string captureLine;
       const bool own = e2e_host_captured_window(hostLogPath, target.hwnd(), &captureLine);
@@ -921,6 +1010,7 @@ int wmain(int argc, wchar_t** argv) {
     target.Stop();
     if (!outDir.empty()) CopyFileW(hostLogPath.c_str(), (outDir + L"directoryhost_host.log").c_str(), FALSE);
     if (!staging.Remove()) say("WARN  " + staging.why());
+    remote60::native_poc::e2e::e2e_injection_final_check_all();  // every launch judged before the result
     say(std::string("\nmobile_abr_session_e2e_test: ") + (gFailures == 0 ? "PASS" : "FAIL") +
         "\nRESULT: " + (gFailures == 0 ? "PASS" : "FAIL"));
     WSACleanup();
@@ -1401,17 +1491,15 @@ int wmain(int argc, wchar_t** argv) {
   const std::vector<SeenReport> reports = relay.Reports();
   const auto ctlEvents = relay.CtlEvents();
   relay.Stop();
+  if (hostPi.hProcess && WaitForSingleObject(hostPi.hProcess, 90000) != WAIT_OBJECT_0) {
+    say("NOTE  host did not exit by itself; its job is ended");
+  }
+  endHostJudged();  // the shared guard's end: the job (every process of it), the log to EOF, the final judgement
   if (hostPi.hProcess) {
-    if (WaitForSingleObject(hostPi.hProcess, 90000) != WAIT_OBJECT_0) {
-      say("NOTE  host did not exit by itself; terminated");
-      TerminateProcess(hostPi.hProcess, 0);
-      WaitForSingleObject(hostPi.hProcess, 5000);
-    }
+    WaitForSingleObject(hostPi.hProcess, 5000);
     CloseHandle(hostPi.hProcess);
   }
   if (hostPi.hThread) CloseHandle(hostPi.hThread);
-  if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
-  CloseHandle(job);
   if (launched && !parkClip) {
     std::string captureLine;
     const bool own = e2e_host_captured_window(hostLogPath, target.hwnd(), &captureLine);
@@ -1742,6 +1830,7 @@ int wmain(int argc, wchar_t** argv) {
           << r.height << "," << r.presentSamples << "\n";
   }
   if (!staging.Remove()) say("WARN  " + staging.why());
+  remote60::native_poc::e2e::e2e_injection_final_check_all();  // every launch judged before the result
   say("\n" + std::to_string(gChecks) + " checks, " + std::to_string(gFailures) + " failed, " + std::to_string(gSkips) +
       " not judged");
   if (gFailures == 0 && gSkips == 0) {
