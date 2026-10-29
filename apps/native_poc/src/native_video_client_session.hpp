@@ -11,6 +11,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "client_liveness_trace.hpp"
 #include "clipboard_sync.hpp"
 #include "native_socket.hpp"
 #include "client_park_state.hpp"
@@ -149,6 +150,9 @@ class ClientSessionController {
   void Disconnect();
   ClientSessionSnapshot Snapshot() const;
   WindowPanelSnapshot WindowPanelSnapshotCopy() const;
+  // apk-decoder-liveness r2: the progress trace (client_liveness_trace.hpp) plus the control transport's counters, as
+  // one line. Empty unless the build records it (GNLINK_LIVENESS_TRACE). Lock-free but for the channel's own short lock.
+  std::string LivenessTraceLine();
   bool RequestWindowList();
   // apk-0232 r1: at a host KNOWN to be at the logon screen a desktop pick is a local selection (nothing sent; see
   // ClientEncodedFrameSink::BeginLocalSelectionFor) and a window pick is refused (false). A pick made before the
@@ -380,6 +384,7 @@ class ClientSessionController {
   void ShutdownVideoSocketLocked();
   UdpControlChannel udpControl_;
   std::atomic<bool> controlOverUdp_{false};
+  ClientLivenessTrace livenessTrace_;  // apk-decoder-liveness r2: written only with GNLINK_LIVENESS_TRACE
 
   int FetchOneThumbnailLocked(ControlLink& link);
   // Clipboard text sync (K1), run on the control thread's idle turns like the thumbnail fetch:

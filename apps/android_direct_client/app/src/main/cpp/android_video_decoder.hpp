@@ -3,6 +3,7 @@
 #include <jni.h>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -12,6 +13,7 @@
 #include <vector>
 
 #include "client_decode_snapshot.hpp"
+#include "client_liveness_trace.hpp"
 #include "native_video_client_session.hpp"
 #include "decoder_pending_slot.hpp"
 #include "selection_ack_gate.hpp"
@@ -160,6 +162,9 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void RefuseSelectionForAs(uint64_t token, uint64_t tag);
   LocalCommit CommitLocalSelectionForAs(uint64_t token, uint64_t tag, const std::function<void(uint64_t generation)>& commit);
   std::string DebugStatus();
+  // apk-decoder-liveness r2 (test builds, GNLINK_LIVENESS_TRACE): the worker's last pass and the codec call it is in
+  // right now (with mu_ released), and its tid -- lock-free. Empty without the flag.
+  std::string LivenessTraceLine() const;
   uint64_t VideoSizePacked();
   uint64_t ReadySelectionGeneration();
   uint64_t LastOutputPresentationUs();
@@ -195,11 +200,16 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   template <class F>
   decltype(auto) CodecCall(F&& f) {
     if (workerLock_ == nullptr || std::this_thread::get_id() != workerId_) return f();
+    REMOTE60_LT(ltCodecCallSinceUs_.store(LtNowUs(), std::memory_order_relaxed));
     workerLock_->unlock();
     struct Relock {
       std::unique_lock<std::mutex>* l;
-      ~Relock() { l->lock(); }
-    } relock{workerLock_};
+      std::atomic<uint64_t>* since;
+      ~Relock() {
+        REMOTE60_LT(since->store(0, std::memory_order_relaxed));
+        l->lock();
+      }
+    } relock{workerLock_, &ltCodecCallSinceUs_};
     return f();
   }
 
@@ -312,6 +322,16 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   const char* codecState_ = "none";
   uint64_t codecFailures_ = 0;
   uint64_t codecVoidStarts_ = 0;
+  // apk-decoder-liveness r2 trace (written only with GNLINK_LIVENESS_TRACE).
+  static uint64_t LtNowUs() {
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                     std::chrono::steady_clock::now().time_since_epoch())
+                                     .count());
+  }
+  std::atomic<uint64_t> ltCodecCallSinceUs_{0};
+  std::atomic<uint64_t> ltWorkerPassUs_{0};
+  std::atomic<uint64_t> ltWorkerTid_{0};
+  std::atomic<uint64_t> ltInbox_{0};
   // At most one decoded frame waits here for its slot. Handing it over sooner would put it in
   // a queue the view drains newest-first, where an earlier frame is simply thrown away.
   bool heldOutputValid_ = false;

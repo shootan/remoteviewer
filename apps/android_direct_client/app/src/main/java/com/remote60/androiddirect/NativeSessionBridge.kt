@@ -105,6 +105,8 @@ object NativeSessionBridge {
     external fun nativeGetStatus(handle: Long): String
     external fun nativeGetLastError(handle: Long): String
     external fun nativeGetVideoDebugStatus(): String
+    // apk-decoder-liveness r2: the session's + the decoder's progress trace ("" unless a liveness-trace test build).
+    external fun nativeLivenessTrace(handle: Long): String
     external fun nativeGetVideoSizePacked(): Long
     external fun nativePrepareVideoSwitch(binding: Long, selectionGeneration: Long): Boolean
     external fun nativeAbortVideoSwitch(binding: Long)

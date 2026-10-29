@@ -670,6 +670,22 @@ Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetVideoDebugStatus(
   return to_jstring(env, g_video_decoder_sink.DebugStatus());
 }
 
+// apk-decoder-liveness r2: test builds only record it (GNLINK_LIVENESS_TRACE); "" otherwise. No lock of the decoder.
+extern "C" JNIEXPORT jstring JNICALL
+Java_com_remote60_androiddirect_NativeSessionBridge_nativeLivenessTrace(
+    JNIEnv* env, jobject /* this */, jlong handle) {
+#ifdef GNLINK_LIVENESS_TRACE
+  std::string line;
+  if (auto e = entry_of(handle)) line = e->controller.LivenessTraceLine();
+  else line = "session none";
+  line += " | " + g_video_decoder_sink.LivenessTraceLine();
+  return to_jstring(env, line);
+#else
+  (void)handle;
+  return to_jstring(env, std::string());
+#endif
+}
+
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_remote60_androiddirect_NativeSessionBridge_nativeGetVideoSizePacked(
     JNIEnv* /* env */, jobject /* this */) {

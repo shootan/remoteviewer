@@ -151,6 +151,7 @@ void AndroidVideoDecoderSink::WorkerMain() {
   std::unique_lock<std::mutex> lk(mu_);
   workerId_ = std::this_thread::get_id();
   workerLock_ = &lk;
+  REMOTE60_LT(ltWorkerTid_.store(remote60::native_poc::liveness_tid(), std::memory_order_relaxed));
   while (!workerStop_) {
     if (surfaceApplied_ != surfaceSeq_) ApplySurfaceLocked();
     if (CodecResetPendingLocked()) {
@@ -185,6 +186,10 @@ void AndroidVideoDecoderSink::WorkerMain() {
     if (codec_) PumpCodecLocked();
     PublishDecodeStateLocked();
     ++workerPasses_;
+    REMOTE60_LT({
+      ltWorkerPassUs_.store(LtNowUs(), std::memory_order_relaxed);
+      ltInbox_.store(inbox_.size(), std::memory_order_relaxed);
+    });
     doneCv_.notify_all();
     if (workerStop_) break;
     workCv_.wait_for(lk, kPumpInterval, [this] {
@@ -827,6 +832,24 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " gapDrops=" + std::to_string(inboxGapDrops_);
   status += " resetPending=" + std::to_string(CodecResetPendingLocked() ? 1 : 0);
   return status;
+}
+
+std::string AndroidVideoDecoderSink::LivenessTraceLine() const {
+#ifdef GNLINK_LIVENESS_TRACE
+  const uint64_t now = LtNowUs();
+  auto age = [now](uint64_t t) -> long long {
+    return t == 0 ? -1 : static_cast<long long>((now >= t ? now - t : 0) / 1000);
+  };
+  char line[160];
+  std::snprintf(line, sizeof(line), "sink pass=%lldms codecCall=%lldms tid=%llu inbox=%llu",
+                age(ltWorkerPassUs_.load(std::memory_order_relaxed)),
+                age(ltCodecCallSinceUs_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(ltWorkerTid_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(ltInbox_.load(std::memory_order_relaxed)));
+  return line;
+#else
+  return std::string();
+#endif
 }
 
 uint64_t AndroidVideoDecoderSink::VideoSizePacked() {

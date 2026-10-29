@@ -166,7 +166,8 @@ def check_windows_dir(report, directory):
 APK_TEST_MARKERS = ['sh-test-seam', 'shTestFault', 'shTestStrength', 'shTestDisplayPass']
 # sh-filter r3 (R2): the native half of the same seam (debug variant only) -- its marker and the system
 # property prefix it reads. Searched in every lib/*/*.so of the APK.
-APK_NATIVE_TEST_MARKERS = ['sh-test-seam', 'debug.gnlink.sh.']
+# apk-decoder-liveness r2: + the session's progress trace (-Pgnlink.livenessTrace=true, debug only).
+APK_NATIVE_TEST_MARKERS = ['sh-test-seam', 'debug.gnlink.sh.', 'liveness-trace']
 
 
 def apk_native_markers_found(so_bytes):

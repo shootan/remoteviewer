@@ -851,9 +851,12 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
     return;
   }
 
+  REMOTE60_LT(livenessTrace_.wkTid.store(liveness_tid(), std::memory_order_relaxed));
   while (!stopRequested_.load(std::memory_order_acquire)) {
     bool didWork = false;
     const uint64_t loopNowUs = now_us();
+    REMOTE60_LT(livenessTrace_.wkLastPassUs.store(loopNowUs, std::memory_order_relaxed));
+    REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkPass, loopNowUs));
     ControlOutboundAction action{};
     // Once a second, on this connection's own clock: what the sink received and decoded (the decode-side
     // fields the PC viewer fills) and what its display did (client_telemetry_window.hpp). mobile-abr r1:
@@ -921,7 +924,9 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
     // answer and was dropped) is asked for again until it arrives -- a request taken here may still
     // be refused by the host's limiter. Once per second at most, eight times, through the limiter.
     if (!parking) {
+      REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkSinkHook, now_us()));
       const uint64_t owed = encodedFrameSink_ ? encodedFrameSink_->KeyframeOwedFor() : 0;
+      REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkPass, now_us()));
       if (owed != owedSelection_) {
         owedSelection_ = owed;
         owedAttempts_ = 0;
@@ -933,10 +938,16 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
           keyframeRequests_.Request(2, loopNowUs).queued) {
         ++owedAttempts_;
         owedNextUs_ = loopNowUs + kOwedKeyRetryUs;
+        REMOTE60_LT(livenessTrace_.keyWantQueued.fetch_add(1, std::memory_order_relaxed));
         std::fprintf(stderr, "[native-video-client-session] keyframe owed to selection %llu: asked (%u)\n",
                      static_cast<unsigned long long>(owed), owedAttempts_);
       }
     }
+    REMOTE60_LT({
+      livenessTrace_.owedToken.store(owedSelection_, std::memory_order_relaxed);
+      livenessTrace_.owedAttempts.store(owedAttempts_, std::memory_order_relaxed);
+      livenessTrace_.owedNextUs.store(owedNextUs_, std::memory_order_relaxed);
+    });
     if (!parking && decoderRekeyPending_.load(std::memory_order_acquire) &&
         keyframeRequests_.Request(2, loopNowUs).queued) {
       decoderRekeyPending_.store(false, std::memory_order_release);
@@ -1002,7 +1013,22 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         continue;
       }
       TcpControlResponse response{};
-      if (!execute_control_action(*controlLink, action, &response)) {
+      REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkWrite, now_us()));
+      const bool exchanged = execute_control_action(*controlLink, action, &response);
+      REMOTE60_LT({
+        const uint64_t t = now_us();
+        livenessTrace_.Wk(LtPhase::WkPass, t);
+        if (action.kind == ControlOutboundActionKind::KeyframeRequest) {
+          livenessTrace_.keySentSeq.store(action.keyframe.seq, std::memory_order_relaxed);
+          livenessTrace_.keySentReason.store(action.keyframe.reason, std::memory_order_relaxed);
+          livenessTrace_.keySentOk.store(exchanged ? 1u : 0u, std::memory_order_relaxed);
+          livenessTrace_.keySentUs.store(t, std::memory_order_relaxed);
+          if (controlOverUdp_.load(std::memory_order_acquire)) {
+            livenessTrace_.keySentTransportMsg.store(udpControl_.GetStats().messagesSent, std::memory_order_relaxed);
+          }
+        }
+      });
+      if (!exchanged) {
         if (!stopRequested_.load(std::memory_order_acquire)) {
           SignalRuntimeFailure("control loop failed");
         }
@@ -1114,6 +1140,7 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
             answer.streamGeneration = 0;
           }
           if (encodedFrameSink_) {
+            REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkSinkHook, now_us()));
             encodedFrameSink_->OnWindowSelectionControlResultFor(answer, action.selectionTag);
             // r3 M1: the answer itself may owe the decoder an IDR (its own arrived first and was
             // dropped). Queued now, not at the next frame.
@@ -1360,13 +1387,28 @@ void ClientSessionController::VideoReceiveMain() {
     if (!currentSink) return;
     sinkFrames_.fetch_add(1, std::memory_order_relaxed);
     sinkPayloadBytes_.fetch_add(frame.payload.size(), std::memory_order_relaxed);
+    REMOTE60_LT(livenessTrace_.Rx(LtPhase::RxDeliver, now_us()));
+#ifdef GNLINK_LIVENESS_TRACE
+    const uint64_t deliverStartUs = now_us();
+#endif
     currentSink->OnEncodedH264Frame(std::move(frame));
+    REMOTE60_LT({
+      const uint64_t t = now_us();
+      livenessTrace_.MaxDeliver(t - deliverStartUs);
+      livenessTrace_.Rx(LtPhase::RxKeyConsume, t);
+    });
     // The decoder may have had to discard what it was just handed. Ask for an IDR now
     // rather than letting every later delta decode against a reference that never arrived.
     if (currentSink->ConsumeDecoderKeyframeRequest()) {
       // r3 M1: refused by the limiter is not forgotten -- the control loop retries it.
-      if (!keyframeRequests_.Request(2, now_us()).queued) decoderRekeyPending_.store(true, std::memory_order_release);
+      if (!keyframeRequests_.Request(2, now_us()).queued) {
+        decoderRekeyPending_.store(true, std::memory_order_release);
+        REMOTE60_LT(livenessTrace_.keyWantRefused.fetch_add(1, std::memory_order_relaxed));
+      } else {
+        REMOTE60_LT(livenessTrace_.keyWantQueued.fetch_add(1, std::memory_order_relaxed));
+      }
     }
+    REMOTE60_LT(livenessTrace_.Rx(LtPhase::RxAssemble, now_us()));
   };
   callbacks.requestKeyframe = [&]() {
     // KeyframeRequestState owns the time/token limiter, so repeated gaps cannot make an IDR storm.
@@ -1426,6 +1468,12 @@ void ClientSessionController::VideoReceiveMain() {
                    nackEnabled ? 1 : 0, static_cast<unsigned long long>(pipelineConfig.holdUs), nb ? 1 : 0);
     }
 
+    REMOTE60_LT({
+      if (livenessTrace_.rxTid.load(std::memory_order_relaxed) == 0) {
+        livenessTrace_.rxTid.store(liveness_tid(), std::memory_order_relaxed);
+      }
+      livenessTrace_.Rx(LtPhase::RxWait, now_us());
+    });
     int recvErr = 0;
     int n;
     if (udpRecvHookForTest_) {
@@ -1479,6 +1527,11 @@ void ClientSessionController::VideoReceiveMain() {
                      static_cast<unsigned long long>(recvRetry), static_cast<unsigned long long>(sinceDatagramMs),
                      stopRequested_.load(std::memory_order_acquire) ? 1 : 0);
       }
+      REMOTE60_LT({
+        const uint64_t t = now_us();
+        livenessTrace_.Rx(LtPhase::RxTick, t);
+        livenessTrace_.rxLastTickUs.store(t, std::memory_order_relaxed);
+      });
       if (controlOverUdp_.load(std::memory_order_acquire)) udpControl_.Tick();
       pipeline.OnTick(now_us());
       // r2 U2 anti-spin: do NOT assume a Retryable waited -- would-block/interrupted can return at once
@@ -1495,9 +1548,18 @@ void ClientSessionController::VideoReceiveMain() {
     }
     lastDatagramUs = now_us();
     lastDropLoopUs = 0;  // a real datagram breaks any immediate-drop streak
+    REMOTE60_LT({
+      livenessTrace_.rxLastDatagramUs.store(lastDatagramUs, std::memory_order_relaxed);
+      livenessTrace_.rxDatagrams.fetch_add(1, std::memory_order_relaxed);
+      livenessTrace_.Rx(LtPhase::RxControl, lastDatagramUs);
+    });
 
     if (controlOverUdp_.load(std::memory_order_acquire) &&
         udpControl_.OnPacket(datagram.data(), static_cast<size_t>(n))) {
+      REMOTE60_LT({
+        livenessTrace_.rxLastControlUs.store(now_us(), std::memory_order_relaxed);
+        livenessTrace_.rxControlPackets.fetch_add(1, std::memory_order_relaxed);
+      });
       sessionBytesReceived_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
       pipeline.OnTick(now_us());
       continue;
@@ -1505,6 +1567,7 @@ void ClientSessionController::VideoReceiveMain() {
     if (n < static_cast<int>(sizeof(UdpVideoChunkHeader))) continue;
 
     sessionBytesReceived_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+    REMOTE60_LT(livenessTrace_.Rx(LtPhase::RxAssemble, now_us()));
     const uint64_t malformedBefore = pipeline.stats().malformed;
     pipeline.OnDatagram(datagram.data(), static_cast<size_t>(n), now_us());
     const auto& ps = pipeline.stats();
@@ -1530,6 +1593,27 @@ void ClientSessionController::VideoReceiveMain() {
                    static_cast<unsigned long long>(ps.discontinuities));
     }
   }
+}
+
+std::string ClientSessionController::LivenessTraceLine() {
+#ifdef GNLINK_LIVENESS_TRACE
+  std::string line = std::string(kLivenessTraceMarker) + " " + livenessTrace_.Format(now_us());
+  if (controlOverUdp_.load(std::memory_order_acquire)) {
+    const UdpControlChannel::Stats st = udpControl_.GetStats();
+    char ch[200];
+    std::snprintf(ch, sizeof(ch), " | ch sent=%llu recv=%llu retx=%llu nack=%llu pend=%llu closed=%d reason=%s",
+                  static_cast<unsigned long long>(st.messagesSent), static_cast<unsigned long long>(st.messagesReceived),
+                  static_cast<unsigned long long>(st.fragmentRetransmits), static_cast<unsigned long long>(st.nacksSent),
+                  static_cast<unsigned long long>(st.pendingMessages), udpControl_.IsClosed() ? 1 : 0,
+                  to_string(udpControl_.CloseReason()));
+    line += ch;
+  } else {
+    line += " | ch tcp";
+  }
+  return line;
+#else
+  return std::string();
+#endif
 }
 
 void ClientSessionController::RunVideoReceiveForTest(SocketHandle udpSocket, ClientEncodedFrameSink* sink) {

@@ -17,7 +17,7 @@ val shTestSeam = project.findProperty("gnlink.shTestSeam") == "true"
 gradle.taskGraph.whenReady {
   val release = allTasks.any { it.project == project && it.name.contains("Release") }
   for (property in listOf("gnlink.testDirectoryUrl", "gnlink.testMigratableOrigins", "gnlink.testKeepParkTtlMs",
-                          "gnlink.testStandbyAutoPrepare")) {
+                          "gnlink.testStandbyAutoPrepare", "gnlink.livenessTrace")) {
     if (release && project.hasProperty(property)) {
       throw GradleException(
         "$property is for debug builds; a release build always uses $fixedDirectoryUrl")
@@ -58,6 +58,9 @@ android {
     // its own (start / return / list refresh). OFF in every shipped build; a user's own "PC 목록" from a supported PC
     // goes to standby regardless. Only a debug TEST build may turn it on (below).
     buildConfigField("boolean", "STANDBY_AUTO_PREPARE", "false")
+    // apk-decoder-liveness r2: the session's progress trace, logged by the app twice a second. OFF in every shipped
+    // build; only a debug TEST build turns it on (below), with its native half (GNLINK_LIVENESS_TRACE).
+    buildConfigField("boolean", "LIVENESS_TRACE", "false")
 
     // Where updates come from, and the key that says a manifest is ours.
     //
@@ -111,6 +114,18 @@ android {
       // automatically. Refused for a release (above).
       if (project.findProperty("gnlink.testStandbyAutoPrepare") == "true") {
         buildConfigField("boolean", "STANDBY_AUTO_PREPARE", "true")
+      }
+      // TEST BUILDS ONLY (apk-decoder-liveness r2, Codex design r2 (2)): -Pgnlink.livenessTrace=true -- the session's
+      // receive / control progress, the owed key, the last keyframe request and the control transport's counters,
+      // logged as `liveness_trace` twice a second. Metadata only. Refused for a release (above); native marker
+      // "liveness-trace", which the release gate refuses.
+      if (project.findProperty("gnlink.livenessTrace") == "true") {
+        buildConfigField("boolean", "LIVENESS_TRACE", "true")
+        externalNativeBuild {
+          cmake {
+            cppFlags += "-DGNLINK_LIVENESS_TRACE=1"
+          }
+        }
       }
     }
     release {

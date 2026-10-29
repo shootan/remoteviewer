@@ -1692,6 +1692,7 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
         applyImmersiveMode()
 
         diagnosticsLog = SessionDiagnosticsLog(this)
+        if (BuildConfig.LIVENESS_TRACE) startLivenessTraceLogger()  // apk-decoder-liveness r2: test builds only
         SharpenTestSeam.runFixture(this, intent)  // sh-filter r3: test builds only (the shipped seam does nothing)
         loginScene = findViewById(R.id.loginScene)
         hostsScene = findViewById(R.id.hostsScene)
@@ -2317,7 +2318,32 @@ class MainActivity : Activity(), TextureView.SurfaceTextureListener {
     /** Empty until an operational key exists. Empty means this build cannot check, not that it failed. */
     private fun trustedUpdateKeyHex(): String = BuildConfig.UPDATE_PUBLIC_KEY_HEX
 
+    // apk-decoder-liveness r2 (Codex design r2 (2)) -- TEST builds only (-Pgnlink.livenessTrace=true): the session's
+    // receive / control progress and the decoder worker's, logged as `liveness_trace` twice a second from a thread of
+    // its own -- not the UI thread, which is the one that can be held up. The native side formats it from atomics.
+    private var livenessTraceThread: Thread? = null
+
+    private fun startLivenessTraceLogger() {
+        if (livenessTraceThread != null) return
+        val thread = Thread({
+            while (!Thread.currentThread().isInterrupted) {
+                try {
+                    Thread.sleep(500)
+                } catch (_: InterruptedException) {
+                    return@Thread
+                }
+                val line = NativeSessionBridge.nativeLivenessTrace(activeHandle)
+                if (line.isNotEmpty()) diagnosticsLog.log("liveness_trace", "handle=$activeHandle $line")
+            }
+        }, "lt-log")
+        thread.isDaemon = true
+        thread.start()
+        livenessTraceThread = thread
+    }
+
     override fun onDestroy() {
+        livenessTraceThread?.interrupt()
+        livenessTraceThread = null
         updateStatusReceiver?.let {
             try { unregisterReceiver(it) } catch (_: Exception) { }
         }
