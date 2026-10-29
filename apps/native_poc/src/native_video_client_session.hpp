@@ -259,6 +259,12 @@ class ClientSessionController {
   void TestConfigureKeyframeLimiter(uint64_t minIntervalUs, uint64_t tokenRefillUs, uint32_t tokenCapacity) {
     keyframeRequests_.Configure(minIntervalUs, tokenRefillUs, tokenCapacity);
   }
+  // TEST BUILD ONLY (apk-inbox C r3): a whole descriptor (epoch / episode / token as a producer took it) published
+  // through the same section every path uses -- e.g. an older one published after a newer one.
+  bool TestPublishKey(const DecoderKeyRequest& r) {
+    return RequestKey(r, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                   std::chrono::steady_clock::now().time_since_epoch()).count()));
+  }
   // TEST BUILD ONLY (apk-inbox C r2): one key request with these causes, through the same section every path uses.
   bool TestRequestKey(uint32_t causes) {
     DecoderKeyRequest r;

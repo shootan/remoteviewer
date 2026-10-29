@@ -649,6 +649,58 @@ int main() {
           sink.KeyframeOwedFor() != 0 && sink.KeyframeOwedFor() != token && field(st, "covered") == 0);
     sink.SetSurface(env, nullptr);
   }
+  std::puts("\n--- [C12] C r3 N2 (Codex's sequences): a late, OLDER ask merged after a newer one -- the sink still takes it");
+  {
+    AndroidVideoDecoderSink sink;
+    Rx rx{sink};
+    rx.sendBack = false;
+    const uint64_t g = start(sink, rx, 41, 411);
+    // (1) the same epoch: episode e then, after its IDR committed, episode e+1
+    make_loss(sink, rx, g);
+    DecoderKeyRequest older;
+    older.causes = kKeyCauseRecovery;
+    older.sinkEpoch = field(sink.DebugStatus(), "keyEpoch");
+    older.episodeId = field(sink.DebugStatus(), "episode");
+    rx.send(frame(g, true, 0x91));  // its IDR commits: the episode closes
+    wait_until([&] { return sfield(sink.DebugStatus(), "recovery") == "idle"; }, 1500);
+    make_loss(sink, rx, g);
+    DecoderKeyRequest newer;
+    newer.causes = kKeyCauseRecovery;
+    newer.sinkEpoch = field(sink.DebugStatus(), "keyEpoch");
+    newer.episodeId = field(sink.DebugStatus(), "episode");
+    DecoderKeyRequest merged = newer;
+    merged.Merge(older);  // published late
+    check("[C12] (1) episode e+1 published, then the late episode-e ask: the sink still takes the merged ask (recovery)",
+          newer.episodeId > older.episodeId && sink.DecoderKeyRequestValidCauses(newer) == kKeyCauseRecovery &&
+              sink.DecoderKeyRequestValidCauses(older) == 0 &&
+              sink.DecoderKeyRequestValidCauses(merged) == kKeyCauseRecovery,
+          "episodes " + std::to_string(older.episodeId) + "/" + std::to_string(newer.episodeId) + " merged episode=" +
+              std::to_string(merged.episodeId) + " valid=" + std::to_string(sink.DecoderKeyRequestValidCauses(merged)));
+    // (2) a newer epoch: two aborts, a pick between them -- both descriptors handed out by the sink itself
+    sink.PrepareForWindowSelection(42);
+    sink.OnWindowSelectionControlResultFor(answer(421), 42);
+    sink.AbortWindowSelection();
+    DecoderKeyRequest ab1, ab2;
+    const bool t1 = sink.TakeDecoderKeyRequest(&ab1);
+    sink.PrepareForWindowSelection(43);
+    sink.OnWindowSelectionControlResultFor(answer(431), 43);
+    sink.AbortWindowSelection();
+    const bool t2 = sink.TakeDecoderKeyRequest(&ab2);
+    DecoderKeyRequest m2 = ab2;
+    m2.Merge(ab1);  // the older epoch's ask, published late
+    check("[C12] (2) the newer epoch's abort ask published, then the late older-epoch one: the merged ask still valid",
+          t1 && t2 && ab2.sinkEpoch > ab1.sinkEpoch && (ab1.causes & kKeyCauseSelectionAbort) != 0 &&
+              sink.DecoderKeyRequestValidCauses(ab1) == 0 &&
+              sink.DecoderKeyRequestValidCauses(m2) == kKeyCauseSelectionAbort && m2.sinkEpoch == ab2.sinkEpoch,
+          "epochs " + std::to_string(ab1.sinkEpoch) + "/" + std::to_string(ab2.sinkEpoch) + " merged epoch=" +
+              std::to_string(m2.sinkEpoch) + " valid=" + std::to_string(sink.DecoderKeyRequestValidCauses(m2)));
+    DecoderKeyRequest m3 = ab1;
+    m3.Merge(ab2);  // the issue order
+    check("[C12] in the issue order the same two merge to the newer one (valid)",
+          sink.DecoderKeyRequestValidCauses(m3) == kKeyCauseSelectionAbort);
+    sink.SetSurface(env, nullptr);
+  }
+
   std::printf("\nandroid_decoder_inbox_c_test: %d checks, %d failed\nRESULT: %s\n", gChecks, gFailures,
               gFailures == 0 ? "PASS" : "FAIL");
   return gFailures == 0 ? 0 : 1;

@@ -643,6 +643,63 @@ int main() {
     r.Down();
   }
 
+  std::puts("\n--- [S10] C r3 N2: an OLDER descriptor published after a newer one -- accepted (coalesced) and held");
+  for (const bool heldCase : {false, true}) {
+    const std::string tag = heldCase ? "[S10 held]" : "[S10 accepted]";
+    Rig r;
+    const bool up = r.Up(heldCase ? 102 : 101);
+    check(tag + " connected and ready", up);
+    if (!up) {
+      r.Down();
+      continue;
+    }
+    r.host.ignoreKeyRequests = true;
+    // a valid ask of the sink's CURRENT epoch (selection-abort: valid exactly while the epoch stands, and nothing the
+    // sink would ask by itself here) and an older one: the epoch before
+    const uint64_t epoch = field(r.sink.DebugStatus(), "keyEpoch");
+    n::DecoderKeyRequest newer, older;
+    newer.causes = older.causes = n::kKeyCauseSelectionAbort;
+    newer.sinkEpoch = epoch;
+    older.sinkEpoch = epoch - 1;
+    const uint64_t stale0 = r.c.KeyRequestsDroppedStale();
+    if (!heldCase) {
+      // both taken by the limiter and coalesced in ACCEPTED before the scheduler takes them (its pass held meanwhile)
+      r.c.TestConfigureKeyframeLimiter(0, 1, 100);
+      std::atomic<int> gate{0};  // 0 off, 1 hold the pass, 2 released
+      r.c.SetTestPassBoundaryHook([&](bool) {
+        while (gate.load() == 1) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+      });
+      gate = 1;
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));  // the control thread now waits in the hook
+      const auto t0 = Clock::now();
+      const bool q1 = r.c.TestPublishKey(newer);
+      const bool q2 = r.c.TestPublishKey(older);
+      gate = 2;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+      r.c.SetTestPassBoundaryHook(nullptr);
+      const auto reqs = r.host.RequestsSinceMs(t0);
+      check(tag + " newer then older, both accepted and coalesced: the merged ask is still valid -- sent, not dropped",
+            q1 && q2 && reqs.size() == 1 && r.c.KeyRequestsDroppedStale() == stale0,
+            "queued=" + std::to_string(q1) + "/" + std::to_string(q2) + " host requests=" + list(reqs) + " droppedStale+" +
+                std::to_string(r.c.KeyRequestsDroppedStale() - stale0));
+    } else {
+      // the limiter's interval just spent by a pipeline ask: both go to HELD and merge there
+      r.c.TestConfigureKeyframeLimiter(2000000, 1, 100);
+      std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+      const auto t0 = Clock::now();
+      const bool q0 = r.c.TestRequestKey(n::kKeyCausePipeline);
+      const bool q1 = r.c.TestPublishKey(newer);
+      const bool q2 = r.c.TestPublishKey(older);
+      std::this_thread::sleep_for(std::chrono::milliseconds(4000));  // past the interval: the held ask goes
+      const auto reqs = r.host.RequestsSinceMs(t0);
+      check(tag + " newer then older, both held: the merged held ask is still valid -- it goes once the limiter allows",
+            q0 && !q1 && !q2 && reqs.size() == 2 && r.c.KeyRequestsDroppedStale() == stale0,
+            "queued=" + std::to_string(q0) + "/" + std::to_string(q1) + "/" + std::to_string(q2) + " host requests=" +
+                list(reqs) + " droppedStale+" + std::to_string(r.c.KeyRequestsDroppedStale() - stale0));
+    }
+    r.Down();
+  }
+
   std::printf("\nandroid_decoder_inbox_session_test: %d checks, %d failed\nRESULT: %s\n", gChecks, gFailures,
               gFailures == 0 ? "PASS" : "FAIL");
   return gFailures == 0 ? 0 : 1;
