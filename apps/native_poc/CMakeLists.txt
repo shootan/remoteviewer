@@ -1169,7 +1169,7 @@ target_include_directories(remote60_android_decoder_inbox_test PRIVATE
   ${REMOTE60_LIVENESS_SINK_DIR}
   src
 )
-target_compile_definitions(remote60_android_decoder_inbox_test PRIVATE NOMINMAX)
+target_compile_definitions(remote60_android_decoder_inbox_test PRIVATE NOMINMAX GNLINK_LIVENESS_TRACE=1)
 
 # apk-decoder-liveness r1 contrast 2: the product receive loop (VideoReceiveMain, which carries the UDP control
 # channel) delivering into the APK sink while its codec is held; a fake host over loopback with its own control

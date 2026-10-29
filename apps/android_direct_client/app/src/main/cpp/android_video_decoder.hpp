@@ -427,7 +427,18 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   std::atomic<uint64_t> ltRxLockHoldMaxUs_{0};
   uint64_t ltPassFrames_ = 0;    // the worker's own (under mu_)
   uint64_t ltPassStartUs_ = 0;
-  uint64_t ltCurEnqueueUs_ = 0;
+  // r2: each AU's enqueue time by its identity (stream generation + seq), under mu_ (RX writes, the worker reads)
+  struct LtEnq {
+    uint64_t gen = 0;
+    uint32_t seq = 0;
+    uint64_t us = 0;
+  };
+  static constexpr size_t kLtEnqRing = 64;
+  LtEnq ltEnq_[kLtEnqRing];
+  std::atomic<uint64_t> ltAgeQueueUnmatched_{0};
+  std::atomic<uint64_t> ltAgeQueueReplay_{0};
+  std::atomic<uint64_t> ltInboxPeakPreFrames_{0};
+  std::atomic<uint64_t> ltInboxPeakPreBytes_{0};
   LtAgeHist ltAgePop_;
   LtAgeHist ltAgeQueue_;
   std::atomic<uint64_t> ltApiCount_[kApiKinds] = {};

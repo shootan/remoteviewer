@@ -379,12 +379,21 @@ void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::nat
                   latestInputStreamGeneration_ != frame.header.streamGeneration;
   latestInputStreamGeneration_ = frame.header.streamGeneration;
   inboxBytes_ += frame.payload.size();
-  REMOTE60_LT(item.enqueueUs = LtNowUs());
+  REMOTE60_LT({
+    item.enqueueUs = LtNowUs();
+    // apk-decoder-inbox r2 (Codex codex_apk_inbox_plan_src_r1.md N1): the AU's own enqueue time, by its identity
+    // (stream generation + AU seq) -- looked up when THAT AU goes into the codec, wherever it waited (inbox, the
+    // pending slot). r1 used the time of whatever frame was processed last: a held IDR's 286 ms read as 33 ms.
+    LtEnq& e = ltEnq_[frame.header.seq % kLtEnqRing];
+    e.gen = frame.header.streamGeneration;
+    e.seq = frame.header.seq;
+    e.us = item.enqueueUs;
+  });
   item.frame = std::move(frame);
   inbox_.push_back(std::move(item));
-  REMOTE60_LT({
-    LtMax(ltInboxHwFrames_, inbox_.size());
-    LtMax(ltInboxHwBytes_, inboxBytes_);
+  REMOTE60_LT({  // r2: the peak INCLUDING the frame just added, before the trim (may be 9 / over 4 MiB for an instant)
+    LtMax(ltInboxPeakPreFrames_, inbox_.size());
+    LtMax(ltInboxPeakPreBytes_, inboxBytes_);
   });
   // Bounded: the oldest goes. Its loss is the codec's loss -- an IDR is owed again and asked for, and the deltas
   // after the gap are not fed before the next IDR (ProcessFrameLocked). r4 N2: no exception for the last frame --
@@ -404,12 +413,15 @@ void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::nat
       log_info(line);
     }
   }
+  REMOTE60_LT({  // r2: what stays admitted after the trim (never over the caps)
+    LtMax(ltInboxHwFrames_, inbox_.size());
+    LtMax(ltInboxHwBytes_, inboxBytes_);
+  });
   workCv_.notify_all();
 }
 
 // The worker's part of a frame (what the receive thread did here before r1), in arrival order.
 void AndroidVideoDecoderSink::ProcessFrameLocked(InboxFrame&& item) {
-  REMOTE60_LT(ltCurEnqueueUs_ = item.enqueueUs);  // its age when it is queued into the codec (directly from here)
   remote60::native_poc::UdpH264AssembledFrame frame = std::move(item.frame);
   const bool isKeyFrame = (frame.header.flags & 1u) != 0;
   if (item.resetPts) ResetPtsStateLocked();
@@ -960,18 +972,28 @@ std::string AndroidVideoDecoderSink::LivenessTraceLine() const {
     return std::string(b);
   };
   std::string out = line;
-  char more[256];
-  std::snprintf(more, sizeof(more), " | inboxHw=%llu/%lluB passFramesMax=%llu passSvcMax=%llums rxLockWaitMax=%llums "
-                "rxLockHoldMax=%llums",
+  char more[320];
+  // r2 labels: inboxHw = admitted after the trim; inboxPeakPre = including the frame just added, before the trim;
+  // rxLockScope = from taking mu_ to the end of the call's scope (an upper bound of the hold: it includes what runs
+  // after the unlock in the same scope)
+  std::snprintf(more, sizeof(more), " | inboxHw=%llu/%lluB inboxPeakPre=%llu/%lluB passFramesMax=%llu passSvcMax=%llums "
+                "rxLockWaitMax=%llums rxLockScopeMax=%llums",
                 static_cast<unsigned long long>(ltInboxHwFrames_.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(ltInboxHwBytes_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(ltInboxPeakPreFrames_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(ltInboxPeakPreBytes_.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(ltPassFramesMax_.load(std::memory_order_relaxed)),
                 static_cast<unsigned long long>(ltPassServiceMaxUs_.load(std::memory_order_relaxed) / 1000),
                 static_cast<unsigned long long>(ltRxLockWaitMaxUs_.load(std::memory_order_relaxed) / 1000),
                 static_cast<unsigned long long>(ltRxLockHoldMaxUs_.load(std::memory_order_relaxed) / 1000));
   out += more;
-  out += " | agePop " + hist(ltAgePop_) + " | ageQueue " + hist(ltAgeQueue_) + " | api";
-  static const char* kApiNames[kApiKinds] = {"other", "create", "stopDel", "name", "deqIn", "queueIn",
+  char aq[96];
+  std::snprintf(aq, sizeof(aq), " unmatched=%llu replay=%llu",
+                static_cast<unsigned long long>(ltAgeQueueUnmatched_.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(ltAgeQueueReplay_.load(std::memory_order_relaxed)));
+  out += " | agePop " + hist(ltAgePop_) + " | ageQueueAU " + hist(ltAgeQueue_) + aq + " | api";
+  // r2: "createCfgStart" is ONE span (create + configure + start), not three calls measured apart
+  static const char* kApiNames[kApiKinds] = {"other", "createCfgStart", "stopDel", "name", "deqIn", "queueIn",
                                              "fmt", "release", "deqOut", "winRel"};
   for (int k = 0; k < kApiKinds; ++k) {
     const uint64_t n = ltApiCount_[k].load(std::memory_order_relaxed);
@@ -1302,9 +1324,20 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
   if (queueingReplay_) RememberReplayPtsLocked(ptsUs);
   lastInputQueueSteadyUs_ = steady_now_us();
   if (isKey) codecAwaitsKey_ = false;  // keepalive r5 D1: this instance has its IDR
-  REMOTE60_LT(if (ltCurEnqueueUs_) {
-    LtAge(ltAgeQueue_, LtNowUs() - ltCurEnqueueUs_);
-    ltCurEnqueueUs_ = 0;  // a held frame queued later has no enqueue time here: not counted
+  REMOTE60_LT({
+    // r2: THIS AU's enqueue time (by identity). A bootstrap replay is the same AU queued again: not an arrival, not
+    // counted. An AU whose record the ring has lost (64+ AUs later) is counted as unmatched -- never another's time.
+    if (queueingReplay_) {
+      ltAgeQueueReplay_.fetch_add(1, std::memory_order_relaxed);
+    } else {
+      LtEnq& e = ltEnq_[frame.header.seq % kLtEnqRing];
+      if (e.us != 0 && e.seq == frame.header.seq && e.gen == frame.header.streamGeneration) {
+        LtAge(ltAgeQueue_, LtNowUs() - e.us);
+        e.us = 0;  // one AU, one age
+      } else {
+        ltAgeQueueUnmatched_.fetch_add(1, std::memory_order_relaxed);
+      }
+    }
   });
   if ((frame.header.flags & 1u) != 0 && gate_.pending() != 0 &&
       readySelectionGeneration_ != gate_.pending()) {

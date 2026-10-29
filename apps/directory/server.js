@@ -1692,6 +1692,9 @@ function relayTraceOf(session) {
     session.trace = {
       mono0: relayTraceMonoMs(), wall0: Date.now(), buckets: new Map(),
       last: { c2hRx: 0, c2hSent: 0, h2cRx: 0, h2cSent: 0 }, sendErr: { c2h: 0, h2c: 0 }, lastErr: '', events: [],
+      // apk-decoder-inbox r2 (Codex codex_apk_inbox_plan_src_r1.md, traffic): the UDP payload bytes that ARRIVED for this
+      // flow, per direction (counted once, at rx -- never again at sent), cumulative and per 1 s bucket (`<key>B`)
+      rxBytes: { c2h: 0, h2c: 0 }, rxPkts: { c2h: 0, h2c: 0 },
     };
   }
   return session.trace;
@@ -1711,6 +1714,12 @@ function relayTraceCount(session, dir, what, msg) {
   }
   const key = `${dir}.${what}.${relayTraceKind(msg)}`;
   b[key] = (b[key] || 0) + 1;
+  if (what === 'rx') {
+    const len = msg ? msg.length : 0;
+    b[`${key}B`] = (b[`${key}B`] || 0) + len;
+    t.rxBytes[dir] += len;
+    t.rxPkts[dir] += 1;
+  }
   if (what === 'rx') t.last[`${dir}Rx`] = mono;
   if (what === 'sent') t.last[`${dir}Sent`] = mono;
 }
@@ -1745,7 +1754,8 @@ function relayTraceLine(session, why, withBuckets) {
              `mono0=${t.mono0} wall0=${new Date(t.wall0).toISOString()} state=${session.state} ` +
              `ageMs c2hRx=${age(t.last.c2hRx)} c2hSent=${age(t.last.c2hSent)} h2cRx=${age(t.last.h2cRx)} ` +
              `h2cSent=${age(t.last.h2cSent)} sendErr c2h=${t.sendErr.c2h} h2c=${t.sendErr.h2c} ` +
-             `lastErr=${t.lastErr || 'none'} events=[${t.events.join(' ')}]`;
+             `lastErr=${t.lastErr || 'none'} rxBytes c2h=${t.rxBytes.c2h}/${t.rxPkts.c2h} h2c=${t.rxBytes.h2c}/${t.rxPkts.h2c} ` +
+             `events=[${t.events.join(' ')}]`;
   if (withBuckets) {
     const parts = [];
     for (const [sec, b] of t.buckets) parts.push(`${sec}:` + Object.entries(b).map(([k, v]) => `${k}=${v}`).join(','));
