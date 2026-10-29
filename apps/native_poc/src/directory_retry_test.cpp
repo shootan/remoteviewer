@@ -698,17 +698,51 @@ int main() {
           heartbeatsAfter - heartbeatsBefore <= 2,
           std::to_string(heartbeatsAfter - heartbeatsBefore) + " heartbeats");
 
+    // rel-0164 (verifier, 53fced4: 176/177 once, "single use" FAILED): the script's last reply repeats, so every
+    // heartbeat hands the SAME token out again -- and the punches above ask for a refresh. A heartbeat landing between
+    // the two AuthorizePeer calls below re-installed the consumed token and the second call passed. The real directory
+    // issues a new token per connect, so that was this fake, not the product. From here the directory hands out no
+    // capability, and the judgement waits (bounded) for one heartbeat served with that reply: the agent runs its
+    // heartbeats one after another, so every earlier reply that carried the token has been taken in by then. (A
+    // heartbeat without a capability removes nothing: capabilities are only added, each with its own expiry.)
+    dir.Script("/api/host/heartbeat", {Reply{200, "{\"ok\":true}"}});
+    const int heartbeatsAtRescript = dir.Count("/api/host/heartbeat");
+    const auto quietUntil = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    while (dir.Count("/api/host/heartbeat") <= heartbeatsAtRescript && std::chrono::steady_clock::now() < quietUntil)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    const bool settled = dir.Count("/api/host/heartbeat") > heartbeatsAtRescript;
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));  // that last reply taken in (it carries nothing)
+    check("the directory stops handing the token out before single use is judged (one heartbeat without it served)",
+          settled, std::to_string(dir.Count("/api/host/heartbeat") - heartbeatsAtRescript) + " heartbeat(s) since");
+
     // AuthorizePeer, unchanged: the capability was issued against the PUBLIC tuple and the Hello
     // arrives from the PRIVATE one, which is exactly what a direct LAN connection looks like.
     // The rule is not being modified here -- it is being pinned, because the whole fix depends
     // on it staying true.
     remote60::native_poc::directory::HostAgent::PeerAuthDiag diag;
+    const int heartbeatsBeforeAuth = dir.Count("/api/host/heartbeat");
     const bool authorized = harness.agent.AuthorizePeer(token, client, &diag);
     check("a capability issued for the public tuple is accepted from the private one", authorized);
     check("...and is reported as an endpoint that moved", diag.endpointMoved);
-    check("...and the capability is single use", !harness.agent.AuthorizePeer(token, client, &diag));
+    const bool secondRefused = !harness.agent.AuthorizePeer(token, client, &diag);
+    // recorded, so a pass is known not to rest on a reissue: any heartbeat now carries no token anyway
+    check("...and the capability is single use", secondRefused,
+          std::to_string(dir.Count("/api/host/heartbeat") - heartbeatsBeforeAuth) +
+              " heartbeats between the two calls (none of them carries the token)");
     check("...and a token nobody issued is refused",
           !harness.agent.AuthorizePeer(std::string(32, 'z'), client, &diag));
+
+    // rel-0164: the mechanism the step above guards against, shown on purpose -- the fake hands the SAME token out again
+    // and one heartbeat later the consumed token is accepted again. The real directory never re-issues a token; this
+    // is what made the old single-use check pass or fail by timing.
+    dir.Script("/api/host/heartbeat", {Reply{200, heartbeatWithCapability(token, "211.218.222.1", 60420)}});
+    const int heartbeatsAtReissue = dir.Count("/api/host/heartbeat");
+    const auto reissueUntil = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    while (dir.Count("/api/host/heartbeat") <= heartbeatsAtReissue && std::chrono::steady_clock::now() < reissueUntil)
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));  // that reply taken in
+    check("contrast: a heartbeat re-handing the same token re-installs it -- the consumed token is accepted again",
+          dir.Count("/api/host/heartbeat") > heartbeatsAtReissue && harness.agent.AuthorizePeer(token, client, &diag));
   }
 
   {
