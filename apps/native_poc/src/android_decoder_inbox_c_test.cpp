@@ -583,7 +583,8 @@ int main() {
     // (chainTrim) -- it is never handed to the worker. (In this sequence the slot would drop d3 as well; the r1-vs-r2
     // contrast of the trim itself is the pure test's Codex counterexample.)
     check("[C10] N1-a: the loss at d2 trims d3 out of the queue; the codec's next input is IDR4, never d3",
-          !t.empty() && t.front() == 0xD4 && std::find(t.begin(), t.end(), 0xD3) == t.end() && field(st, "chainTrim") >= 1,
+          !t.empty() && t.front() == 0xD4 && std::find(t.begin(), t.end(), 0xD3) == t.end() &&
+              st.find(" chainTrim=") != std::string::npos && field(st, "chainTrim") >= 1,  // an absent field is not a pass
           "fed=" + [&] { std::string s; for (uint8_t x : t) s += std::to_string(x) + ","; return s; }() +
               " chainTrim=" + std::to_string(field(st, "chainTrim")) + " tailGap=" + std::to_string(field(st, "tailGap")));
     sink.SetSurface(env, nullptr);
@@ -615,6 +616,10 @@ int main() {
     const std::string s2 = sink.DebugStatus();
     check("[C11] after the 4 s final window with no usable IDR: covered-exhausted; still no ask; the gate still owes (not "
           "falsely paid)", field(s2, "coveredExh") == 1 && !asked2 && sink.KeyframeOwedFor() == token);
+    DecoderKeyRequest pipe;
+    pipe.causes = kKeyCausePipeline;
+    check("[C11] covered-exhausted leaves an independent (pipeline) cause valid: it is not swallowed",
+          sink.DecoderKeyRequestValidCauses(pipe) == kKeyCausePipeline);
     const size_t q0 = queued();
     rx.send(frame(g, true, 0xE2));  // the host's late IDR
     rx.send(frame(g, false, 0xE3));

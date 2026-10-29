@@ -1178,6 +1178,9 @@ set(REMOTE60_CHAIN_INBOX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src" CACHE PATH
     "decoder_chain_inbox.hpp the chain inbox test builds (negative runs point it at a mutated copy)")
 add_executable(remote60_decoder_chain_inbox_test src/decoder_chain_inbox_test.cpp)
 target_include_directories(remote60_decoder_chain_inbox_test PRIVATE ${REMOTE60_CHAIN_INBOX_DIR} src)
+# C r2: Codex's N1-a / N3 counterexamples with only the API r1 and r2 share -- built against 5fe90a9's header it FAILs.
+add_executable(remote60_decoder_chain_inbox_r2_contrast_test src/decoder_chain_inbox_r2_contrast_test.cpp)
+target_include_directories(remote60_decoder_chain_inbox_r2_contrast_test PRIVATE ${REMOTE60_CHAIN_INBOX_DIR} src)
 
 # apk-inbox C: the boundaries C adds, on the APK sink itself against the stand-in NDK (order, oversize, a candidate
 # lost again, the t0/1/3/7 schedule and exhaustion, D8 validity, the binding adapter, overload, a slow create). A PLAIN
