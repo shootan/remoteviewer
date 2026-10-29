@@ -51,20 +51,8 @@ function get(pathname, body, token) {
   });
 }
 
-function waitForServer() {
-  return new Promise((resolve, reject) => {
-    const deadline = Date.now() + 8000;
-    const attempt = () => {
-      const req = http.request({ host: '127.0.0.1', port: HTTP, path: '/healthz' },
-                               (res) => { res.resume(); resolve(); });
-      req.on('error', () => {
-        if (Date.now() > deadline) return reject(new Error('server did not start'));
-        setTimeout(attempt, 100);
-      });
-      req.end();
-    };
-    attempt();
-  });
+function waitForServer(child) {
+  return require('./server_ready').waitForServer(child, HTTP, 'observe_contract_test');
 }
 
 /** The rules from the shared file, as the clients apply them. */
@@ -94,7 +82,7 @@ async function runServer(env, body) {
   const serverPath = path.join(__dirname, '..', 'server.js');
   const server = spawn(process.execPath, [serverPath], { env, stdio: 'ignore' });
   try {
-    await waitForServer();
+    await waitForServer(server);
     await body();
   } finally {
     await new Promise((resolve) => { server.on('exit', resolve); server.kill(); });

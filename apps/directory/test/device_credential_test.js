@@ -46,6 +46,7 @@ const secrets = new Set([PASSWORD, OTHER_PASSWORD]);
 const remember = (...values) => values.forEach((v) => { if (v) secrets.add(String(v)); });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const { waitForServer, waitForOutput } = require('./server_ready');
 async function freePort(tcp) {
   const socket = tcp ? net.createServer() : dgram.createSocket('udp4');
   await new Promise((r) => (tcp ? socket.listen(0, '127.0.0.1', r) : socket.bind(0, '127.0.0.1', r)));
@@ -73,12 +74,7 @@ async function start(serverFile = serverPath, withFault = true) {
   const args = withFault ? ['--require', preload, serverFile] : [serverFile];
   server = spawn(process.execPath, args, { env, stdio: ['ignore', out, out] });
   fs.closeSync(out);
-  let ready = false;
-  for (let i = 0; i < 100 && !ready; ++i) {
-    try { ready = (await api('/healthz')).status === 200; } catch { /* not yet */ }
-    if (!ready) await sleep(50);
-  }
-  assert(ready, 'the server starts');
+  await waitForServer(server, port, 'device_credential_test');  // the server starts (bounded 15 s, else exit 3)
 }
 async function stop() {
   if (server && server.exitCode === null && server.signalCode === null) {

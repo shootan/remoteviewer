@@ -52,6 +52,7 @@ function check(label, ok, detail) {
   console.log((ok ? 'PASS  ' : 'FAIL  ') + label + (detail ? '  ' + detail : ''));
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const { waitForServer, waitForOutput } = require('./server_ready');
 async function freePort(tcp) {
   const socket = tcp ? net.createServer() : dgram.createSocket('udp4');
   await new Promise((r) => (tcp ? socket.listen(0, '127.0.0.1', r) : socket.bind(0, '127.0.0.1', r)));
@@ -94,12 +95,7 @@ async function start(extraEnv) {
   server = spawn(process.execPath, ['--require', preload, serverPath],
                  { env: { ...baseEnv, ...extraEnv }, stdio: ['ignore', out, out] });
   fs.closeSync(out);
-  let ready = false;
-  for (let i = 0; i < 100 && !ready; ++i) {
-    try { ready = (await api('/healthz')).status === 200; } catch { /* not yet */ }
-    if (!ready) await sleep(50);
-  }
-  assert(ready, 'the server starts');
+  await waitForServer(server, port, 'account_admin_test');  // the server starts (bounded 15 s, else exit 3)
   await sleep(150);   // the admin listener binds in the same tick; give it a moment either way
 }
 async function stop() {

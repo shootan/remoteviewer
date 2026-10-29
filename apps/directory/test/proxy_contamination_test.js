@@ -97,20 +97,8 @@ function observe(token) {
   });
 }
 
-function waitForServer() {
-  return new Promise((resolve, reject) => {
-    const deadline = Date.now() + 8000;
-    const attempt = () => {
-      const req = http.request({ host: '127.0.0.1', port: SERVER_HTTP, path: '/healthz' },
-                               (res) => { res.resume(); resolve(); });
-      req.on('error', () => {
-        if (Date.now() > deadline) return reject(new Error('server did not come up'));
-        setTimeout(attempt, 100);
-      });
-      req.end();
-    };
-    attempt();
-  });
+function waitForServer(child) {
+  return require('./server_ready').waitForServer(child, SERVER_HTTP, 'proxy_contamination_test');
 }
 
 (async () => {
@@ -129,7 +117,7 @@ function waitForServer() {
   const proxy = await startProxy();
 
   try {
-    await waitForServer();
+    await waitForServer(server);
 
     // ---- the routes that do not need an address work through a proxy unchanged
     let r = await api('GET', '/healthz');

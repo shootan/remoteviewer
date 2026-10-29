@@ -25,6 +25,7 @@ spawnSync(process.execPath, [serverPath, '--add-account', 'outsider', 'outsider-
           { env, stdio: 'ignore' });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const { waitForServer, waitForOutput } = require('./server_ready');
 
 function startServer() {
   return spawn(process.execPath, [serverPath], { env, stdio: 'ignore' });
@@ -134,7 +135,7 @@ function cleanup() {
   }
 
   let server = startServer();
-  await sleep(1500);
+  await waitForServer(server, env.REMOTE60_DIR_PORT, 'run.js main');
 
   const main = await runTest(['directory_test.js']);
   if (main.code !== 0) {
@@ -154,7 +155,7 @@ function cleanup() {
 
   await stopServer(server);
   server = startServer();
-  await sleep(1500);
+  await waitForServer(server, env.REMOTE60_DIR_PORT, 'run.js restart');
 
   const verified = await runTest(['restart_test.js', 'verify', registered.out]);
   await stopServer(server);
@@ -172,7 +173,7 @@ function cleanup() {
                     REMOTE60_NAT_DIAG_IP: '127.0.0.1', REMOTE60_NAT_DIAG_PORT: '18443',
                     T_DIAG: '18443' };
   server = spawn(process.execPath, [serverPath], { env: diagEnv, stdio: 'ignore' });
-  await sleep(1500);
+  await waitForServer(server, diagEnv.REMOTE60_DIR_PORT, 'run.js diagEnv');
   const diag = await new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, 'nat_diag_test.js')],
                         { env: diagEnv, stdio: 'inherit' });
@@ -197,7 +198,7 @@ function cleanup() {
                      REMOTE60_RELAY_ALLOW_ACCOUNTS: 'tester',
                      T_RELAY: '18443' };
   server = spawn(process.execPath, [serverPath], { env: relayEnv, stdio: 'ignore' });
-  await sleep(1500);
+  await waitForServer(server, relayEnv.REMOTE60_DIR_PORT, 'run.js relayEnv');
   const relay = await new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, 'relay_test.js')],
                         { env: relayEnv, stdio: 'inherit' });
@@ -230,7 +231,7 @@ function cleanup() {
                        // bound (8) is what the cases meet
                        REMOTE60_RELAY_STANDBY_MAX_PER_ACCOUNT: '200', REMOTE60_RELAY_STANDBY_MAX_PER_WIRE_IP: '200' };
   server = spawn(process.execPath, [serverPath], { env: standbyEnv, stdio: 'ignore' });
-  await sleep(1500);
+  await waitForServer(server, standbyEnv.REMOTE60_DIR_PORT, 'run.js standbyEnv');
   const standby = await new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, 'relay_standby_test.js')],
                         { env: standbyEnv, stdio: 'inherit' });
@@ -258,7 +259,7 @@ function cleanup() {
   console.log('\n--- observe correction (own lan) ---');
   const observeEnv = { ...env, REMOTE60_PUBLIC_IP: '203.0.113.9', T_PUBLIC_IP: '203.0.113.9' };
   server = spawn(process.execPath, [serverPath], { env: observeEnv, stdio: 'ignore' });
-  await sleep(1500);
+  await waitForServer(server, observeEnv.REMOTE60_DIR_PORT, 'run.js observeEnv');
   const observe = await new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, 'observe_correction_test.js')],
                         { env: observeEnv, stdio: 'inherit' });
@@ -279,7 +280,7 @@ function cleanup() {
   testTmp.remove(logDir, { recursive: true });
   const logEnv = { ...env, REMOTE60_LOG_DIR: logDir, REMOTE60_LOG_RATE_KB_PER_MIN: '8' };
   server = spawn(process.execPath, [serverPath], { env: logEnv, stdio: 'ignore' });
-  await sleep(1500);
+  await waitForServer(server, logEnv.REMOTE60_DIR_PORT, 'run.js logEnv');
   const logs = await new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, 'logs_test.js')],
                         { env: logEnv, stdio: 'inherit' });
@@ -310,7 +311,7 @@ function cleanup() {
   }
   const updateEnv = { ...env, REMOTE60_UPDATE_DIR: updateDir };
   server = spawn(process.execPath, [serverPath], { env: updateEnv, stdio: 'ignore' });
-  await sleep(1500);
+  await waitForServer(server, updateEnv.REMOTE60_DIR_PORT, 'run.js updateEnv');
   const updateRoute = await new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, 'update_route_test.js')],
                         { env: updateEnv, stdio: 'inherit' });
@@ -333,7 +334,7 @@ function cleanup() {
                    REMOTE60_RELAY_ALLOW_IPS: '127.0.0.1', REMOTE60_RELAY_ALLOW_ACCOUNTS: 'tester',
                    T_RELAY: '18443' };
   server = spawn(process.execPath, [serverPath], { env: lanEnv, stdio: 'ignore' });
-  await sleep(1500);
+  await waitForServer(server, lanEnv.REMOTE60_DIR_PORT, 'run.js lanEnv');
   const sameLan = await new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(__dirname, 'same_lan_test.js')],
                         { env: lanEnv, stdio: 'inherit' });

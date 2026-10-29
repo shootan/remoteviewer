@@ -26,6 +26,7 @@ function check(name, cond, detail) {
   if (!cond) failures++;
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const { waitForServer, waitForOutput } = require('./server_ready');
 
 function api(method, p, body, token) {
   return new Promise((resolve, reject) => {
@@ -93,7 +94,7 @@ function runProbe(hostId, relayEarly) {
 
 async function withServer(serverJs, env, body) {
   const server = spawn(process.execPath, [serverJs], { env, stdio: 'ignore' });
-  await sleep(1500);
+  await waitForServer(server, HTTP, 'np_early_bootstrap_e2e ' + serverJs);
   try { await body(); } finally {
     await new Promise((r) => { server.on('exit', r); server.kill(); });
   }

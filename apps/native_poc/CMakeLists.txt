@@ -3753,6 +3753,9 @@ add_executable(remote60_viewer_window_proc_isolated_test
   src/viewer_layout.cpp
   src/viewer_log.cpp
   src/native_video_client_shared_core.cpp
+  # rel-0164: the shipped WndProc stops a running macro (ka-pc r3 705ed23, viewer_window_proc.cpp:1279-1280); the
+  # real InputMacro (self-contained: its header and the standard library) links it -- no double for it.
+  src/input_macro.cpp
 )
 target_include_directories(remote60_viewer_window_proc_isolated_test PRIVATE src)
 # The real present path comes with it: D3D11, the shader compiler and Media Foundation. Linking

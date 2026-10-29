@@ -5,6 +5,7 @@
 const { spawn } = require('child_process');
 const path = require('path');
 const testTmp = require('./test_tmp');  // r5 (Codex N4): only inside REMOTE60_TEST_TMP
+const { waitForServer, waitForOutput } = require('./server_ready');
 const fs = require('fs');
 
 let failures = 0;
@@ -24,7 +25,7 @@ const server = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')]
 let out = '';
 server.stdout.on('data', (c) => (out += c));
 server.stderr.on('data', (c) => (out += c));
-setTimeout(() => {
+waitForOutput(() => out, '[relay] listening on udp', 'relay_env_bound_test').then(() => {
   check('a non-number bound falls back and says so (MAX_PER_ACCOUNT=abc -> 24)',
         out.includes('REMOTE60_RELAY_STANDBY_MAX_PER_ACCOUNT="abc" is not a positive integer; using 24'));
   check('a fraction falls back (MAX_PER_WIRE_IP=2.5 -> 24)',
@@ -38,4 +39,4 @@ setTimeout(() => {
     console.log(`\nRESULT: ${failures ? 'FAILED' : 'ALL PASS'}  (${failures} failed)`);
     process.exit(failures ? 1 : 0);
   });
-}, 2500);
+});

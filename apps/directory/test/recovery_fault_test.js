@@ -17,6 +17,7 @@ fs.writeFileSync=function(p,...args){if(String(p)===process.env.REMOTE60_DIR_DAT
 throw Object.assign(new Error('injected disk full'),{code:'ENOSPC'});return write.call(this,p,...args)};`);
 let server;
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+const { waitForServer, waitForOutput } = require('./server_ready');
 async function freeTcpPort() {
   const socket = net.createServer();
   await new Promise(resolve => socket.listen(0, '127.0.0.1', resolve));
@@ -47,9 +48,7 @@ async function stop() {
       signal: AbortSignal.timeout(5000) });
     return { status: response.status, body: await response.json() };
   };
-  let ready = false;
-  for (let i = 0; i < 100 && !ready; ++i) { try { ready = (await api('/healthz')).status === 200; } catch {} if (!ready) await sleep(50); }
-  assert(ready, 'isolated server starts');
+  await waitForServer(server, port, 'recovery_fault_test');  // isolated server starts (bounded 15 s, else exit 3)
   const registration = { id: 'tester', pw: 'fixture-password', machineId: 'fixture-pc', hostName: 'Fixture' };
   const before = await api('/api/host/register', registration);
   assert.equal(before.status, 200);

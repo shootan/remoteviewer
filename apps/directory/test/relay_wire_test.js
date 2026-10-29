@@ -77,6 +77,7 @@ function check(name, cond, detail) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const { waitForServer, waitForOutput } = require('./server_ready');
 
 function api(method, urlPath, body, token) {
   return new Promise((resolve, reject) => {
@@ -253,7 +254,7 @@ function cleanupScratch() {
   });
   server.stdout.on('data', (c) => (serverLog += c));
   server.stderr.on('data', (c) => (serverLog += c));
-  await sleep(1500);
+  await waitForServer(server, HTTP, 'relay_wire_test ' + MODE);
   console.log(`mode=${MODE} lan=${lan} advertised=${PUBLIC_IP} scratch=${path.relative(root, scratch)}`);
 
   const sockets = [];

@@ -36,6 +36,7 @@ function check(name, cond, detail) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const { waitForServer, waitForOutput } = require('./server_ready');
 
 const serverPath = path.join(__dirname, '..', 'server.js');
 const dataPath = path.join(os.tmpdir(), `remote60-connect-diag-${process.pid}.json`);
@@ -128,7 +129,7 @@ function buildHello(kind, token, features) {
   };
 
   try {
-    await sleep(900);
+    await waitForServer(server, HTTP, 'connect_diag_test');
 
     let r = await api('POST', '/api/login', { id: 'tester', pw: 'test-pass-1234' });
     const session = r.body.sessionToken;

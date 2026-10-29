@@ -40,6 +40,7 @@ function check(name, cond, detail) {
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const { waitForServer, waitForOutput } = require('./server_ready');
 
 const serverPath = path.join(__dirname, '..', 'server.js');
 const preloadPath = path.join(__dirname, 'wake_resend_preload.js');
@@ -133,7 +134,7 @@ function observe(sock, token) {
   };
 
   try {
-    await sleep(900);
+    await waitForServer(server, HTTP, 'wake_resend_test');
 
     let r = await api('POST', '/api/login', { id: 'tester', pw: 'test-pass-1234' });
     const session = r.body.sessionToken;
