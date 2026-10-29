@@ -1171,6 +1171,30 @@ target_include_directories(remote60_android_decoder_inbox_test PRIVATE
 )
 target_compile_definitions(remote60_android_decoder_inbox_test PRIVATE NOMINMAX GNLINK_LIVENESS_TRACE=1)
 
+# apk-inbox C (design r3): the chain-aware inbox decision table, the recovery episode and the key-request descriptor
+# as pure logic. REMOTE60_CHAIN_INBOX_DIR: where decoder_chain_inbox.hpp comes from -- src (default), or a mutated copy
+# for the negative runs (a separate build directory). TEST ONLY.
+set(REMOTE60_CHAIN_INBOX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src" CACHE PATH
+    "decoder_chain_inbox.hpp the chain inbox test builds (negative runs point it at a mutated copy)")
+add_executable(remote60_decoder_chain_inbox_test src/decoder_chain_inbox_test.cpp)
+target_include_directories(remote60_decoder_chain_inbox_test PRIVATE ${REMOTE60_CHAIN_INBOX_DIR} src)
+
+# apk-inbox C: the boundaries C adds, on the APK sink itself against the stand-in NDK (order, oversize, a candidate
+# lost again, the t0/1/3/7 schedule and exhaustion, D8 validity, the binding adapter, overload, a slow create). A PLAIN
+# build (no GNLINK_LIVENESS_TRACE): the product's own boundary. TEST ONLY; the same REMOTE60_LIVENESS_SINK_DIR choice.
+add_executable(remote60_android_decoder_inbox_c_test
+  src/android_decoder_inbox_c_test.cpp
+  src/test_fake_ndk/fake_ndk.cpp
+  ${REMOTE60_LIVENESS_SINK_DIR}/android_video_decoder.cpp
+)
+target_include_directories(remote60_android_decoder_inbox_c_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
+  ${REMOTE60_LIVENESS_SINK_DIR}
+  ${REMOTE60_CHAIN_INBOX_DIR}
+  src
+)
+target_compile_definitions(remote60_android_decoder_inbox_c_test PRIVATE NOMINMAX)
+
 # apk-decoder-liveness r1 contrast 2: the product receive loop (VideoReceiveMain, which carries the UDP control
 # channel) delivering into the APK sink while its codec is held; a fake host over loopback with its own control
 # channel. TEST ONLY. The same REMOTE60_LIVENESS_SINK_DIR choice as above.

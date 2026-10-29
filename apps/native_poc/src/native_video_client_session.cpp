@@ -226,6 +226,7 @@ bool ClientSessionController::RequestMonitorSelect(uint32_t monitorId, uint64_t 
     return false;
   }
   decoderRekeyPending_.store(false, std::memory_order_release);  // a new pick: the old one's IDR is moot
+  ClearKeyLedger();  // apk-inbox C: and the descriptors with it (the sink judges a later one by its own new epoch)
   const uint64_t tag = encodedFrameSink_ ? encodedFrameSink_->CurrentSelectionTag() : 0;
   if (!windowPanel_.RequestSelect(encode_monitor_select_target(monitorId), "monitor_select_requested", tag,
                                   panel.monitorListRevision)) {
@@ -252,6 +253,7 @@ bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
   // A window id in the monitor-select namespace is not a window (monitor_select_target.hpp).
   if (classify_select_target(windowId).kind != SelectTargetKind::Window) return false;
   decoderRekeyPending_.store(false, std::memory_order_release);
+  ClearKeyLedger();  // apk-inbox C
   const uint64_t tag = encodedFrameSink_ ? encodedFrameSink_->CurrentSelectionTag() : 0;
   // apk-0232 r1 (Codex codex_rel_0163_e1_decision.md): a host KNOWN to be at the logon screen (PreloginV1 -- not a
   // secure desktop, not LockCred) takes no WindowSelect and serves its one desktop. A desktop pick there is a local
@@ -483,6 +485,7 @@ void ClientSessionController::CollectForParkLocked(uint64_t nowUs, bool releases
   captureMode_.Reset();
   keyframeRequests_.Reset();
   decoderRekeyPending_.store(false, std::memory_order_release);
+  ClearKeyLedger();  // apk-inbox C
   owedSelection_ = 0;
   owedAttempts_ = 0;
   owedNextUs_ = 0;
@@ -938,6 +941,10 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         const bool queued = keyframeRequests_.Request(2, loopNowUs).queued;
         REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Owed, queued));  // apk-decoder-inbox r1
         if (queued) {
+          DecoderKeyRequest owedReq;  // apk-inbox C: rides with whatever else is pending (one send, both causes)
+          owedReq.causes = kKeyCauseOwed;
+          owedReq.owedToken = owed;
+          NoteKeyRequest(owedReq, true);
           ++owedAttempts_;
           owedNextUs_ = loopNowUs + kOwedKeyRetryUs;
           REMOTE60_LT(livenessTrace_.keyWantQueued.fetch_add(1, std::memory_order_relaxed));
@@ -952,11 +959,53 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       livenessTrace_.owedNextUs.store(owedNextUs_, std::memory_order_relaxed);
     });
     if (!parking && decoderRekeyPending_.load(std::memory_order_acquire)) {
-      const bool queued = keyframeRequests_.Request(2, loopNowUs).queued;
-      REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Held, queued));  // apk-decoder-inbox r1
-      if (queued) {
+      // apk-inbox C (D8, the HELD point): before the held request goes to the limiter again, the sink says which of its
+      // causes still hold. None: it is dropped here (a newer pick / binding / committed IDR made it moot).
+      DecoderKeyRequest held;
+      {
+        std::lock_guard<std::mutex> lk(keyLedgerMu_);
+        held = keyHeld_;
+      }
+      uint32_t valid = held.causes;
+      if (!held.empty() && encodedFrameSink_) {
+        REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkSinkHook, now_us()));
+        valid = encodedFrameSink_->DecoderKeyRequestValidCauses(held);
+        REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkPass, now_us()));
+      }
+      if (!held.empty() && valid == 0) {
+        {
+          std::lock_guard<std::mutex> lk(keyLedgerMu_);
+          keyHeld_.Clear();
+        }
         decoderRekeyPending_.store(false, std::memory_order_release);
-        std::fprintf(stderr, "[native-video-client-session] held keyframe request queued\n");
+        keyDroppedStale_.fetch_add(1, std::memory_order_relaxed);
+        std::fprintf(stderr, "[native-video-client-session] held keyframe request dropped: no cause still valid\n");
+      } else {
+        const bool queued = keyframeRequests_.Request(2, loopNowUs).queued;
+        REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Held, queued));  // apk-decoder-inbox r1
+        if (queued) {
+          held.causes = valid;
+          {
+            std::lock_guard<std::mutex> lk(keyLedgerMu_);
+            keyHeld_.Clear();
+            if (!held.empty()) keyAccepted_.Merge(held);
+          }
+          decoderRekeyPending_.store(false, std::memory_order_release);
+          std::fprintf(stderr, "[native-video-client-session] held keyframe request queued\n");
+        }
+      }
+    }
+    // apk-inbox C: the sink's own wants on every pass -- a recovery retry falls due on the clock, not on a frame (the
+    // tail gap refuses the deltas that would otherwise have carried the ask).
+    if (!parking && encodedFrameSink_) {
+      DecoderKeyRequest want;
+      REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkSinkHook, now_us()));
+      const bool wanted = encodedFrameSink_->TakeDecoderKeyRequest(&want);
+      REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkPass, now_us()));
+      if (wanted) {
+        const bool queued = keyframeRequests_.Request(2, loopNowUs).queued;
+        REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Held, queued));
+        NoteKeyRequest(want, queued);
       }
     }
     bool haveAction = false;
@@ -1018,9 +1067,36 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
         if (action.kind == ControlOutboundActionKind::WindowSelect) ResolveUnsendableSelect(action);
         continue;
       }
+      // apk-inbox C (D8, the ACCEPTED point): a KeyframeRequest action carries the descriptor the limiter took; the
+      // sink is asked (a short query, no lock held here) which causes still hold, right before the exchange starts.
+      // None: not sent (the limiter's token is spent; nothing is queued again for it). Legacy / pipeline causes and a
+      // request with no descriptor go as before.
+      DecoderKeyRequest sentKey;
+      if (action.kind == ControlOutboundActionKind::KeyframeRequest) {
+        {
+          std::lock_guard<std::mutex> lk(keyLedgerMu_);
+          sentKey = keyAccepted_;
+          keyAccepted_.Clear();
+        }
+        if (!sentKey.empty() && encodedFrameSink_) {
+          REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkSinkHook, now_us()));
+          sentKey.causes = encodedFrameSink_->DecoderKeyRequestValidCauses(sentKey);
+          REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkPass, now_us()));
+          if (sentKey.empty()) {
+            keyDroppedStale_.fetch_add(1, std::memory_order_relaxed);
+            std::fprintf(stderr, "[native-video-client-session] keyframe request not sent: no cause still valid\n");
+            didWork = true;
+            continue;
+          }
+        }
+      }
       TcpControlResponse response{};
       REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkWrite, now_us()));
       const bool exchanged = execute_control_action(*controlLink, action, &response);
+      if (exchanged && action.kind == ControlOutboundActionKind::KeyframeRequest && !sentKey.empty() &&
+          encodedFrameSink_) {
+        encodedFrameSink_->OnDecoderKeyRequestSent(sentKey, now_us());  // the retry clock starts at the send
+      }
       REMOTE60_LT({
         const uint64_t t = now_us();
         livenessTrace_.Wk(LtPhase::WkPass, t);
@@ -1151,8 +1227,10 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
             // r3 M1: the answer itself may owe the decoder an IDR (its own arrived first and was
             // dropped). Queued now, not at the next frame.
             bool answerQueued = true;
-            if (encodedFrameSink_->ConsumeDecoderKeyframeRequest()) {
+            DecoderKeyRequest answerWant;
+            if (encodedFrameSink_->TakeDecoderKeyRequest(&answerWant)) {
               answerQueued = keyframeRequests_.Request(2, now_us()).queued;
+              NoteKeyRequest(answerWant, answerQueued);
               REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Answer, answerQueued));  // apk-decoder-inbox r1
             }
             if (!answerQueued) {
@@ -1376,6 +1454,25 @@ uint64_t ClientSessionController::WindowThumbnailVersion(uint64_t windowId) cons
   return (it == thumbs_.end()) ? 0 : it->second.version;
 }
 
+// apk-inbox C (design r3 §4 D8): a key request the limiter took (accepted: it goes with the next KeyframeRequest
+// action) or refused (held: the control loop asks the limiter again). Coalesced with what is already there.
+void ClientSessionController::NoteKeyRequest(const DecoderKeyRequest& request, bool queued) {
+  if (request.empty()) return;
+  std::lock_guard<std::mutex> lk(keyLedgerMu_);
+  if (queued) {
+    keyAccepted_.Merge(request);
+  } else {
+    keyHeld_.Merge(request);
+    decoderRekeyPending_.store(true, std::memory_order_release);
+  }
+}
+
+void ClientSessionController::ClearKeyLedger() {
+  std::lock_guard<std::mutex> lk(keyLedgerMu_);
+  keyHeld_.Clear();
+  keyAccepted_.Clear();
+}
+
 void ClientSessionController::VideoReceiveMain() {
   std::array<uint8_t, 1600> datagram{};
   uint64_t oversizePayloadDropCount = 0;
@@ -1409,10 +1506,12 @@ void ClientSessionController::VideoReceiveMain() {
     });
     // The decoder may have had to discard what it was just handed. Ask for an IDR now
     // rather than letting every later delta decode against a reference that never arrived.
-    if (currentSink->ConsumeDecoderKeyframeRequest()) {
+    DecoderKeyRequest frameWant;
+    if (currentSink->TakeDecoderKeyRequest(&frameWant)) {
       // r3 M1: refused by the limiter is not forgotten -- the control loop retries it.
       const bool frameQueued = keyframeRequests_.Request(2, now_us()).queued;
       REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Frame, frameQueued));  // apk-decoder-inbox r1
+      NoteKeyRequest(frameWant, frameQueued);  // apk-inbox C: held or accepted, with its causes
       if (!frameQueued) {
         decoderRekeyPending_.store(true, std::memory_order_release);
         REMOTE60_LT(livenessTrace_.keyWantRefused.fetch_add(1, std::memory_order_relaxed));
@@ -1426,7 +1525,11 @@ void ClientSessionController::VideoReceiveMain() {
     // KeyframeRequestState owns the time/token limiter, so repeated gaps cannot make an IDR storm.
     const bool pipeQueued = keyframeRequests_.Request(2, now_us()).queued;
     REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Pipeline, pipeQueued));  // apk-decoder-inbox r1
-    (void)pipeQueued;
+    if (pipeQueued) {
+      DecoderKeyRequest pipe;  // apk-inbox C: rides with a pending sink request, never judged stale
+      pipe.causes = kKeyCausePipeline;
+      NoteKeyRequest(pipe, true);
+    }
   };
   callbacks.discontinuity = [&]() {
     if (currentSink) currentSink->OnVideoDiscontinuity();
@@ -1884,6 +1987,7 @@ void ClientSessionController::ResetUnlocked() {
   snapshot_ = ClientSessionSnapshot{};
   windowPanel_.Reset();
   decoderRekeyPending_.store(false, std::memory_order_release);
+  ClearKeyLedger();  // apk-inbox C
   owedSelection_ = 0;
   owedAttempts_ = 0;
   owedNextUs_ = 0;

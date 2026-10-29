@@ -69,6 +69,10 @@ UdpH264AssembledFrame frame(uint64_t gen, bool key, uint8_t tag, size_t pad = 0)
   f.header.height = 720;
   f.header.flags = key ? 0x1u : 0u;
   f.header.streamGeneration = gen;
+  // apk-inbox C: the AU seq increasing, as the session's assembler delivers it (decoder_chain_inbox.hpp ORDER). Before
+  // C it was left 0 -- to an order-aware inbox every frame would be the same AU again.
+  static uint32_t fixtureSeq = 0;
+  f.header.seq = ++fixtureSeq;
   static std::atomic<uint64_t> capture{1000000};
   f.header.captureQpcUs = capture.fetch_add(33333);
   const uint8_t sc[] = {0, 0, 0, 1};
@@ -535,7 +539,14 @@ int main(int argc, char** argv) {
     check("[6] the inbox held at most 8 frames; the rest were dropped and counted",
           inbox != ~0ull && inbox <= 8 && drops != ~0ull && drops >= 190,
           "inbox=" + std::to_string(inbox) + " drops=" + std::to_string(drops));
-    check("[6] the IDR that was dropped is owed again, and a key is asked for", owed != 0 && asked);
+    // apk-inbox C (design r3 §1, replacing r1's drop-the-oldest): the inbox keeps the IDR (0x8A) with the suffix that
+    // fits and cuts the newest -- no IDR is lost, so nothing is owed. The loss is at the TAIL (after that suffix): to go
+    // on past it the decoder needs an IDR newer than the cut, so the one episode asks once. (r1-r5 here: the IDR was the
+    // oldest frame, dropped, owed and asked for.)
+    check("[6] C: the IDR is KEPT (nothing owed); the tail loss is ONE episode with ONE ask (for an IDR after the cut)",
+          owed == 0 && asked && field(st, "episodes") == 1 && field(st, "tailGap") == 1,
+          "owed=" + std::to_string(owed) + " asked=" + std::to_string(asked ? 1 : 0) + " episodes=" +
+              std::to_string(field(st, "episodes")) + " tailGap=" + std::to_string(field(st, "tailGap")));
     check("[6] after the hold no delta of the gap is fed before the next IDR; that IDR pays the debt",
           !flood && !after.empty() && sink.KeyframeOwedFor() == 0, "queued=" + std::to_string(after.size()));
     sink.SetSurface(env, nullptr);
@@ -797,7 +808,11 @@ int main(int argc, char** argv) {
     check("[12] the frame over the cap was refused at the door (inboxBytes 0, counted)",
           field(st1, "inboxBytes") == 0 && field(st1, "inboxRefused") == 1,
           "inboxBytes=" + std::to_string(field(st1, "inboxBytes")) + " refused=" + std::to_string(field(st1, "inboxRefused")));
-    check("[12] ...and the IDR it was is owed again, a key asked for", owedAfterBig != 0 && askedAfterBig);
+    // apk-inbox C (design r3 §3): the refused IDR is owed again, and the session's owed asks (8 x 1 s) carry it -- that
+    // duty IS this IDR, so the sink's recovery episode adds no second ask on top (one logical exchange, not 4 + 8).
+    check("[12] ...and the IDR it was is owed again (asked through that duty; the sink adds no second ask)",
+          owedAfterBig != 0 && !askedAfterBig,
+          "owed=" + std::to_string(owedAfterBig) + " sink ask=" + std::to_string(askedAfterBig ? 1 : 0));
     check("[12] frames within the cap: the inbox never held more than 4 MB", bytesMax != ~0ull && bytesMax <= (4u << 20),
           "max=" + std::to_string(bytesMax));
     check("[12] a new pick owes nothing of the old one's losses; its IDR goes in",

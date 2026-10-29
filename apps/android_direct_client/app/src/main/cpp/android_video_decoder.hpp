@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "client_decode_snapshot.hpp"
+#include "decoder_chain_inbox.hpp"
 #include "client_liveness_trace.hpp"
 #include "native_video_client_session.hpp"
 #include "decoder_pending_slot.hpp"
@@ -123,6 +124,17 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void OnVideoStreamReset() override { OnVideoStreamResetAs(kAnyBinding); }
   void OnVideoDiscontinuity() override { OnVideoDiscontinuityAs(kAnyBinding); }
   bool ConsumeDecoderKeyframeRequest() override { return ConsumeDecoderKeyframeRequestAs(kAnyBinding); }
+  // apk-inbox C (design r3 §3-§4): the want with its descriptor, its validity at the session's held / accepted points,
+  // and the send that starts the recovery episode's retry clock.
+  bool TakeDecoderKeyRequest(remote60::native_poc::DecoderKeyRequest* out) override {
+    return TakeDecoderKeyRequestAs(kAnyBinding, out);
+  }
+  uint32_t DecoderKeyRequestValidCauses(const remote60::native_poc::DecoderKeyRequest& request) override {
+    return DecoderKeyRequestValidCausesAs(kAnyBinding, request);
+  }
+  void OnDecoderKeyRequestSent(const remote60::native_poc::DecoderKeyRequest& request, uint64_t nowUs) override {
+    OnDecoderKeyRequestSentAs(kAnyBinding, request, nowUs);
+  }
   bool DrainPresentationStats(remote60::native_poc::ClientPresentationStats* out) override {
     return DrainPresentationStatsAs(kAnyBinding, out);
   }
@@ -160,6 +172,9 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void OnVideoStreamResetAs(uint64_t token);
   void OnVideoDiscontinuityAs(uint64_t token);
   bool ConsumeDecoderKeyframeRequestAs(uint64_t token);
+  bool TakeDecoderKeyRequestAs(uint64_t token, remote60::native_poc::DecoderKeyRequest* out);
+  uint32_t DecoderKeyRequestValidCausesAs(uint64_t token, const remote60::native_poc::DecoderKeyRequest& request);
+  void OnDecoderKeyRequestSentAs(uint64_t token, const remote60::native_poc::DecoderKeyRequest& request, uint64_t nowUs);
   bool DrainPresentationStatsAs(uint64_t token, remote60::native_poc::ClientPresentationStats* out);
   bool DrainDecodeStatsAs(uint64_t token, remote60::native_poc::ClientDecodeStats* out);
   uint64_t DecodeGenerationAs(uint64_t token);
@@ -357,11 +372,35 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   // overhead, the assembler's and the codec's own buffers are outside it.
   static constexpr size_t kInboxMaxFrames = 8;
   static constexpr size_t kInboxMaxBytes = 4u << 20;
-  std::deque<InboxFrame> inbox_;
-  size_t inboxBytes_ = 0;
-  uint64_t inboxDrops_ = 0;
-  uint64_t inboxGapDrops_ = 0;
-  bool inboxGap_ = false;
+  // apk-inbox C (design r3 §1-§2, decoder_chain_inbox.hpp): the same bounds, chain-aware -- on overflow the earliest
+  // usable IDR + its suffix is kept (the older chain skipped, no loss) or, with none, the loss is taken as one and the
+  // tail gap refuses the deltas that follow it until a usable IDR. A loss opens (or continues) recovery_.
+  struct InboxInfo {
+    remote60::native_poc::ChainAuInfo operator()(const InboxFrame& f) const {
+      return remote60::native_poc::ChainAuInfo{f.frame.header.streamGeneration, f.frame.header.seq,
+                                                (f.frame.header.flags & 1u) != 0, f.frame.payload.size()};
+    }
+  };
+  remote60::native_poc::ChainInbox<InboxFrame, InboxInfo> inbox_{kInboxMaxFrames, kInboxMaxBytes, InboxInfo{}};
+  // The recovery episode (design r3 §2-§3): at most 4 asks per episode at t0 / +1 / +3 / +7 s from real sends, a final
+  // window, then exhausted (recorded; a later usable IDR still decodes and ends it). Under mu_.
+  remote60::native_poc::KeyRecoveryEpisode recovery_;
+  // Moves at every bind / unbind / pick / abort / stream reset / surface request: an ask made before is moot (D8).
+  uint64_t keyEpoch_ = 1;
+  // The IDR the worker is handing to the codec right now (mu_ released around the codec calls): a candidate too.
+  bool inFlightKey_ = false;
+  uint32_t inFlightKeySeq_ = 0;
+  // One-shot causes outside the episode (r4 N3 codec up, mobile-abr r5 abort); each taken once, kept as its cause.
+  bool wantCodecUp_ = false;
+  bool wantSelectionAbort_ = false;
+  uint64_t keyRequestsTaken_ = 0;      // wants handed to the session (any cause)
+  uint64_t recoveryDroppedMoot_ = 0;   // recovery asks judged moot at the session's points (a candidate held)
+  uint64_t recoveryExhaustedLogged_ = 0;
+  void InvalidateKeyAsksLocked();                  // keyEpoch_++, the episode and the one-shot wants dropped
+  bool RecoveryCandidateLocked() const;            // a usable IDR after the loss point is preserved somewhere
+  void NoteChainLossLocked(int cause, uint32_t seq);  // a loss of the chain the decoder saw itself
+  void NoteInboxOfferLocked(const remote60::native_poc::ChainOfferResult& r);
+  void TickRecoveryLocked();
   // What the codec itself is doing, for video_debug: none / creating / started / failed, and how often a codec
   // came back after a reset was asked for (discarded, never used).
   const char* codecState_ = "none";
@@ -468,9 +507,8 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint64_t displayedWindowBase_ = 0;
   uint64_t pendingFrameCount_ = 0;
   uint64_t pendingFrameQueueRetryCount_ = 0;
-  // Set when a delta had to be discarded before reaching the codec; consumed by the session,
-  // which turns it into a rate-limited IDR request.
-  bool decoderKeyframeRequest_ = false;
+  // apk-inbox C: the old single want flag (decoderKeyframeRequest_) is gone -- a chain loss goes to recovery_, the two
+  // other causes are the one-shots above; the session asks TakeDecoderKeyRequest (a cause set + the sink state).
   // apk-decoder-inbox r1: each time the want is set, by cause (always counted; DebugStatus `keyWant=`). Setting it is
   // unchanged -- the same flag at the same places; the session consumes it per frame / answer.
   enum KeyWant : int {
@@ -478,10 +516,9 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
     kWantCodecUp, kWantKinds
   };
   uint64_t keyWant_[kWantKinds] = {};
-  void NoteKeyWantLocked(int cause) {
-    decoderKeyframeRequest_ = true;
-    ++keyWant_[cause];
-  }
+  // apk-inbox C: counted by cause as before; what it asks for is decided by the cause (NoteChainLossLocked for a chain
+  // loss, the one-shot flags for codec up / abort).
+  void NoteKeyWantLocked(int cause) { ++keyWant_[cause]; }
   // Intervals between the times frames actually reach the display, drained once a second by
   // the session and reported to the host. A scheduled release lands at its presentation
   // timestamp, not at the moment we called release -- draining several ready buffers in one

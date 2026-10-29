@@ -45,6 +45,10 @@ UdpH264AssembledFrame frame(uint64_t gen, bool key, uint8_t tag) {
   f.header.height = 1080;
   f.header.flags = key ? 0x1u : 0u;
   f.header.streamGeneration = gen;
+  // apk-inbox C: the AU seq increasing, as the session's assembler delivers it (decoder_chain_inbox.hpp ORDER). Before
+  // C it was left 0 -- to an order-aware inbox every frame would be the same AU again.
+  static uint32_t fixtureSeq = 0;
+  f.header.seq = ++fixtureSeq;
   static uint64_t capture = 1000000;
   capture += 33333;
   f.header.captureQpcUs = capture;

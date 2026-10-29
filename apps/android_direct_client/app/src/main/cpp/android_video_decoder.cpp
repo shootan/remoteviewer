@@ -139,9 +139,53 @@ void AndroidVideoDecoderSink::RequestCodecResetLocked() {
 }
 
 void AndroidVideoDecoderSink::ClearInboxLocked() {
-  inbox_.clear();
-  inboxBytes_ = 0;
-  inboxGap_ = false;
+  inbox_.Clear();
+}
+
+// apk-inbox C (D8): every ask made before this moment is moot -- the session drops it at its held / accepted point.
+void AndroidVideoDecoderSink::InvalidateKeyAsksLocked() {
+  ++keyEpoch_;
+  recovery_.Invalidate();
+  wantCodecUp_ = false;
+  wantSelectionAbort_ = false;
+}
+
+// apk-inbox C (design r3 §3 보류): a usable IDR (after the loss point) is in the inbox, in the pending slot or going
+// into the codec right now -- nothing is asked while one is.
+bool AndroidVideoDecoderSink::RecoveryCandidateLocked() const {
+  if (recovery_.state() == remote60::native_poc::KeyRecoveryEpisode::State::Idle) return false;
+  const uint32_t loss = recovery_.lossSeq();
+  if (inbox_.HoldsKeyAfter(loss)) return true;
+  if (inFlightKey_ && remote60::native_poc::chain_seq_after(inFlightKeySeq_, loss)) return true;
+  const auto* held = pendingFrame_.held();
+  return held && (held->header.flags & 1u) != 0 && remote60::native_poc::chain_seq_after(held->header.seq, loss);
+}
+
+// A loss of the chain the decoder saw itself (await-key, its pending slot): the episode, and the tail gap.
+void AndroidVideoDecoderSink::NoteChainLossLocked(int cause, uint32_t seq) {
+  NoteKeyWantLocked(cause);
+  inbox_.MarkLoss(seq);
+  recovery_.OnLoss(remote60::native_poc::kKeyCauseRecovery, seq, steady_now_us());
+}
+
+void AndroidVideoDecoderSink::NoteInboxOfferLocked(const remote60::native_poc::ChainOfferResult& r) {
+  if (r.keysLost) gate_.KeyLost(r.keyLostGen);  // r5 N1: an IDR of that generation is owed again
+  if (!r.loss) return;
+  NoteKeyWantLocked(r.admit == remote60::native_poc::ChainAdmit::Oversize ? kWantOversize : kWantInboxOverflow);
+  recovery_.OnLoss(remote60::native_poc::kKeyCauseRecovery, r.lossSeq, steady_now_us());
+}
+
+void AndroidVideoDecoderSink::TickRecoveryLocked() {
+  recovery_.Tick(steady_now_us(), RecoveryCandidateLocked());
+  if (recovery_.exhausted() != recoveryExhaustedLogged_) {
+    recoveryExhaustedLogged_ = recovery_.exhausted();
+    char line[192];
+    std::snprintf(line, sizeof(line),
+                  "decoder recovery exhausted episode=%llu asks=%u lossSeq=%u -- no more asks; the next usable IDR "
+                  "(the host's periodic one) still decodes",
+                  static_cast<unsigned long long>(recovery_.id()), recovery_.attempts(), recovery_.lossSeq());
+    log_error(line);
+  }
 }
 
 // The worker's pass: an applied surface, an applied reset, the frames in order, the codec pumped (held frame,
@@ -180,9 +224,8 @@ void AndroidVideoDecoderSink::WorkerMain() {
     }
     REMOTE60_LT(ltPassFrames_ = 0; ltPassStartUs_ = LtNowUs());
     while (!inbox_.empty() && !workerStop_ && surfaceApplied_ == surfaceSeq_ && !CodecResetPendingLocked()) {
-      InboxFrame item = std::move(inbox_.front());
-      inbox_.pop_front();
-      inboxBytes_ -= std::min(inboxBytes_, item.frame.payload.size());
+      InboxFrame item;
+      inbox_.Pop(&item);
       REMOTE60_LT({
         ++ltPassFrames_;
         if (item.enqueueUs) LtAge(ltAgePop_, LtNowUs() - item.enqueueUs);
@@ -197,11 +240,12 @@ void AndroidVideoDecoderSink::WorkerMain() {
     RetryCodecLocked();  // r4 N3
     if (surfaceApplied_ != surfaceSeq_ || CodecResetPendingLocked()) continue;
     if (codec_) PumpCodecLocked();
+    TickRecoveryLocked();  // apk-inbox C: the final window ends on the clock
     PublishDecodeStateLocked();
     ++workerPasses_;
     REMOTE60_LT({
       ltWorkerPassUs_.store(LtNowUs(), std::memory_order_relaxed);
-      ltInbox_.store(inbox_.size(), std::memory_order_relaxed);
+      ltInbox_.store(inbox_.frames(), std::memory_order_relaxed);
     });
     doneCv_.notify_all();
     if (workerStop_) break;
@@ -281,6 +325,7 @@ int64_t AndroidVideoDecoderSink::SetSurface(JNIEnv* env, jobject surface) {
   if (requestedWindow_) windowsToRelease_.push_back(requestedWindow_);  // asked for, never applied
   requestedWindow_ = window;
   surfaceRequested_ = window != nullptr;
+  InvalidateKeyAsksLocked();  // apk-inbox C: a new surface (or none) -- the codec starts over; the owed duty re-arms
   const uint64_t seq = ++surfaceSeq_;
   if (!window) lastDetachSeq_ = seq;
   ++codecResetSeq_;
@@ -354,68 +399,51 @@ void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::nat
     return;
   }
 
-  // r4 N2 (Codex src r1): the byte cap holds for every frame -- r1-r3 kept one frame of ANY size (the last one was
-  // never dropped). A frame larger than the whole cap is refused here: it is lost like a dropped one (an IDR is owed
-  // again, a key asked for, the deltas after it not fed before the next IDR) and counted apart. The cap is more than
-  // one whole second of the highest bitrate the client asks for (kRuntimeBitrateMax 30 Mbit/s = 3.75 MB) -- r5
-  // (Codex src r4): an AVERAGE, which does NOT bound a single IDR: an encoder may make one IDR larger than 4 MiB at
-  // 30 Mbit/s (rate control over a window, a scene of fine detail), and such an IDR is refused here, every time it
-  // comes. The assembler itself admits up to 16 MB (kMaxUdpAssembledPayloadBytes).
-  if (frame.payload.size() > kInboxMaxBytes) {
-    if (isKeyFrame) gate_.KeyLost(frame.header.streamGeneration);
-    ++inboxOversizeDrops_;
-    inboxGap_ = true;
-    NoteKeyWantLocked(kWantOversize);
-    char line[192];
-    std::snprintf(line, sizeof(line), "decoder inbox: frame over the cap refused bytes=%zu cap=%zu key=%u refused=%llu",
-                  frame.payload.size(), kInboxMaxBytes, isKeyFrame ? 1u : 0u,
-                  static_cast<unsigned long long>(inboxOversizeDrops_));
-    log_error(line);
-    return;
-  }
-
+  // apk-inbox C (design r3 §1-§2): the chain-aware inbox decides -- the order (a duplicate / older AU dropped), the
+  // byte cap for every frame (r4 N2: a frame over the whole cap is refused: a loss), the tail gap (a delta after a loss
+  // is refused until a usable IDR), and the trim (the earliest usable IDR + suffix kept; else the loss taken as one).
+  // r5 (Codex src r4) still holds: the cap is an AVERAGE of the highest bitrate asked for, an encoder may make one IDR
+  // over 4 MiB -- refused here, every time it comes. The assembler itself admits up to 16 MB.
+  const uint32_t seq = frame.header.seq;
+  const uint64_t gen = frame.header.streamGeneration;
   InboxFrame item;
-  item.resetPts = latestInputStreamGeneration_ != 0 &&
-                  latestInputStreamGeneration_ != frame.header.streamGeneration;
-  latestInputStreamGeneration_ = frame.header.streamGeneration;
-  inboxBytes_ += frame.payload.size();
-  REMOTE60_LT({
-    item.enqueueUs = LtNowUs();
-    // apk-decoder-inbox r2 (Codex codex_apk_inbox_plan_src_r1.md N1): the AU's own enqueue time, by its identity
-    // (stream generation + AU seq) -- looked up when THAT AU goes into the codec, wherever it waited (inbox, the
-    // pending slot). r1 used the time of whatever frame was processed last: a held IDR's 286 ms read as 33 ms.
-    LtEnq& e = ltEnq_[frame.header.seq % kLtEnqRing];
-    e.gen = frame.header.streamGeneration;
-    e.seq = frame.header.seq;
-    e.us = item.enqueueUs;
-  });
+  item.resetPts = latestInputStreamGeneration_ != 0 && latestInputStreamGeneration_ != gen;
+  REMOTE60_LT(item.enqueueUs = LtNowUs());
   item.frame = std::move(frame);
-  inbox_.push_back(std::move(item));
-  REMOTE60_LT({  // r2: the peak INCLUDING the frame just added, before the trim (may be 9 / over 4 MiB for an instant)
-    LtMax(ltInboxPeakPreFrames_, inbox_.size());
-    LtMax(ltInboxPeakPreBytes_, inboxBytes_);
-  });
-  // Bounded: the oldest goes. Its loss is the codec's loss -- an IDR is owed again and asked for, and the deltas
-  // after the gap are not fed before the next IDR (ProcessFrameLocked). r4 N2: no exception for the last frame --
-  // the frame just added is within the cap by itself, so this stops with it in the inbox and the total <= the cap.
-  while (inbox_.size() > kInboxMaxFrames || inboxBytes_ > kInboxMaxBytes) {
-    const auto& old = inbox_.front().frame;
-    if ((old.header.flags & 1u) != 0) gate_.KeyLost(old.header.streamGeneration);
-    inboxBytes_ -= std::min(inboxBytes_, old.payload.size());
-    inbox_.pop_front();
-    ++inboxDrops_;
-    inboxGap_ = true;
-    NoteKeyWantLocked(kWantInboxOverflow);
-    if ((inboxDrops_ % 30u) == 1u) {
-      char line[160];
-      std::snprintf(line, sizeof(line), "decoder inbox full: oldest frame dropped drops=%llu",
-                    static_cast<unsigned long long>(inboxDrops_));
-      log_info(line);
-    }
+  const auto offer = inbox_.Offer(std::move(item));
+  if (offer.admit == remote60::native_poc::ChainAdmit::Duplicate ||
+      offer.admit == remote60::native_poc::ChainAdmit::Stale) {
+    return;  // counted by the inbox (chainDup / chainStale); not a loss
+  }
+  latestInputStreamGeneration_ = gen;
+  if (offer.admit == remote60::native_poc::ChainAdmit::Oversize) {
+    ++inboxOversizeDrops_;
+    char line[192];
+    std::snprintf(line, sizeof(line), "decoder inbox: frame over the cap refused seq=%u cap=%zu key=%u refused=%llu", seq,
+                  kInboxMaxBytes, isKeyFrame ? 1u : 0u, static_cast<unsigned long long>(inboxOversizeDrops_));
+    log_error(line);
+  }
+  NoteInboxOfferLocked(offer);
+  if (offer.admit == remote60::native_poc::ChainAdmit::Admitted) {
+    REMOTE60_LT({
+      // apk-decoder-inbox r2 (Codex codex_apk_inbox_plan_src_r1.md N1): the AU's own enqueue time, by its identity
+      // (stream generation + AU seq) -- looked up when THAT AU goes into the codec, wherever it waited.
+      LtEnq& e = ltEnq_[seq % kLtEnqRing];
+      e.gen = gen;
+      e.seq = seq;
+      e.us = LtNowUs();
+    });
+  }
+  if (offer.loss && ((inbox_.lost() % 30u) == 1u || offer.lostFrames > 1)) {
+    char line[192];
+    std::snprintf(line, sizeof(line), "decoder inbox: chain loss at seq=%u lost=%zu (total %llu) skipped=%zu episode=%llu %s",
+                  offer.lossSeq, offer.lostFrames, static_cast<unsigned long long>(inbox_.lost()), offer.skippedFrames,
+                  static_cast<unsigned long long>(recovery_.id()), recovery_.StateName());
+    log_info(line);
   }
   REMOTE60_LT({  // r2: what stays admitted after the trim (never over the caps)
-    LtMax(ltInboxHwFrames_, inbox_.size());
-    LtMax(ltInboxHwBytes_, inboxBytes_);
+    LtMax(ltInboxHwFrames_, inbox_.frames());
+    LtMax(ltInboxHwBytes_, inbox_.bytes());
   });
   workCv_.notify_all();
 }
@@ -425,14 +453,14 @@ void AndroidVideoDecoderSink::ProcessFrameLocked(InboxFrame&& item) {
   remote60::native_poc::UdpH264AssembledFrame frame = std::move(item.frame);
   const bool isKeyFrame = (frame.header.flags & 1u) != 0;
   if (item.resetPts) ResetPtsStateLocked();
-  if (inboxGap_) {
-    if (!isKeyFrame) {
-      ++inboxGapDrops_;
-      NoteKeyWantLocked(kWantGapDelta);
-      return;
-    }
-    inboxGap_ = false;
-  }
+  // apk-inbox C: no worker-side gap any more -- after a loss the inbox holds no delta before a usable IDR (the trim
+  // and the tail gap). The IDR going in now is a recovery candidate while the codec calls run (mu_ released).
+  struct InFlight {
+    AndroidVideoDecoderSink* s;
+    ~InFlight() { s->inFlightKey_ = false; }
+  } inFlight{this};
+  inFlightKey_ = isKeyFrame;
+  inFlightKeySeq_ = frame.header.seq;
   configuredWidth_ = frame.header.width;
   configuredHeight_ = frame.header.height;
   const bool codecConfigUpdated = UpdateCodecConfigLocked(frame.payload);
@@ -452,7 +480,7 @@ void AndroidVideoDecoderSink::ProcessFrameLocked(InboxFrame&& item) {
   // (the session's limiter paces the asks); the IDR then starts this instance like any other.
   if (codecAwaitsKey_ && !isKeyFrame) {
     ++deltaBeforeKeyDrops_;
-    NoteKeyWantLocked(kWantAwaitKey);
+    NoteChainLossLocked(kWantAwaitKey, frame.header.seq);  // apk-inbox C: one episode, not one ask per delta
     if ((deltaBeforeKeyDrops_ % 30u) == 1u) {
       char line[160];
       std::snprintf(line, sizeof(line), "delta before the codec's first IDR dropped streamGen=%llu drops=%llu",
@@ -467,10 +495,15 @@ void AndroidVideoDecoderSink::ProcessFrameLocked(InboxFrame&& item) {
   // held / replacing the held frame / dropped (an IDR asked for) -- DecoderPendingSlot.
   const bool hadPending = pendingFrame_.has();
   bool keyRequest = false;
+  // apk-inbox C: what the slot gives up is the loss point -- the HELD delta when this IDR replaces it, this delta when
+  // it is the one dropped. (Not the arriving IDR: that one is the recovery's candidate.)
+  const uint32_t offeredSeq = frame.header.seq;
+  const bool offeredKey = isKeyFrame;
+  const uint32_t heldSeq = pendingFrame_.held() ? pendingFrame_.held()->header.seq : offeredSeq;
   pendingFrame_.Offer(std::move(frame), gate_, [this](remote60::native_poc::UdpH264AssembledFrame& f) {
     return TryQueueFrameLocked(f);
   }, &keyRequest);
-  if (keyRequest) NoteKeyWantLocked(kWantPendingSlot);
+  if (keyRequest) NoteChainLossLocked(kWantPendingSlot, offeredKey ? heldSeq : offeredSeq);
   if (pendingFrame_.has()) {
     pendingFrameCount_ = 1;
     if (!hadPending) pendingFrameQueueRetryCount_ = 0;
@@ -502,7 +535,7 @@ void AndroidVideoDecoderSink::ResetForBindingLocked() {
   presentGapsUs_.clear();
   presentScheduledCount_ = 0;
   presentImmediateCount_ = 0;
-  decoderKeyframeRequest_ = false;
+  InvalidateKeyAsksLocked();  // apk-inbox C (was: the single want flag cleared)
 }
 
 void AndroidVideoDecoderSink::Bind(uint64_t token) {
@@ -534,6 +567,7 @@ void AndroidVideoDecoderSink::OnVideoStreamResetAs(uint64_t token) {
   RequestCodecResetLocked();
   ClearInboxLocked();
   ResetCodecRetryLocked();  // r4 N3
+  InvalidateKeyAsksLocked();  // apk-inbox C
   configuredWidth_ = 0;
   configuredHeight_ = 0;
   outputWidth_ = 0;
@@ -713,11 +747,69 @@ bool AndroidVideoDecoderSink::DrainDecodeStatsAs(uint64_t token, remote60::nativ
 }
 
 bool AndroidVideoDecoderSink::ConsumeDecoderKeyframeRequestAs(uint64_t token) {
+  return TakeDecoderKeyRequestAs(token, nullptr);
+}
+
+// apk-inbox C (design r3 §3): the want now, with what it is for. The episode hands out its ask at t0 and then only
+// when due (1 / 2 / 4 s after the previous SEND), never while a usable IDR is preserved; the one-shots once each.
+bool AndroidVideoDecoderSink::TakeDecoderKeyRequestAs(uint64_t token, remote60::native_poc::DecoderKeyRequest* out) {
   LockedState lock(this);
   if (!OwnerLocked(token)) return false;
-  const bool requested = decoderKeyframeRequest_;
-  decoderKeyframeRequest_ = false;
-  return requested;
+  remote60::native_poc::DecoderKeyRequest r;
+  r.sinkEpoch = keyEpoch_;
+  if (wantCodecUp_) r.causes |= remote60::native_poc::kKeyCauseCodecUp;
+  if (wantSelectionAbort_) r.causes |= remote60::native_poc::kKeyCauseSelectionAbort;
+  wantCodecUp_ = false;
+  wantSelectionAbort_ = false;
+  uint64_t episode = 0;
+  const bool candidate = RecoveryCandidateLocked();
+  // While the selection is owed an IDR (gate_.KeyLost / Rearm: the session asks for it, bounded 8 x 1 s) that duty IS
+  // this IDR: the episode adds no asks of its own on top (design r3 §3: one logical exchange, not 4 + 8). Its budget is
+  // untouched; the commit that pays the duty ends the episode too (an IDR after the loss point).
+  const bool owedCovers = gate_.OwedToken() != 0;
+  if (!owedCovers && recovery_.TakeWant(steady_now_us(), candidate, &episode)) {
+    r.causes |= remote60::native_poc::kKeyCauseRecovery;
+    r.episodeId = episode;
+  }
+  TickRecoveryLocked();  // logs an exhaustion TakeWant's own tick reached
+  if (r.empty()) return false;
+  ++keyRequestsTaken_;
+  if (out) *out = r;
+  return true;
+}
+
+// apk-inbox C (D8): which causes of a held / accepted request still hold, asked by the session right before it goes
+// on (to the limiter again / to the send). A short query under mu_ -- never across the network.
+uint32_t AndroidVideoDecoderSink::DecoderKeyRequestValidCausesAs(uint64_t token,
+                                                                 const remote60::native_poc::DecoderKeyRequest& r) {
+  using namespace remote60::native_poc;
+  const uint32_t sessionScoped = r.causes & (kKeyCausePipeline | kKeyCauseLegacy);
+  LockedState lock(this);
+  if (!OwnerLocked(token)) return sessionScoped;  // another PC on screen: none of this sink's state is that request's
+  uint32_t valid = sessionScoped;
+  const bool sameEpoch = r.sinkEpoch == keyEpoch_;
+  if ((r.causes & kKeyCauseRecovery) != 0 && sameEpoch && recovery_.StillValid(r.episodeId)) {
+    if (!RecoveryCandidateLocked()) {
+      valid |= kKeyCauseRecovery;
+    } else {
+      recovery_.OnWantDropped(r.episodeId);  // moot for now: a usable IDR is preserved
+      ++recoveryDroppedMoot_;
+    }
+  }
+  if ((r.causes & kKeyCauseCodecUp) != 0 && sameEpoch && codecAwaitsKey_) valid |= kKeyCauseCodecUp;
+  if ((r.causes & kKeyCauseSelectionAbort) != 0 && sameEpoch) valid |= kKeyCauseSelectionAbort;
+  if ((r.causes & kKeyCauseOwed) != 0 && r.owedToken != 0 && gate_.OwedToken() == r.owedToken) valid |= kKeyCauseOwed;
+  return valid;
+}
+
+// apk-inbox C: the control exchange for this request started -- the episode's attempt, on the sink's own clock.
+void AndroidVideoDecoderSink::OnDecoderKeyRequestSentAs(uint64_t token, const remote60::native_poc::DecoderKeyRequest& r,
+                                                        uint64_t /* nowUs: the session's clock */) {
+  LockedState lock(this);
+  if (!OwnerLocked(token)) return;
+  if ((r.causes & remote60::native_poc::kKeyCauseRecovery) != 0 && r.sinkEpoch == keyEpoch_) {
+    recovery_.OnSent(r.episodeId, steady_now_us());
+  }
 }
 
 void AndroidVideoDecoderSink::OnWindowSelectionControlResultAs(
@@ -824,6 +916,7 @@ bool AndroidVideoDecoderSink::PrepareForWindowSelectionAs(uint64_t token, uint64
   RequestCodecResetLocked();
   ClearInboxLocked();
   ResetCodecRetryLocked();  // r4 N3
+  InvalidateKeyAsksLocked();  // apk-inbox C: the old selection's asks are moot (inbox contrast [5])
   configuredWidth_ = 0;
   configuredHeight_ = 0;
   outputWidth_ = 0;
@@ -871,7 +964,9 @@ bool AndroidVideoDecoderSink::AbortWindowSelectionAs(uint64_t token) {
   // applies). Inside the transition's grace only; the app pauses the stream before it aborts, so then
   // nothing is measured anyway.
   StartGraceLocked(false);
+  InvalidateKeyAsksLocked();  // apk-inbox C: what was asked before is moot -- the abort's own ask is new
   NoteKeyWantLocked(kWantSelectionAbort);
+  wantSelectionAbort_ = true;
   log_info("selection aborted");
   return true;
 }
@@ -928,10 +1023,19 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
   status += " codecState=" + std::string(codecState_);
   status += " codecFail=" + std::to_string(codecFailures_);
   status += " codecVoid=" + std::to_string(codecVoidStarts_);
-  status += " inbox=" + std::to_string(inbox_.size());
-  status += " inboxBytes=" + std::to_string(inboxBytes_);  // r4 N2
-  status += " inboxDrops=" + std::to_string(inboxDrops_);
-  status += " gapDrops=" + std::to_string(inboxGapDrops_);
+  status += " inbox=" + std::to_string(inbox_.frames());
+  status += " inboxBytes=" + std::to_string(inbox_.bytes());  // r4 N2
+  status += " inboxDrops=" + std::to_string(inbox_.lost());   // apk-inbox C: frames lost to the chain (trim / gap / oversize)
+  status += " gapDrops=" + std::to_string(inbox_.gapDeltas());
+  // apk-inbox C: the chain inbox and the recovery episode
+  status += " chainSkipped=" + std::to_string(inbox_.skipped()) + " chainDup=" + std::to_string(inbox_.duplicates()) +
+            " chainStale=" + std::to_string(inbox_.stale()) + " tailGap=" + std::to_string(inbox_.gapOpen() ? 1 : 0);
+  status += " recovery=" + std::string(recovery_.StateName()) + " episode=" + std::to_string(recovery_.id()) +
+            " asks=" + std::to_string(recovery_.attempts()) + " episodes=" + std::to_string(recovery_.opened()) +
+            " recClosed=" + std::to_string(recovery_.closed()) + " recExhausted=" + std::to_string(recovery_.exhausted()) +
+            " recWants=" + std::to_string(recovery_.wants()) + " recSent=" + std::to_string(recovery_.sent()) +
+            " recMoot=" + std::to_string(recoveryDroppedMoot_) + " keyTaken=" + std::to_string(keyRequestsTaken_) +
+            " keyEpoch=" + std::to_string(keyEpoch_);
   status += " resetPending=" + std::to_string(CodecResetPendingLocked() ? 1 : 0);
   status += " codecRetries=" + std::to_string(codecAutoRetries_);       // r4 N3
   status += " queueVoided=" + std::to_string(queueVoided_);             // r4 N1
@@ -1137,6 +1241,7 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height,
     // token, the session's same bounded asks); r5: whichever path made it.
     gate_.Rearm();
     NoteKeyWantLocked(kWantCodecUp);
+    wantCodecUp_ = true;  // apk-inbox C: its own cause, taken once
     char rline[160];
     std::snprintf(rline, sizeof(rline), "codec made on retry %u after a failure: an owed IDR is asked for afresh (token=%llu)",
                   codecAutoRetries_, static_cast<unsigned long long>(gate_.OwedToken()));
@@ -1324,6 +1429,13 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
   if (queueingReplay_) RememberReplayPtsLocked(ptsUs);
   lastInputQueueSteadyUs_ = steady_now_us();
   if (isKey) codecAwaitsKey_ = false;  // keepalive r5 D1: this instance has its IDR
+  // apk-inbox C (design r3 §2): the episode ends only here -- an IDR after the loss point committed to the codec.
+  if (isKey && recovery_.OnKeyCommitted(frame.header.seq)) {
+    char cline[160];
+    std::snprintf(cline, sizeof(cline), "decoder recovery: IDR seq=%u committed -- episode %llu closed after %u asks",
+                  frame.header.seq, static_cast<unsigned long long>(recovery_.id()), recovery_.attempts());
+    log_info(cline);
+  }
   REMOTE60_LT({
     // r2: THIS AU's enqueue time (by identity). A bootstrap replay is the same AU queued again: not an arrival, not
     // counted. An AU whose record the ring has lost (64+ AUs later) is counted as unmatched -- never another's time.

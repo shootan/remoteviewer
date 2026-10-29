@@ -36,6 +36,20 @@ class EntrySinkAdapter : public remote60::native_poc::ClientEncodedFrameSink {
     const uint64_t t = Token();
     return t != 0 && decoder_->ConsumeDecoderKeyframeRequestAs(t);
   }
+  // apk-inbox C: the want with its descriptor, its validity and its send -- for this PC's binding only (a PC not on
+  // screen asks nothing; its held / accepted requests keep only their session-scoped causes).
+  bool TakeDecoderKeyRequest(remote60::native_poc::DecoderKeyRequest* out) override {
+    const uint64_t t = Token();
+    return t != 0 && decoder_->TakeDecoderKeyRequestAs(t, out);
+  }
+  uint32_t DecoderKeyRequestValidCauses(const remote60::native_poc::DecoderKeyRequest& request) override {
+    const uint64_t t = Token();
+    return t != 0 ? decoder_->DecoderKeyRequestValidCausesAs(t, request)
+                  : request.causes & (remote60::native_poc::kKeyCausePipeline | remote60::native_poc::kKeyCauseLegacy);
+  }
+  void OnDecoderKeyRequestSent(const remote60::native_poc::DecoderKeyRequest& request, uint64_t nowUs) override {
+    if (const uint64_t t = Token()) decoder_->OnDecoderKeyRequestSentAs(t, request, nowUs);
+  }
   bool DrainPresentationStats(remote60::native_poc::ClientPresentationStats* out) override {
     const uint64_t t = Token();
     return t != 0 && decoder_->DrainPresentationStatsAs(t, out);

@@ -114,6 +114,9 @@ JNIEnv* env = nullptr;
 int surfaceA = 1;
 
 // The session's receive thread: hand the frame over, then ask for the decoder's want (as VideoReceiveMain does).
+// C r1: through the descriptor API, and -- as the session does when its limiter takes the request and the control
+// exchange starts -- told back that it was SENT (the episode's retry clock runs from sends). At ac587dd / 79b5c25 the
+// default descriptor API wraps ConsumeDecoderKeyframeRequest, so the baseline counts what it always counted.
 struct Rx {
   AndroidVideoDecoderSink& sink;
   int wants = 0;
@@ -121,7 +124,11 @@ struct Rx {
   void send(UdpH264AssembledFrame&& f) {
     const auto t0 = Clock::now();
     sink.OnEncodedH264Frame(std::move(f));
-    if (sink.ConsumeDecoderKeyframeRequest()) ++wants;
+    DecoderKeyRequest r;
+    if (sink.TakeDecoderKeyRequest(&r)) {
+      ++wants;
+      sink.OnDecoderKeyRequestSent(r, 0);
+    }
     maxCallUs = std::max(maxCallUs, us_since(t0));
   }
 };
@@ -180,15 +187,49 @@ int main() {
     const size_t q0 = queued();
     rx.send(frame(g, true, 0x82));  // the IDR the recovery waited for
     wait_until([&] { return !tags_from(q0).empty(); }, 2000);
-    for (int i = 0; i < 10; ++i) rx.send(frame(g, false, 0x06));
+    // C r1: paced like every other stretch of this case (3 ms). r1 sent these 10 at once -- 10 > 8 arriving faster
+    // than the worker can take them is a SECOND loss of its own, a separate episode by design; that burst is checked
+    // as such in [2b] instead of being counted into this one.
+    for (int i = 0; i < 10; ++i) {
+      rx.send(frame(g, false, 0x06));
+      std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    wait_until([&] { return field(sink.DebugStatus(), "inbox") == 0; }, 1000);
     const std::string st = sink.DebugStatus();
     const auto after = tags_from(q0);
+    int resumed = 0;
+    for (uint8_t t : after) resumed += t == 0x06 ? 1 : 0;
     check("[2] one gap episode -> exactly ONE recovery want (the deltas of the same gap add none)", rx.wants == 1,
           "wants=" + std::to_string(rx.wants) + " inboxDrops=" + std::to_string(field(st, "inboxDrops")) +
-              " gapDrops=" + std::to_string(field(st, "gapDrops")));
+              " gapDrops=" + std::to_string(field(st, "gapDrops")) + " episodes=" + std::to_string(field(st, "episodes")));
     check("[2] no delta of the broken chain reaches the codec; the next IDR does, and decoding resumes",
-          !after.empty() && after.front() == 0x82, "queued after=" + std::to_string(after.size()));
+          !after.empty() && after.front() == 0x82 && resumed == 10,
+          "queued after=" + std::to_string(after.size()) + " deltas after the IDR=" + std::to_string(resumed));
+    check("[2] the episode closed at that IDR's commit", field(st, "recClosed") == 1 && field(st, "episodes") == 1,
+          "closed=" + std::to_string(field(st, "recClosed")));
     check("[2] RX never waited", rx.maxCallUs < kCallBoundUs, std::to_string(rx.maxCallUs / 1000) + " ms");
+    sink.SetSurface(env, nullptr);
+  }
+
+  std::puts("\n--- [2b] C r1: a burst of 10 deltas at once while the worker is held: ONE new loss, ONE episode, ONE want");
+  {
+    AndroidVideoDecoderSink sink;
+    Rx rx{sink};
+    const uint64_t g = start(sink, rx, 18, 108);
+    hold(fake_ndk::kHoldDequeueInput);
+    rx.send(frame(g, false, 0x0F));
+    wait_until(held_now, 2000);
+    for (int i = 0; i < 10; ++i) rx.send(frame(g, false, 0x10));  // 10 > 8 at once
+    let_go();
+    for (int i = 0; i < 10; ++i) {
+      rx.send(frame(g, false, 0x11));
+      std::this_thread::sleep_for(std::chrono::milliseconds(3));
+    }
+    const std::string st = sink.DebugStatus();
+    check("[2b] the burst is one loss: one episode, one want; the deltas after it are refused, not fed",
+          rx.wants == 1 && field(st, "episodes") == 1 && field(st, "gapDrops") >= 10,
+          "wants=" + std::to_string(rx.wants) + " episodes=" + std::to_string(field(st, "episodes")) +
+              " gapDrops=" + std::to_string(field(st, "gapDrops")));
     sink.SetSurface(env, nullptr);
   }
 

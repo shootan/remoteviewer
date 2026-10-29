@@ -18,6 +18,7 @@
 #include "client_mouse_xbutton_fence.hpp"
 #include "client_telemetry_window.hpp"
 #include "client_host_role_gate.hpp"
+#include "decoder_key_request.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "udp_control_channel.hpp"
 
@@ -52,6 +53,22 @@ class ClientEncodedFrameSink {
   // everything that follows. Returning true asks the session for an IDR; the flag is consumed
   // so one drop produces one request and the session's own rate limiter still applies.
   virtual bool ConsumeDecoderKeyframeRequest() { return false; }
+  // apk-inbox C (design r3 §3-§4 D8): the same want with its descriptor -- why it is asked (a cause set) and the sink
+  // state it was asked in. The session keeps the descriptor with the request while it is HELD (the limiter refused)
+  // or ACCEPTED (pending a send), asks DecoderKeyRequestValidCauses before it goes on at either point and does not send
+  // a request none of whose causes are valid any more; OnDecoderKeyRequestSent when the control exchange for it
+  // started (the sink's retry clock runs from real sends, not from wants). The defaults keep a sink that only answers
+  // ConsumeDecoderKeyframeRequest exactly as before (a legacy cause, always valid).
+  virtual bool TakeDecoderKeyRequest(DecoderKeyRequest* out) {
+    if (!ConsumeDecoderKeyframeRequest()) return false;
+    if (out) {
+      out->Clear();
+      out->causes = kKeyCauseLegacy;
+    }
+    return true;
+  }
+  virtual uint32_t DecoderKeyRequestValidCauses(const DecoderKeyRequest& request) { return request.causes; }
+  virtual void OnDecoderKeyRequestSent(const DecoderKeyRequest& /* request */, uint64_t /* nowUs */) {}
   virtual void OnWindowSelectionControlResult(const ControlWindowSelectedMessage& /* msg */) {}
   // t-970r4zgo: the local selection a select request belongs to -- read when the request is
   // queued (the Android sink: the generation PrepareForWindowSelection armed). 0 = not tracked.
@@ -244,7 +261,13 @@ class ClientSessionController {
   uint64_t UdpHelloCount() const { return udpHelloCount_.load(std::memory_order_relaxed); }
 
   // The viewer abandoned a switch (nativeAbortVideoSwitch): an IDR it was still owed is not asked for.
-  void ClearPendingDecoderKeyframe() { decoderRekeyPending_.store(false, std::memory_order_release); }
+  void ClearPendingDecoderKeyframe() {
+    decoderRekeyPending_.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> lk(keyLedgerMu_);
+    keyHeld_.Clear();
+  }
+  // apk-inbox C (D8): requests not sent because no cause of theirs was valid any more (held / at the send point).
+  uint64_t KeyRequestsDroppedStale() const { return keyDroppedStale_.load(std::memory_order_relaxed); }
   bool RequestRuntimeConfig(uint32_t bitrate, uint32_t fps);
   bool RequestDesktopCaptureBackend(uint16_t backend);
   // capture-lifecycle r1 (UA-2): what the host said runs for THIS connection's session (its answer to a
@@ -451,6 +474,15 @@ class ClientSessionController {
   // tried on every control-loop pass, so it does not wait for the next frame -- after a dropped
   // lone IDR there may be none.
   std::atomic<bool> decoderRekeyPending_{false};
+  // apk-inbox C (design r3 §4 D8): the descriptors of the key request HELD (refused by the limiter, decoderRekeyPending_)
+  // and of the one ACCEPTED (the limiter took it; the scheduler's next KeyframeRequest action sends it). Coalesced
+  // (DecoderKeyRequest::Merge); under keyLedgerMu_ (RX and control threads), never held across a sink call or a send.
+  std::mutex keyLedgerMu_;
+  DecoderKeyRequest keyHeld_;
+  DecoderKeyRequest keyAccepted_;
+  std::atomic<uint64_t> keyDroppedStale_{0};
+  void NoteKeyRequest(const DecoderKeyRequest& request, bool queued);
+  void ClearKeyLedger();
   // r4 M1-A: asking for the IDR a selection is owed (ClientEncodedFrameSink::KeyframeOwedFor).
   // Control-loop thread only.
   uint64_t owedSelection_ = 0;
