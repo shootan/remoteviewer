@@ -188,7 +188,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   void ResetForBindingLocked();
   void PumpCodecLocked();
   bool TryQueueFrameLocked(remote60::native_poc::UdpH264AssembledFrame& frame);
-  bool EnsureCodecLocked(uint32_t width, uint32_t height);
+  bool EnsureCodecLocked(uint32_t width, uint32_t height, bool keyFrame = false);
   uint64_t ComputeQueuedPtsUsLocked(const remote60::native_poc::UdpH264AssembledFrame& frame);
   void ResetPtsStateLocked();
   void ResetCodecLocked();
@@ -333,7 +333,9 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   // r4 N2: both bounds hold always -- a single frame over kInboxMaxBytes is refused at the door (lost the same way).
   // The worker holds at most four more frames outside the inbox, each within the same cap: the one being processed,
   // the one held for an input buffer (pendingFrame_), the selection's bootstrap IDR (bootstrapFrame_) and its replay
-  // copy during a replay -- at most kInboxMaxBytes + 4 x kInboxMaxBytes = 20 MB of frames in the sink.
+  // copy during a replay -- at most kInboxMaxBytes + 4 x kInboxMaxBytes = 20 MB of frame PAYLOAD in the sink. r5
+  // (Codex src r4): a logical payload budget, not a bound on the process's memory -- vector capacity, allocator
+  // overhead, the assembler's and the codec's own buffers are outside it.
   static constexpr size_t kInboxMaxFrames = 8;
   static constexpr size_t kInboxMaxBytes = 4u << 20;
   std::deque<InboxFrame> inbox_;
@@ -351,15 +353,20 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   // decoder without a codec for good. Every kCodecRetryIntervalUs, at most kCodecAutoRetryMax times per surface /
   // selection / binding; a codec made this way re-arms the owed IDR (SelectionAckGate::Rearm: a NEW token, the
   // session's same bounded asks once more -- the rule a new surface already had). After the last try the state is
-  // failed_terminal and logged once: from there only a new surface, a new selection or an IDR the host sends
-  // brings a codec (an arriving IDR always tries). Nothing here asks the host for anything by itself.
+  // failed_terminal and logged once: from there only a new surface, a new selection, a new binding or a stream
+  // reset brings a codec (r5: an arriving frame does not try either). Nothing here asks the host for anything by
+  // itself.
   static constexpr uint64_t kCodecRetryIntervalUs = 1000000ULL;
   static constexpr uint32_t kCodecAutoRetryMax = 20;
-  uint64_t codecRetryAtUs_ = 0;    // 0: no retry due
-  uint32_t codecAutoRetries_ = 0;
+  // r5 (Codex src r4): ONE budget for every attempt after a failure -- a frame's and the timer's alike
+  // (EnsureCodecLocked); before the deadline only an IDR may try, never a delta or the timer.
+  uint64_t codecRetryAtUs_ = 0;    // 0: no failure pending
+  uint32_t codecAutoRetries_ = 0;  // tries made after the failure, by any path
+  bool codecTerminal_ = false;     // the budget is spent: no try until ResetCodecRetryLocked
   void ResetCodecRetryLocked() {
     codecRetryAtUs_ = 0;
     codecAutoRetries_ = 0;
+    codecTerminal_ = false;
   }
   void RetryCodecLocked();
   // r4 N1 / N2 diagnostics: exchanges voided by a selection / codec change, frames refused for being over the cap.

@@ -45,9 +45,11 @@ namespace remote60::native_poc {
 //   * what can still change during an exchange -- a new pick (Prepare), an abandon / a stream reset / a new binding
 //     (Reset), BeginLocal, Refuse, an answer (OnAck) -- bumps the gate's epoch. CommitQueue pays / binds only under
 //     the epoch the frame was reserved in; a stale reservation pays nothing and binds nothing. The decoder asks for
-//     a codec reset with every such change, and voids the codec itself if a commit is ever stale without one. So an
-//     exchange begun before such a change completes, if at all, into a codec that change has voided; an exchange
-//     begun after it is judged against the new state.
+//     a codec reset with Prepare and Reset (a new pick, an abandon, a stream reset, a new binding); OnAck, BeginLocal
+//     and Refuse only leave the awaiting state, in which PermitsQueue admits nothing -- so no reservation exists for
+//     them to make stale -- and a stale commit with no reset pending (that unreachable case) makes the decoder void
+//     the codec itself. So an exchange begun before such a change completes, if at all, into a codec the change has
+//     voided; an exchange begun after it is judged against the new state.
 class SelectionAckGate {
  public:
   enum class AckResult { Ignored, Applied, Failed };

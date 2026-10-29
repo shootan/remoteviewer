@@ -107,7 +107,9 @@ std::vector<uint8_t> with_start_code(const uint8_t* data, size_t size) {
 
 AndroidVideoDecoderSink::~AndroidVideoDecoderSink() {
   // The worker ends first, joined WITHOUT mu_ (it takes mu_ on every pass). Then nothing else touches the codec:
-  // what is left is stopped and released here, inline.
+  // what is left is stopped and released here, inline -- r5 (Codex src r4): so the destructor, once quiescent, DOES
+  // call the codec (stop / delete) and release windows under mu_ on the destroying thread; nobody else can be
+  // waiting on mu_ by then, but those calls can be as slow as anywhere else.
   {
     std::lock_guard<std::mutex> lk(mu_);
     workerStop_ = true;
@@ -333,8 +335,10 @@ void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::nat
   // r4 N2 (Codex src r1): the byte cap holds for every frame -- r1-r3 kept one frame of ANY size (the last one was
   // never dropped). A frame larger than the whole cap is refused here: it is lost like a dropped one (an IDR is owed
   // again, a key asked for, the deltas after it not fed before the next IDR) and counted apart. The cap is more than
-  // one whole second of the highest bitrate the client asks for (kRuntimeBitrateMax 30 Mbit/s = 3.75 MB), so a
-  // stream within it never meets it; the assembler itself admits up to 16 MB (kMaxUdpAssembledPayloadBytes).
+  // one whole second of the highest bitrate the client asks for (kRuntimeBitrateMax 30 Mbit/s = 3.75 MB) -- r5
+  // (Codex src r4): an AVERAGE, which does NOT bound a single IDR: an encoder may make one IDR larger than 4 MiB at
+  // 30 Mbit/s (rate control over a window, a scene of fine detail), and such an IDR is refused here, every time it
+  // comes. The assembler itself admits up to 16 MB (kMaxUdpAssembledPayloadBytes).
   if (frame.payload.size() > kInboxMaxBytes) {
     if (isKeyFrame) gate_.KeyLost(frame.header.streamGeneration);
     ++inboxOversizeDrops_;
@@ -395,7 +399,7 @@ void AndroidVideoDecoderSink::ProcessFrameLocked(InboxFrame&& item) {
   if (codecConfigUpdated && codec_) {
     ResetCodecLocked();
   }
-  if (!EnsureCodecLocked(frame.header.width, frame.header.height) || !codec_) {
+  if (!EnsureCodecLocked(frame.header.width, frame.header.height, isKeyFrame) || !codec_) {
     // r5 N1: dropped for want of a decoder (no surface, csd, codec create/configure/start): an
     // IDR of the answered generation that ends here was not delivered, so it is still owed.
     if (isKeyFrame) gate_.KeyLost(frame.header.streamGeneration);
@@ -930,12 +934,27 @@ uint64_t AndroidVideoDecoderSink::LastOutputPresentationUs() {
   return lastOutputPresentationUs_;
 }
 
-bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height) {
+bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height, bool keyFrame) {
   if (codec_ && configuredWidth_ == width && configuredHeight_ == height) {
     return true;
   }
   if (!window_ || width == 0 || height == 0 || csd0_.empty() || csd1_.empty()) {
     return false;
+  }
+  // r5 N3 (Codex src r4: one IDR then 40 deltas made 41 creates in 2 s, codecRetries=0 -- every frame called this
+  // and pushed the timer). Every attempt to make a codec comes through here -- a frame's and the worker's timer --
+  // and after a failure they share ONE budget: each try is counted, and past the budget nobody tries at all
+  // (terminal) until a new surface, a new selection, a new binding or a stream reset starts the count over
+  // (ResetCodecRetryLocked). Before the shared deadline only an IDR may try (keyFrame: the frame the codec needs
+  // anyway, and the one an owed / periodic key brings -- its recovery stays immediate, as before r4); a delta never
+  // does (a stream of deltas cannot spend the budget or set the pace) and neither does the timer.
+  if (codecTerminal_) return false;
+  bool retry = false;
+  if (codecRetryAtUs_ != 0) {
+    if (!keyFrame && steady_now_us() < codecRetryAtUs_) return false;  // failed: not yet (a delta, the timer)
+    codecRetryAtUs_ = 0;                                                // this try takes the slot
+    ++codecAutoRetries_;
+    retry = true;
   }
 
   ResetCodecLocked();
@@ -989,16 +1008,18 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
     log_error(failed ? failed : "codec failed");
     codecState_ = "failed";
     ++codecFailures_;
-    // r4 N3: tried again by the worker, bounded (RetryCodecLocked) -- unless the retries for this surface /
-    // selection are spent: then the failure is terminal until a new surface / selection / an IDR from the host.
+    // r4 N3 / r5: tried again after kCodecRetryIntervalUs (by the next frame or the worker's timer, whichever comes
+    // first -- one shared deadline), at most kCodecAutoRetryMax times; then terminal until a new surface / selection
+    // / binding / stream reset.
     if (codecAutoRetries_ < kCodecAutoRetryMax) {
       codecRetryAtUs_ = steady_now_us() + kCodecRetryIntervalUs;
     } else {
       codecRetryAtUs_ = 0;
+      codecTerminal_ = true;
       codecState_ = "failed_terminal";
       char line[192];
       std::snprintf(line, sizeof(line),
-                    "codec failed: %u retries spent -- no more until a new surface, a new selection or an IDR",
+                    "codec failed: %u retries spent -- no more until a new surface, selection, binding or stream",
                     codecAutoRetries_);
       log_error(line);
     }
@@ -1018,6 +1039,17 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
   codec_ = codec;
   codecState_ = "started";
   codecRetryAtUs_ = 0;  // r4 N3
+  if (retry) {
+    // r4 N3: a codec made after a failure can take an IDR again -- an owed one is asked for afresh (Rearm: a new
+    // token, the session's same bounded asks); r5: whichever path made it.
+    gate_.Rearm();
+    decoderKeyframeRequest_ = true;
+    char rline[160];
+    std::snprintf(rline, sizeof(rline), "codec made on retry %u after a failure: an owed IDR is asked for afresh (token=%llu)",
+                  codecAutoRetries_, static_cast<unsigned long long>(gate_.OwedToken()));
+    log_info(rline);
+  }
+  codecAutoRetries_ = 0;
 
   ++codecsStarted_;
   codecEpoch_.store(static_cast<uint32_t>(codecsStarted_), std::memory_order_release);
@@ -1053,17 +1085,10 @@ bool AndroidVideoDecoderSink::EnsureCodecLocked(uint32_t width, uint32_t height)
 // r4 N3 (Codex src r1): the worker's own bounded retry of a codec that could not be made (see the members). The
 // SPS/PPS and size it needs are the stream's (kept); a codec made here can take an IDR again, so an owed one is
 // asked for afresh (Rearm: a new token) -- the session then asks with its same bounded budget.
+// r5: the timer's half only -- the deadline, the count and the re-arm are EnsureCodecLocked's, shared with frames.
 void AndroidVideoDecoderSink::RetryCodecLocked() {
-  if (codec_ || !window_ || codecRetryAtUs_ == 0 || steady_now_us() < codecRetryAtUs_) return;
-  codecRetryAtUs_ = 0;
-  ++codecAutoRetries_;
-  if (!EnsureCodecLocked(configuredWidth_, configuredHeight_) || !codec_) return;  // failed again: re-scheduled there
-  gate_.Rearm();
-  decoderKeyframeRequest_ = true;
-  char line[160];
-  std::snprintf(line, sizeof(line), "codec made on retry %u after a failure: an owed IDR is asked for afresh (token=%llu)",
-                codecAutoRetries_, static_cast<unsigned long long>(gate_.OwedToken()));
-  log_info(line);
+  if (codec_ || !window_ || codecTerminal_ || codecRetryAtUs_ == 0 || steady_now_us() < codecRetryAtUs_) return;
+  EnsureCodecLocked(configuredWidth_, configuredHeight_);
 }
 
 void AndroidVideoDecoderSink::PumpCodecLocked() {
@@ -1113,7 +1138,11 @@ void AndroidVideoDecoderSink::PumpCodecLocked() {
 // r4 N1 (Codex src r1): the gate is RESERVED for the frame before the first codec call (SelectionAckGate::
 // ReserveQueue) and the frame counts only if that reservation is still current when the queue has returned
 // (CommitQueue). In between the receive side cannot move it (it no longer picks a candidate); a control-side change
-// (Prepare / Reset / an answer) makes it stale and always asks for a codec reset too. The contract, per exchange:
+// makes it stale. r5 (Codex src r4) -- which of them ask for a codec reset: Prepare, Abort, a stream reset, a new
+// binding / unbind (RequestCodecResetLocked with the gate's Prepare / Reset) do; an answer (OnAck), BeginLocal and
+// Refuse do NOT -- they only leave the awaiting state, and while awaiting PermitsQueue admits nothing, so no
+// reservation can exist for them to make stale. A stale commit with no reset pending is that unreachable case's
+// defence (voidExchange: a reset asked for here). The contract, per exchange:
 //   * a change seen after the input buffer was dequeued and before the queue: the frame is NOT queued (that codec is
 //     voided: a reset is pending or asked for here, so its dequeued buffer goes with it);
 //   * a change while the queue call itself runs: the bytes went into a codec the change has voided -- they pay no
