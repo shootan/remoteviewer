@@ -174,6 +174,25 @@ def main():
     check('NEGATIVE menu r7d: a keyboard up -> no wake tap on the picture (the menu is not reached; nothing typed)',
           raised and len(taps(p)) == n_taps and not keys(p), f'taps={len(taps(p)) - n_taps} keys={keys(p)}')
 
+    # r8: the tap only in the SAME viewer and connection as the pick
+    for what, app_line, host_line in (('the app left the viewer (scene HOSTS, status error)',
+                                       '2026-10-30 00:00:01.000 [scene] HOSTS\n2026-10-30 00:00:01.001 [status] error\n', ''),
+                                      ('the host ended the session',
+                                       '', '10-30 00:00:01.000 [native-video-host][control] udp control session ended epoch=1 resumed=0 reason=none\n')):
+        m, p = case('input-not-same', 'ok')
+        m.pick_pinned('3 the pinned window picked')
+        if app_line:
+            open(p['app'], 'a', encoding='utf-8').write(app_line)
+        if host_line:
+            open(p['host'], 'a', encoding='utf-8').write(host_line)
+        n_taps = len(taps(p))
+        ok4 = m.input_check()
+        r = last(m)
+        check(f'NEGATIVE 4 r8: {what} after the pick -> FAIL with NO tap', not ok4 and r[1] is False and
+              'not the same viewer' in r[2] and len(taps(p)) == n_taps, r[2][:200])
+    src = open(os.path.join(E, 'oa_avd.py'), encoding='utf-8').read()
+    check('r8 (source): a 4 FAIL ends the arm before the menu / 5 / 6 / P-5d',
+          'if not input_check():\n            return 1' in src.replace('\r\n', '\n'))
     m, p = case('hosts-ime-hide', 'ok', ime='shown', scene='hosts')
     ok = m.hide_ime_on_hosts('1b the sign-in keyboard')
     check('control 1b r7d: on the PC list a keyboard up is put away with BACK (it takes it); the list stays, no dialog',
