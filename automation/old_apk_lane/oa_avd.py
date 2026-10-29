@@ -221,7 +221,8 @@ def ime_state():
     r7i (verifier oa-s-20261030072336: after BACK the screenshot showed no keyboard, the app logged ImeTracker onHidden
     for HIDE_SOFT_INPUT_BY_BACK_KEY, yet mIsInputViewShown stayed true and r7d called it shown): what is on screen is
     the system's mInputShown (InputMethodManagerService: the IME is being shown) and the IME window's own visibility
-    (InputMethodService mWindowVisible / mDecorViewVisible -- both cleared by hideWindow()). mIsInputViewShown is the
+    (InputMethodService mWindowVisible / mDecorViewVisible -- both cleared by hideWindow()). The public isInputViewShown() reports decor visibility and is conservative shown evidence.
+    mIsInputViewShown is the
     IME's internal "the input view would be shown" evaluation (updateInputViewShown / onEvaluateInputViewShown), NOT
     cleared when the window hides -- recorded, not judged.
       shown    any of mInputShown / mWindowVisible / mDecorViewVisible true
@@ -239,11 +240,11 @@ def ime_state():
     seen = {}
     for k, v in flags:
         seen.setdefault(k, set()).add(v)
-    on_screen = sorted(k for k in SCREEN_FLAGS if 'true' in seen.get(k, set()))
+    on_screen = sorted(k for k in SCREEN_FLAGS + ('isInputViewShown',) if 'true' in seen.get(k, set()))
     if on_screen:
         return 'shown', on_screen
     if all(seen.get(k) == {'false'} for k in SCREEN_FLAGS):
-        internal = sorted(k for k in ('mIsInputViewShown', 'isInputViewShown') if 'true' in seen.get(k, set()))
+        internal = sorted(k for k in ('mIsInputViewShown',) if 'true' in seen.get(k, set()))
         return 'hidden', ([f'{k}=true (IME-internal only; mInputShown / mWindowVisible / mDecorViewVisible false)'
                            for k in internal])
     return 'unknown', [f'missing / unclear: {[k for k in SCREEN_FLAGS if seen.get(k) != {"false"}]}']
