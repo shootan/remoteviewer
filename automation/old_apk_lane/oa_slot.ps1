@@ -23,7 +23,9 @@ param(
   [string]$ServerSha256 = '',  # r7f: passed to the fixture (required there with KE_RELAY_TRACE=1)
   [string]$JobRun = '',
   [switch]$WithStandby,
-  [string[]]$HolderCmd = @()
+  [string[]]$HolderCmd = @(),
+  # old-ref r1: full (default) | to-3w -- the reference runs end the arm after the 30 s watch (4-7 NOT RUN by scope)
+  [ValidateSet('full', 'to-3w')][string]$Scope = 'full'
 )
 # rel-0164 old-APK lane (Codex codex_rel_0164_split_decision.md (2), legacy combination 1): made from the AVD harness r8
 # ke_slot.ps1 -- its run folder / job / readiness / adb rules unchanged -- for ONE host (oa-pc-a) and APK 0.2.32.
@@ -72,7 +74,7 @@ if (Is-Link $root) { "FAIL  SETUP slot: the run folder is a link`nRESULT: INVALI
 $sum = "$root\slot.txt"
 function Say([string]$line) { $line | Out-File $sum -Append -Encoding utf8 }
 Say "slot run=$runId start $(Get-Date -Format s) (qwinsta: $((qwinsta | Select-String '^>').Line.Trim()))"
-Say "  arm $Arm standby=$([bool]$WithStandby) build=$BuildDir server=$ServerJs serverSha256=$ServerSha256 relayTrace=$env:KE_RELAY_TRACE"
+Say "  arm $Arm standby=$([bool]$WithStandby) build=$BuildDir server=$ServerJs serverSha256=$ServerSha256 relayTrace=$env:KE_RELAY_TRACE scope=$Scope"
 if ($AvdCmd.Count -eq 0) {
   if (-not $Apk -or -not (Test-Path -LiteralPath $Apk -PathType Leaf)) { "FAIL  SETUP slot: -Apk is not a file ($Apk)`nRESULT: INVALID"; exit 2 }
   Say "  apk $Apk $((Get-FileHash $Apk).Hash.ToLower())"
@@ -207,6 +209,7 @@ try {
   try {
     if ($AvdCmd.Count -eq 0) {
       $env:KA_SERIAL = 'emulator-5554'
+      if ($Scope -eq 'to-3w') { $env:OA_SCOPE = 'to-3w' } else { Remove-Item env:OA_SCOPE -ErrorAction SilentlyContinue }
       & python -I "$e\oa_avd.py" $root $Arm $Apk "$root\avd" > "$root\avd_stdout.txt" 2> "$root\avd_stderr.txt"
     } else {
       $avdArgs = @($AvdCmd | Select-Object -Skip 1) + @($root)

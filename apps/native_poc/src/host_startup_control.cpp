@@ -1027,6 +1027,9 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
         std::cout << "[native-video-host][control] udp control session ended epoch=" << servedEpoch
                   << " resumed=" << (resuming ? 1 : 0)
                   << " reason=" << remote60::native_poc::to_string(clientSession.udpControlChannel.CloseReason())
+#ifdef REMOTE60_CONTROL_CLOSE_DIAG
+                  << " " << clientSession.udpControlChannel.CloseDiagLine()  // old-ref r1 (test build only)
+#endif
                   << "\n";
       }
     });

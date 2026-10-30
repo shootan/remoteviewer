@@ -1,5 +1,10 @@
 # The WebView2 SDK is a NuGet package of headers and a static loader, fetched into third_party
 add_executable(remote60_recovery_process_test src/recovery_process_test.cpp src/udp_control_channel.cpp)
+# old-ref r1: the control channel's test-only ACK / head record (REMOTE60_CONTROL_CLOSE_DIAG) -- peer-lost and normal
+add_executable(remote60_udp_control_close_diag_test src/udp_control_close_diag_test.cpp src/udp_control_channel.cpp)
+target_include_directories(remote60_udp_control_close_diag_test PRIVATE src)
+target_compile_definitions(remote60_udp_control_close_diag_test PRIVATE REMOTE60_CONTROL_CLOSE_DIAG=1)
+target_link_libraries(remote60_udp_control_close_diag_test PRIVATE ws2_32)
 target_include_directories(remote60_recovery_process_test PRIVATE src)
 target_link_libraries(remote60_recovery_process_test PRIVATE ws2_32)
 add_executable(remote60_winhttp_recovery_test src/winhttp_recovery_test.cpp src/winhttp_transport.cpp)
@@ -202,6 +207,7 @@ set_target_properties(remote60_native_video_host_pinned_select PROPERTIES
 target_include_directories(remote60_native_video_host_pinned_select PRIVATE src)
 target_compile_definitions(remote60_native_video_host_pinned_select PRIVATE
   REMOTE60_PINNED_SELECT_TEST_SEAM=1
+  REMOTE60_CONTROL_CLOSE_DIAG=1
   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
 )
 target_link_libraries(remote60_native_video_host_pinned_select PRIVATE

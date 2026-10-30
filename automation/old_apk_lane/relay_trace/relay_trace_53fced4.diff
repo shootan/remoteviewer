@@ -1,6 +1,6 @@
 --- a/apps/directory/server.js
 +++ b/apps/directory/server.js
-@@ -1652,9 +1652,112 @@
+@@ -1652,9 +1652,126 @@
    if (map.get(key) === session) map.delete(key);
  }
  
@@ -44,6 +44,7 @@
 +    session.trace = {
 +      mono0: relayTraceMonoMs(), wall0: Date.now(), buckets: new Map(),
 +      last: { c2hRx: 0, c2hSent: 0, h2cRx: 0, h2cSent: 0 }, sendErr: { c2h: 0, h2c: 0 }, lastErr: '', events: [],
++      snapThroughSec: -1,  // old-ref r1: the last COMPLETED second a snap already wrote
 +    };
 +  }
 +  return session.trace;
@@ -102,6 +103,19 @@
 +    const parts = [];
 +    for (const [sec, b] of t.buckets) parts.push(`${sec}:` + Object.entries(b).map(([k, v]) => `${k}=${v}`).join(','));
 +    line += ` buckets=[${parts.join(' ')}]`;
++  } else {
++    // old-ref r1 (Codex codex_old_apk_lane_peer_lost_decision_r1.md): the fixture ends Node by its handle -- no close
++    // line. Each snap writes the buckets of the seconds COMPLETED since the previous snap (header kinds only, never a
++    // payload), so they are on disk before Node goes. "sent" is the socket's word only, not the far end's receipt.
++    const nowSec = Math.floor((mono - t.mono0) / 1000);
++    const parts = [];
++    for (const [sec, b] of t.buckets) {
++      if (sec > t.snapThroughSec && sec < nowSec) {
++        parts.push(`${sec}:` + Object.entries(b).map(([k, v]) => `${k}=${v}`).join(','));
++      }
++    }
++    line += ` buckets=[${parts.join(' ')}] bucketsThrough=${nowSec - 1}`;
++    t.snapThroughSec = nowSec - 1;
 +  }
 +  return line;
 +}
@@ -113,7 +127,7 @@
    relaySessions.delete(session);
    if (session.clientPort) relayUnindex(relaySessionByClient, endpointKey(session.clientIp, session.clientPort), session);
    if (session.cls === 'standby') {
-@@ -1705,6 +1808,7 @@
+@@ -1705,6 +1822,7 @@
                      `was=${standby.hostIp}:${standby.hostPort}`);
        }
        standby.hostPinned = false;
@@ -121,7 +135,7 @@
        relayStandbyReprove(standby, 'host moved');
      }
      if (!standby.hostPinned) {
-@@ -1724,6 +1828,7 @@
+@@ -1724,6 +1842,7 @@
    console.log(`[relay] connect=${session.connectId} host moved ${session.hostIp}:${session.hostPort}` +
                ` -> ${aim.ip}:${aim.port} via=${aim.via}` +
                (previousWire.ip ? '' : ' (first heartbeat)'));
@@ -129,7 +143,7 @@
    session.hostIp = aim.ip;
    session.hostPort = aim.port;
    relaySessionByHost.set(newKey, session);
-@@ -1740,6 +1845,15 @@
+@@ -1740,6 +1859,15 @@
      if (now > rec.expiresAt) relayEligibleByWireIp.delete(ip);
    }
    relayDiag.sweep();
@@ -145,7 +159,7 @@
    for (const session of [...relaySessions]) {
      // CONNECT-DIAG: said once, while the session is still open, so the silence is visible before
      // the close line rather than only in the post-mortem it produces.
-@@ -2116,6 +2230,7 @@
+@@ -2116,6 +2244,7 @@
      const host = store.hosts[session.hostId];
      const known = host ? [host.wireIp, host.publicIp, session.hostIp].filter(Boolean) : [];
      if (!known.includes(rinfo.address) || !proofMatches(punchProofOf(msg), session.hostProof)) {
@@ -153,7 +167,7 @@
        relayDiag.note('standby-host-unproven', rinfo.address,
                       `[relay] connect=${session.connectId} standby host-side datagram refused ` +
                       `src=${rinfo.address}:${rinfo.port} reason=${known.includes(rinfo.address) ? 'no-host-proof' : 'not-the-host'}`);
-@@ -2127,12 +2242,14 @@
+@@ -2127,12 +2256,14 @@
      console.log(`[relay] connect=${session.connectId} standby host pinned ${rinfo.address}:${rinfo.port} ` +
                  `hostFacing=${session.hostFacingPort}`);
    } else if (rinfo.address !== session.hostIp || rinfo.port !== session.hostPort) {
@@ -168,7 +182,7 @@
    const handshake = parseHandshakePacket(msg);
    if (handshake && handshake.kind === UDP_KIND_PUNCH) return;
    session.pktH2C++;
-@@ -2153,12 +2270,13 @@
+@@ -2153,12 +2284,13 @@
      console.log(`[relay] connect=${session.connectId} standby active (activation over the same lease)`);
    }
    if (!session.clientPort) return;  // a reservation: the host's punch pinned it, nothing to carry yet
@@ -183,7 +197,7 @@
    session.pktC2H++;
    session.bytesC2H += msg.length;
    // CONNECT-DIAG: the first hop towards the host, once per session.
-@@ -2171,7 +2289,7 @@
+@@ -2171,7 +2303,7 @@
    }
    // A standby lease goes out of its OWN host-facing socket; a legacy one out of the observe socket.
    const out = session.cls === 'standby' ? session.sock : observeSock;
@@ -192,7 +206,7 @@
  }
  
  /**
-@@ -2241,6 +2359,11 @@
+@@ -2241,6 +2373,11 @@
          }
          return;
        }
@@ -204,7 +218,7 @@
        return;  // anything else opens nothing
      }
  
-@@ -2282,6 +2405,7 @@
+@@ -2282,6 +2419,7 @@
    const session = relaySessionByHost.get(endpointKey(rinfo.address, rinfo.port));
    if (!session || session.dropped) return false;
    session.lastHostAt = Date.now();
@@ -212,7 +226,7 @@
    session.pktH2C++;
    session.bytesH2C += msg.length;
    // CONNECT-DIAG: the first sign of life from the host, once per session. The gap from the first
-@@ -2303,7 +2427,7 @@
+@@ -2303,7 +2441,7 @@
        console.log(`[relay] connect=${session.connectId} active; helloAck in ${session.ackMs}ms`);
      }
    }
@@ -221,7 +235,7 @@
    return true;
  }
  
-@@ -3061,6 +3185,7 @@
+@@ -3061,6 +3199,7 @@
      const ips = RELAY_ALLOW_IPS.any ? '*' : ([...RELAY_ALLOW_IPS.set].join(',') || '(none)');
      const accounts = RELAY_ALLOW_ACCOUNTS.any
        ? '*' : ([...RELAY_ALLOW_ACCOUNTS.set].join(',') || '(none)');

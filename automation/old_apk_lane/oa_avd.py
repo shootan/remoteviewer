@@ -911,6 +911,15 @@ def main():
         # r7f: 30 s, no input, the connection watched; a break ends the arm here (no 4, nothing after)
         if not observe_connection('3w the connection'):
             return 1
+        # old-ref r1 (Codex codex_old_apk_lane_peer_lost_decision_r1.md): the old/new reference runs compare login ->
+        # ordinary / relay -> pick / first frame -> the 30 s watch. With OA_SCOPE=to-3w (oa_slot.ps1 -Scope to-3w,
+        # recorded there) the arm ends HERE: no input at all after the watch, 4-7 NOT RUN by scope (not by a failure).
+        if os.environ.get('OA_SCOPE') == 'to-3w':
+            step('  scope to-3w (old-ref r1): the arm ends after the 30 s watch -- 4 5 6 7 NOT RUN by scope')
+            for c in '4567':
+                skip_case(c, 'old-ref scope to-3w: login -> relay -> pick / first frame -> 30 s watch only')
+            open(os.path.join(OUT, 'app_final.log'), 'w', encoding='utf-8').write(applog())
+            return 0
 
         # 4: one tap on the window's picture -> its own down/up on the host (injection none: logged, not injected)
         # r8: a FAIL here ends the arm -- no menu wake tap, no 5 / 6 / P-5d (they are NOT RUN)

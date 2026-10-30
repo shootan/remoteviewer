@@ -506,6 +506,22 @@ def main():
     ok4 = m.input_check()
     check('control 4 r7i: the run\'s internal-only pattern counts as no keyboard -> the tap goes, PASS', ok4, last(m)[2][:160])
 
+    # old-ref r1: OA_SCOPE=to-3w -- the reference runs stop after the 30 s watch
+    os.environ['OA_SCOPE'] = 'to-3w'
+    try:
+        rc, four, nr, i4, after = run_flow('flow-scope-3w', input_mode='pair')
+    finally:
+        os.environ.pop('OA_SCOPE', None)
+    res = run_flow.res['results']
+    steps_s = {r[0].split()[0]: r[1] for r in res}
+    reasons = {n: w for n, w in run_flow.res['not_run']}
+    check('old-ref: OA_SCOPE=to-3w -- through 3w all PASS, then the arm ends: exit 0, NO tap on the picture, 4 5 6 7 NOT RUN '
+          'by scope', rc == 0 and steps_s.get('3w') is True and i4 < 0 and
+          all('old-ref scope' in reasons.get(c, '') for c in '4567'), f'rc={rc} steps={steps_s} not run={reasons}')
+    rc, four, nr, i4, after = run_flow('flow-scope-full', input_mode='pair')
+    check('old-ref contrast: without the scope the same flow goes on to 4 (the picture tapped)', i4 >= 0 and four,
+          f'rc={rc} 4={[f[1] for f in four]}')
+
     print(f'\n{checks} checks, {fails} failed\nRESULT: {"PASS" if fails == 0 else "FAIL"}')
     return 0 if fails == 0 else 1
 
