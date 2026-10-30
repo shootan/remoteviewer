@@ -1201,6 +1201,21 @@ target_include_directories(remote60_android_decoder_inbox_c_test PRIVATE
 )
 target_compile_definitions(remote60_android_decoder_inbox_c_test PRIVATE NOMINMAX)
 
+# apk-inbox C r4 prototype (Codex codex_apk_inbox_prefix_design_go_r1.md): keep-prefix vs today's C on the product sink,
+# one binary (a runtime switch, default OFF), an independent reference oracle over what the codec was handed. TEST ONLY.
+add_executable(remote60_android_decoder_inbox_prefix_test
+  src/android_decoder_inbox_prefix_test.cpp
+  src/test_fake_ndk/fake_ndk.cpp
+  ${REMOTE60_LIVENESS_SINK_DIR}/android_video_decoder.cpp
+)
+target_include_directories(remote60_android_decoder_inbox_prefix_test PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
+  ${REMOTE60_LIVENESS_SINK_DIR}
+  ${REMOTE60_CHAIN_INBOX_DIR}
+  src
+)
+target_compile_definitions(remote60_android_decoder_inbox_prefix_test PRIVATE NOMINMAX)
+
 # apk-inbox C: the episode and the D8 descriptors through the PRODUCT shared session into the APK sink (its binding
 # adapter), a fake host on loopback -- the schedule as the host receives it, and the held / accepted points with a race
 # put there by the session's test hook (REMOTE60_CLIENT_SESSION_TEST_HOOKS). TEST ONLY.

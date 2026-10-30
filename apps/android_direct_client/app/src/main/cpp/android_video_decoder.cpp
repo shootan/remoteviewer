@@ -132,19 +132,37 @@ void AndroidVideoDecoderSink::EnsureWorkerLocked() {
   worker_ = std::thread([this] { WorkerMain(); });
 }
 
+void AndroidVideoDecoderSink::SetPrefixPolicyForTest(bool on) {
+  LockedState lock(this);
+  prefixPolicy_ = on;
+  inbox_.SetPrefixPolicy(on);
+}
+
+// C r4: the residence budget -- the time the whole inbox (kInboxMaxFrames) represents at the session's target fps,
+// floored at 250 ms (high fps: one jitter spike must not expire a valid prefix) and capped at 500 ms (low fps: the
+// picture is not allowed to trail by more). 30 fps -> 267 ms, 20 -> 400 ms, <= 16 -> 500 ms.
+uint64_t AndroidVideoDecoderSink::PrefixAgeBudgetUsLocked() const {
+  const uint64_t fps = targetFps_ == 0 ? 30u : targetFps_;
+  return std::clamp<uint64_t>(static_cast<uint64_t>(kInboxMaxFrames) * 1000000ULL / fps, 250000ULL, 500000ULL);
+}
+
 void AndroidVideoDecoderSink::RequestCodecResetLocked() {
+  InvalidateChainLocked();  // C r4
   ++codecResetSeq_;
   EnsureWorkerLocked();
   workCv_.notify_all();
 }
 
 void AndroidVideoDecoderSink::ClearInboxLocked() {
+  InvalidateChainLocked();  // C r4
+  haveFrontier_ = false;
   inbox_.Clear();
   committedKeyValid_ = false;  // C r2
 }
 
 // apk-inbox C (D8): every ask made before this moment is moot -- the session drops it at its held / accepted point.
 void AndroidVideoDecoderSink::InvalidateKeyAsksLocked() {
+  InvalidateChainLocked();  // C r4
   ++keyEpoch_;
   committedKeyValid_ = false;  // C r2
   coveredToken_ = 0;           // C r2 §8
@@ -171,6 +189,7 @@ bool AndroidVideoDecoderSink::RecoveryCandidateLocked() const {
 // it as the candidate; (a) otherwise the queued deltas before the next usable IDR are dropped (never handed out), or
 // everything and the tail gap when none is queued.
 void AndroidVideoDecoderSink::NoteChainLossLocked(int cause, uint32_t seq) {
+  InvalidateChainLocked();  // C r4: a loss the decoder saw -- the codec's chain is not provably intact any more
   NoteKeyWantLocked(cause);
   if (committedKeyValid_ && remote60::native_poc::chain_seq_after(committedKeySeq_, seq)) {
     ++lossAlreadyRecovered_;
@@ -264,8 +283,27 @@ void AndroidVideoDecoderSink::WorkerMain() {
     }
     REMOTE60_LT(ltPassFrames_ = 0; ltPassStartUs_ = LtNowUs());
     while (!inbox_.empty() && !workerStop_ && surfaceApplied_ == surfaceSeq_ && !CodecResetPendingLocked()) {
+      // C r4 backpressure: while a frame waits in the slot for an input buffer, nothing more is taken -- the next one
+      // would only replace (lose) it; the queue keeps the chain and the overflow decides (case 3'), and the held
+      // frame is retried on this pass's pump. A held DELTA past the age budget is dropped there (finite: an IDR
+      // queued behind it waits at most that long).
+      if (prefixPolicy_ && pendingFrame_.has()) {
+        ++backpressurePasses_;
+        break;
+      }
+      // C r4 age, at the Pop: a delta past the budget is not fed -- a loss at its seq (MarkLoss then drops the deltas
+      // that reference it, up to the next IDR); never a one-frame skip.
+      if (prefixPolicy_ && inbox_.HeadExpired(steady_now_us(), PrefixAgeBudgetUsLocked())) {
+        InboxFrame expired;
+        inbox_.Pop(&expired);
+        ++ageExpiredPop_;
+        NoteChainLossLocked(kWantInboxOverflow, expired.frame.header.seq);
+        continue;
+      }
       InboxFrame item;
       inbox_.Pop(&item);
+      frontierSeq_ = item.frame.header.seq;  // C r4: the newest AU the codec path took
+      haveFrontier_ = true;
       // C r2: defensive -- a delta past the open gap's loss point is not fed (the trim and the door keep it out)
       if (inbox_.BeyondGap(item.frame.header.seq, (item.frame.header.flags & 1u) != 0)) {
         ++beyondGapDrops_;
@@ -295,7 +333,9 @@ void AndroidVideoDecoderSink::WorkerMain() {
     doneCv_.notify_all();
     if (workerStop_) break;
     workCv_.wait_for(lk, kPumpInterval, [this] {
-      return workerStop_ || !inbox_.empty() || surfaceApplied_ != surfaceSeq_ || CodecResetPendingLocked();
+      // C r4: a queue behind a held frame does not wake the worker (no hot loop); the pump interval retries the slot
+      return workerStop_ || (!inbox_.empty() && !(prefixPolicy_ && pendingFrame_.has())) ||
+             surfaceApplied_ != surfaceSeq_ || CodecResetPendingLocked();
     });
   }
   workerLock_ = nullptr;
@@ -335,6 +375,7 @@ void AndroidVideoDecoderSink::SetTargetFps(uint32_t fps) {
   // A runtime FPS change starts a new presentation clock on the next frame.
   playoutClock_.SetTargetFrameIntervalUs(
       std::max<uint64_t>(1ULL, 1000000ULL / static_cast<uint64_t>(clampedFps)));
+  targetFps_ = clampedFps;  // C r4: the age budget's base
 }
 
 // apk-decoder-liveness r1: the UI hands the Surface's window over and returns -- the codec for it is made by the
@@ -453,8 +494,12 @@ void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::nat
   const uint64_t gen = frame.header.streamGeneration;
   InboxFrame item;
   item.resetPts = latestInputStreamGeneration_ != 0 && latestInputStreamGeneration_ != gen;
-  REMOTE60_LT(item.enqueueUs = LtNowUs());
+  item.enqueueUs = steady_now_us();  // C r4: always (the residence start)
   item.frame = std::move(frame);
+  if (prefixPolicy_) {
+    inbox_.SetFrontier(chainValid_ && haveFrontier_, frontierSeq_, item.enqueueUs,
+                       PrefixAgeBudgetUsLocked());
+  }
   const auto offer = inbox_.Offer(std::move(item));
   if (offer.admit == remote60::native_poc::ChainAdmit::Duplicate ||
       offer.admit == remote60::native_poc::ChainAdmit::Stale) {
@@ -545,6 +590,7 @@ void AndroidVideoDecoderSink::ProcessFrameLocked(InboxFrame&& item) {
   const uint32_t offeredSeq = frame.header.seq;
   const bool offeredKey = isKeyFrame;
   const uint32_t heldSeq = pendingFrame_.held() ? pendingFrame_.held()->header.seq : offeredSeq;
+  const uint64_t offeredEnqueueUs = item.enqueueUs;  // C r4
   pendingFrame_.Offer(std::move(frame), gate_, [this](remote60::native_poc::UdpH264AssembledFrame& f) {
     return TryQueueFrameLocked(f);
   }, &keyRequest);
@@ -552,6 +598,7 @@ void AndroidVideoDecoderSink::ProcessFrameLocked(InboxFrame&& item) {
   if (pendingFrame_.has()) {
     pendingFrameCount_ = 1;
     if (!hadPending) pendingFrameQueueRetryCount_ = 0;
+    if (!hadPending || offeredKey) pendingEnqueueUs_ = offeredEnqueueUs;  // C r4: the held frame's residence start
   }
   PumpCodecLocked();
 }
@@ -1102,6 +1149,10 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
             " recWants=" + std::to_string(recovery_.wants()) + " recSent=" + std::to_string(recovery_.sent()) +
             " recMoot=" + std::to_string(recoveryDroppedMoot_) + " keyTaken=" + std::to_string(keyRequestsTaken_) +
             " covered=" + std::to_string(coveredToken_ != 0 ? 1 : 0) + " coveredExh=" + std::to_string(coveredExhausted_ ? 1 : 0) +
+            " prefixPolicy=" + std::to_string(prefixPolicy_ ? 1 : 0) + " prefixKept=" + std::to_string(inbox_.prefixKeptEvents()) +
+            " prefixKeptFrames=" + std::to_string(inbox_.prefixKeptFrames()) + " tailLost=" + std::to_string(inbox_.tailLost()) +
+            " prefixRefused=" + std::to_string(inbox_.prefixRefused()) + " ageExpPop=" + std::to_string(ageExpiredPop_) +
+            " ageExpSlot=" + std::to_string(ageExpiredSlot_) + " backpressure=" + std::to_string(backpressurePasses_) + " passes=" + std::to_string(workerPasses_) +
             " coveredStale=" + std::to_string(coveredStale_) +
             " keyEpoch=" + std::to_string(keyEpoch_);
   status += " resetPending=" + std::to_string(CodecResetPendingLocked() ? 1 : 0);
@@ -1360,6 +1411,15 @@ void AndroidVideoDecoderSink::RetryCodecLocked() {
 void AndroidVideoDecoderSink::PumpCodecLocked() {
   const uint64_t nowUs = steady_now_us();
 
+  // C r4 age, at the slot: a held DELTA past the budget is dropped (a loss at its seq) -- an IDR never is.
+  if (prefixPolicy_ && pendingFrame_.has() && (pendingFrame_.held()->header.flags & 1u) == 0 && pendingEnqueueUs_ != 0 &&
+      nowUs > pendingEnqueueUs_ && nowUs - pendingEnqueueUs_ > PrefixAgeBudgetUsLocked()) {
+    const uint32_t seq = pendingFrame_.held()->header.seq;
+    pendingFrame_.Reset();
+    pendingFrameCount_ = 0;
+    ++ageExpiredSlot_;
+    NoteChainLossLocked(kWantPendingSlot, seq);
+  }
   if (pendingFrame_.has() && codec_) {
     // apk-0232 r2 (N2): the held frame goes in only if the gate still admits its generation; else it is dropped.
     if (pendingFrame_.Pump(gate_, [this](remote60::native_poc::UdpH264AssembledFrame& f) { return TryQueueFrameLocked(f); })) {
@@ -1501,6 +1561,7 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
     committedKeyValid_ = true;
     committedKeySeq_ = frame.header.seq;
     inbox_.OnKeyCommitted(frame.header.seq);
+    chainValid_ = true;  // C r4: the codec's chain is intact from here (until a loss / reset / clear)
   }
   // apk-inbox C (design r3 §2): the episode ends only here -- an IDR after the loss point committed to the codec.
   if (isKey && recovery_.OnKeyCommitted(frame.header.seq)) {

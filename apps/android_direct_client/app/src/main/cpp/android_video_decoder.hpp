@@ -179,6 +179,8 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   uint32_t DecoderKeyRequestValidCausesAs(uint64_t token, const remote60::native_poc::DecoderKeyRequest& request);
   void OnDecoderKeyRequestSentAs(uint64_t token, const remote60::native_poc::DecoderKeyRequest& request, uint64_t nowUs);
   void OnDecoderKeyOwedExhaustedAs(uint64_t token, uint64_t owedToken, uint64_t nowUs);
+  // C r4 prototype: the keep-prefix overflow case + age + slot backpressure (default OFF = today's C). Tests only.
+  void SetPrefixPolicyForTest(bool on);
   bool DrainPresentationStatsAs(uint64_t token, remote60::native_poc::ClientPresentationStats* out);
   bool DrainDecodeStatsAs(uint64_t token, remote60::native_poc::ClientDecodeStats* out);
   uint64_t DecodeGenerationAs(uint64_t token);
@@ -220,7 +222,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   struct InboxFrame {
     remote60::native_poc::UdpH264AssembledFrame frame;
     bool resetPts = false;  // the receive side saw the stream generation change (the old ResetPtsStateLocked rule)
-    uint64_t enqueueUs = 0;  // apk-decoder-inbox r1: set only in test builds (GNLINK_LIVENESS_TRACE)
+    uint64_t enqueueUs = 0;  // C r4: set always -- the frame's local residence starts here (keep-prefix, age)
   };
   void EnsureWorkerLocked();
   void WorkerMain();
@@ -382,7 +384,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   struct InboxInfo {
     remote60::native_poc::ChainAuInfo operator()(const InboxFrame& f) const {
       return remote60::native_poc::ChainAuInfo{f.frame.header.streamGeneration, f.frame.header.seq,
-                                                (f.frame.header.flags & 1u) != 0, f.frame.payload.size()};
+                                                (f.frame.header.flags & 1u) != 0, f.frame.payload.size(), f.enqueueUs};
     }
   };
   remote60::native_poc::ChainInbox<InboxFrame, InboxInfo> inbox_{kInboxMaxFrames, kInboxMaxBytes, InboxInfo{}};
@@ -402,6 +404,16 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
   // C r2 (Codex §8 (a)): the owed duty the session spent its asks on (covered) -- its token, the end of the final
   // answer window, and whether it ran out with no usable IDR (coveredExhausted). Ends when the gate's token moves (paid,
   // re-armed, reset). A stale token's notice changes nothing (coveredStale counts it).
+  // C r4 keep-prefix prototype (Codex codex_apk_inbox_prefix_design_go_r1.md) -- OFF unless SetPrefixPolicyForTest.
+  bool prefixPolicy_ = false;
+  bool chainValid_ = false;        // the codec's chain intact since a committed IDR (no loss / reset / drop since)
+  bool haveFrontier_ = false;
+  uint32_t frontierSeq_ = 0;       // the newest AU the worker took to feed (popped, under mu_)
+  uint32_t targetFps_ = 30;        // SetTargetFps (the age budget's base)
+  uint64_t pendingEnqueueUs_ = 0;  // the held frame's residence start
+  uint64_t ageExpiredPop_ = 0, ageExpiredSlot_ = 0, backpressurePasses_ = 0;
+  uint64_t PrefixAgeBudgetUsLocked() const;
+  void InvalidateChainLocked() { chainValid_ = false; }
   uint64_t coveredToken_ = 0;
   uint64_t coveredDeadlineUs_ = 0;
   bool coveredExhausted_ = false;

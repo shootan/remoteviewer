@@ -23,6 +23,12 @@
 //   2. an IDR in the inbox but no IDR's suffix fits: from the LAST IDR on is kept and the NEWEST frames go until it
 //      fits -- the cut is a loss at the tail (the kept IDR + its shortened suffix still decode) and the tail gap opens;
 //   3. no IDR in the inbox: everything goes (all of it continues a chain whose next reference is gone) -- a loss.
+//   3'. C r4 KEEP-PREFIX (off unless SetPrefixPolicy(true); Codex codex_apk_inbox_prefix_design_go_r1.md): no IDR in
+//      the inbox, and the owner PROVES the queue continues what its codec holds -- SetFrontier(valid, seq, now,
+//      budget) before the Offer: the codec's chain intact since a committed IDR, the queue's head the very next AU
+//      after the newest one the codec took (frontier + 1), every queued AU the next of the one before it, one
+//      generation, the head no older than the budget. Then the PREFIX is kept and the NEWEST frames go until it fits
+//      -- a tail loss (the gap opens after them; the recovery asks as for any loss). Not proven: case 3.
 // A loss opens the tail gap; `gapAfterSeq` is the newest AU lost, and only an IDR after it is usable.
 //
 // THE EPISODE (§2, §3, r3 보충). A chain loss opens a recovery episode (if none is open). It asks for an IDR at most
@@ -51,6 +57,7 @@ struct ChainAuInfo {
   uint32_t seq = 0;
   bool key = false;
   size_t bytes = 0;
+  uint64_t enqueueUs = 0;  // C r4: when the owner queued it (its local residence starts here); 0 = unknown
 };
 
 enum class ChainAdmit : uint8_t {
@@ -117,6 +124,28 @@ class ChainInbox {
     if (items_.size() > maxFrames_ || bytes_ > maxBytes_) Trim(&r);
     return r;
   }
+
+  // ---- C r4 keep-prefix (Codex codex_apk_inbox_prefix_design_go_r1.md) ----
+  void SetPrefixPolicy(bool on) { prefixPolicy_ = on; }
+  bool prefixPolicy() const { return prefixPolicy_; }
+  // What the owner has proven at this moment (read only by case 3'): the codec's chain is intact and `frontierSeq` is
+  // the newest AU it took to feed; `nowUs` / `ageBudgetUs` for the head's residence.
+  void SetFrontier(bool valid, uint32_t frontierSeq, uint64_t nowUs, uint64_t ageBudgetUs) {
+    frontierValid_ = valid;
+    frontierSeq_ = frontierSeq;
+    frontierNowUs_ = nowUs;
+    ageBudgetUs_ = ageBudgetUs;
+  }
+  // The head is a delta whose residence is over the budget (an IDR never expires here: it starts a chain).
+  bool HeadExpired(uint64_t nowUs, uint64_t budgetUs) const {
+    if (items_.empty()) return false;
+    const ChainAuInfo a = info_(items_.front());
+    return !a.key && a.enqueueUs != 0 && nowUs > a.enqueueUs && nowUs - a.enqueueUs > budgetUs;
+  }
+  uint64_t prefixKeptEvents() const { return prefixKeptEvents_; }
+  uint64_t prefixKeptFrames() const { return prefixKeptFrames_; }
+  uint64_t tailLost() const { return tailLost_; }
+  uint64_t prefixRefused() const { return prefixRefused_; }
 
   bool Pop(T* out) {
     if (items_.empty()) return false;
@@ -273,8 +302,35 @@ class ChainInbox {
       while (items_.size() > maxFrames_ || bytes_ > maxBytes_) DropBack(r);
       return;
     }
+    // case 3': C r4 -- the queue PROVABLY continues the codec's chain: keep it, cut the newest (a tail loss)
+    if (prefixPolicy_) {
+      if (PrefixProvable()) {
+        while (!items_.empty() && (items_.size() > maxFrames_ || bytes_ > maxBytes_)) {
+          DropBack(r);
+          ++tailLost_;
+        }
+        ++prefixKeptEvents_;
+        prefixKeptFrames_ += items_.size();
+        return;
+      }
+      ++prefixRefused_;
+    }
     // case 3: no IDR -- the whole chain in here is undecodable once its head goes
     while (!items_.empty()) DropFront(true, r);
+  }
+  // C r4: the proof case 3' needs, from the owner's frontier and the queue itself.
+  bool PrefixProvable() const {
+    if (!frontierValid_ || items_.empty()) return false;
+    const ChainAuInfo head = info_(items_.front());
+    if (head.key || head.seq != frontierSeq_ + 1u) return false;
+    if (head.enqueueUs == 0 || frontierNowUs_ < head.enqueueUs || frontierNowUs_ - head.enqueueUs > ageBudgetUs_) return false;
+    uint32_t prev = head.seq;
+    for (size_t i = 1; i < items_.size(); ++i) {
+      const ChainAuInfo a = info_(items_[i]);
+      if (a.gen != head.gen || a.seq != prev + 1u) return false;
+      prev = a.seq;
+    }
+    return true;
   }
 
   size_t maxFrames_;
@@ -288,6 +344,12 @@ class ChainInbox {
   uint64_t lastGen_ = 0;
   uint32_t lastSeq_ = 0;
   uint64_t duplicates_ = 0, stale_ = 0, oversize_ = 0, gapDeltas_ = 0, skipped_ = 0, lost_ = 0, trimmed_ = 0;
+  // C r4 keep-prefix
+  bool prefixPolicy_ = false;
+  bool frontierValid_ = false;
+  uint32_t frontierSeq_ = 0;
+  uint64_t frontierNowUs_ = 0, ageBudgetUs_ = 0;
+  uint64_t prefixKeptEvents_ = 0, prefixKeptFrames_ = 0, tailLost_ = 0, prefixRefused_ = 0;
 };
 
 class KeyRecoveryEpisode {
