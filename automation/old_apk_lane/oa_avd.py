@@ -692,6 +692,92 @@ def tcp_clients(log):
     return len(re.findall(r'\[native-video-host\]\[control\] client connected', log))
 
 
+P_START_BUDGET_S = 120.0  # r7k: the whole start-up precondition, from the ONE am start (monotonic)
+P_CALL_CAP_S = 5.0        # r7k: one SDK adb call of it, at most (and never past the budget)
+
+
+def bounded_adb(args, deadline, cap):
+    """r7k (Codex codex_old_apk_lane_p_start_decision_r1.md): ONE adb call bounded by min(cap, what is left of the
+    deadline). On a timeout the child (adb.exe, a direct child) is killed and waited for by subprocess.run -- reaped,
+    not left running. -> (rc or None, stdout bytes, why)."""
+    left = deadline - time.monotonic()
+    if left <= 0:
+        return None, b'', 'no budget left'
+    t = max(0.05, min(cap, left))
+    try:
+        r = subprocess.run([ka.ADB, '-s', ka.SERIAL, *args], capture_output=True, timeout=t)
+        return r.returncode, r.stdout, '' if r.returncode == 0 else f'rc={r.returncode}'
+    except subprocess.TimeoutExpired:
+        return None, b'', f'timeout after {t:.1f} s (child killed)'
+    except Exception as e:  # noqa: BLE001 -- a call that could not run is "not read", never a success
+        return None, b'', f'{type(e).__name__}: {str(e)[:60]}'
+
+
+def p_startup(video_port, control_port):
+    """r7k: arm P's start-up precondition, bounded and fail-closed (Codex codex_old_apk_lane_p_start_decision_r1.md (나)):
+      * am start exactly ONCE (no warm-up, no re-launch); the budget P_START_BUDGET_S (120 s, monotonic) starts there;
+      * every SDK call of it (am start, each log pull, the force-stop) bounded by min(P_CALL_CAP_S, what is left);
+      * each pull to a NEW file of this run (never an earlier pull taken for a new read);
+      * a pull that fails / times out, no file yet, an empty log: NOT confirmed -- keep waiting (never a success);
+      * a log read whole: any auto_login that is not NO_CREDENTIAL, or any sign_in_store line -> INVALID at once (the
+        app force-stopped, nothing tapped); auto_login NO_CREDENTIAL and no sign_in_store in that SAME read -> go on;
+      * the budget spent -> INVALID, nothing tapped.
+    Every read (elapsed, status, bytes) is kept in <out>/p_startup.txt and the steps. -> (the confirming text, elapsed)."""
+    budget = P_START_BUDGET_S
+    cap = P_CALL_CAP_S
+    if os.environ.get('OA_TEST_FAKE_ADB'):  # the stub test only: a short budget / cap on the same code
+        budget = float(os.environ.get('OA_P_START_BUDGET_S', budget))
+        cap = float(os.environ.get('OA_P_CALL_CAP_S', cap))
+    reads = []
+
+    def record():
+        open(os.path.join(OUT, 'p_startup.txt'), 'w', encoding='utf-8').write('\n'.join(reads) + '\n')
+
+    t0 = time.monotonic()
+    deadline = t0 + budget
+    rc, out, why = bounded_adb(['shell', 'am', 'start', '-n', f'{PKG}/.MainActivity', '--es', 'host', '10.0.2.2',
+                                '--ei', 'videoPort', str(video_port), '--ei', 'controlPort', str(control_port)],
+                               deadline, cap)
+    reads.append(f'{time.monotonic() - t0:7.2f}s am start (once): rc={rc} {why} {out.decode("utf-8", "replace").strip()[:120]}')
+    step(f'  P start-up: am start (once, budget {budget:g} s, per call <= {cap:g} s): rc={rc} {why}')
+    if rc != 0:
+        record()
+        bounded_adb(['shell', 'am', 'force-stop', PKG], time.monotonic() + cap, cap)
+        raise Invalid(f'arm P start-up: am start did not succeed ({rc} {why}) -- no second launch, nothing tapped')
+    n = 0
+    while time.monotonic() < deadline:
+        n += 1
+        path = os.path.join(OUT, f'_pstart_{n:03d}.log')  # a new file per read: an old pull is never a new read
+        rc, _, why = bounded_adb(['pull', ka.LOG_PATH, path], deadline, cap)
+        el = time.monotonic() - t0
+        text = ''
+        if rc == 0 and os.path.exists(path):
+            text = open(path, encoding='utf-8', errors='replace').read()
+            status = 'read' if text.strip() else 'empty log (not confirmed)'
+        else:
+            status = f'not read ({why or "no file"})'
+        autos = re.findall(r'\[auto_login\][^\n]*', text)
+        store = re.findall(r'\[sign_in_store\][^\n]*', text)
+        reads.append(f'{el:7.2f}s read {n}: {status} bytes={len(text)} auto_login={[a[:60] for a in autos]} '
+                     f'sign_in_store={len(store)}')
+        if text.strip():
+            if store or any('NO_CREDENTIAL' not in a for a in autos):
+                record()
+                bounded_adb(['shell', 'am', 'force-stop', PKG], time.monotonic() + cap, cap)
+                raise Invalid(f'arm P precondition: not an empty sign-in store at {el:.1f} s '
+                              f'(auto_login={[a[:60] for a in autos]} sign_in_store={store[:2]}) -- nothing tapped')
+            if autos:
+                record()
+                step(f'  P precondition: {autos[-1][:80]} and no sign_in_store, in read {n} at {el:.1f} s after am start '
+                     f'(the setup allowance -- not a cold-start performance figure)')
+                return text, el
+        time.sleep(min(0.5, max(0.0, deadline - time.monotonic())))
+    record()
+    bounded_adb(['shell', 'am', 'force-stop', PKG], time.monotonic() + cap, cap)
+    raise Invalid(f'arm P start-up: auto_login NO_CREDENTIAL not confirmed within {budget:g} s of am start '
+                  f'({n} reads; last: {reads[-1].strip()[:120] if reads else "none"}) -- nothing tapped')
+
+
 def p_first_connect(video_port, control_port):
     """Arm P, the app's ONE start (rev r2, Codex codex_rel_0164_old_apk_lane_decision.md "P의 운영 로그인 방지"):
     onCreate starts beginAutoLogin before the manual button can be tapped, and the button does not cancel it. The
@@ -703,19 +789,10 @@ def p_first_connect(video_port, control_port):
     videoPort / controlPort, TCP control + UDP video (b554e76's manual args: requireTcpControl=true,
     controlOverUdp=false) -- judged from the host's own log, not from the app's."""
     h0 = tcp_clients(host_log())
-    ka.adb('shell', 'am', 'start', '-n', f'{PKG}/.MainActivity', '--es', 'host', '10.0.2.2',
-           '--ei', 'videoPort', str(video_port), '--ei', 'controlPort', str(control_port))
-    m = wait_log(r'\[auto_login\][^\n]*', '', 30)
-    log = applog()
-    store = re.findall(r'\[sign_in_store\][^\n]*', log)
+    log, _ = p_startup(video_port, control_port)  # r7k: bounded, fail-closed; raises Invalid (nothing tapped)
     upd = re.findall(r'\[update_check\][^\n]*', log)
-    step(f'  P precondition: {m.group(0) if m else "no auto_login line in 30 s"}; sign_in_store lines={len(store)}')
     step('  P start-up update check (the published build derives it from its fixed https directory; no session, so '
          'no credential): ' + (' | '.join(upd)[:240] if upd else 'no update_check line yet'))
-    if not m or 'NO_CREDENTIAL' not in m.group(0) or store:
-        ka.adb('shell', 'am', 'force-stop', PKG, check=False)
-        raise Invalid('arm P precondition: the app did not start with an empty sign-in store '
-                      f'({m.group(0) if m else "no auto_login"}; sign_in_store={store[:2]})')
     n0 = cursor()
     if not ka.wait('loginManualButton', 30):
         verdict('2 (P) the manual connect is offered', False)

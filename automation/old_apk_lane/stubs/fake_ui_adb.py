@@ -243,9 +243,42 @@ elif cmd == 'shell input keyevent 4':
         state['dialog'] = True
     json.dump(state, open(state_path, 'w', encoding='utf-8'))
 elif cmd.startswith('shell am start') and '--es' in args:
+    # r7k: OA_FAKE_P_START -- now (default): the app logs NO_CREDENTIAL at once | late:<s>: the log file appears only
+    # <s> seconds after am start (pulls fail before, "does not exist") | empty:<s>: the file is there but empty until
+    # <s> | pullhang: every pull of the app log hangs (sleeps OA_FAKE_HANG_S) | cred: auto_login RESTORED (a stored
+    # sign-in) | store: NO_CREDENTIAL with a sign_in_store line
     state['scene'] = 'start'
-    app('[auto_login] NO_CREDENTIAL')
+    state['am_t'] = time.time()
+    state['am_starts'] = state.get('am_starts', 0) + 1
+    mode = os.environ.get('OA_FAKE_P_START', 'now')
+    if mode == 'now':
+        app('[auto_login] NO_CREDENTIAL')
+    elif mode == 'cred':
+        app('[auto_login] RESTORED account=oatest')
+    elif mode == 'store':
+        app('[auto_login] NO_CREDENTIAL')
+        app('[sign_in_store] saved id=oatest')
     json.dump(state, open(state_path, 'w', encoding='utf-8'))
+elif args[:1] == ['pull'] and not args[1].endswith('base.apk') and state.get('scene') == 'start' and \
+        os.environ.get('OA_FAKE_P_START', 'now') not in ('now', 'cred', 'store'):
+    # r7k: the start-up modes that delay or stop the app log
+    mode = os.environ['OA_FAKE_P_START']
+    el = time.time() - state.get('am_t', time.time())
+    if mode == 'pullhang':
+        time.sleep(float(os.environ.get('OA_FAKE_HANG_S', '3')))
+        sys.exit(1)
+    kind, _, at = mode.partition(':')
+    if el < float(at or 0):
+        if kind == 'late':
+            sys.stderr.write("adb: error: failed to stat remote object: No such file or directory (fake)\n")
+            sys.exit(1)
+        open(args[2], 'w').close()  # empty: the file exists, nothing in it yet
+        sys.exit(0)
+    if not state.get('p_logged'):
+        app('[auto_login] NO_CREDENTIAL')
+        state['p_logged'] = True
+        json.dump(state, open(state_path, 'w', encoding='utf-8'))
+    shutil.copyfile(os.environ['OA_FAKE_APPLOG'], args[2])
 elif args[:1] == ['pull'] and not args[1].endswith('base.apk') and os.environ.get('OA_FAKE_PULL_FAIL') == '1':
     sys.stderr.write('adb: error: failed to stat remote object: Permission denied (fake)\n')
     sys.exit(1)

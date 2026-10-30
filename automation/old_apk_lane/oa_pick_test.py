@@ -506,6 +506,50 @@ def main():
     ok4 = m.input_check()
     check('control 4 r7i: the run\'s internal-only pattern counts as no keyboard -> the tap goes, PASS', ok4, last(m)[2][:160])
 
+    # r7k (Codex codex_old_apk_lane_p_start_decision_r1.md): arm P's bounded start-up -- the real helper, the fake adb,
+    # a short budget / cap for the stub only (the same code; 120 s / 5 s in a real run)
+    def p_start(tag, mode, budget='6', cap='1', hang='3'):
+        os.environ.update({'OA_FAKE_P_START': mode, 'OA_P_START_BUDGET_S': budget, 'OA_P_CALL_CAP_S': cap,
+                           'OA_FAKE_HANG_S': hang})
+        try:
+            t0 = time.time()
+            rc, four, nr, i4, after = run_flow(tag, scene='login', arm='P')
+            took = time.time() - t0
+        finally:
+            for k in ('OA_FAKE_P_START', 'OA_P_START_BUDGET_S', 'OA_P_CALL_CAP_S', 'OA_FAKE_HANG_S'):
+                os.environ.pop(k, None)
+        calls = [l.strip() for l in open(os.path.join(RUNS, [d for d in os.listdir(RUNS) if d.startswith(tag + '-')][-1],
+                                                      'adb_calls.txt'), encoding='utf-8')]
+        starts = [i for i, l in enumerate(calls) if l.startswith('shell am start') and '--es' in l]
+        tapsAt = [i for i, l in enumerate(calls) if l.startswith('shell input tap')]
+        return rc, took, starts, tapsAt, calls, run_flow.res
+
+    rc, took, starts, tapsAt, calls, res = p_start('pstart-late', 'late:3')
+    steps_p = {r[0].split()[0]: r[1] for r in res['results']}
+    check('r7k: the app log appears 3 s after am start (pulls fail before): confirmed late, then the manual connect -- ONE '
+          'am start, the first tap only after it', len(starts) == 1 and tapsAt and tapsAt[0] > starts[0] and
+          steps_p.get('2') is True, f'rc={rc} am starts={len(starts)} first tap at call {tapsAt[:1]} steps={steps_p}')
+    rc, took, starts, tapsAt, calls, res = p_start('pstart-empty', 'empty:3')
+    check('r7k: the log file there but EMPTY for 3 s is not a success: waited, then confirmed; one am start',
+          len(starts) == 1 and tapsAt and {r[0].split()[0]: r[1] for r in res['results']}.get('2') is True,
+          f'rc={rc} am starts={len(starts)}')
+    rc, took, starts, tapsAt, calls, res = p_start('pstart-expire', 'late:9')
+    check('r7k: the log appears only after the budget (9 s > 6 s): INVALID (exit 2), nothing tapped, one am start',
+          rc == 2 and not tapsAt and len(starts) == 1, f'rc={rc} took={took:.1f}s taps={len(tapsAt)} am starts={len(starts)}')
+    rc, took, starts, tapsAt, calls, res = p_start('pstart-hang', 'pullhang', budget='6', cap='1', hang='4')
+    check('r7k: every pull hangs (4 s each): each bounded by the 1 s cap, the budget still ends it -- INVALID, nothing '
+          'tapped, one am start, finite', rc == 2 and not tapsAt and len(starts) == 1 and took < 6 + 15,
+          f'rc={rc} took={took:.1f}s taps={len(tapsAt)}')
+    for mode, what in (('cred', 'a stored sign-in restored (auto_login not NO_CREDENTIAL)'),
+                       ('store', 'NO_CREDENTIAL but a sign_in_store line')):
+        rc, took, starts, tapsAt, calls, res = p_start(f'pstart-{mode}', mode)
+        check(f'r7k: {what} -> INVALID at once (not at the deadline), nothing tapped, one am start',
+              rc == 2 and not tapsAt and len(starts) == 1 and took < 7.5, f'rc={rc} took={took:.1f}s')
+    src3 = open(os.path.join(E, 'oa_avd.py'), encoding='utf-8').read()
+    check('r7k (source): the P start-up has no unbounded call left (no wait_log / ka.adb in p_startup)',
+          'wait_log(' not in src3[src3.index('def p_startup'):src3.index('def p_first_connect')] and
+          'ka.adb(' not in src3[src3.index('def p_startup'):src3.index('def p_first_connect')])
+
     print(f'\n{checks} checks, {fails} failed\nRESULT: {"PASS" if fails == 0 else "FAIL"}')
     return 0 if fails == 0 else 1
 
