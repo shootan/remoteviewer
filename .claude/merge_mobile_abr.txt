@@ -1,0 +1,9 @@
+merge: fix/mobile-abr-evidence r6 (0e5ddae) into main
+
+The phone reports decode and receive every second and keeps the measured report until it is sent,
+so the host's stale-feedback rule (P7) no longer steps quality down on a healthy phone. Startup
+grace for active transitions, no measurement while paused, the decode rate over its own span.
+APK only; host, PC viewer and wire unchanged. Codex SOURCE OK (codex_mobile_abr_0e5ddae.md),
+verifier independent checks verify_mobile_abr_r1/r3/r5/r6.md.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

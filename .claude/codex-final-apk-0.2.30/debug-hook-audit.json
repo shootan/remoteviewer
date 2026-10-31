@@ -1,0 +1,81 @@
+[
+  {
+    "abi": "arm64-v8a",
+    "hook_name_present": true,
+    "testHook_literal_present": false,
+    "diagnostic_strings": {
+      "abr-trace": 0,
+      "input-trace": 0,
+      "10.0.2.2": 0
+    },
+    "hook_disassembly": [
+      "0000000000114140 <remote60::native_poc::ConnectOpGate::Hook(char const*)>:",
+      "  114140: d10043ff     \tsub\tsp, sp, #0x10",
+      "  114144: f90007e0     \tstr\tx0, [sp, #0x8]",
+      "  114148: f90003e1     \tstr\tx1, [sp]",
+      "  11414c: 910043ff     \tadd\tsp, sp, #0x10",
+      "  114150: d65f03c0     \tret"
+    ]
+  },
+  {
+    "abi": "armeabi-v7a",
+    "hook_name_present": true,
+    "testHook_literal_present": false,
+    "diagnostic_strings": {
+      "abr-trace": 0,
+      "input-trace": 0,
+      "10.0.2.2": 0
+    },
+    "hook_disassembly": [
+      "",
+      ".claude\\codex-final-apk-0.2.30\\armeabi-v7a.so:\tfile format elf32-littlearm",
+      "",
+      "Disassembly of section .text:",
+      "",
+      "000921ee <_ZN8remote6010native_poc13ConnectOpGate4HookEPKc>:",
+      "   921ee: b082         \tsub\tsp, #0x8",
+      "   921f0: 9001         \tstr\tr0, [sp, #0x4]",
+      "   921f2: 9100         \tstr\tr1, [sp]",
+      "   921f4: b002         \tadd\tsp, #0x8",
+      "   921f6: 4770         \tbx\tlr"
+    ]
+  },
+  {
+    "abi": "x86",
+    "hook_name_present": true,
+    "testHook_literal_present": false,
+    "diagnostic_strings": {
+      "abr-trace": 0,
+      "input-trace": 0,
+      "10.0.2.2": 0
+    },
+    "hook_disassembly": [
+      "0010b780 <remote60::native_poc::ConnectOpGate::Hook(char const*)>:",
+      "  10b780: 55                           \tpushl\t%ebp",
+      "  10b781: 89 e5                        \tmovl\t%esp, %ebp",
+      "  10b783: 8b 45 0c                     \tmovl\t0xc(%ebp), %eax",
+      "  10b786: 8b 45 08                     \tmovl\t0x8(%ebp), %eax",
+      "  10b789: 5d                           \tpopl\t%ebp",
+      "  10b78a: c3                           \tretl"
+    ]
+  },
+  {
+    "abi": "x86_64",
+    "hook_name_present": true,
+    "testHook_literal_present": false,
+    "diagnostic_strings": {
+      "abr-trace": 0,
+      "input-trace": 0,
+      "10.0.2.2": 0
+    },
+    "hook_disassembly": [
+      "000000000010ccf0 <remote60::native_poc::ConnectOpGate::Hook(char const*)>:",
+      "  10ccf0: 55                           \tpushq\t%rbp",
+      "  10ccf1: 48 89 e5                     \tmovq\t%rsp, %rbp",
+      "  10ccf4: 48 89 7d f8                  \tmovq\t%rdi, -0x8(%rbp)",
+      "  10ccf8: 48 89 75 f0                  \tmovq\t%rsi, -0x10(%rbp)",
+      "  10ccfc: 5d                           \tpopq\t%rbp",
+      "  10ccfd: c3                           \tretq"
+    ]
+  }
+]

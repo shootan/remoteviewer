@@ -1,0 +1,7 @@
+000000000010ccf0 <remote60::native_poc::ConnectOpGate::Hook(char const*)>:
+  10ccf0: 55                           	pushq	%rbp
+  10ccf1: 48 89 e5                     	movq	%rsp, %rbp
+  10ccf4: 48 89 7d f8                  	movq	%rdi, -0x8(%rbp)
+  10ccf8: 48 89 75 f0                  	movq	%rsi, -0x10(%rbp)
+  10ccfc: 5d                           	popq	%rbp
+  10ccfd: c3                           	retq

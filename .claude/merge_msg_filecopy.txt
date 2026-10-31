@@ -1,0 +1,16 @@
+merge: explorer file copy over the network -- Ctrl+C on one PC, Ctrl+V on the other (feat/file-copy-net dacee8e)
+
+Brings the file-copy network path in over the Medium helper (7fb4c5e): GNLinkClipHelper.exe now ships
+with the product (c25508d), offers, pins, R->P and P->R bulk transfers, the viewer's receive side, and
+the session/instance isolation rounds r4..r11 (c32e736 .. dacee8e): the session epoch owns the helper
+channel and the bulk sender; a helper is known by its instance; a request takes only the answer of the
+helper it sent to; a helper's "gone" ends everything it owned, begun or in flight.
+
+Reviewed: verifier's independent runs on 5a2594d, 1f880bc, c40971d, 36a0e22, a1b0ba1, 3b68b5f (net e2e
+up to 320/0 x2, build gate 29/0, helper e2e 100/0, clip-image e2e 34/0, negative controls failing
+exactly their counterexamples) and dacee8e (V3 in Codex's order). Codex: 3b68b5f source OK, no
+blocking defect; dacee8e adds one test probe call and tests only.
+Known limit (P2, not blocking): after the remote helper restarts within a session, the source PC has to
+copy again before a paste works.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>

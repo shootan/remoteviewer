@@ -1,0 +1,57 @@
+{
+  "base": "7d9bc68b73e02a1047d7646324f9de8289a9ea29",
+  "parents": [
+    "798bfca4caeacb090b4a120680d60b79694267ca",
+    "f7079c0dd3e691c6ec6d92a126e0f463af27dbfe"
+  ],
+  "both_changed_differently": [],
+  "unexpected_changes": [],
+  "exe_checks": [
+    {
+      "name": "GNLinkCapture.exe",
+      "new_utf16": false,
+      "old_utf16": false
+    },
+    {
+      "name": "GNLinkClient.exe",
+      "new_utf16": true,
+      "old_utf16": false
+    },
+    {
+      "name": "GNLinkClipHelper.exe",
+      "new_utf16": false,
+      "old_utf16": false
+    },
+    {
+      "name": "GNLinkHost.exe",
+      "new_utf16": true,
+      "old_utf16": false
+    },
+    {
+      "name": "GNLinkInputService.exe",
+      "new_utf16": false,
+      "old_utf16": false
+    },
+    {
+      "name": "GNLinkSetup.exe",
+      "new_utf16": true,
+      "old_utf16": false
+    },
+    {
+      "name": "GNLinkStream.exe",
+      "new_utf16": true,
+      "old_utf16": false
+    },
+    {
+      "name": "GNLinkUpdater.exe",
+      "new_utf16": false,
+      "old_utf16": false
+    },
+    {
+      "name": "GNLinkViewer.exe",
+      "new_utf16": true,
+      "old_utf16": false
+    }
+  ],
+  "host_has_redaction_marker": true
+}

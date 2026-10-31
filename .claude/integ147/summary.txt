@@ -1,0 +1,8 @@
+﻿remote60_update_effects_test exit=0 | RESULT: ALL PASS  (323 checks, 0 failed, 0 skipped)
+remote60_updater_assembly_test exit=0 | RESULT: ALL PASS  (55 checks, 0 failed)
+remote60_payload_name_test exit=0 | RESULT: ALL PASS  (54 checks, 0 failed)
+remote60_shipped_helper_gate_test exit=0 | RESULT: ALL PASS  (19 checks, 0 failed)
+remote60_clip_image_build_gate_test exit=0 | RESULT: PASSED  (29 checks, 0 failed)
+remote60_host_migration_e2e_test exit=0 | RESULT: ALL PASS  (33 checks, 0 failed)
+remote60_login_flow_test exit=0 | login_flow_test: ALL PASS (127 checks)
+ALLDONE

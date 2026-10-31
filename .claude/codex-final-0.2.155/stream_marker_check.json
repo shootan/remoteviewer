@@ -1,0 +1,25 @@
+{
+  "sha256": "0119219b43c427c5c71cf22d70823bcfbb8fd7b3c028fe664438e55dbcd92187",
+  "markers": [
+    {
+      "text": "REMOTE60_NATIVE_FORCE_CLAMP_BURST",
+      "ascii_present": false,
+      "utf16le_present": false
+    },
+    {
+      "text": "GNLINK_STREAM_TEST_MONITORS_FILE",
+      "ascii_present": false,
+      "utf16le_present": false
+    },
+    {
+      "text": "GNLINK_STREAM_TEST_FAIL_RESTART_FILE",
+      "ascii_present": false,
+      "utf16le_present": false
+    },
+    {
+      "text": "GNLINK_STREAM_TEST_HOLD_DIR",
+      "ascii_present": false,
+      "utf16le_present": false
+    }
+  ]
+}

@@ -1,0 +1,215 @@
+{
+  "checked_at_utc": "2026-10-17T17:51:46.477310+00:00",
+  "origin_main": "a622f04b5e70cb32ea5db01ad477f8c31437b91a\trefs/heads/main",
+  "release_commit": "64177a78062473fb06a71ea3dda587c94ae3908f",
+  "source_commit": "a428abf928b257dd8c8bb66577bb88759a7b3153",
+  "manifest_files": [
+    {
+      "name": "windows.manifest",
+      "nas_sha256": "e78a4fed15d4ea97d366ad0d5fdcbcefa2da02537ce5c4f48306b66734e5c7ed",
+      "local_sha256": "e78a4fed15d4ea97d366ad0d5fdcbcefa2da02537ce5c4f48306b66734e5c7ed",
+      "match": true
+    },
+    {
+      "name": "windows.sig",
+      "nas_sha256": "3106d6e4f6d22e216edd7814708744df76d3ccd01eca2f17878c72fb6e5cd54d",
+      "local_sha256": "3106d6e4f6d22e216edd7814708744df76d3ccd01eca2f17878c72fb6e5cd54d",
+      "match": true
+    }
+  ],
+  "signature_and_tamper_check": {
+    "exit": 0,
+    "stdout": "manifest ok: version=0.2.159 release=r-0.2.159 artifacts=11 platform=windows\n",
+    "stderr": "",
+    "public_key_override": false
+  },
+  "artifacts": [
+    {
+      "name": "GNLinkHost.exe",
+      "url": "https://gnlink.shotan.net/updates/0.2.159/GNLinkHost.exe",
+      "http": 200,
+      "bytes": 729088,
+      "sha256": "18aaf1d5b1f96807aa9eb630b4d386ce0446f5d2afc2c2d973cd70a1c75e2a78",
+      "local_sha256": "18aaf1d5b1f96807aa9eb630b4d386ce0446f5d2afc2c2d973cd70a1c75e2a78",
+      "match": true
+    },
+    {
+      "name": "GNLinkStream.exe",
+      "url": "https://gnlink.shotan.net/updates/0.2.159/GNLinkStream.exe",
+      "http": 200,
+      "bytes": 1440256,
+      "sha256": "16e484d02706397549ce753a78d81ff959e87b19d926c2c300dae6faefbdb736",
+      "local_sha256": "16e484d02706397549ce753a78d81ff959e87b19d926c2c300dae6faefbdb736",
+      "match": true
+    },
+    {
+      "name": "GNLinkCapture.exe",
+      "url": "https://gnlink.shotan.net/updates/0.2.159/GNLinkCapture.exe",
+      "http": 200,
+      "bytes": 221184,
+      "sha256": "1796d30ee614e5e4c6c7cce356a6d14eb1b7efeab46842b8f92f298c79fc5411",
+      "local_sha256": "1796d30ee614e5e4c6c7cce356a6d14eb1b7efeab46842b8f92f298c79fc5411",
+      "match": true
+    },
+    {
+      "name": "GNLinkInputService.exe",
+      "url": "https://gnlink.shotan.net/updates/0.2.159/GNLinkInputService.exe",
+      "http": 200,
+      "bytes": 227328,
+      "sha256": "953950ed7428da695aeb5804fd9ef4020f2ad1cdaff99a328cabf5b54a785fe6",
+      "local_sha256": "953950ed7428da695aeb5804fd9ef4020f2ad1cdaff99a328cabf5b54a785fe6",
+      "match": true
+    },
+    {
+      "name": "GNLinkClient.exe",
+      "url": "https://gnlink.shotan.net/updates/0.2.159/GNLinkClient.exe",
+      "http": 200,
+      "bytes": 854528,
+      "sha256": "3ee4a355feabc20d590ae13ea1cb33ce7a7c33a3069c918d880926e30f95551f",
+      "local_sha256": "3ee4a355feabc20d590ae13ea1cb33ce7a7c33a3069c918d880926e30f95551f",
+      "match": true
+    },
+    {
+      "name": "GNLinkViewer.exe",
+      "url": "https://gnlink.shotan.net/updates/0.2.159/GNLinkViewer.exe",
+      "http": 200,
+      "bytes": 1320448,
+      "sha256": "b1e034fecc532bae6de42e6008b4361ab00086b695e1c8d7c1635ca4b30440d8",
+      "local_sha256": "b1e034fecc532bae6de42e6008b4361ab00086b695e1c8d7c1635ca4b30440d8",
+      "match": true
+    },
+    {
+      "name": "GNLinkSetup.exe",
+      "url": "https://gnlink.shotan.net/updates/0.2.159/GNLinkSetup.exe",
+      "http": 200,
+      "bytes": 5978624,
+      "sha256": "984269547dcfa04b3859800d99327eedd817c983e5040a9246cec48ac0ec0b8d",
+      "local_sha256": "984269547dcfa04b3859800d99327eedd817c983e5040a9246cec48ac0ec0b8d",
+      "match": true
+    },
+    {
+      "name": "GNLinkUpdater.exe",
+      "url": "https://gnlink.shotan.net/updates/0.2.159/GNLinkUpdater.exe",
+      "http": 200,
+      "bytes": 650240,
+      "sha256": "bd46d4426a690635f4a9be3d92d9bc77aabbe1d82b8e8a9109fc19d6078aff83",
+      "local_sha256": "bd46d4426a690635f4a9be3d92d9bc77aabbe1d82b8e8a9109fc19d6078aff83",
+      "match": true
+    },
+    {
+      "name": "GNLinkClipHelper.exe",
+      "url": "https://gnlink.shotan.net/updates/0.2.159/GNLinkClipHelper.exe",
+      "http": 200,
+      "bytes": 295424,
+      "sha256": "abece0cc9fd566190d5b148cd4f818016de4857ec9238db8f518bb069c61deca",
+      "local_sha256": "abece0cc9fd566190d5b148cd4f818016de4857ec9238db8f518bb069c61deca",
+      "match": true
+    },
+    {
+      "name": "ui\\shell.html",
+      "url": "https://gnlink.shotan.net/updates/0.2.159/ui/shell.html",
+      "http": 200,
+      "bytes": 21824,
+      "sha256": "8fac49cd810e1445d36305bf5e62e9e539982fb0b671be86cb9008ee5ad62811",
+      "local_sha256": "8fac49cd810e1445d36305bf5e62e9e539982fb0b671be86cb9008ee5ad62811",
+      "match": true
+    },
+    {
+      "name": "ui\\macro.html",
+      "url": "https://gnlink.shotan.net/updates/0.2.159/ui/macro.html",
+      "http": 200,
+      "bytes": 11270,
+      "sha256": "380c232691d05e74506ce7269dd048d97b343735b1d3c86bd088b88227c1a268",
+      "local_sha256": "380c232691d05e74506ce7269dd048d97b343735b1d3c86bd088b88227c1a268",
+      "match": true
+    }
+  ],
+  "preserved_dist": {
+    "path": "D:\\remote\\remote\\dist\\GNLinkSetup-0.2.159.exe",
+    "sha256": "984269547dcfa04b3859800d99327eedd817c983e5040a9246cec48ac0ec0b8d",
+    "matches_setup": true
+  },
+  "payload_versions": [
+    {
+      "name": "GNLinkCapture.exe",
+      "new_utf16_count": 0,
+      "old_utf16_count": 0
+    },
+    {
+      "name": "GNLinkClient.exe",
+      "new_utf16_count": 1,
+      "old_utf16_count": 0
+    },
+    {
+      "name": "GNLinkClipHelper.exe",
+      "new_utf16_count": 0,
+      "old_utf16_count": 0
+    },
+    {
+      "name": "GNLinkHost.exe",
+      "new_utf16_count": 1,
+      "old_utf16_count": 0
+    },
+    {
+      "name": "GNLinkInputService.exe",
+      "new_utf16_count": 0,
+      "old_utf16_count": 0
+    },
+    {
+      "name": "GNLinkSetup.exe",
+      "new_utf16_count": 5,
+      "old_utf16_count": 0
+    },
+    {
+      "name": "GNLinkStream.exe",
+      "new_utf16_count": 1,
+      "old_utf16_count": 0
+    },
+    {
+      "name": "GNLinkUpdater.exe",
+      "new_utf16_count": 0,
+      "old_utf16_count": 0
+    },
+    {
+      "name": "GNLinkViewer.exe",
+      "new_utf16_count": 1,
+      "old_utf16_count": 0
+    }
+  ],
+  "shipping_viewer": {
+    "rsds_count": 0,
+    "test_markers": {
+      "Remote60StatsChainTarget": 0,
+      "remote60 stats chain target": 0,
+      "viewer_stats_chain_e2e_test": 0,
+      "--watchdog-sec": 0
+    }
+  },
+  "android_unchanged": [
+    {
+      "name": "android.manifest",
+      "sha256": "b64c1b49045ed0f939b5f733fdb51e04a6964458192f0f2a77cf40f34d0d593e",
+      "match": true
+    },
+    {
+      "name": "android.sig",
+      "sha256": "210ab909bba41e8690531ada7057400c3ebf19c0e9a1d0873d22b8b6df0b20c3",
+      "match": true
+    }
+  ],
+  "shipping_stream_gate": {
+    "exit": 0,
+    "stdout": "ABSENT  ok   REMOTE60_NATIVE_AU_TRACE\r\nABSENT  ok   [native-video-host][enc] src=\r\nABSENT  ok   [native-video-host][au] seq=\r\nABSENT  ok   REMOTE60_NATIVE_CATCHUP\r\nABSENT  ok   REMOTE60_NATIVE_CATCHUP_AWAIT_MODE\r\nABSENT  ok   REMOTE60_NATIVE_DIAG_OUTPUT_PROBE\r\nABSENT  ok   [native-video-host][cap] version=\r\nABSENT  ok    sliceQp=\r\nABSENT  ok   REMOTE60_NATIVE_SETTLE\r\nABSENT  ok   REMOTE60_NATIVE_GOP_DRAIN\r\nGATE PASS (shipping) D:\\remote\\remote\\.claude\\worktrees\\main-stability-integration\\.claude\\codex-final-0.2.159\\GNLinkStream.exe sha256=16e484d027063975\r\n"
+  },
+  "source_to_release_files": [
+    "apps/native_poc/src/product_version.hpp"
+  ],
+  "android_artifact_unchanged": {
+    "url": "https://gnlink.shotan.net/updates/0.2.30/GNLink-0.2.30.apk",
+    "http": 200,
+    "bytes": 13492132,
+    "sha256": "e6a6eecbf129f92998d5c4d4e2844057485315489c001023b24f5966a93608cf",
+    "match": true
+  },
+  "all_checks_pass": true
+}

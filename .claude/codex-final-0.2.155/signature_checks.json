@@ -1,0 +1,16 @@
+[
+  {
+    "platform": "windows",
+    "exit": 0,
+    "stdout": "manifest ok: version=0.2.155 release=r-0.2.155 artifacts=11 platform=windows",
+    "stderr": "",
+    "key_source": "tracked apps/native_poc/src/update_manifest.cpp; env override removed"
+  },
+  {
+    "platform": "android",
+    "exit": 0,
+    "stdout": "manifest ok: version=0.2.27 release=r-0.2.27 artifacts=1 platform=android",
+    "stderr": "",
+    "key_source": "tracked apps/native_poc/src/update_manifest.cpp; env override removed"
+  }
+]

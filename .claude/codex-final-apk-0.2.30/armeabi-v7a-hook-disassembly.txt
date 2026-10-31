@@ -1,0 +1,11 @@
+
+.claude\codex-final-apk-0.2.30\armeabi-v7a.so:	file format elf32-littlearm
+
+Disassembly of section .text:
+
+000921ee <_ZN8remote6010native_poc13ConnectOpGate4HookEPKc>:
+   921ee: b082         	sub	sp, #0x8
+   921f0: 9001         	str	r0, [sp, #0x4]
+   921f2: 9100         	str	r1, [sp]
+   921f4: b002         	add	sp, #0x8
+   921f6: 4770         	bx	lr

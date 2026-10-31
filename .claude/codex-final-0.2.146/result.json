@@ -1,0 +1,89 @@
+﻿{
+    "release":  "0.2.146",
+    "build_commit":  "df274be43c28bc9d3cb9d8d84156d9f3083dd7d6",
+    "checked_at_utc":  "2026-09-30T18:58:33.6347479Z",
+    "manifest_sha256":  "acd2146975b8ac472c48f31f7739e55fd116c1b6102bd25c451684aa77c81fe7",
+    "signature_sha256":  "0e1f4d18855bd6f5296ecfc31e62d35d6779750b1dce0687c9a62f3d831423e6",
+    "live_local_pair_match":  true,
+    "signature_valid":  true,
+    "tamper_refused":  true,
+    "https_artifacts":  [
+                            {
+                                "name":  "GNLinkHost.exe",
+                                "bytes":  720384,
+                                "sha256":  "496c9a84eae8d03e2ecbba2f8336903ef8682d59002ea7aa3382042c55a059f8",
+                                "url":  "https://gnlink.shotan.net/updates/0.2.146/GNLinkHost.exe",
+                                "match":  true
+                            },
+                            {
+                                "name":  "GNLinkStream.exe",
+                                "bytes":  1346048,
+                                "sha256":  "421b7a923b9713f188699aa02923f00a2d5bcb9d74f67983d03099ca5e0f4469",
+                                "url":  "https://gnlink.shotan.net/updates/0.2.146/GNLinkStream.exe",
+                                "match":  true
+                            },
+                            {
+                                "name":  "GNLinkCapture.exe",
+                                "bytes":  221184,
+                                "sha256":  "de85618b985c7c804188f260e26120000b1d740d44b05366b579d244e94cad76",
+                                "url":  "https://gnlink.shotan.net/updates/0.2.146/GNLinkCapture.exe",
+                                "match":  true
+                            },
+                            {
+                                "name":  "GNLinkInputService.exe",
+                                "bytes":  227328,
+                                "sha256":  "82ff3df6977389ac58eba22b00743f80f13b817def2ab853a136ef649797c2d2",
+                                "url":  "https://gnlink.shotan.net/updates/0.2.146/GNLinkInputService.exe",
+                                "match":  true
+                            },
+                            {
+                                "name":  "GNLinkClient.exe",
+                                "bytes":  854528,
+                                "sha256":  "57a468af0c6a05956d3afa6f44d53a8bb4d01fa6c8713f874064d10899e93c3c",
+                                "url":  "https://gnlink.shotan.net/updates/0.2.146/GNLinkClient.exe",
+                                "match":  true
+                            },
+                            {
+                                "name":  "GNLinkViewer.exe",
+                                "bytes":  1248256,
+                                "sha256":  "12327de62daf4fee77adca4e41dc4173b245b61fd210a2dcadb87647887b7890",
+                                "url":  "https://gnlink.shotan.net/updates/0.2.146/GNLinkViewer.exe",
+                                "match":  true
+                            },
+                            {
+                                "name":  "GNLinkSetup.exe",
+                                "bytes":  5797888,
+                                "sha256":  "b3e264b66d8b9ea7eb1635aef87b7b546e11f60da9d3f336a383431d51f33b94",
+                                "url":  "https://gnlink.shotan.net/updates/0.2.146/GNLinkSetup.exe",
+                                "match":  true
+                            },
+                            {
+                                "name":  "GNLinkUpdater.exe",
+                                "bytes":  644608,
+                                "sha256":  "4cb910cb180cddcd5289f5d8666338b49343400f4b721c77ff282ac294a90254",
+                                "url":  "https://gnlink.shotan.net/updates/0.2.146/GNLinkUpdater.exe",
+                                "match":  true
+                            },
+                            {
+                                "name":  "GNLinkClipHelper.exe",
+                                "bytes":  295424,
+                                "sha256":  "8290dc4692ff94a9c8142b7caf29af1e4ce61556d27262e0f001bc5adccb1c33",
+                                "url":  "https://gnlink.shotan.net/updates/0.2.146/GNLinkClipHelper.exe",
+                                "match":  true
+                            },
+                            {
+                                "name":  "ui\\shell.html",
+                                "bytes":  21824,
+                                "sha256":  "8fac49cd810e1445d36305bf5e62e9e539982fb0b671be86cb9008ee5ad62811",
+                                "url":  "https://gnlink.shotan.net/updates/0.2.146/ui/shell.html",
+                                "match":  true
+                            },
+                            {
+                                "name":  "ui\\macro.html",
+                                "bytes":  11270,
+                                "sha256":  "380c232691d05e74506ce7269dd048d97b343735b1d3c86bd088b88227c1a268",
+                                "url":  "https://gnlink.shotan.net/updates/0.2.146/ui/macro.html",
+                                "match":  true
+                            }
+                        ]
+}

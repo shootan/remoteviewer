@@ -1,0 +1,83 @@
+diff --git a/docs/history.md b/docs/history.md
+index 8a784b2..0e7a5ae 100644
+--- a/docs/history.md
++++ b/docs/history.md
+@@ -12940,3 +12940,16 @@ Next
+ - Codex(9yg69hjw) 직접 외부 확인(읽기 전용, result.json checked_at_utc 2026-10-01T07:29:06Z): 라이브 manifest/sig = 로컬 pair 해시, 출하 공개키로 서명 검증·변조 거부, HTTPS 11 artifacts 크기·SHA256 일치, origin/main = c0935b0. 결과 `main-stability-integration/.claude/codex-final-0.2.147/result.json`. 검증용 독립 실행과 별개.
+ - 다음: 실기 — 이 PC 인앱 0.2.146 → 0.2.147 뒤 설치 폴더에 `GNLinkClipHelper.exe` 생성 확인, 두 PC 사이 파일 Ctrl+C → Ctrl+V(양방향·취소). 미해결 P2(도우미가 세션 중 재기동되면 source 재복사 필요)는 그대로. B(paste-on-demand: 뷰어→원격 복사를 GNLink 창의 Ctrl+V 때만)는 설계 합의 완료(`.claude/plans/paste_on_demand_and_helper_token_2026-10-01.md`), 우클릭 붙여넣기 대체 수단만 사용자 답 대기.
+ - 제품/테스트/문서: 제품(file_copy_helper_host.*, file_copy_paste_parts.*, file_copy_client.*, viewer_clip_transfer_bar.cpp, native_video_host_main.cpp, host_file_copy.hpp; 버전 c0935b0) / 테스트(helper e2e·receiver·bar·update_effects·updater_assembly, elevated_check.ps1) / 문서(이 항목).
++
++### 2026-10-02 0.2.148 (PC) · APK 0.2.25 게시 — 사용자가 정한 비트레이트가 회선에 나가는 영상의 상한이 된다 (실기 대기)
++
++- 발견(10-01 사용자 질문 + 이 PC 호스트 로그): 6 Mbps 설정인데 회선 ~15 Mbps. 인코더는 `PeakConstrainedVBR` mean=설정·peak=2×, AMD MFT 는 움직임에서 평균을 지키지 않고(`host_rate_governor.hpp` 실측 3~5×), 거버너는 1 s 주기로 payload 만 봐서 2~3 s 버스트를 놓쳤다(0.2.147 17:26:27 `payloadKbps=13618 targetKbps=6000`). FEC·NACK 재전송·헤더는 영상 payload 와 **한 총량으로 합산되지 않았다**(NACK 는 별도 15% bucket, AU pacing 은 평균의 500%·최소 40 Mbps).
++- 설계(검증용 초안 → Codex r1 계약, 검증용 오류 5건 인정: 기존 AU pacing 이 있었음, 버킷 깊이 R×0.25 s 는 250 ms 창 200% 허용, gate-off 부정 대조는 shaper 가 있으면 무의미 등): 설정값 = 그 영상 스트림의 data + FEC + NACK + 앱/UDP/IP 헤더 회선 상한. 실제 datagram 직전의 공통 wire limiter(`R=cap/8`, `B=max(Lmax, R×10 ms)`, 우회 0, 폐기 대신 대기) + 인코드 전 부하 gate + 거버너 보조(1 s 유지 승인). Codex r2 결정: 모든 UDP peer 에 같은 상한(구 수신기 예외 없음), 수신 진척 기반 NACK tail 을 PC·Android 공통 코드에 — 와이어·협상 변경 없음. 킬스위치 `REMOTE60_NATIVE_WIRE_CAP=0`.
++- 구현·검수(t-m0ry3hum, 작업용1 `feat/bitrate-hard-cap`, r1~r9): 24b8bf6·8fc384a(limiter·gate) → 8f2f0e7·8d85c8f(진척 tail, AU 를 송신 시작 전에 캐시) → a766486(F1~F4: 재전송을 sender 가 같은 예산으로, key 상태, 첫 datagram fence 를 token 대기 뒤로, 예약 vs 실제 송신 회계) → 31c13e8(R1~R4: 실 sender 스레드가 재전송에 깨어나고 송신 중 끼워 보냄, 세션 소유 replay) → 921ce8a(G1~G4) → **152b685**(H1 key 상태 단일 락, H2 펜스된 replay 즉시 정리·cap OFF 에도 펜스) = 승인 제품 소스. 뒤 6f98bce·5a42c06·5b1b3c6·ef81624 는 시험만. 라운드마다 Codex NEEDS_CHANGES 를 한 묶음으로 반려했다. 검증용 독립 빌드·실행은 r2~r6(37572b1·a766486·31c13e8·921ce8a·152b685)과 r8·r9 시험 commit 에서 했다(`verify-c2-ef533f2/.claude/rv_cap*/`).
++- 측정(검증용 독립 build-verify + 독립 빌드한 a95215e 호스트, console 세션): 실 MFT+실 decoder 매트릭스 155/0 — 모든 1 s·250 ms 창 ≤ 설정 +10%(6M/60 움직임 101.0/103.7%, 1.5M/30 100.8/103.1%, 손실 5%+NACK 폭주 101.0/103.7%, 6→1.5 하향은 실제 적용 시점부터). 데스크톱 유사 콘텐츠는 상한에 거의 걸리지 않음(글자 스크롤 ~54%, 창 드래그 ~47%). event-ID paired(118/0, fixture 의 그린 변화 → decoder 출력에서 그 marker 를 찾은 시각): **단일 변화의 중앙값 ON≈OFF≈0.2.147 소스**(6M 46/52/46 ms), 화면 전체 전환은 ON 이 느림(6M 218 vs 69·95 ms, 1.5M 335 vs ~55 ms), 접속 직후 첫 화면 최대 0.75~0.85 s. Codex 는 이 범위를 수용 가능한 비용으로 판단했다(원인을 바이트 직렬화로 단정하지는 않는다 — ON/OFF 차이에는 gate/staging 도 섞여 있다). 첫 IDR 크기를 latency×rate 로 환산한 448/158 KB 는 실측이 아니라 철회했다.
++- 실 PC 수신 경로: 제품 `VideoReceiver`(viewer_udp_recovery_test ViewerRig) + 격리 호스트 `--real-recv-smoke` 12/12 exit 0 — 키프레임은 FrameGate 권위 상태(lastDecodedKeyCaptureUs·대기 해제)로 확인, 화면 변화 전량 도달, 키 요청 0~1·복구 포기 0. 검증용 첫 실행의 간헐 FAIL(8회 중 3회, 첫 시나리오)은 시험의 2 ms poll 이 IDR publish 를 놓친 관측 문제였다(Codex 판정, 고친 뒤 12/12, 그중 5회는 옛 실패 조건을 재현하고도 통과).
++- 게시: main ef81624(통합 build-integ 새 configure, 회귀 19종·real-recv·matrix exit 0) push → 버전 commit **aeebe33**(PC 0.2.148, APK versionName 0.2.25·versionCode 24 — main 은 APK 0.2.24 를 담은 적이 없다: 그 릴리스는 별도 브랜치, versionCode 23). 첫 버전 commit 시도(6c5e297)는 gradle 줄 편집 실패로 PC 줄만 담겨 메시지와 어긋났고 push 전에 되돌려 다시 만들었다. PC: `gnlink_release.sh --sign` 게이트 전부 PASS·payload 문자열 0.2.148 → deploy exit 0, manifest `19cb7a271b2b0e311e61b4e1722e05afb4acbd9388d093ce0f4295c62a03a511` · sig `1bee1ef02af01deafb8d956a3d6c71d71e282afc4c74c20a7fc553ef11f3fd14`, 11 artifacts, 백업 pair 0.2.147(7c27f0fa…/b78c97bc…). APK: clean assembleDebug + 단위 158/0, 인증서 dcc806ae…(= 기존), aapt2 24/0.2.25·4 ABI → manifest `73dde974115ffd31d6a26f823cf9cfb1f919c4a033703cd8dd8814eeea3c4516` · sig `2e55dabc9286c2e3bbfbdab2cb4a09607d865bba550c18cbefe96c97db5f79eb`, APK 0be35bbc…, 백업 pair 0.2.24. 외부 https(`https://gnlink.shotan.net/updates/0.2.148/`, `…/updates/0.2.25/GNLink-0.2.25.apk`): 스크립트 11/11·1/1 + 검증용 독립 curl 4개 일치. 저장소 루트 `dist/GNLinkSetup-0.2.148.exe`·`dist/GNLink-0.2.25.apk`. origin/main = aeebe33.
++- Codex(9yg69hjw) 직접 외부 확인(읽기 전용, result.json UTC 2026-10-01T16:01:45Z): 라이브 windows·android pair 해시 = 로컬, 출하 공개키로 서명 검증·변조 거부, HTTPS 12/12 크기·SHA256 일치, APK 인증서 dcc806ae…·versionCode 24·4 ABI, 루트 dist 2개 일치, origin/main = aeebe33. 결과 `main-stability-integration/.claude/codex-final-0.2.148/result.json`. 검증용 확인과 별개.
++- 환경 메모: main 작업 폴더의 `apps/shared/update_manifest/` 시험 벡터 4개가 09-14 에 꺼낸 CRLF 사본이라(그 뒤 `-text` 규칙이 생겨도 기존 사본은 안 바뀜) APK 의 서명 시험이 실패했다 → 저장소 바이트로 다시 꺼낸 뒤 통과. 새 worktree 의 gradle 은 `ANDROID_HOME` 이 없으면 "BuildFlowService" 오류로 보인다.
++- 미검증·경계: 두 PC 사이·WAN 의 6 Mbps 현장 측정, 폰 실기. 무손실 초기/idle 에서 뷰어의 키 요청은 관찰만 했고 호스트까지 왕복한 복구는 검증하지 않았다.
++- 제품/테스트/문서: 제품(host 송신·gate·limiter·key 상태, 공통 수신 NACK tail; 버전 aeebe33) / 테스트(wire_limiter·defer·idr·fix·sender_thread, fec e2e 매트릭스·paired, recovery real-recv) / 문서(이 항목·작업목록·구현계획).
+diff --git "a/docs/\352\265\254\355\230\204\352\263\204\355\232\215.md" "b/docs/\352\265\254\355\230\204\352\263\204\355\232\215.md"
+index f5b7fac..1ba229c 100644
+--- "a/docs/\352\265\254\355\230\204\352\263\204\355\232\215.md"
++++ "b/docs/\352\265\254\355\230\204\352\263\204\355\232\215.md"
+@@ -1113,6 +1113,8 @@ dropin `10-tls.conf`). **아래의 "프록시가 종료하면 서버 TLS 는 비
+ 
+ ## C0 — 대역폭 관찰 ① (2026-09-23) — 관찰만, 적용 없음
+ 
++> 2026-10-02: 이 절의 단계(① 관찰 → ② 추정을 상한/pacing 에 적용 → ③ UI)와 별개로, **독립 hard cap**(사용자 설정값 = 영상 회선 바이트의 창 상한, 추정과 무관)이 0.2.148 에 들어갔다. ①만 완료, ②·③ 은 미착수. 경위 `history.md` 2026-10-02 0.2.148 항목.
++
+ 정본 `.claude/c0_bandwidth_plan.md`(Codex PLAN_REVIEW: ① 관찰 단계만 조건부 승인). encoder·pacing·ABR 은 **읽지도 바꾸지도 않는다**.
+ 
+ - [x] 뷰어 추정기 `viewer_bwe.hpp` — GCC 초안 구조를 **따른 것**(동등 아님): 프레임별 지연 기울기(trendline, WebRTC 기본값) + 적응 임계 → normal/underuse/overuse, 율 제어 normal→**증가**·underuse→유지·overuse→감소(0.85×수신), 추정 ≤ 1.5×수신. app-limited = 큐 신호 없음 + 추정이 수신률에 묶임. 정지화면(합성 프레임 과반) = **값 유지**.
+diff --git "a/docs/\354\236\221\354\227\205\353\252\251\353\241\235.md" "b/docs/\354\236\221\354\227\205\353\252\251\353\241\235.md"
+index 6894714..cf07958 100644
+--- "a/docs/\354\236\221\354\227\205\353\252\251\353\241\235.md"
++++ "b/docs/\354\236\221\354\227\205\353\252\251\353\241\235.md"
+@@ -1,20 +1,21 @@
+ # 작업 목록
+ 
+-> 2026-09-22 재작성, 2026-10-01 갱신. 제품/배포 기준 `main@df274be`(0.2.146) — docs commit 은 그 뒤에 쌓여도 제품 기준은 바뀌지 않는다. **남은 작업만** 적는다. 끝난 항목은 여기서 지우고
++> 2026-09-22 재작성, 2026-10-02 갱신. 제품/배포 기준 `main@aeebe33`(0.2.148 · APK 0.2.25) — docs commit 은 그 뒤에 쌓여도 제품 기준은 바뀌지 않는다. **남은 작업만** 적는다. 끝난 항목은 여기서 지우고
+ > `history.md` 에 남긴다. 새 작업은 생기는 즉시 한 줄로 추가하고, 우선순위가 높은 것을 위에 둔다.
+ > 상세: `구현계획.md`(항목) · `history.md`(기록) · `legacy/2026-09/`(끝난 조사·사건·설계 문서).
+ >
+-> 현재 배포(2026-10-01 NAS manifest 직접 확인): `windows=0.2.146`(df274be, 10-01 04:2x) · `android=0.2.24`(versionCode 23,
+-> 09-30 17:1x — 고정 서버·자동 로그인·계정 상태 포함). 디렉터리 서버 배포본 = `e274c37` 의 `apps/directory/` 6개 파일과
++> 현재 배포(2026-10-02 NAS manifest 직접 확인): `windows=0.2.148`(aeebe33) · `android=0.2.25`(versionCode 24, 같은 commit —
++> 고정 서버·자동 로그인·계정 상태(0.2.24 부터) + 수신 진척 tail). 디렉터리 서버 배포본 = `e274c37` 의 `apps/directory/` 6개 파일과
+ > sha256 동일(09-29 21:22 재시작, NRestarts 0). 우선순위 근거 `.claude/priority_2026-09-22.md`(09-22 기준).
+ 
+ ## 1. 실기·검증 대기 — 사용자 손 또는 현장이 필요한 것
+ 
+ | # | 항목 | 담당 · 사용자 손 | 판정 기준 |
+ |---|---|---|---|
+-| V11 | **APK 0.2.24 폰 실기** — ✅ 게시 09-30 17:1x(manifest ede573eb…, APK c39b2434…, 인증서 = 0.2.23, 백업 pair 0.2.23). 내용: 고정 서버(입력란 없음, 옛 자격 이행)·자동 로그인(Keystore)·계정 상태 문장(트리 `e274c37`) | 사용자 폰 1회 | 업데이트 알림→설치 · ⑴ 기존 유효 세션 이행(0.2.23 평문 세션은 origin·유효기간 확인 뒤 그 실행에서만 사용) ⑵ 최초 명시 로그인 1회 뒤 기기 자격 발급 → 재시작 자동 로그인 · 로그아웃 뒤 재로그인 · 승인 대기 계정이면 그 문장 |
++| V11 | **폰 실기(최신 APK 0.2.25)** — 0.2.24 부터의 고정 서버(입력란 없음, 옛 자격 이행)·자동 로그인(Keystore)·계정 상태 문장 + 0.2.25 의 수신 진척 tail. 게시: 0.2.24 09-30(manifest ede573eb…), **0.2.25 10-02**(manifest 73dde974…, APK 0be35bbc…, 인증서 dcc806ae… 동일) | 사용자 폰 1회 | 업데이트 알림→설치 · 기존 유효 세션 이행 또는 최초 명시 로그인 1회 뒤 재시작 자동 로그인 · 로그아웃 뒤 재로그인 · 승인 대기 계정이면 그 문장 · 영상 끊김·반복 멈춤 없음 |
+ | V12 | **0.2.145 PC 자동 로그인 실기** — ✅ 자동 로그인 자체는 사용자 확인 09-30 16:2x("자동 로그인 잘 되는 거 확인했다"). **남은 확인**: 서버 재시작 뒤 복귀 · 12 h 경과 뒤 복귀 · 로그아웃이 서버에도 반영(다른 기기/서버 로그) | 사용자 | 남은 3개 행동 각각 |
+-| V14 | **0.2.146 파일 복사 실기** — 두 PC 사이 탐색기 Ctrl+C → 원격 데스크톱 Ctrl+V(양방향), 취소·대용량·전송 바. 도우미 `GNLinkClipHelper.exe` 첫 출하(Setup 에 포함, 인앱 업데이트 payload 11개). 바로 시험하려면 **Setup 설치 권장**(기존 0.2.145 업데이터도 11개 payload 를 받는지는 이 실기가 첫 확인). P2 한계: 원격 도우미가 세션 중 재기동되면 source PC 에서 다시 복사해야 붙여넣기 됨 | 사용자 PC 2대 | 복사→붙여넣기 완료 · 취소 시 전송 중단·결과 문구·예약 해제·이후 새 paste 가능(부분 파일 잔존은 허용, `docs/file_copy_field_test.md`) · 실패 문구 |
++| V15 | **0.2.148 비트레이트 상한 현장 측정** — 6 Mbps 설정, 움직이는 화면. 판정 대상은 **GNLink 의 H.264 영상 UDP 흐름(IP 층)**이다 — NIC 전체(다른 프로그램·파일 복사·제어)는 이 상한의 계약이 아니다. 근거는 호스트 로그의 `[wire]` 실제 송신 바이트 또는 패킷 캡처로 그 흐름만 분리; 작업 관리자 NIC 그래프는 보조. 클릭 반응·화면 전환 체감. 폰 0.2.25 에서 1회 | 사용자 + 검증용 로그 판독 | 그 흐름의 1 s 창이 설정 부근(자동 검증의 관찰 범위: 1 s·250 ms 창 ≤ +10%), 끊김·반복 멈춤 없음 |
++| V14 | **파일 복사 실기 잔여** — ✅ 양방향 복사·붙여넣기는 사용자 확인(10-01, 0.2.147). **남은 확인**: 전송 중 취소, 대용량, 전송 바. 0.2.147 부터는 인앱 업데이트로 도우미가 깔린다(0.2.145 출신 PC 는 0.2.146 → 0.2.147 업데이트에서). P2 한계: 원격 도우미가 세션 중 재기동되면 source 에서 재복사 필요 | 사용자 PC 2대 | 취소 시 전송 중단·결과 문구·예약 해제·이후 새 paste 가능(부분 파일 잔존 허용) · 대용량 완주 |
+ | V13 | **관리 창구(Account Admin API v1) 운영** — 서버 코드는 배포됐으나 별도 포트 리스너는 NAS env 미설정으로 꺼져 있음 | 사용자(NAS env·노출 범위 결정) → 검증용 | 승인 대기/정지 전환이 클라 문장·Host 백오프로 보임 · disable 시 릴레이 즉시 끊김(미검증) · 설치 GNLinkHost(관리자)의 403 문장(미검증) |
+ | V0 | **이 PC 클라이언트 설정 잔여** — Host 는 복구됨(사용자 재로그인 09-23 15:45 `rv_verify.md`, 0.2.144 이행이 09-29 18:38 `host.json` 을 `gnlink.shotan.net`·`shotan` 으로 재기록, 09-30 직접 확인). **Client 의 `client.txt` 는 아직 시험 값**(`127.0.0.1:52762`·`account-b`, 09-23 03:25, `client_recovery_ui_test` 가 덮어씀 — RV-00). 0.2.144 부터 서버 입력란이 없으므로 아이디·비밀번호 로그인 1회면 된다 — V12 와 함께 확인 | 사용자: GNLinkClient 로그인 1회 | `client.txt` 에 시험 주소·계정 없음 |
+ | V1 | **승격 격리 실측 1회** — rollback 의 실행중/ACL 구분과 비파괴 보존 (`update_rollback_safety`, G gate 와 같은 방식) | 검증용 준비 → 사용자 관리자 실행 1회 | rc 0. 실행중 이미지는 bounded wait, ACL 거부는 즉시 중단·파일 무이동 |
+@@ -49,7 +50,7 @@ C1~C3 의 ✅ 는 **구현 범위 승인**이다. 아래 RV-C 가 끝나기 전
+ 
+ | # | 작업 | 효과 | 규모 | 메모 |
+ |---|---|---|---|---|
+-| **C0 (핵심)** | ✅ ① 관찰 단계 `c0fdcba` 검증용 OK(`rv_verify.md`)·main 병합(0.2.140 포함) · ② cap/pacing 적용 **미착수**(구현계획 C0 절: 큐 증가 감지가 드롭보다 빠르지 않음·지연 전용이라 손실 미반영 → ② 전 재검토) (task t-9srqt5go, 지시서 `.claude/task_c0_r1.md`, Codex 계획 검토 seq 2798: 관찰만, ABR/pacing 적용 없음) — **대역폭 추정 → 화질 상한 연동 (measured-bandwidth adaptive quality)** | FHD60 을 멈춤 없이. 사용자 설정을 지켜지는 상한으로 | 큼 | 인코더는 FHD60 가능하나 대역을 몰라 고정하면 멈춘다. 지금 ABR 은 손실·지연 **사후 반응**만(`host_abr.hpp` AbrInputs = fps·지연·drop·rtt, 대역 추정 없음). 설계: ⑴ 연속 대역 추정(전송 페이싱 + 수신 도착 간격·지연 추세, delay-based+loss-based=WebRTC GCC 계열) ⑵ ABR 이 `min(사용자 설정 상한, 추정×여유)` 로 능동 조절, 시작 보수적→위로 프로빙, 지연 상승 시 **손실 전에** back off ⑶ 접속 시 초기 추정으로 시작 비트레이트 결정. **Codex 계획 검토(2026-09-22): ① 관찰 단계(추정+새 kind·협상 비트+호스트 로그만, 기존 encoder/pacing/ABR 출력 불변)만 조건부 승인 → 측정 뒤 ② cap/pacing 적용 재검토 → ③ UI. `tuneManualOverride` 의미 변경 불가(별도 `ceilingMode`), W/H/fps 천장 각각, GCC 초안 구조(normal→increase·underuse→hold), freshness 는 host 수신 시각, 상수 미확정.** 지시서 `.claude/task_c0_r1.md`(C3 뒤 발송). 관련 R08/R09·HN13(720p 고착) |
++| **C0 (핵심)** | ① 관찰 `c0fdcba`(0.2.140) ✅ · **독립 hard cap ✅ 0.2.148**(aeebe33, t-m0ry3hum, 제품 152b685 — 설정값 = 영상 data+FEC+NACK+헤더의 회선 상한, 대역 추정과 무관) · ② **추정 → 상한/pacing 적용(ABR 연동) 미착수** · ③ UI 미착수 | 대역 절감·FHD60 무정체 | 큼 | 경위 `history.md` 2026-10-02 0.2.148 항목. 실기 V15 |
+ | ~~C1~~ | ✅ **구현·독립 검수·Codex 승인 완료** (2026-09-22, feat/connect-bandwidth `60aca38`+`a391c4a`+`fd09407`) — 원인: 클라의 LAN Punch 가 호스트에 도착해도 호스트가 답하지 않아 뷰어 `PunchAny` 에 private 후보가 "무응답" → 릴레이가 2.5s 에 승리. 수정: 호스트가 유효한 Punch 에 같은 크기 Punch 1개로 응답(창은 디렉터리 이벤트로만 10s, source 25·창 200·초당 50·맵 64 포화 시 신규 거부, refresh 는 유효 펀치만+2s cooldown). 검증: 순수 55·호스트 경로 111·실호스트 e2e 40(공인 tuple capability→private 소켓 세션 성립, 4케이스) 각 3회, 변이 다수. **미검증: 실기 직결(PC2 배포 뒤)·펀치 손실 주입(C2 전송경계 시험에서 보완).** 릴리스는 C2 뒤 묶음 |
+ | ~~C2~~ | ✅ **구현·독립 검수·Codex 승인 완료** (2026-09-23, feat/connect-bandwidth F3 `15de4e8` · F1 `c74b340`→`4485535`→`76e50e7`→`0ea294b`→`23e3848`→`036e7d4`) — F1: Hello 대기 상한 30s(UX 상한, `kViewerHelloBudgetMs`, TTL 30s 정합)·세대 fence·"호스트 응답 대기 중…" 표시·셸→구 뷰어 취소 채널(**이름 없는** 이벤트를 HANDLE_LIST 로만 상속, 취소 불가 구 뷰어가 살아 있으면 같은 호스트 교체 거부) · F3: 서버 wake 유계 재송신(1s×≤10 회, connect 당 ≤13, 최신 세대만, collected=handed-to-response/취소/만료 시 해제; 배포 patch base `27b730e7`→`69451c90`). 독립 검수: cancel_e2e 30/0×3 · recovery_ui 38/0×10(실제 begin_session 배선) · 변이 3건 정확히 그 단언 FAIL · 제품 창 실캡처. 릴리스 스크립트 `automation/gnlink_release.sh` r6 `d0801bc` Codex 승인(실서명 경로는 다음 릴리스에서 확인). **2026-09-30**: 서버 patch 는 09-29 서버 배포(e274c37)에 포함, C1+C2 는 0.2.140 이후 게시본에 포함. **남은 것**: 실기 첫 클릭 성공률 — 실기 대기 | 접속 재클릭 소멸 | 소 | 09-21 인과는 미확정으로 기록 |
+ | ~~C3~~ | ✅ **구현·독립 검수·Codex 승인(구현 범위) 완료** (2026-09-23, feat/connect-bandwidth `a9c88fb`→`b208321`→`bebc04b`→`961668a`→`ace414e`) — 호스트: 같은 ask 에 저장 Ack 멱등 재송신(4/s burst 2 + 전역), serving 중엔 검증+새 resumeId+긍정 정지 근거(채널 peer-lost 또는 왕복 probe 6×250ms, 신선도 750ms, 복구당 ≤64)로만 ResumePending 전환(flush·epoch·mailbox·T3 갱신 없음) · 뷰어: worker Running→Resuming→Running(재시작 없음), 한 단절 한 resumeId, 새 stream id 왕복 성공이 회복, 비멱등 요청 재전송 0, 블랙아웃 입력 폐기, release-all · 발견·수정: 실제 핸드셰이크가 feature bit 을 설정한 적 없어 item 8 은 협상 불가였음 / 공유 UdpControlChannel::OnPacket 이 닫힌 뒤 영상까지 삼키던 순서 결함(양단) / age 두 시계 결함. 독립 검수: 격리 e2e(실제 GNLinkStream+제어만 drop 프록시) 56/0 ×10 정체 0(회복 1567~5456ms), release-all e2e 19/0 ×5(유실 key-up 복구·중복 0), 변이 4건 정확히 그 단언. **미검증**: 실기 peer-lost 입력 회복, release_all_physical(IME 스캔코드) 경로, 물리 socket 수명; 영상 최대 공백 1994ms 측정치(모니터 캡처·화면 활동 미기록 조건 — C3 r5 정정, 재측정은 구현계획 C3 "측정 표기"). viewer_udp_recovery 부하 간헐(픽스처 타이밍)은 r4 로 좁게 보완 중 | peer-lost 30s 동안 입력 회복 | 중 | 실기 대기 |
+@@ -84,7 +85,7 @@ C1~C3 의 ✅ 는 **구현 범위 승인**이다. 아래 RV-C 가 끝나기 전
+ |---|---|
+ | R1 | `history.md`·`구현계획.md` 의 09-18~22 기록: item 8 layer 1·2, item 12 wake/relay(서버 배포 09-21 14:45), `e3897a1`, pc2-connect-diag(0.2.131), 헬스 게이트 D1/D2(0.2.132), abandon race r1~r10 + G 승격 실측(0.2.133). 근거 `.claude/*_2026-09-21.md`, `legacy/2026-09/updater_abandon_race_crash_2026-09-21.md` |
+ | R2 | 0.2.131/132/133 게시 근거 — 설치본·payload·manifest·NAS 해시 정합은 09-22 확인(`.claude/priority_2026-09-22.md`). 게시 로그 파일은 없음 |
+-| R4 | `history.md` 에 Windows 0.2.140~0.2.145 · APK 0.2.21~0.2.24 의 **게시 기록이 없다**(release 커밋 메시지·`.claude/rel/<버전>`·`release-*/.claude/msg.txt` 만). 0.2.146 은 docs commit d865970 의 2026-10-01 항목으로 기록 완료. 근거: 0.2.145 `feat-fixed-server/.claude/state_fixed_server.md`, APK 0.2.24 `D:/remote/remote/.claude/state_2026-09-30.md`(manifest·sig·artifact 해시·백업 pair) |
++| R4 | `history.md` 에 Windows 0.2.140~0.2.145 · APK 0.2.21~0.2.24 의 **게시 기록이 없다**(0.2.146~0.2.148·APK 0.2.25 는 기록됨)(release 커밋 메시지·`.claude/rel/<버전>`·`release-*/.claude/msg.txt` 만). 0.2.146 은 docs commit d865970 의 2026-10-01 항목으로 기록 완료. 근거: 0.2.145 `feat-fixed-server/.claude/state_fixed_server.md`, APK 0.2.24 `D:/remote/remote/.claude/state_2026-09-30.md`(manifest·sig·artifact 해시·백업 pair) |
+ | R3 | 133 실기 사실 — 09-22 13:14 readiness claim 완주, 호환행렬 row2(09-21 17:27)·row4(09-22 13:14) 실기 통과, 통과 경로도 로그 줄을 남김 |
+ 
+ ## 5. 백로그 — 급하지 않음

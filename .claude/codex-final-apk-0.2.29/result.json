@@ -1,0 +1,72 @@
+{
+  "checked_at_utc": "2026-10-15T02:18:32.959705+00:00",
+  "source_commit": "0e5ddae68e96c0bd5aff56c880f6623c569ea59d",
+  "release_commit": "de5a0357cdd9c56fdfe1416c4a9fdc7ddd89a0da",
+  "origin_main": "de5a0357cdd9c56fdfe1416c4a9fdc7ddd89a0da\trefs/heads/main",
+  "source_to_release_files": [
+    "apps/android_direct_client/app/build.gradle.kts",
+    "docs/작업목록.md"
+  ],
+  "nas_pairs": [
+    {
+      "name": "android.manifest",
+      "sha256": "f82318f9d02abb4cc58ea0d03daefe2553a1e2ee607ed2634ba3a65e7bb11523",
+      "match_expected": true,
+      "match_local": true
+    },
+    {
+      "name": "android.sig",
+      "sha256": "d5534f81e74cd94aaf8a8de1e31b252ec00eb7076831ebe5aa6926d92cd77897",
+      "match_expected": true,
+      "match_local": true
+    },
+    {
+      "name": "windows.manifest",
+      "sha256": "78df5305b70cc429e6779d484a4a534bf13875d81e05e2fc6e5f8da263eb9306",
+      "match_expected": true,
+      "match_local": true
+    },
+    {
+      "name": "windows.sig",
+      "sha256": "6dce1ca98d483da0e2a7dafa70077d3f25d340724baef415fb2b301c99a0f77f",
+      "match_expected": true,
+      "match_local": true
+    }
+  ],
+  "manifest_signature_and_tamper": {
+    "exit": 0,
+    "stdout": "manifest ok: version=0.2.29 release=r-0.2.29 artifacts=1 platform=android\n",
+    "public_key_override": false
+  },
+  "external_apk": {
+    "url": "https://gnlink.shotan.net/updates/0.2.29/GNLink-0.2.29.apk",
+    "http": 200,
+    "bytes": 12562092,
+    "sha256": "942b898ff8a3eb73f47e9ed6ba77f0041e79fa5895f754dd2fe480b60191b020",
+    "matches_signed": true,
+    "matches_payload": true,
+    "matches_dist": true
+  },
+  "apk_signer": {
+    "exit": 0,
+    "same_certificate": true
+  },
+  "apk_identity": {
+    "package": "package: name='com.remote60.androiddirect' versionCode='28' versionName='0.2.29' platformBuildVersionName='14' platformBuildVersionCode='34' compileSdkVersion='34' compileSdkVersionCodename='14'",
+    "abis": [
+      "arm64-v8a",
+      "armeabi-v7a",
+      "x86",
+      "x86_64"
+    ],
+    "version_match": true
+  },
+  "build_test_reports_read_only": {
+    "suites": 16,
+    "tests": 177,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0
+  },
+  "all_checks_pass": true
+}

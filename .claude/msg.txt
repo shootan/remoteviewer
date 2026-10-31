@@ -1,0 +1,15 @@
+release: 0.2.142 -- a small frame's parity is its own size
+
+PC only. A frame that fits one datagram (a still or slow-changing screen sends many) used to get a
+parity padded to a full MTU chunk; now its parity is the frame's own size -- still a full copy for
+recovery, only the padding is gone. Header, negotiation and receivers unchanged; old viewers and the
+APK assemble the same frames (eafe462). Isolated measurement: still screen parity per frame x0.58,
+wire per frame x0.92; low motion wire x0.97; video unchanged (multi-chunk frames are untouched).
+Switch: REMOTE60_NATIVE_FEC_SINGLE_CHUNK_STRIDE=0.
+
+Integration on main eafe462: full build rc 0, regressions PASS (abr e2e failed only on a port taken
+by a concurrent test run; 2/2 clean when idle).
+
+Product: version only. Test: none. Docs: none.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

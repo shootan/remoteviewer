@@ -1,0 +1,7 @@
+0010b780 <remote60::native_poc::ConnectOpGate::Hook(char const*)>:
+  10b780: 55                           	pushl	%ebp
+  10b781: 89 e5                        	movl	%esp, %ebp
+  10b783: 8b 45 0c                     	movl	0xc(%ebp), %eax
+  10b786: 8b 45 08                     	movl	0x8(%ebp), %eax
+  10b789: 5d                           	popl	%ebp
+  10b78a: c3                           	retl

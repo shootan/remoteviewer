@@ -1,0 +1,6 @@
+0000000000114140 <remote60::native_poc::ConnectOpGate::Hook(char const*)>:
+  114140: d10043ff     	sub	sp, sp, #0x10
+  114144: f90007e0     	str	x0, [sp, #0x8]
+  114148: f90003e1     	str	x1, [sp]
+  11414c: 910043ff     	add	sp, sp, #0x10
+  114150: d65f03c0     	ret
