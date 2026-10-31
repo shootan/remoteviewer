@@ -13632,3 +13632,11 @@ Next
 - 보관: build·remote-worktrees 총 1,992파일/547,346,562 bytes를 `E:\remote-output\evidence\20261031-storage\legacy-build-worktrees-20261031-212555.zip`에 보관하고 각 ZIP 엔트리를 원본 SHA-256과 대조해 PASS. 원본 삭제·프로세스 종료·제품 실행/빌드·설치·배포·push 없음. 원문 JSON은 E:/remote-output/migration/20261031-storage/removal_readiness_*.json, sibling_inventory.json, process_cwd_check.json, legacy_sibling_backup.json에 보존했다.
 - 변경 파일: docs/history.md(조사 기록), docs/구현계획.md(진행 체크). 이전 조사 도구·상태는 미추적 .claude/storage-migration에 보존했다.
 - 다음: D 원본 저장소의 오래된 MCP 연결을 정리한 뒤 삭제 범위를 확정한다. 세 레거시 폴더는 위 근거로 삭제 가능한 후보이며 이번에는 삭제하지 않았다. D 전체 파티션·다른 프로젝트 삭제 판단으로 확대하지 않는다. 제품 STOP 유지.
+
+### 2026-10-31 사용자 승인 D remote 삭제·MCP 해제 확인 (제품 STOP 유지)
+- 목표: 사용자의 명시적 "삭제해. 그리고 이제 mcp연결다끊겻을거야 확인해" 지시에 따라 사전 조사한 D:/remote 하위 네 폴더를 삭제한다. D 파티션이나 다른 D 프로젝트는 범위 밖이다.
+- 삭제 전: D:/remote 참조 프로세스 0, D remote 버스 세션 0, 현재 Git·파일시스템 MCP C 응답 확인. 이전 전 파일 SHA-256 조사 이후 D 원본 58,952개 파일의 추가·누락·크기·수정/생성 시각 변경이 없고 junction 3개의 원래 대상도 같은 것을 확인했다. build·remote-worktrees 원본 1,992파일과 E ZIP 보관본을 다시 SHA-256 대조해 PASS.
+- 삭제: 절대 경로 D:/remote/build, download, remote-worktrees, remote를 검증한 뒤 일반 파일 75,473개/7,654,376,603 bytes, 디렉터리 17,066개를 제거했다. junction 3개는 대상으로 진입하지 않고 링크 자체만 제거했다. 상위 D:/remote도 비어 있음을 확인하고 제거했다. C/E 대상 삭제 없음.
+- 삭제 후: C worktree 23개 HEAD·기존 status·common-dir, 활성 junction 18개, git fsck PASS. C의 기존 비-Git 사본 누락 0. E 기존 보관본 1,183파일의 존재·크기 및 legacy-build-worktrees-20261031-212555.zip 보존 확인. 과거 D 대상 보관 junction 15개는 대상 경로를 C/E retired_junction_metadata.json으로 보존한 뒤 깨진 링크만 제거하여 Git 조회 경고를 해소했다.
+- 변경 파일: docs/history.md(실행·검증 기록), docs/구현계획.md(진행 체크). 미추적 .claude/storage-migration의 삭제 도구·인계·상태를 갱신했다. 원문 근거: E:/remote-output/migration/20261031-storage/predelete_check.json, deletion_result.json, postdelete_check.json, retired_junction_metadata.json.
+- 다음: 이번 D:/remote 정리 완료. 사용자가 지금 할 일 없음. 제품 소스·버전 변경, 제품 실행·빌드·실기·설치·배포·push는 수행하지 않았고 제품 STOP 유지. 과거 D 절대 경로 캐시/runner의 재생성·재고정은 제품 작업 재개 승인 뒤 진행한다. D 전체 파티션 및 다른 프로젝트 정리는 이번 완료 범위가 아니다.
