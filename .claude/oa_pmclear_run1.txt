@@ -1,0 +1,16 @@
+﻿oa_pmclear_test (old-APK lane r3 N1): oa_avd.py against a fake adb
+PASS  arm P, pm clear rc1: INVALID (exit 2), no app start, no tap, the clear not retried  rc=2 am-start=False taps=0 clears=1
+PASS  arm P, pm clear failed: INVALID (exit 2), no app start, no tap, the clear not retried  rc=2 am-start=False taps=0 clears=1
+PASS  arm P, pm clear empty: INVALID (exit 2), no app start, no tap, the clear not retried  rc=2 am-start=False taps=0 clears=1
+PASS  arm P, pm clear timeout: INVALID (exit 2), no app start, no tap, the clear not retried  rc=2 am-start=False taps=0 clears=1
+PASS  arm S, pm clear rc1: INVALID (exit 2), no app start, no tap, the clear not retried  rc=2 am-start=False taps=0 clears=1
+PASS  arm S, pm clear failed: INVALID (exit 2), no app start, no tap, the clear not retried  rc=2 am-start=False taps=0 clears=1
+PASS  arm S, pm clear empty: INVALID (exit 2), no app start, no tap, the clear not retried  rc=2 am-start=False taps=0 clears=1
+PASS  arm S, pm clear timeout: INVALID (exit 2), no app start, no tap, the clear not retried  rc=2 am-start=False taps=0 clears=1
+PASS  arm P, install failed: INVALID (exit 2), no clear, no app start  rc=2 am-start=False clears=0
+PASS  control, arm P: install and clear both Success -> the app IS started (the gate is not a dead end)  am-start=True clears=1
+PASS  control, arm S: install and clear both Success -> the app IS started (the gate is not a dead end)  am-start=True clears=1
+PASS  a fake adb with an adb pin set: refused before any adb call  rc=1 calls=0
+
+12 checks, 0 failed
+RESULT: PASS

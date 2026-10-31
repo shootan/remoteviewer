@@ -1,0 +1,7 @@
+PASS  the relay works (relay_test)  exit 0
+PASS  a periodic snap written before the kill carries 1 s buckets by direction and header kind  snaps=2 with buckets=2
+PASS  every snap names how far its buckets go (bucketsThrough)
+PASS  no credential in the output
+  e.g. [relay-trace] connect=68a3a123 snap wall=2026-10-29T23:40:50.326Z mono=663069415 mono0=663068204 wall0=2026-10-29T23:40:49.115Z state=active ageMs c2hRx=1211 c2hSent=1211 h2cRx=209 h2cSent=209 sendErr c2h=0 h2c=0 lastErr=none events=[] buckets=[0:c2h.rx.hello=1,c2h.sent.hello=1,h2c.rx.helloAck=1,h2c.sent.helloAck=1] bucketsThrough=0
+
+relay_trace_snap_test: ALL PASS

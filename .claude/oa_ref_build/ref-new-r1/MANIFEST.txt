@@ -1,0 +1,11 @@
+﻿old-ref build folder ref-new-r1 2026-10-30T09:06:30
+  tools from C:\work\gnlink-wt\old-apk-lane\build\apps\native_poc\Release (commit old-apk-lane (c45fb9b + old-ref r1))
+  host from C:\work\gnlink-wt\old-apk-lane\build\apps\native_poc\Release (commit old-apk-lane (c45fb9b + old-ref r1))
+caf933cd668a20e5882d4dccab08d46b7a329a075f9f8259266bac31c48309b6  remote60_mobile_abr_session_e2e_test.exe  (tools)
+248d9829004aa1b43f3bec4ab03b1b4b14b39c3b2604d74286b28c09f618f727  e2e_job_run.exe  (tools)
+e9ae941514db0c3f2c967136a94573103aafa354c7e982bb792841aa231e4084  remote60_ka_standby_holder_tool.exe  (tools)
+6806dd41acb7f2736736569c2fcd6024c5c977ca65ee7dfa73bb367aa22e2a5d  GNLinkViewerKaTest.exe  (tools)
+7d1cd93587587d0bd41e5e3ad71d0f574018800f45ee9ed7093dd28f35805bd9  GNLinkStreamPinnedSelectTest.exe  (host)
+  host strings: 'diag{ack seen=' x1
+  host strings: 'host power management=off' x1
+  host strings: 'pinned_test_seam_refused' x1

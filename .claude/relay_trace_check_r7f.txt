@@ -1,0 +1,9 @@
+PASS  t2: server.js is the pinned one  52918c04b8fef8f4
+PASS  p2: server.js is the pinned one  2742143d72bb9482
+PASS  POSITIVE: the traced 53fced4 passes 7a79b09's relay_trace_test whole (off: no line; on: ENABLED, both ways, clocks, buckets, no credential; the relay works both ways)  exit=0 PASS lines=66
+PASS  POSITIVE: a real [relay-trace] flow line was written  [relay-trace] connect=f4846e78 snap wall=2026-10-29T21:22:09.992Z mono=654749080 mono0=654742861 wall0=2026-10-29T21:22:03.772Z state=active ageMs c2hRx=6219 c2hSent=6219 h2cRx=5219 h2cSent=5219 sendErr c2h=0 h2c=
+PASS  NEGATIVE: 53fced4 as it is, the variable set -- "the trace says it is on" FAILs (the variable alone traces nothing)  exit=1
+PASS  NEGATIVE control is sound: its relay itself works both times (relay_test passes)
+
+relay trace copy check: PASS
+RESULT: PASS

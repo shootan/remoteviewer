@@ -1,0 +1,76 @@
+--- the relay with the trace OFF ---
+PASS  login  status=200
+PASS  host registers  status=200
+PASS  host is online at its observed port  observed=61116 local=61116
+PASS  a relay connect wakes the host immediately  hostReceived=2
+PASS  the wake comes from the observe socket, which the host can answer  src=18091 expected=18091
+PASS  connect succeeds  status=200
+PASS  exactly one relay candidate is offered  [{"ip":"192.168.20.50","port":61116,"kind":"private"},{"ip":"127.0.0.1","port":61116,"kind":"public"},{"ip":"127.0.0.1","port":18453,"kind":"relay"}]
+PASS  the relay candidate is last, never first  first=private last=relay
+PASS  the direct candidates are untouched  ["private","public","relay"]
+PASS  the host still receives its own punch capability  [{"ip":"127.0.0.1","port":61117,"punchToken":"6b4e0a16b2920879a79d5ec645309d1a"}]
+PASS  an account outside the allowlist is offered no relay  status=200 kinds=["public"]
+PASS  the relay stays silent while a direct path could still answer  replies=0
+PASS  the relay answers once the grace has passed  replies=2
+PASS  a Hello with an unknown capability is not forwarded  hostReceived=0
+PASS  a Hello with a valid capability reaches the host  hostReceived=2
+PASS  the Hello arrives byte for byte as the client sent it
+PASS  the Hello comes from the observe socket, the one address the host can answer  src=127.0.0.1:18091 expected=18091
+PASS  the host's HelloAck comes back to the client  clientReceived=1
+PASS  the Ack still carries the directory-auth bit the client checks for
+PASS  the Ack appears to come from the relay, as the client expects  src=18453 expected=18453
+PASS  client media reaches the host unchanged  hostReceived=1
+PASS  host media reaches the client unchanged  clientReceived=1
+PASS  a restarted app gets a fresh capability  status=200
+PASS  the new capability takes the host from the abandoned session  hostReceived=3
+PASS  the restarted app receives the Ack  received=1
+PASS  the superseded capability cannot reclaim the host  hostReceived=0
+PASS  media from the superseded session is dropped  hostReceived=1
+PASS  the current session still carries host media  received=1
+PASS  the host can still observe while relaying  127.0.0.1:61116
+
+RESULT: ALL PASS
+PASS  the relay works (relay_test)  exit 0
+PASS  no trace line is written
+
+--- the relay with the trace ON (REMOTE60_RELAY_TRACE=1) ---
+PASS  login  status=200
+PASS  host registers  status=200
+PASS  host is online at its observed port  observed=50450 local=50450
+PASS  a relay connect wakes the host immediately  hostReceived=3
+PASS  the wake comes from the observe socket, which the host can answer  src=18091 expected=18091
+PASS  connect succeeds  status=200
+PASS  exactly one relay candidate is offered  [{"ip":"192.168.20.50","port":50450,"kind":"private"},{"ip":"127.0.0.1","port":50450,"kind":"public"},{"ip":"127.0.0.1","port":18453,"kind":"relay"}]
+PASS  the relay candidate is last, never first  first=private last=relay
+PASS  the direct candidates are untouched  ["private","public","relay"]
+PASS  the host still receives its own punch capability  [{"ip":"127.0.0.1","port":50451,"punchToken":"12c33144d2685c9227f4a641c89787fc"}]
+PASS  an account outside the allowlist is offered no relay  status=200 kinds=["public"]
+PASS  the relay stays silent while a direct path could still answer  replies=0
+PASS  the relay answers once the grace has passed  replies=2
+PASS  a Hello with an unknown capability is not forwarded  hostReceived=0
+PASS  a Hello with a valid capability reaches the host  hostReceived=2
+PASS  the Hello arrives byte for byte as the client sent it
+PASS  the Hello comes from the observe socket, the one address the host can answer  src=127.0.0.1:18091 expected=18091
+PASS  the host's HelloAck comes back to the client  clientReceived=1
+PASS  the Ack still carries the directory-auth bit the client checks for
+PASS  the Ack appears to come from the relay, as the client expects  src=18453 expected=18453
+PASS  client media reaches the host unchanged  hostReceived=1
+PASS  host media reaches the client unchanged  clientReceived=1
+PASS  a restarted app gets a fresh capability  status=200
+PASS  the new capability takes the host from the abandoned session  hostReceived=3
+PASS  the restarted app receives the Ack  received=1
+PASS  the superseded capability cannot reclaim the host  hostReceived=0
+PASS  media from the superseded session is dropped  hostReceived=1
+PASS  the current session still carries host media  received=1
+PASS  the host can still observe while relaying  127.0.0.1:50450
+
+RESULT: ALL PASS
+PASS  the relay works the same (relay_test)  exit 0
+PASS  the trace says it is on
+PASS  flows are traced both ways (a c2h and an h2c last time)  lines=3
+PASS  the clocks are named (mono, mono0, wall, wall0)
+PASS  a closed flow carries its 1 s buckets by direction and kind  closes=1
+PASS  no credential in the output
+  e.g. [relay-trace] connect=354b531a snap wall=2026-10-29T20:57:53.118Z mono=653292207 mono0=653285990 wall0=2026-10-29T20:57:46.901Z state=active ageMs c2hRx=6217 c2hSent=6216 h2cRx=5214 h2cSent=5214 sendErr c2h=0 h2c=0 lastErr=none events=[]
+
+relay_trace_test: ALL PASS

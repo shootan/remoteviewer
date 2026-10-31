@@ -1,0 +1,6 @@
+PASS  the relay works (relay_test)  exit 0
+FAIL  a periodic snap written before the kill carries 1 s buckets by direction and header kind  snaps=2 with buckets=0
+FAIL  every snap names how far its buckets go (bucketsThrough)
+PASS  no credential in the output
+
+relay_trace_snap_test: 2 FAILED

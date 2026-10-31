@@ -1,0 +1,40 @@
+﻿--- arm S + standby: host ready, standby ready, the AVD passes
+PASS  S+standby: host and holder started, AVD saw "standby=ready controlPort=0", rc 0, nothing left  rc=0 avd=True saw=started ready run=orch-s-sb-20261030000305-45308 hosts=a standby=ready controlPort=0
+PASS  S: the harness got no --host-control-port; the holder got this run's standby root, stop file, oa-pc-a, the account file
+PASS  the test account file is in the run folder, its password never in slot.txt / fixture.txt
+--- arm P, no standby: the host's TCP control port is passed, no holder
+PASS  P: harness got --host-control-port 18460, no holder, AVD saw "standby=none controlPort=18460", rc 0  rc=0 saw=started ready run=orch-p-20261030000312-27324 hosts=a standby=none controlPort=18460
+--- standby never ready (5 s)
+PASS  standby silent: no AVD, rc != 0, holder ended by its stop (exit 3), host ended 0, nothing left  rc=2 left=0
+--- standby holder dies at once (the viewer died)
+PASS  standby dies: no AVD, rc != 0, nothing left  rc=2 left=0
+--- standby ready, then dies during the AVD (a late failure); the AVD itself passes
+PASS  standby late: the AVD ran and passed, the bundle still fails (rc 3)  rc=3 left=0
+--- r4: the DEFAULT holder path (no -HolderCmd): <BuildDir>\remote60_ka_standby_holder_tool.exe, one element
+PASS  default holder path: the fixture ran <BuildDir>\remote60_ka_standby_holder_tool.exe (hashed, started, ready), rc 0, nothing left  rc=0 left=0
+--- r4: a relative -BuildDir is refused before anything starts
+PASS  relative -BuildDir: refused (exit 2), no fixture started  rc=2
+--- r3 N2: the holder was ready, but its end was not a clean Release (exit 5): the bundle fails
+PASS  standby rc 5 at its stop: the AVD ran, the fixture counts it (standby exit 5), the bundle fails (rc 3)  rc=3 left=0
+--- the host's harness ends at once (staging / launch / guard failure), standby asked
+PASS  host exit2: holder never started, no AVD, rc != 0, nothing left  rc=2
+--- the host writes another run's readiness
+PASS  foreign readiness: holder never started, no AVD, rc != 0  rc=2
+--- the directory dies at once
+PASS  node dies: no host, no holder, no AVD, rc != 0  rc=2
+--- the host fails late (during the AVD)
+PASS  host late: the AVD ran, the bundle fails (rc 3), the holder still ended 0  rc=3
+--- the AVD fails, the fixture fine
+PASS  AVD rc 1: the bundle says the AVD (rc 1)  rc=1
+--- the fixture crashes right after its readiness: its job ends the host, the holder and the node
+PASS  fixture crash: residual ended by the job (confirmed), rc 3, nothing left  rc=3 left=0 job_run: child_exit=9 residual=3 forced=0 ended_confirmed=1
+--- stopping the holder throws (one cleanup error): host and node still ended
+PASS  one cleanup error: holder killed after its error, a and node ended, rc 3, nothing left  rc=3 left=0
+--- a real run without an APK file is refused before anything starts
+PASS  no APK: exit 2, no fixture started  exit=2
+--- a run folder is never reused / a root outside the anchor is refused
+PASS  stale root (holds standby\): refused (exit 2), starts nothing  exit=2
+PASS  a root not directly under the anchor: refused (exit 2)  exit=2
+
+20 checks, 0 failed
+RESULT: PASS

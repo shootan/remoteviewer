@@ -1,0 +1,10 @@
+PASS  ref-old-t1: server.js is the pinned one (old)  196405dd60a82c46
+PASS  ref-old-p1: server.js is the pinned one (old)  fdc9cbe8cdfc0015
+PASS  POSITIVE (old fae0e1f): 7a79b09's relay_trace_test passes whole (off: no line; on: ENABLED, both ways, clocks, buckets at the close, no credential; the relay works both ways)  exit=0 PASS lines=66
+PASS  POSITIVE: a real [relay-trace] flow line was written  [relay-trace] connect=ed550105 snap wall=2026-10-29T23:40:43.970Z mono=663063059 mono0=663056836 wall0=2026-10-29T23:40:37.747Z state=active ageMs c2hRx=6223 c2hSent=6223 h2cRx=5220 h2cSent=5220 sendErr c2h=0 h2c=
+PASS  POSITIVE: a periodic snap written BEFORE Node is killed carries 1 s buckets by direction and header kind  exit=0 [relay-trace] connect=68a3a123 snap wall=2026-10-29T23:40:50.326Z mono=663069415 mono0=663068204 wall0=2026-10-29T23:40:49.115Z state=active ageMs c2hRx=1211 c2hSent=1211 h2cRx=209 h2cSent=209 sendErr c2h=0 h2c=0 lastErr=none events=[] buck
+PASS  NEGATIVE: fae0e1f as it is, the variable set -- "the trace says it is on" FAILs (the variable alone traces nothing)  exit=1
+PASS  NEGATIVE control is sound: its relay itself works both times (relay_test passes)
+
+relay trace copy check (old): PASS
+RESULT: PASS
