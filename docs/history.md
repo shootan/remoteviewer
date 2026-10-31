@@ -13640,3 +13640,13 @@ Next
 - 삭제 후: C worktree 23개 HEAD·기존 status·common-dir, 활성 junction 18개, git fsck PASS. C의 기존 비-Git 사본 누락 0. E 기존 보관본 1,183파일의 존재·크기 및 legacy-build-worktrees-20261031-212555.zip 보존 확인. 과거 D 대상 보관 junction 15개는 대상 경로를 C/E retired_junction_metadata.json으로 보존한 뒤 깨진 링크만 제거하여 Git 조회 경고를 해소했다.
 - 변경 파일: docs/history.md(실행·검증 기록), docs/구현계획.md(진행 체크). 미추적 .claude/storage-migration의 삭제 도구·인계·상태를 갱신했다. 원문 근거: E:/remote-output/migration/20261031-storage/predelete_check.json, deletion_result.json, postdelete_check.json, retired_junction_metadata.json.
 - 다음: 이번 D:/remote 정리 완료. 사용자가 지금 할 일 없음. 제품 소스·버전 변경, 제품 실행·빌드·실기·설치·배포·push는 수행하지 않았고 제품 STOP 유지. 과거 D 절대 경로 캐시/runner의 재생성·재고정은 제품 작업 재개 승인 뒤 진행한다. D 전체 파티션 및 다른 프로젝트 정리는 이번 완료 범위가 아니다.
+
+### 2026-10-31 전체 Git 작업 백업·커밋·푸시 (제품 STOP 유지)
+- 목표: 사용자의 "작업물들 전부다 커밋 푸시 되어있는지 확인" 및 "안되있으면 다 푸시해놔" 지시에 따라 이번 백업 범위의 push를 명시 승인받아 원격 복구점을 만든다. 제품 구현·빌드·실기·NAS 배포는 재개하지 않는다.
+- 조사: 등록 worktree 23개, 로컬 브랜치 78개를 원격에 직접 대조했다. 원격은 브랜치 2개뿐이며 고유 미푸시 커밋 253개, main은 7커밋 앞서 있었다. 기존 추적 파일의 미커밋 수정·스테이징은 0이었지만 미추적 작업·실행 자료가 있었다.
+- 보존: 원본 브랜치·파일·인덱스를 유지하면서 미추적 소스·문서·검증 스크립트 9,671개를 10개 WIP 백업 브랜치에 Git MCP로 커밋했다. detached HEAD 6개에도 백업 ref를 만들었다. 백업 prefix는 `backup/20261031-222353/`. 런타임 인증자료·캐시·바이너리·스크린샷·실행 로그 등은 공개 저장소 업로드 대상에서 제외하고 원본 C/E에 보존했다. 원본의 미추적 상태는 그대로 남긴다.
+- 보안 검사: 기존 미푸시 커밋의 신규 blob 1,172개와 선택한 미추적 파일을 비밀정보 패턴으로 검사했다. 기존 커밋의 3개 매치는 localhost tester 계정용 테스트 상수임을 문맥으로 확인했다. 로컬 인증값 패턴이 있는 미추적 파일은 업로드하지 않았다. 실제 값은 보고서나 도구 출력에 노출하지 않았다.
+- 푸시·검증: 강제 push 없이 원자적 브랜치 push와 태그 push를 수행했다. 원격 ls-remote 기준 브랜치 94개·태그 6개가 로컬 SHA와 모두 일치했다. 원래 worktree 23개의 HEAD·추적 파일·인덱스 보존을 확인했고 임시 백업 worktree는 제거했다. 이 마무리 기록 commit도 별도로 push하고 최종 SHA를 재확인한다.
+- 변경 파일: docs/history.md·docs/구현계획.md와 .claude/storage-migration의 audit_git_backup.py, prepare_git_backup.py, snapshot_git_work.py, resume_git_snapshots.py, finalize_git_backup.py. 제품 소스 변경 없음. 검사 중 MCP branch 생성이 SHA를 받지 않는 점을 확인하여 신규 branch ref만 Git으로 만들고, 스테이징·커밋은 계속 Git MCP를 사용했다.
+- 복구 근거: E:/remote-output/migration/20261031-storage/git-backup의 initial_audit.json, final_backup_plan.json, execution.json, remote_verification_before_wrapup.json 및 `E:\remote-output\migration\20261031-storage\git-backup\all-refs-before-push-20261031-222353.bundle`. 실행 자료 제외는 파일 손실을 뜻하지 않으며 원본에 그대로 있다. 이력 전체 bundle은 최종 기록까지 포함해 한 번 더 보존한다.
+- 다음: 이번 전체 브랜치·태그와 WIP 소스 백업의 원격 동기화 완료. 제품 STOP 유지. 사용자 지금 할 일 없음. 소스 검수·main 기능 머지·빌드·NAS 배포·미검증 기능 승인은 이번 백업에 포함하지 않는다.
