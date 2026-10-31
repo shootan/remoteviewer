@@ -1,0 +1,1840 @@
+#include "native_video_client_session.hpp"
+#include "session_video_pipeline.hpp"
+
+#include "thumbnail_fetch_policy.hpp"
+
+#include "monitor_select_target.hpp"
+#include "native_video_client_tcp_control.hpp"
+#include "reboot_wire.hpp"
+#include "poc_protocol.hpp"
+#include "udp_video_nack.hpp"
+
+#include <algorithm>
+#include <cstring>
+#include <random>
+#include <array>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <thread>
+
+#include "prelogin_control_allowlist.hpp"
+#include "prelogin_input_gate.hpp"
+#include "client_mouse_xbutton_fence.hpp"
+
+namespace remote60::native_poc {
+
+namespace {
+
+constexpr uint32_t kDefaultControlResponseTimeoutMs = 1000;
+constexpr uint32_t kVideoReceiveTimeoutMs = 100;
+// quality r4: with the in-order hold on, the receive timeout is its clock (hold expiry, NACK
+// rounds), so it ticks faster. Same 120 ms hold as the Windows viewer (viewer_context.hpp).
+constexpr uint32_t kVideoReceiveTimeoutHoldMs = 20;
+constexpr uint64_t kVideoNackHoldUs = 120000;
+constexpr uint32_t kTcpControlConnectRetryMs = 4000;
+constexpr uint32_t kTcpControlConnectRetrySleepMs = 50;
+// Generous: a window list or thumbnail crossing a slow link may need several retransmit
+// rounds, and giving up early would drop a session that was about to recover.
+constexpr uint32_t kUdpControlReadTimeoutMs = 12000;
+
+uint64_t now_us() {
+  using namespace std::chrono;
+  return static_cast<uint64_t>(
+      duration_cast<microseconds>(steady_clock::now().time_since_epoch()).count());
+}
+
+bool should_append_selected_title(const std::string& detail) {
+  return detail.rfind("window_list_received", 0) == 0 ||
+         detail.rfind("window_selected", 0) == 0 ||
+         detail.rfind("window_select_failed", 0) == 0;
+}
+
+}  // namespace
+
+ClientSessionController::ClientSessionController()
+    : keyframeRequests_(120000, 300000, 3),
+      runtimeTune_(300000, 30000000, 250000, 1, 240) {}
+
+ClientSessionController::~ClientSessionController() {
+  Disconnect();
+}
+
+bool ClientSessionController::Connect(const ClientSessionConnectArgs& args) {
+  std::string error;
+  if (!initialize_sockets(&error)) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ResetUnlocked();
+    snapshot_.state = ClientSessionState::Error;
+    snapshot_.status = "error";
+    snapshot_.lastError = error;
+    return false;
+  }
+
+  if (args.host.empty()) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ResetUnlocked();
+    snapshot_.state = ClientSessionState::Error;
+    snapshot_.status = "error";
+    snapshot_.lastError = "host is required";
+    return false;
+  }
+  if (!IsValidPort(args.videoPort)) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ResetUnlocked();
+    snapshot_.state = ClientSessionState::Error;
+    snapshot_.status = "error";
+    snapshot_.lastError = "video port is invalid";
+    return false;
+  }
+  if (!IsValidPort(args.controlPort)) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ResetUnlocked();
+    snapshot_.state = ClientSessionState::Error;
+    snapshot_.status = "error";
+    snapshot_.lastError = "control port is invalid";
+    return false;
+  }
+
+  StopWorker();
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    ResetUnlocked();
+    connectionGeneration_.fetch_add(1, std::memory_order_acq_rel);  // keepalive r1
+    connectCount_.fetch_add(1, std::memory_order_relaxed);
+    snapshot_.state = ClientSessionState::Connecting;
+    snapshot_.status = "connecting";
+    snapshot_.host = args.host;
+    snapshot_.videoPort = args.videoPort;
+    snapshot_.controlPort = args.controlPort;
+    snapshot_.sessionThreadActive = true;
+    encodedFrameSink_ = args.encodedFrameSink;
+  }
+
+  stopRequested_.store(false, std::memory_order_release);
+  try {
+    workerThread_ = std::thread(&ClientSessionController::WorkerMain, this, args);
+  } catch (...) {
+    std::lock_guard<std::mutex> lock(mu_);
+    ResetUnlocked();
+    snapshot_.state = ClientSessionState::Error;
+    snapshot_.status = "error";
+    snapshot_.lastError = "failed to start session worker";
+    return false;
+  }
+  return true;
+}
+
+void ClientSessionController::Disconnect() {
+  StopWorker();
+  std::lock_guard<std::mutex> lock(mu_);
+  ResetUnlocked();
+}
+
+ClientSessionSnapshot ClientSessionController::Snapshot() const {
+  std::lock_guard<std::mutex> lock(mu_);
+  return snapshot_;
+}
+
+WindowPanelSnapshot ClientSessionController::WindowPanelSnapshotCopy() const {
+  return windowPanel_.Snapshot();
+}
+
+bool ClientSessionController::RequestWindowList() {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  // r10: a pre-login host closes the link on a window-list request. Before the first pong says what the host
+  // is, the request waits for it (the pong sends it, or answers "not here"); at a host known to be at the
+  // logon screen it is answered at once and not sent. The app's own call right after connecting
+  // (MainActivity) used to go out before that pong.
+  // r11 U5: decided, marked and shown in one transition with the first pong's (client_host_role_gate.hpp).
+  const HostRoleGate::ListRequest d =
+      hostRole_.RequestList(kCaptureFlagPreloginV1, [this](HostRoleGate::ListRequest decided) {
+        if (decided == HostRoleGate::ListRequest::Send) return;
+        windowPanel_.SetStatus(decided == HostRoleGate::ListRequest::Deferred
+                                   ? "window_list_request waiting for the host"
+                                   : "window list not available at the logon screen");
+        const auto shown = windowPanel_.Snapshot();
+        std::lock_guard<std::mutex> lock(mu_);
+        SyncWindowPanelSnapshotLocked(shown);
+        UpdateConnectedStatusLocked(shown.status);
+      });
+  if (d != HostRoleGate::ListRequest::Send) return d == HostRoleGate::ListRequest::Deferred;
+
+  {
+    // keepalive r3 R1: the check and the enqueue are one step against BeginPark / ResumeFromPark and the
+    // control loop's take-and-judge of its next action (all under parkMu_). After the role gate above, which
+    // takes mu_ in its post -- parkMu_ is not held across it (r20 merge).
+    std::lock_guard<std::mutex> pk(parkMu_);
+    if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r1: parked
+    windowPanel_.RequestList("window_list_request pending");
+    // r3 M4: and the screens, where the host lists them -- the APK refreshes its targets through
+    // here (sheet, back to the list), and a screen that went while connected must leave the list.
+    if (windowPanel_.Snapshot().hostSupportsMonitors) windowPanel_.RequestMonitorList();
+  }
+  {
+    // A manual refresh should also refresh the previews.
+    std::lock_guard<std::mutex> lk(thumbMu_);
+    thumbs_.clear();
+    thumbFetchQueue_.clear();
+  }
+  const auto panelSnapshot = windowPanel_.Snapshot();
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!CanQueueControlRequestLocked()) return false;
+  SyncWindowPanelSnapshotLocked(panelSnapshot);
+  UpdateConnectedStatusLocked(panelSnapshot.status);
+  return true;
+}
+
+bool ClientSessionController::RequestMonitorList() {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  std::lock_guard<std::mutex> pk(parkMu_);  // keepalive r3 R1: refused while parked, one step with it
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;
+  windowPanel_.RequestMonitorList();
+  return true;
+}
+
+bool ClientSessionController::RequestMonitorSelect(uint32_t monitorId, uint64_t listRevision) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  std::unique_lock<std::mutex> pk(parkMu_);  // keepalive r3 R1: the check and the enqueue, one step
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r1: parked
+  // t-970r4zgo: through the window-select transaction, which the host answers only once the
+  // capture is on that screen, with the stream generation the selection gate waits for. A host
+  // that has not said it does this on THIS connection is refused here at once -- the legacy
+  // ControlMonitorSelect is answered with a list before anything is applied and carries no
+  // generation, which is why a selecting viewer waited 6 s and gave up. The caller can tell the
+  // user the host needs updating.
+  const auto panel = windowPanel_.Snapshot();
+  if (!panel.hostSupportsMonitors || !panel.hostSupportsMonitorSelect) {
+    windowPanel_.SetStatus("monitor_select_unsupported: host_update_required");
+    return false;
+  }
+  if (listRevision != ~0ULL && listRevision != panel.monitorListRevision) {
+    // r3 M4: the user picked from a list that has been replaced since; the index may now be
+    // another screen. Refused here so the caller can ask again from the list now shown.
+    windowPanel_.SetStatus("monitor_select_failed: monitor_list_changed");
+    return false;
+  }
+  decoderRekeyPending_.store(false, std::memory_order_release);  // a new pick: the old one's IDR is moot
+  const uint64_t tag = encodedFrameSink_ ? encodedFrameSink_->CurrentSelectionTag() : 0;
+  if (!windowPanel_.RequestSelect(encode_monitor_select_target(monitorId), "monitor_select_requested", tag,
+                                  panel.monitorListRevision)) {
+    return false;
+  }
+  pk.unlock();
+  const auto panelSnapshot = windowPanel_.Snapshot();
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!CanQueueControlRequestLocked()) return false;
+  SyncWindowPanelSnapshotLocked(panelSnapshot);
+  UpdateConnectedStatusLocked(panelSnapshot.status);
+  return true;
+}
+
+bool ClientSessionController::RequestWindowSelect(uint64_t windowId) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+
+  std::unique_lock<std::mutex> pk(parkMu_);  // keepalive r3 R1: the check and the enqueue, one step
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r1: parked
+  const char* statusText = (windowId == 0) ? "desktop_select_requested" : "window_select_requested";
+  // A window id in the monitor-select namespace is not a window (monitor_select_target.hpp).
+  if (classify_select_target(windowId).kind != SelectTargetKind::Window) return false;
+  decoderRekeyPending_.store(false, std::memory_order_release);
+  const uint64_t tag = encodedFrameSink_ ? encodedFrameSink_->CurrentSelectionTag() : 0;
+  // apk-0232 r1 (Codex codex_rel_0163_e1_decision.md): a host KNOWN to be at the logon screen (PreloginV1 -- not a
+  // secure desktop, not LockCred) takes no WindowSelect and serves its one desktop. A desktop pick there is a local
+  // selection: nothing is sent, the sink's armed selection continues without an answer and is bound by its own
+  // first IDR (asked for through the owed-IDR path). A window pick there is refused. A role not known yet: queued
+  // as always and decided where it would go out.
+  const HostRoleGate::Role role = hostRole_.Load();
+  if (role.known && (role.flags & kCaptureFlagPreloginV1) != 0) {
+    if (windowId != 0) {
+      windowPanel_.SetStatus("window_select_unavailable_prelogin");
+      std::fprintf(stderr, "[native-video-client-session] window pick refused: the host is at the logon screen\n");
+      return false;
+    }
+    // r2 (N1): the sink, the panel and the tracked tag in one step (after parkMu_, which this path holds).
+    std::lock_guard<std::mutex> ls(localSelectMu_);
+    if (!encodedFrameSink_ || tag == 0 || !encodedFrameSink_->BeginLocalSelectionFor(tag) ||
+        !windowPanel_.BeginLocalSelect(tag, "desktop_select_local")) {
+      return false;
+    }
+    localSelectTag_.store(tag, std::memory_order_release);
+    std::fprintf(stderr, "[native-video-client-session] desktop pick at the logon screen: local selection %llu\n",
+                 static_cast<unsigned long long>(tag));
+  } else if (!windowPanel_.RequestSelect(windowId, statusText, tag)) {
+    return false;
+  }
+  pk.unlock();
+
+  const auto panelSnapshot = windowPanel_.Snapshot();
+  std::lock_guard<std::mutex> lock(mu_);
+  if (!CanQueueControlRequestLocked()) return false;
+  SyncWindowPanelSnapshotLocked(panelSnapshot);
+  UpdateConnectedStatusLocked(panelSnapshot.status);
+  return true;
+}
+
+// apk-0232 r1: a WindowSelect queued before the host's role was known, unsendable now that it is the logon screen.
+void ClientSessionController::ResolveUnsendableSelect(const ControlOutboundAction& action) {
+  const uint64_t tag = action.selectionTag;
+  // r2 (N1): the sink's turn to local, the panel's and the tracked tag are one step -- a newer pick made meanwhile
+  // waits for it, then publishes its own; and a panel that already holds a newer pick takes no tag from this one.
+  std::unique_lock<std::mutex> ls(localSelectMu_);
+  bool sinkLocal = false;
+  if (action.windowSelect.windowId == 0 && encodedFrameSink_ && tag != 0) sinkLocal = encodedFrameSink_->BeginLocalSelectionFor(tag);
+#ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+  if (sinkLocal) {
+    std::function<void(uint64_t)> hook;
+    {
+      std::lock_guard<std::mutex> lk(testHookMu_);
+      hook = testAfterLocalSinkBeginHook_;
+    }
+    if (hook) hook(tag);
+  }
+#endif
+  if (sinkLocal) {
+    if (windowPanel_.ConvertSelectToLocal(tag, "desktop_select_local")) {
+      localSelectTag_.store(tag, std::memory_order_release);
+      std::fprintf(stderr, "[native-video-client-session] queued desktop pick %llu: the host is at the logon screen, "
+                   "continues as a local selection\n", static_cast<unsigned long long>(tag));
+    } else {
+      std::fprintf(stderr, "[native-video-client-session] queued desktop pick %llu: a newer pick holds the panel, "
+                   "nothing tracked for it\n", static_cast<unsigned long long>(tag));
+    }
+  } else if (action.windowSelect.windowId != 0 || tag == 0 || !encodedFrameSink_) {
+    // A window pick (or one no sink tracks): it cannot be made there. Refused, shown as failed if still current.
+    if (encodedFrameSink_ && tag != 0) encodedFrameSink_->RefuseSelectionFor(tag);
+    windowPanel_.RefuseSelectFor(tag, "unavailable_prelogin");
+    std::fprintf(stderr, "[native-video-client-session] queued pick %llu (window %llu) refused: the host is at the "
+                 "logon screen\n", static_cast<unsigned long long>(tag),
+                 static_cast<unsigned long long>(action.windowSelect.windowId));
+  } else {
+    std::fprintf(stderr, "[native-video-client-session] queued desktop pick %llu is no longer armed: nothing to do\n",
+                 static_cast<unsigned long long>(tag));
+  }
+  ls.unlock();
+  const auto panelSnapshot = windowPanel_.Snapshot();
+  std::lock_guard<std::mutex> lock(mu_);
+  SyncWindowPanelSnapshotLocked(panelSnapshot);
+  UpdateConnectedStatusLocked(panelSnapshot.status);
+}
+
+// apk-0232 r1: once the local selection's first IDR has reached the decoder, the panel shows it selected with that
+// generation (what an answer would have shown) -- only if it is still the selection requested.
+void ClientSessionController::PollLocalSelection() {
+  if (localSelectTag_.load(std::memory_order_acquire) == 0 || !encodedFrameSink_) return;
+  std::unique_lock<std::mutex> ls(localSelectMu_);  // r2 (N1): read, judge and complete against one start
+  const uint64_t tag = localSelectTag_.load(std::memory_order_acquire);
+  if (tag == 0) return;
+  // r3 (N1): the sink's "still this selection, bound by G" and the panel's record are one step under the sink's
+  // state, the one a cancel (nativeAbortVideoSwitch) or a new Prepare takes -- never a read, then a record later.
+  // Lock order local -> sink -> panel; nothing takes them the other way.
+  WindowSelectApplyResult applied;
+  const auto result = encodedFrameSink_->CommitLocalSelectionFor(tag, [&](uint64_t generation) {
+#ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+    std::function<void(uint64_t, uint64_t)> hook;
+    {
+      std::lock_guard<std::mutex> lk(testHookMu_);
+      hook = testBeforeLocalCommitHook_;
+    }
+    if (hook) hook(tag, generation);
+#endif
+    uint64_t expected = tag;
+    if (!localSelectTag_.compare_exchange_strong(expected, 0, std::memory_order_acq_rel)) return;
+    applied = windowPanel_.ApplyLocalSelectedFor(tag, generation);
+  });
+  if (result == ClientEncodedFrameSink::LocalCommit::Abandoned) {
+    uint64_t stale = tag;
+    localSelectTag_.compare_exchange_strong(stale, 0, std::memory_order_acq_rel);
+    return;  // replaced or abandoned: it completes nothing
+  }
+  if (result == ClientEncodedFrameSink::LocalCommit::Unbound) return;
+  ls.unlock();
+  if (!applied.logLine.empty()) std::fprintf(stderr, "%s\n", applied.logLine.c_str());
+  const auto panelSnapshot = windowPanel_.Snapshot();
+  std::lock_guard<std::mutex> lock(mu_);
+  SyncWindowPanelSnapshotLocked(panelSnapshot);
+  UpdateConnectedStatusLocked(panelSnapshot.status);
+}
+
+bool ClientSessionController::RequestDesktopMode() {
+  return RequestWindowSelect(0);
+}
+
+uint32_t ClientSessionController::RequestReboot() {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return 0;
+  }
+  if ((hostRole_.Load().flags & kCaptureFlagRemoteRebootV1) == 0) return 0;
+  std::lock_guard<std::mutex> lock(rebootMu_);
+  if (rebootPendingId_ != 0 || rebootInFlight_) return 0;  // one out at a time
+  static std::random_device rd;
+  uint32_t id = 0;
+  while (id == 0) id = rd();
+  rebootPendingId_ = id;
+  rebootHasOutcome_ = false;
+  return id;
+}
+
+uint32_t ClientSessionController::RequestSas() {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return 0;
+  }
+  if ((hostRole_.Load().flags & kCaptureFlagPreloginSasV1) == 0) return 0;
+  std::lock_guard<std::mutex> lock(rebootMu_);
+  if (sasPendingId_ != 0) return 0;
+  static std::random_device rd;
+  uint32_t id = 0;
+  while (id == 0) id = rd();
+  sasPendingId_ = id;
+  sasHasOutcome_ = false;
+  return id;
+}
+
+bool ClientSessionController::TakeSasOutcome(uint32_t* requestId, int* outcome, uint32_t* win32, uint8_t* flags) {
+  std::lock_guard<std::mutex> lock(rebootMu_);
+  if (!sasHasOutcome_) return false;
+  sasHasOutcome_ = false;
+  *requestId = sasOutcomeId_;
+  *outcome = sasOutcome_;
+  *win32 = sasWin32_;
+  if (flags) *flags = sasFlags_;
+  return true;
+}
+
+bool ClientSessionController::TakeRebootOutcome(uint32_t* requestId, int* outcome, uint32_t* win32) {
+  std::lock_guard<std::mutex> lock(rebootMu_);
+  if (!rebootHasOutcome_) return false;
+  rebootHasOutcome_ = false;
+  *requestId = rebootOutcomeId_;
+  *outcome = rebootOutcome_;
+  *win32 = rebootWin32_;
+  return true;
+}
+
+bool ClientSessionController::RequestStreamActive(bool active) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  // keepalive r1: a parked session takes no stream request; the park pauses the stream itself.
+  // r3 R1: checked and queued in one step against the park (parkMu_).
+  std::lock_guard<std::mutex> pk(parkMu_);
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;
+  streamState_.Request(active);
+  // r5: pausing is intended inactivity (not measured); resuming starts an active episode.
+  const bool wasPaused = streamPaused_.exchange(!active, std::memory_order_acq_rel);
+  if (active && wasPaused && encodedFrameSink_) encodedFrameSink_->OnDecodeEpisodeStart();
+  return true;
+}
+
+bool ClientSessionController::BeginPark() {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  // r2 K5: only a host known to honour the pause. ControlStreamState stops the host's capture/encode
+  // since 90f718c (2026-04-07); the window-list thumbnail flag came later (45dbbb2, 2026-07-27), so a host
+  // that set it on this connection does both. Without it a park could claim "picture stopped" while the
+  // host goes on sending: refused (the app disconnects instead).
+  if (!HostHonorsStreamPause()) return false;
+  const uint64_t nowUs = now_us();
+  std::lock_guard<std::mutex> lk(parkMu_);
+  if (!park_.Begin(nowUs)) return false;
+  // r2 K1: only marked here. From now on nothing new is taken (every request path checks this under
+  // parkMu_); what is queued, held or in flight is collected by the control loop at its next pass
+  // boundary, where no action is in flight -- a down being sent right now is answered and recorded first.
+  parkInhibit_.store(true, std::memory_order_release);
+  parkReleased_.store(0, std::memory_order_relaxed);
+  parkDroppedActions_.store(0, std::memory_order_relaxed);
+  std::fprintf(stderr, "[native-video-client-session] park: begin\n");
+  return true;
+}
+
+// r2 K1: the control loop, at a pass boundary, under parkMu_. Unsent input but releases dropped, the
+// releases of what is held queued, every other pending request cancelled; nothing of them is sent.
+void ClientSessionController::CollectForParkLocked(uint64_t nowUs, bool releasesOnly) {
+  uint32_t dropped = 0, kept = 0;
+  if (!releasesOnly) inputQueue_.DropAllButReleases(&dropped, &kept);
+  const auto releases = heldInput_.Releases(inputQueue_, nowUs);
+  for (const auto& r : releases) inputQueue_.Enqueue(r);
+  parkReleased_.fetch_add(static_cast<uint32_t>(releases.size()), std::memory_order_relaxed);
+  if (releasesOnly) {
+    std::fprintf(stderr, "[native-video-client-session] park: still held after the drain, released %zu again\n",
+                 releases.size());
+    return;
+  }
+  windowPanel_.CancelPendingRequests();
+  captureMode_.Reset();
+  keyframeRequests_.Reset();
+  decoderRekeyPending_.store(false, std::memory_order_release);
+  owedSelection_ = 0;
+  owedAttempts_ = 0;
+  owedNextUs_ = 0;
+  {
+    std::lock_guard<std::mutex> tl(thumbMu_);
+    thumbFetchQueue_.clear();
+  }
+  {
+    std::lock_guard<std::mutex> cl(clipMu_);
+    clipHasPending_ = false;
+    clipPendingText_.clear();
+    clipHasIncoming_ = false;
+    clipIncomingText_.clear();
+  }
+  clipInitialPushWanted_.store(false, std::memory_order_release);
+  std::fprintf(stderr, "[native-video-client-session] park: collected (dropped %u, releases kept %u, released %zu)\n",
+               dropped, kept, releases.size());
+}
+
+// keepalive r2 K3: the park's budget and limit, enforced from the video thread too. The control loop can sit
+// in one exchange for up to the control read timeout (12 s) when nothing comes back -- exactly when a park
+// cannot be confirmed -- so its own pass-boundary tick alone would let an unconfirmed park outlive its 2 s.
+void ClientSessionController::ParkWatchdog() {
+  ClientParkPhase phase = ClientParkPhase::None;
+  {
+    std::lock_guard<std::mutex> lk(parkMu_);
+    if (!park_.Inhibiting()) return;
+    phase = park_.Tick(now_us());
+  }
+  if (phase == ClientParkPhase::Failed || phase == ClientParkPhase::Expired) {
+    SignalRuntimeFailure(phase == ClientParkPhase::Expired ? "park expired" : "park not confirmed");
+  }
+}
+
+bool ClientSessionController::HostHonorsStreamPause() const {
+  return hostSupportsThumbnails_.load(std::memory_order_acquire);
+}
+
+bool ClientSessionController::ResumeFromPark() {
+  {
+    std::lock_guard<std::mutex> lk(parkMu_);
+    // r2 K3: the deadline is checked at the moment of adoption, not only on the loop's last pass.
+    if (park_.Tick(now_us()) != ClientParkPhase::Parked) return false;
+    park_.End();
+    {
+      // The clipboard starts again from what both sides hold now: the next poll is a baseline, and the
+      // app seeds the phone's current text (SeedClipboardBaseline) -- nothing from the parked time travels.
+      std::lock_guard<std::mutex> cl(clipMu_);
+      clipPolicy_.OnResumed();
+      clipHasPending_ = false;
+      clipHasIncoming_ = false;
+    }
+    // r3 R1: lifted in the same step as the park's end -- the control loop judges its next action under
+    // this lock, so it sees either the park or the resume, never an older park after the resume.
+    parkInhibit_.store(false, std::memory_order_release);
+  }
+  std::fprintf(stderr, "[native-video-client-session] park: resumed\n");
+  return true;
+}
+
+void ClientSessionController::EndPark() {
+  {
+    std::lock_guard<std::mutex> lk(parkMu_);
+    park_.End();
+  }
+  // Still inhibited until the app's disconnect: nothing is sent on a connection being given up.
+}
+
+ClientParkPhase ClientSessionController::ParkPhase() const {
+  std::lock_guard<std::mutex> lk(parkMu_);
+  return park_.phase();
+}
+
+void ClientSessionController::SeedClipboardBaseline(const std::u16string& text) {
+  std::lock_guard<std::mutex> cl(clipMu_);
+  clipCore_.SeedBaseline(text);
+}
+
+bool ClientSessionController::RequestRuntimeConfig(uint32_t bitrate, uint32_t fps) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  if (bitrate == 0 && fps == 0) return false;
+  std::lock_guard<std::mutex> pk(parkMu_);
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r2 K1
+  runtimeTune_.SetEnabled(true);
+  runtimeTune_.SetTargets(bitrate, 0, fps);
+  return true;
+}
+
+bool ClientSessionController::RequestDesktopCaptureBackend(uint16_t backend) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  // ua2-apk r1: 1 dxgi, 2 wgc, 3 gdi (the host's isolated GDI, 5dbfc1a). 3 was refused here since then, so the
+  // APK's GDI button never reached the host.
+  if (backend < 1 || backend > 3) return false;
+  std::lock_guard<std::mutex> pk(parkMu_);
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r2 K1
+  desktopBackend_.Request(backend);
+  return true;
+}
+
+bool ClientSessionController::QueryDesktopCaptureBackend() {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  std::lock_guard<std::mutex> pk(parkMu_);
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;
+  return desktopBackend_.Query();
+}
+
+DesktopBackendStatusSnapshot ClientSessionController::DesktopCaptureBackendStatus() const {
+  std::lock_guard<std::mutex> lk(backendStatusMu_);
+  return backendStatus_;
+}
+
+bool ClientSessionController::QueueInputEvent(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta,
+                                              uint32_t keyCode, uint16_t buttons) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  if (kind < 1 || kind > 6) return false;
+  // keepalive r2 K1: the check and the enqueue are one step against BeginPark / the park's collection.
+  std::lock_guard<std::mutex> pk(parkMu_);
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;  // no input while parked
+  // r5 G8: a host at the logon screen is sent navigation keys only -- never a character in plaintext.
+  const HostRoleGate::Role role = hostRole_.Load();  // r11 U5: one word, a pair that was true together
+  if (!prelogin::ViewerMaySendInputEvent(prelogin::EffectiveHostFlags(role.known, role.flags), kind, keyCode)) {
+    preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  // keepalive-r2 e: no X edge, no X bit to a host without kCaptureFlagMouseXButtonsV1 (or not known yet) -- the
+  // JNI input and the macro playback both come here (client_mouse_xbutton_fence.hpp; the PC: fence_mouse_for_host).
+  // r2: a press refused here stays refused to its up (its up and its held bit too), whatever the next Pong says.
+  if (!mouseXLedger_.AdmitQueued(HostTakesMouseXButtons(role.known, role.flags), kind, keyCode, &buttons)) {
+    mouseXButtonsHeldBack_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+
+  inputQueue_.Enqueue(make_control_input_event(inputQueue_, kind, buttons, x, y, wheelDelta,
+                                               keyCode, now_us()));
+  return true;
+}
+
+bool ClientSessionController::QueueInputText(const uint16_t* text, size_t count) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  std::lock_guard<std::mutex> pk(parkMu_);  // keepalive r2 K1: one step with the check
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;
+  // r5 G8: no text at all to a host at the logon screen (a password goes by "Windows 로그인").
+  const HostRoleGate::Role role = hostRole_.Load();
+  if (!prelogin::ViewerMaySendText(prelogin::EffectiveHostFlags(role.known, role.flags))) {
+    preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  return enqueue_control_input_text(inputQueue_, text, count, now_us()) > 0;
+}
+
+bool ClientSessionController::QueueClipboardText(const uint16_t* text, size_t count) {
+  if (!text && count > 0) return false;
+  if (!clipboardEnabled_.load(std::memory_order_relaxed)) return false;
+  // Never queue for a host that cannot parse it: the message is gated on the capability bit, and
+  // an old host would mis-drain the variable payload and desync the stream.
+  if (!hostSupportsClipboard_.load(std::memory_order_relaxed)) return false;
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!CanQueueControlRequestLocked()) return false;
+  }
+  const std::u16string incoming(reinterpret_cast<const char16_t*>(text), count);
+  // r3 R1: refused while parked, in one step with the queueing (the park's collection clears it under
+  // parkMu_ then clipMu_ -- the same order).
+  std::lock_guard<std::mutex> pk(parkMu_);
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r1: nothing travels while parked
+  std::lock_guard<std::mutex> lock(clipMu_);
+  uint64_t hash = 0;
+  // Send == genuinely new. The other verdicts are empty / oversize / already sent / the echo of
+  // what the host just gave us, none of which belong on the wire.
+  if (clipCore_.OnLocalChange(incoming, &hash) != ClipboardLocalDecision::Send) return false;
+  clipPendingText_ = incoming;
+  clipPendingHash_ = hash;
+  clipHasPending_ = true;
+  return true;
+}
+
+bool ClientSessionController::TakeIncomingClipboardText(std::u16string* out) {
+  if (!out) return false;
+  if (parkInhibit_.load(std::memory_order_acquire)) return false;  // keepalive r1
+  std::lock_guard<std::mutex> lock(clipMu_);
+  if (!clipHasIncoming_) return false;
+  *out = std::move(clipIncomingText_);
+  clipIncomingText_.clear();
+  clipHasIncoming_ = false;
+  return true;
+}
+
+void ClientSessionController::SetClipboardSyncEnabled(bool enabled) {
+  clipboardEnabled_.store(enabled, std::memory_order_relaxed);
+  if (enabled) return;
+  // Turning it off drops anything queued in either direction. The point of the switch is that
+  // what was on the clipboard while it was off never travels, so a pending item must not survive.
+  std::lock_guard<std::mutex> lock(clipMu_);
+  clipHasPending_ = false;
+  clipPendingText_.clear();
+  clipHasIncoming_ = false;
+  clipIncomingText_.clear();
+}
+
+int ClientSessionController::PumpClipboardSync(ControlLink& link) {
+  if (!clipboardEnabled_.load(std::memory_order_relaxed) ||
+      !hostSupportsClipboard_.load(std::memory_order_relaxed) ||
+      parkInhibit_.load(std::memory_order_acquire)) {  // keepalive r1: no poll, no push while parked
+    return 0;
+  }
+  // Once per session the app is asked for whatever is on the phone's clipboard now, so that the
+  // machine the user just connected from is the source rather than whatever the host was holding
+  // from an earlier session. The app has to do the reading: Android only allows it in the
+  // foreground, so this is a request, not a call.
+  if (clipPolicy_.TakeInitialPush()) {
+    clipInitialPushWanted_.store(true, std::memory_order_release);
+  }
+  // (a) A clipboard the app queued goes first: the user copied on the phone meaning to paste on
+  // the host, which is the interactive direction and should not wait behind the poll.
+  std::u16string outText;
+  uint64_t outHash = 0;
+  uint32_t seq = 0;
+  bool haveOutbound = false;
+  {
+    std::lock_guard<std::mutex> lock(clipMu_);
+    if (clipHasPending_) {
+      outText = std::move(clipPendingText_);
+      outHash = clipPendingHash_;
+      seq = ++clipNextSeq_;
+      clipHasPending_ = false;
+      clipPendingText_.clear();
+      haveOutbound = true;
+    }
+  }
+  if (haveOutbound) {
+    if (!send_clipboard_update(link, seq, outText, outHash, now_us())) return -1;
+    return 1;
+  }
+  // (b) Otherwise ask the host whether its clipboard moved. The host cannot push -- control is
+  // strict request/response -- so this poll is the only way host -> phone text arrives.
+  const uint64_t nowUs = now_us();
+  if (!clipPolicy_.ShouldPoll(nowUs)) return 0;
+  clipPolicy_.NotePolled(nowUs);
+  ClipboardPollReply reply;
+  if (!poll_clipboard(link, clipPolicy_.knownGeneration(), nowUs, &reply)) return -1;
+  // The first reply of a session only sets the generation: its contents predate this session and
+  // must not land on top of what the user copied since (the stale-revival bug).
+  if (clipPolicy_.OnPollReply(reply.generation, reply.hasData)) {
+    std::lock_guard<std::mutex> lock(clipMu_);
+    // Recording it as applied here is what stops it going back out: the app will put this on the
+    // Android clipboard, and the change it notices afterwards must be recognised as our own.
+    if (clipCore_.OnRemoteData(reply.text, reply.hash) == ClipboardRemoteDecision::Apply) {
+      clipIncomingText_ = std::move(reply.text);
+      clipHasIncoming_ = true;
+    }
+  }
+  return 1;
+}
+
+bool ClientSessionController::IsValidPort(int port) {
+  return port > 0 && port <= 65535;
+}
+
+void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
+  if (encodedFrameSink_) {
+    encodedFrameSink_->OnVideoStreamReset();
+  }
+
+  if (args.requireUdpHello) {
+    std::string error;
+    udpHelloCount_.fetch_add(1, std::memory_order_relaxed);  // keepalive r1: a Hello exchange
+    if (!ConnectUdpVideo(args, &error)) {
+      if (!stopRequested_.load(std::memory_order_acquire)) FailWorker(error);
+      FinalizeWorkerExit();
+      return;
+    }
+  }
+
+  if (encodedFrameSink_ && udpVideoSocket_ != kInvalidSocket) {
+    try {
+      videoThread_ = std::thread(&ClientSessionController::VideoReceiveMain, this);
+    } catch (...) {
+      if (!stopRequested_.load(std::memory_order_acquire)) {
+        FailWorker("failed to start video receive worker");
+      }
+      FinalizeWorkerExit();
+      return;
+    }
+  }
+
+  if (args.requireTcpControl) {
+    std::string error;
+    if (!ConnectTcpControlWithRetry(args, &error)) {
+      if (!stopRequested_.load(std::memory_order_acquire)) FailWorker(error);
+      FinalizeWorkerExit();
+      return;
+    }
+  }
+
+  // Control rides the video socket when there is no way to open a second connection to the
+  // host. The video receive thread is already reading that socket, so it hands control
+  // datagrams to the channel and this loop drives the exchange.
+  std::unique_ptr<ControlLink> controlLink;
+  if (args.controlOverUdp && udpVideoSocket_ != kInvalidSocket) {
+    const SocketHandle videoSocket = udpVideoSocket_;
+    udpControl_.Configure(
+        [videoSocket](const void* data, size_t len) -> bool {
+          return send(videoSocket, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
+        },
+        kUdpControlStreamClientToHost, kUdpControlStreamHostToClient, 1200);
+    controlOverUdp_.store(true, std::memory_order_release);
+    controlLink = std::make_unique<UdpControlLink>(&udpControl_, kUdpControlReadTimeoutMs);
+  } else if (args.requireTcpControl) {
+    controlLink = std::make_unique<TcpControlLink>([this]() {
+      std::lock_guard<std::mutex> lock(mu_);
+      return tcpControlSocket_;
+    });
+  }
+
+  const bool controlActive = controlLink != nullptr;
+
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    controlScheduler_.Reset(args.controlIntervalMs, now_us());
+    // r9: the window list is asked once the first pong has said the host is NOT at the logon screen -- a
+    // pre-login host closes the control link on a window-list request (it is outside its allowlist), which
+    // took the Android app's link down at every logon screen.
+    snapshot_.state = ClientSessionState::Connected;
+    snapshot_.lastError.clear();
+    snapshot_.controlLoopActive = controlActive;
+    UpdateConnectedStatusLocked("");
+  }
+
+  // mobile-abr r1: this connection's report window. The sink outlives sessions (the APK keeps one), so
+  // whatever it counted before this connection is drained and dropped here -- outside mu_, because a
+  // sink drain takes the sink's own lock.
+  if (encodedFrameSink_) {
+    ClientDecodeStats discardDecode{};
+    ClientPresentationStats discardPresent{};
+    (void)encodedFrameSink_->DrainDecodeStats(&discardDecode);
+    (void)encodedFrameSink_->DrainPresentationStats(&discardPresent);
+  }
+  telemetry_.Reset(now_us(), sinkFrames_.load(std::memory_order_relaxed),
+                   sinkPayloadBytes_.load(std::memory_order_relaxed));
+  // r5: a connection starts an active episode (the host streams to a new viewer at once).
+  streamPaused_.store(false, std::memory_order_release);
+  if (encodedFrameSink_) encodedFrameSink_->OnDecodeEpisodeStart();
+
+  if (!controlActive) {
+    while (!stopRequested_.load(std::memory_order_acquire)) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    FinalizeWorkerExit();
+    return;
+  }
+
+  while (!stopRequested_.load(std::memory_order_acquire)) {
+    bool didWork = false;
+    const uint64_t loopNowUs = now_us();
+    ControlOutboundAction action{};
+    // Once a second, on this connection's own clock: what the sink received and decoded (the decode-side
+    // fields the PC viewer fills) and what its display did (client_telemetry_window.hpp). mobile-abr r1:
+    // this used to be built in a local only on seconds the sink had presentation stats for, without
+    // decode fields, and was lost whenever NextAction picked something else on that pass -- a phone went
+    // 5-10 s without a report and the host's stale-feedback rule (P7) stepped quality down on a healthy
+    // link (field 2026-10-14). The measured snapshot now stays pending until it is actually sent.
+    // r6 (Codex S1): a decode measurement that began just now (a grace's first picture, a generation
+    // change) is held for its minimum sample -- re-asked on a later pass, the presentation drain untouched.
+    if (encodedFrameSink_ && telemetry_.Due(loopNowUs)) {
+      ClientDecodeStats decode{};
+      const bool decodeValid = encodedFrameSink_->DrainDecodeStats(&decode);
+      const bool paused = streamPaused_.load(std::memory_order_acquire);
+      if (!telemetry_.Hold(loopNowUs, decodeValid ? &decode : nullptr, paused)) {
+        ClientPresentationStats present{};
+        const bool presentValid = encodedFrameSink_->DrainPresentationStats(&present);
+        (void)telemetry_.Close(loopNowUs, sinkFrames_.load(std::memory_order_relaxed),
+                               sinkPayloadBytes_.load(std::memory_order_relaxed), decodeValid ? &decode : nullptr,
+                               presentValid ? &present : nullptr, paused);
+      }
+    }
+    // r3 R2: a snapshot measured before the sink's decode state changed (surface, selection) is not sent.
+    if (encodedFrameSink_) telemetry_.OnDecodeGeneration(encodedFrameSink_->DecodeGeneration());
+    const ClientControlMetricsSnapshot& metrics = telemetry_.Pending(loopNowUs);
+    // keepalive: a park's steps at this pass boundary -- no action is in flight here (client_park_state.hpp).
+    bool parking = false;
+    {
+      ClientParkFence::PassStep st;
+      {
+        std::lock_guard<std::mutex> lk(parkMu_);
+        st = park_.OnPassBoundary(loopNowUs, inputQueue_.Empty(), heldInput_.Empty());
+        if (st.collect) CollectForParkLocked(loopNowUs, false);
+        if (st.reRelease) CollectForParkLocked(loopNowUs, true);
+        parking = park_.Inhibiting();
+      }
+      if (st.pauseNow) {
+        streamState_.Request(false);
+        streamPaused_.store(true, std::memory_order_release);
+      }
+      if (st.pingNow) controlScheduler_.RequestPingNow();
+      // r2 K3: a park that could not be confirmed, or that ran past its 5 min, ends the session here --
+      // the app's own polling is not needed for either.
+      if (st.phase == ClientParkPhase::Expired || st.phase == ClientParkPhase::Failed) {
+        std::fprintf(stderr, "[native-video-client-session] park: %s -- ending the session\n",
+                     client_park_phase_name(st.phase));
+        if (!stopRequested_.load(std::memory_order_acquire)) {
+          SignalRuntimeFailure(st.phase == ClientParkPhase::Expired ? "park expired" : "park not confirmed");
+        }
+        break;
+      }
+    }
+#ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+    {
+      std::function<void(bool)> hook;
+      {
+        std::lock_guard<std::mutex> lk(testHookMu_);
+        hook = testPassHook_;
+      }
+      if (hook) hook(parking);
+    }
+#endif
+    PollLocalSelection();  // apk-0232 r1
+    // r3 M1: an IDR the decoder is still owed goes to the limiter on every pass, frame or no frame.
+    // r4 M1-A: a selection still owed the IDR of its answered generation (its own came before the
+    // answer and was dropped) is asked for again until it arrives -- a request taken here may still
+    // be refused by the host's limiter. Once per second at most, eight times, through the limiter.
+    if (!parking) {
+      const uint64_t owed = encodedFrameSink_ ? encodedFrameSink_->KeyframeOwedFor() : 0;
+      if (owed != owedSelection_) {
+        owedSelection_ = owed;
+        owedAttempts_ = 0;
+        owedNextUs_ = 0;
+      }
+      constexpr uint32_t kOwedKeyMaxAttempts = 8;
+      constexpr uint64_t kOwedKeyRetryUs = 1000000;
+      if (owed != 0 && owedAttempts_ < kOwedKeyMaxAttempts && loopNowUs >= owedNextUs_ &&
+          keyframeRequests_.Request(2, loopNowUs).queued) {
+        ++owedAttempts_;
+        owedNextUs_ = loopNowUs + kOwedKeyRetryUs;
+        std::fprintf(stderr, "[native-video-client-session] keyframe owed to selection %llu: asked (%u)\n",
+                     static_cast<unsigned long long>(owed), owedAttempts_);
+      }
+    }
+    if (!parking && decoderRekeyPending_.load(std::memory_order_acquire) &&
+        keyframeRequests_.Request(2, loopNowUs).queued) {
+      decoderRekeyPending_.store(false, std::memory_order_release);
+      std::fprintf(stderr, "[native-video-client-session] held keyframe request queued\n");
+    }
+    bool haveAction = false;
+    {
+      // r3 R1: the next action is taken and judged against the park in one step, under parkMu_ -- the lock
+      // every request path, BeginPark and ResumeFromPark take. A resume cannot fall between the loop's read
+      // of the park and its use: the request a resumed session makes is never dropped by the park before
+      // it. (Local work only: no network under this lock.)
+      std::lock_guard<std::mutex> lk(parkMu_);
+      haveAction = controlScheduler_.NextAction(loopNowUs, metrics, &windowPanel_, &streamState_, &captureMode_,
+                                                &keyframeRequests_, &runtimeTune_, &inputQueue_, &action,
+                                                &desktopBackend_);
+      const bool parkingNow = park_.Inhibiting() || parkInhibit_.load(std::memory_order_acquire);
+      const bool streamResume = action.kind == ControlOutboundActionKind::StreamState &&
+                                (action.streamState.flags & 0x1u) != 0;
+      if (haveAction && parkingNow && !client_park_allows(action.kind, streamResume)) {
+        // r2 K1: taken off the scheduler and not sent -- a park has no side effect but release and pause.
+        parkDroppedActions_.fetch_add(1, std::memory_order_relaxed);
+        std::fprintf(stderr, "[native-video-client-session] park: dropped an unsent action (kind %d)\n",
+                     static_cast<int>(action.kind));
+        haveAction = false;
+        didWork = true;
+      }
+    }
+    if (haveAction) {
+      if (!controlLink->Alive()) {
+        if (!stopRequested_.load(std::memory_order_acquire)) {
+          SignalRuntimeFailure("control link closed");
+        }
+        break;
+      }
+
+      // r7 H6: the last look before an input leaves (queued before the role was known, or before it changed).
+      const HostRoleGate::Role role = hostRole_.Load();  // r11 U5
+      if (!prelogin::ViewerMaySendAction(prelogin::EffectiveHostFlags(role.known, role.flags), action)) {
+        preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      // keepalive-r2 e: the same X fence on whatever reached the queue another way (a release the park or the
+      // held state made, an entry the queue kept through DropAllButReleases); a refused edge is never OnSent.
+      // r2: per press -- a down dropped here takes its up and its held bit with it; a sent down's owed release
+      // goes only while the host takes X.
+      bool xAdmitted = true;
+      {
+        std::lock_guard<std::mutex> lk(parkMu_);
+        xAdmitted = mouseXLedger_.AdmitSendAction(HostTakesMouseXButtons(role.known, role.flags), &action);
+      }
+      if (!xAdmitted) {
+        mouseXButtonsHeldBack_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      // r9: a host KNOWN to be at the logon screen closes the link on anything outside its allowlist (the
+      // same definition, prelogin_control_allowlist.hpp): such a request is not sent at all.
+      if (role.known && (role.flags & kCaptureFlagPreloginV1) != 0 &&
+          !prelogin::IsControlAllowedInPrelogin(outbound_message_type(action))) {
+        // apk-0232 r1: a pick queued before the role was known is not dropped in silence (the APK waited in
+        // REQUESTING for an answer that never came). THAT op -- its own tag -- continues: a desktop pick as a
+        // local selection, a window pick refused. A tag no longer armed (a later pick replaced it) changes nothing.
+        if (action.kind == ControlOutboundActionKind::WindowSelect) ResolveUnsendableSelect(action);
+        continue;
+      }
+      TcpControlResponse response{};
+      if (!execute_control_action(*controlLink, action, &response)) {
+        if (!stopRequested_.load(std::memory_order_acquire)) {
+          SignalRuntimeFailure("control loop failed");
+        }
+        break;
+      }
+      didWork = true;
+      {
+        // keepalive r1: what the host now holds, and the park's boundaries (sent = answered or, for a
+        // StreamState with no answer of its own, handed to the ordered control stream).
+        std::lock_guard<std::mutex> lk(parkMu_);
+        heldInput_.OnSent(action);
+        mouseXLedger_.OnSentAction(action);  // r2: a sent X down owes its release; a sent X up ends it
+        if (action.kind == ControlOutboundActionKind::StreamState) {
+          park_.OnStreamStateSent((action.streamState.flags & 0x1u) != 0);
+        } else if (action.kind == ControlOutboundActionKind::Ping) {
+          park_.OnPingSent(action.ping.seq);
+        }
+        if (response.kind == TcpControlResponseKind::Pong) park_.OnPong(response.pong.seq, now_us());
+      }
+
+      switch (response.kind) {
+        case TcpControlResponseKind::Pong:
+          controlScheduler_.OnPingCompleted(now_us());
+          // The host says here whether a UAC prompt or the lock screen is in front. It is the
+          // only signal the viewer has for "the picture is frozen because Windows is showing
+          // something we cannot capture", and the client can offer to unlock when it is set.
+          hostSecureDesktopActive_.store(
+              (response.pong.captureTargetFlags & kCaptureFlagSecureDesktopActive) != 0,
+              std::memory_order_relaxed);
+          // capture-lifecycle r1 (UA-2): whether this host answers backend requests (every pong: another host
+          // after a reconnect may not).
+          desktopBackend_.SetHostAnswers((response.pong.captureTargetFlags & kCaptureFlagDesktopBackendStatusV1) != 0);
+          // r7 H6 / r11 U5: the role, and on the first pong the deferred request, in one transition.
+          (void)hostRole_.Pong(response.pong.captureTargetFlags, kCaptureFlagPreloginV1,
+                               [this](HostRoleGate::FirstPong first) {
+                                 if (first == HostRoleGate::FirstPong::SendList) {
+                                   windowPanel_.RequestList("window_list_request pending");  // r9: deferred from connect
+                                 } else if (first == HostRoleGate::FirstPong::AnswerNotHere) {
+                                   // r10: asked before the pong, at a host at the logon screen: answered here.
+                                   windowPanel_.SetStatus("window list not available at the logon screen");
+                                   const auto answered = windowPanel_.Snapshot();
+                                   std::lock_guard<std::mutex> lock(mu_);
+                                   SyncWindowPanelSnapshotLocked(answered);
+                                   UpdateConnectedStatusLocked(answered.status);
+                                 }
+                               });
+          // Clipboard text sync (K1): whether this host understands the clipboard messages. Set
+          // every pong, so reconnecting to a different host cannot carry the old answer forward.
+          {
+            const bool clipboardHost =
+                (response.pong.captureTargetFlags & kCaptureFlagClipboardTextV1) != 0;
+            // The first pong reporting support opens a clipboard session: arm the baseline poll
+            // and the one-shot push, so a host's previous-session clipboard is never inherited.
+            if (clipboardHost &&
+                !hostSupportsClipboard_.load(std::memory_order_relaxed)) {
+              std::lock_guard<std::mutex> lock(clipMu_);
+              clipCore_.Reset();
+              clipPolicy_.OnConnected();
+            }
+            hostSupportsClipboard_.store(clipboardHost, std::memory_order_relaxed);
+          }
+          break;
+        case TcpControlResponseKind::DesktopBackendStatus: {  // capture-lifecycle r1 (UA-2)
+          const auto& st = response.desktopBackendStatus;
+          std::lock_guard<std::mutex> lk(backendStatusMu_);
+          backendStatus_.valid = true;
+          backendStatus_.seq = st.seq;
+          backendStatus_.requested = st.requested;
+          backendStatus_.effective = st.effective;
+          backendStatus_.active = st.active;
+          backendStatus_.flags = st.flags;
+          backendStatus_.changeCount = st.changeCount;
+          backendStatus_.receivedUs = now_us();
+          break;
+        }
+        case TcpControlResponseKind::MonitorList: {
+          windowPanel_.ApplyMonitorList(response.monitorList);
+          const auto panelSnapshot = windowPanel_.Snapshot();
+          std::lock_guard<std::mutex> lock(mu_);
+          SyncWindowPanelSnapshotLocked(panelSnapshot);
+          break;
+        }
+        case TcpControlResponseKind::WindowList: {
+          windowPanel_.ApplyWindowList(response.windowList, 4);
+          hostSupportsThumbnails_.store(
+              (response.windowList.flags & kControlWindowListFlagThumbnails) != 0,
+              std::memory_order_relaxed);
+          // The window list is fetched on every connect, so it is where the host says whether it
+          // knows the monitor messages at all. Asking one that does not would hang the loop.
+          windowPanel_.SetHostSupportsMonitorSelect(
+              (response.windowList.flags & kControlWindowListFlagMonitors) != 0 &&
+              (response.windowList.flags & kControlWindowListFlagMonitorSelectTransactionV1) != 0);
+          if (windowPanel_.SetHostSupportsMonitors(
+                  (response.windowList.flags & kControlWindowListFlagMonitors) != 0)) {
+            windowPanel_.RequestMonitorList();
+          }
+          QueueThumbnailFetchesFromPanel();
+          const auto panelSnapshot = windowPanel_.Snapshot();
+          std::lock_guard<std::mutex> lock(mu_);
+          SyncWindowPanelSnapshotLocked(panelSnapshot);
+          UpdateConnectedStatusLocked(panelSnapshot.status);
+          break;
+        }
+        case TcpControlResponseKind::WindowSelected: {
+          // t-970r4zgo: the answer is to THIS request (same seq, same target) or it opens nothing.
+          ControlWindowSelectedMessage answer = response.windowSelected;
+          if (answer.seq != action.windowSelect.seq || answer.windowId != action.windowSelect.windowId) {
+            answer.flags &= ~0x1u;
+            answer.streamGeneration = 0;
+          }
+          if (encodedFrameSink_) {
+            encodedFrameSink_->OnWindowSelectionControlResultFor(answer, action.selectionTag);
+            // r3 M1: the answer itself may owe the decoder an IDR (its own arrived first and was
+            // dropped). Queued now, not at the next frame.
+            if (encodedFrameSink_->ConsumeDecoderKeyframeRequest() &&
+                !keyframeRequests_.Request(2, now_us()).queued) {
+              decoderRekeyPending_.store(true, std::memory_order_release);
+              std::fprintf(stderr, "[native-video-client-session] keyframe request after the select answer held by the limiter\n");
+            }
+          }
+          // r3 M2 / r4 M2-A: and it is SHOWN only if it belongs to the selection now requested. The
+          // panel's status is what the APK moves its selection on (window_selected /
+          // window_select_failed); a late answer to an earlier pick -- success or failure -- must not
+          // move a later one. The panel compares and applies under the lock its RequestSelect takes,
+          // so a pick made while this answer was being handled cannot be overwritten.
+          if (!windowPanel_.ApplyWindowSelectedFor(answer, action.selectionTag).shown) {
+            std::fprintf(stderr,
+                         "[native-video-client-session] select answer seq=%u ok=%u for selection %llu: a later "
+                         "selection is requested, not shown\n",
+                         answer.seq, answer.flags & 0x1u, static_cast<unsigned long long>(action.selectionTag));
+          }
+          const auto panelSnapshot = windowPanel_.Snapshot();
+          std::lock_guard<std::mutex> lock(mu_);
+          SyncWindowPanelSnapshotLocked(panelSnapshot);
+          UpdateConnectedStatusLocked(panelSnapshot.status);
+          break;
+        }
+        case TcpControlResponseKind::InputAck:
+        case TcpControlResponseKind::None:
+        default:
+          break;
+      }
+    }
+
+    // Remote reboot (prelogin-ui r1): the confirmed request goes once. Its answer -- or that none came --
+    // is handed to the app; nothing is re-sent by itself.
+    if (!didWork && controlLink->Alive()) {
+      uint32_t rid = 0;
+      {
+        std::lock_guard<std::mutex> lock(rebootMu_);
+        if (rebootPendingId_ != 0) {
+          rid = rebootPendingId_;
+          rebootPendingId_ = 0;
+          rebootInFlight_ = true;
+        }
+      }
+      if (rid != 0) {
+        ControlOutboundAction rebootAction{};
+        rebootAction.kind = ControlOutboundActionKind::RebootRequest;
+        const std::vector<uint8_t> wire = build_reboot_request(rid);
+        std::memcpy(&rebootAction.reboot, wire.data(), sizeof(rebootAction.reboot));
+        rebootAction.expectedResponseType = MessageType::ControlRebootReply;
+        rebootAction.expectedResponseSize = sizeof(ControlRebootReplyMessage);
+        TcpControlResponse rebootResp{};
+        const bool exchanged = execute_control_action(*controlLink, rebootAction, &rebootResp);
+        const bool answered = exchanged && rebootResp.kind == TcpControlResponseKind::RebootReply &&
+                              reboot_reply_valid(rebootResp.rebootReply, rid);
+        {
+          std::lock_guard<std::mutex> lock(rebootMu_);
+          rebootInFlight_ = false;
+          rebootHasOutcome_ = true;
+          rebootOutcomeId_ = rid;
+          rebootOutcome_ = answered ? static_cast<int>(rebootResp.rebootReply.result) : kRebootOutcomeNoReply;
+          rebootWin32_ = answered ? rebootResp.rebootReply.win32 : 0;
+        }
+        didWork = true;
+        if (!exchanged) {
+          // A restart takes the link down; the app shows the request's state, not a failure.
+          if (!stopRequested_.load(std::memory_order_acquire)) SignalRuntimeFailure("control link closed after a reboot request");
+          break;
+        }
+      }
+    }
+
+    // r9 R5: Ctrl+Alt+Del, once per request.
+    if (!didWork && controlLink->Alive()) {
+      uint32_t rid = 0;
+      {
+        std::lock_guard<std::mutex> lock(rebootMu_);
+        rid = sasPendingId_;
+        sasPendingId_ = 0;
+      }
+      if (rid != 0) {
+        ControlOutboundAction sasAction{};
+        sasAction.kind = ControlOutboundActionKind::PreloginControl;
+        sasAction.preloginControl = make_sas_request(rid);
+        sasAction.expectedResponseType = MessageType::ControlPreloginStatus;
+        sasAction.expectedResponseSize = sizeof(ControlPreloginStatusMessage);
+        TcpControlResponse sasResp{};
+        const bool exchanged = execute_control_action(*controlLink, sasAction, &sasResp);
+        const bool answered = exchanged && sasResp.kind == TcpControlResponseKind::PreloginStatus &&
+                              sasResp.preloginStatus.requestId == rid;
+        {
+          std::lock_guard<std::mutex> lock(rebootMu_);
+          sasHasOutcome_ = true;
+          sasOutcomeId_ = rid;
+          sasOutcome_ = answered ? static_cast<int>(sasResp.preloginStatus.result) : kRebootOutcomeNoReply;
+          sasWin32_ = answered ? sasResp.preloginStatus.win32 : 0;
+          sasFlags_ = answered ? sasResp.preloginStatus.flags : 0;
+        }
+        didWork = true;
+        if (!exchanged) {
+          if (!stopRequested_.load(std::memory_order_acquire)) SignalRuntimeFailure("control link closed after a SAS request");
+          break;
+        }
+      }
+    }
+
+    // Clipboard sync runs whenever the session is up, unlike previews, so it comes first.
+    if (!didWork && controlLink->Alive()) {
+      const int synced = PumpClipboardSync(*controlLink);
+      if (synced < 0) {
+        if (!stopRequested_.load(std::memory_order_acquire)) {
+          SignalRuntimeFailure("clipboard sync failed");
+        }
+        break;
+      }
+      didWork = (synced > 0);
+    }
+    if (!didWork && controlLink->Alive()) {
+      const int fetched = FetchOneThumbnailLocked(*controlLink);
+      if (fetched < 0) {
+        if (!stopRequested_.load(std::memory_order_acquire)) {
+          SignalRuntimeFailure("thumbnail fetch failed");
+        }
+        break;
+      }
+      didWork = (fetched > 0);
+    }
+    if (!didWork) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  }
+
+  FinalizeWorkerExit();
+}
+
+void ClientSessionController::QueueThumbnailFetchesFromPanel() {
+  if (!hostSupportsThumbnails_.load(std::memory_order_relaxed)) return;
+  const WindowPanelSnapshot snap = windowPanel_.Snapshot();
+  std::lock_guard<std::mutex> lk(thumbMu_);
+  const uint64_t nowUs = now_us();
+  auto want = [&](uint64_t id) {
+    // Shared with the Windows viewer (thumbnail_fetch_policy.hpp). The old test -- "is it in
+    // thumbs_" -- only ever described successes, so a window whose preview never arrives was
+    // re-queued on every list roundtrip while the host was skipping it.
+    ThumbnailFetchState state;
+    const auto have = thumbs_.find(id);
+    state.havePreview = have != thumbs_.end() && !have->second.rgba.empty();
+    const auto attempt = thumbAttempts_.find(id);
+    if (attempt != thumbAttempts_.end()) {
+      state.attempted = true;
+      state.lastAttemptUs = attempt->second.lastAttemptUs;
+      state.lastAttemptFailed = attempt->second.failed;
+      // WindowThumbnail is handed to the Android side as-is, so the fetch time lives here rather
+      // than as a new field on it: an attempt that did not fail IS the moment the preview landed.
+      if (!attempt->second.failed) state.previewFetchedUs = attempt->second.lastAttemptUs;
+    }
+    if (!thumbnail_fetch_due(state, ThumbnailFetchPolicy{}, nowUs)) return;
+    if (std::find(thumbFetchQueue_.begin(), thumbFetchQueue_.end(), id) !=
+        thumbFetchQueue_.end()) {
+      return;
+    }
+    thumbFetchQueue_.push_back(id);
+  };
+  want(0);
+  for (const auto& item : snap.items) want(item.id);
+}
+
+// Returns 1 if a preview was fetched, 0 if there was nothing to do, -1 on a socket error
+// (the strict request/response stream is then desynced and the session must drop).
+int ClientSessionController::FetchOneThumbnailLocked(ControlLink& link) {
+  if (!hostSupportsThumbnails_.load(std::memory_order_relaxed)) return 0;
+  if (parkInhibit_.load(std::memory_order_acquire)) return 0;  // keepalive r1: no previews while parked
+  uint64_t id = 0;
+  {
+    std::lock_guard<std::mutex> lk(thumbMu_);
+    if (thumbFetchQueue_.empty()) return 0;
+    id = thumbFetchQueue_.front();
+    thumbFetchQueue_.pop_front();
+  }
+  // The exchange is the shared fetch_window_thumbnail (F-09); this side only picks the card and
+  // converts the pixels.
+  WindowThumbnailReply reply;
+  if (!fetch_window_thumbnail(link, id, 256, 160, now_us(), &reply)) return -1;
+  // Past this point the exchange completed. Whether it carried pixels is the host's answer, not a
+  // failure of the request, and both answers are recorded -- a preview that never arrives has to
+  // be distinguishable from a window nobody has asked about.
+  const uint64_t attemptUs = now_us();
+  std::lock_guard<std::mutex> lk(thumbMu_);
+  auto& attempt = thumbAttempts_[id];
+  attempt.lastAttemptUs = attemptUs;
+  attempt.failed = !reply.present;
+  if (reply.present) {
+    // Wire format is BGRA; Android Bitmap.copyPixelsFromBuffer wants RGBA byte order.
+    for (size_t i = 0; i + 3 < reply.bgra.size(); i += 4) {
+      std::swap(reply.bgra[i], reply.bgra[i + 2]);
+    }
+    auto& t = thumbs_[id];
+    t.width = reply.width;
+    t.height = reply.height;
+    t.version = reply.version;
+    t.rgba = std::move(reply.bgra);
+  }
+  return 1;
+}
+
+bool ClientSessionController::CopyWindowThumbnail(uint64_t windowId, WindowThumbnail* out) const {
+  if (!out) return false;
+  std::lock_guard<std::mutex> lk(thumbMu_);
+  const auto it = thumbs_.find(windowId);
+  if (it == thumbs_.end() || it->second.rgba.empty()) return false;
+  *out = it->second;
+  return true;
+}
+
+uint64_t ClientSessionController::SessionBytesReceived() const {
+  return sessionBytesReceived_.load(std::memory_order_relaxed);
+}
+
+uint64_t ClientSessionController::WindowThumbnailVersion(uint64_t windowId) const {
+  std::lock_guard<std::mutex> lk(thumbMu_);
+  const auto it = thumbs_.find(windowId);
+  return (it == thumbs_.end()) ? 0 : it->second.version;
+}
+
+void ClientSessionController::VideoReceiveMain() {
+  std::array<uint8_t, 1600> datagram{};
+  uint64_t oversizePayloadDropCount = 0;
+  uint64_t lastFecLogged = 0;
+
+  // The receive policy lives in SessionVideoPipeline (session_video_pipeline.hpp) so a test can
+  // drive it with synthetic loss. quality r4: against a host that negotiated video NACK, a
+  // completed AU now waits up to kVideoNackHoldUs behind an incomplete older one -- the next frame
+  // no longer throws away a keyframe that a retransmit could still repair (the field: 46 keyframe
+  // requests in 5 minutes, each a visible stop). Without NACK it behaves as before.
+  const bool nackEnabled = hostSupportsNack_.load(std::memory_order_relaxed);
+  SessionVideoPipelineConfig pipelineConfig;
+  pipelineConfig.nackEnabled = nackEnabled;
+  pipelineConfig.holdUs = nackEnabled ? kVideoNackHoldUs : 0;
+  ClientEncodedFrameSink* currentSink = nullptr;
+  SocketHandle currentSocket = kInvalidSocket;
+  SessionVideoPipeline::Callbacks callbacks;
+  callbacks.deliver = [&](UdpH264AssembledFrame&& frame) {
+    if (!currentSink) return;
+    sinkFrames_.fetch_add(1, std::memory_order_relaxed);
+    sinkPayloadBytes_.fetch_add(frame.payload.size(), std::memory_order_relaxed);
+    currentSink->OnEncodedH264Frame(std::move(frame));
+    // The decoder may have had to discard what it was just handed. Ask for an IDR now
+    // rather than letting every later delta decode against a reference that never arrived.
+    if (currentSink->ConsumeDecoderKeyframeRequest()) {
+      // r3 M1: refused by the limiter is not forgotten -- the control loop retries it.
+      if (!keyframeRequests_.Request(2, now_us()).queued) decoderRekeyPending_.store(true, std::memory_order_release);
+    }
+  };
+  callbacks.requestKeyframe = [&]() {
+    // KeyframeRequestState owns the time/token limiter, so repeated gaps cannot make an IDR storm.
+    (void)keyframeRequests_.Request(2, now_us());
+  };
+  callbacks.discontinuity = [&]() {
+    if (currentSink) currentSink->OnVideoDiscontinuity();
+  };
+  callbacks.sendNack = [&](const UdpVideoNackPacket& nack) {
+    if (currentSocket == kInvalidSocket) return;
+    (void)send(currentSocket, reinterpret_cast<const char*>(&nack), sizeof(nack), 0);
+  };
+  SessionVideoPipeline pipeline(pipelineConfig, std::move(callbacks));
+  bool loggedPolicy = false;
+  uint64_t nextSummaryAt = 1;
+
+  // udp-recv-exit r1: a single UDP recv result -- a legal empty datagram, a truncated oversize one, or a
+  // Windows ICMP-driven reset -- is about ONE datagram, not the session. Classify the result, discard /
+  // treat-as-advisory and keep the maintenance going; only a genuine terminal error ends the loop. These
+  // counters drive bounded diagnostics (first drop + on error-code change + a periodic aggregate) and the
+  // anti-spin gap. A discard is NOT a healthy/ACK/peer-alive event.
+  uint64_t recvEmpty = 0, recvTruncated = 0, recvReset = 0, recvRetry = 0;
+  bool loggedFirstDrop = false;
+  uint64_t lastDropLogUs = 0;
+  uint64_t lastDatagramUs = now_us();  // since the last POSITIVE-length recv (malformed or not -- a
+                                       // diagnostic of arrivals, NOT a peer-health/valid-receive marker)
+  uint64_t lastDropLoopUs = 0;
+  constexpr uint64_t kUdpDropSpinGapUs = 1000;      // bound EVERY drop-iteration to ~1 kHz (no CPU spin)
+  constexpr uint64_t kUdpDropLogGapUs = 1'000'000;  // bound drop diagnostics to ~1/s even as codes alternate
+
+  while (!stopRequested_.load(std::memory_order_acquire)) {
+    ParkWatchdog();  // keepalive r2 K3: this loop ticks (<= 100 ms) even while the control loop waits on an answer
+    SocketHandle udpSocket = kInvalidSocket;
+    ClientEncodedFrameSink* sink = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      udpSocket = udpVideoSocket_;
+      sink = encodedFrameSink_;
+    }
+    if (udpSocket == kInvalidSocket || !sink) break;
+    currentSink = sink;
+    currentSocket = udpSocket;
+    // udp-recv-nonblock r1: the receive wait is a BOUNDED readiness wait on a NONBLOCKING socket (Windows)
+    // -- never a blocking recv + SO_RCVTIMEO (which returned WSA_IO_PENDING(997) and ended the session).
+    // The readiness timeout is the maintenance tick (the hold's 20ms, else 100ms). POSIX keeps blocking
+    // recv + SO_RCVTIMEO (unchanged), so it still needs the timeout set here.
+    const uint32_t recvTimeoutMs = pipeline.HoldEnabled() ? kVideoReceiveTimeoutHoldMs : kVideoReceiveTimeoutMs;
+    if (!loggedPolicy) {
+      loggedPolicy = true;
+      // Confirm the socket is nonblocking at worker start (Codex R1: after Hello, before the wait). On
+      // POSIX this is a no-op and the blocking recv keeps its SO_RCVTIMEO tick.
+      const bool nb = set_udp_nonblocking(udpSocket);
+#ifndef _WIN32
+      if (pipeline.HoldEnabled()) (void)set_recv_timeout(udpSocket, kVideoReceiveTimeoutHoldMs);
+#endif
+      std::fprintf(stderr, "[native-video-client-session] video receive nack=%d holdUs=%llu nonblocking=%d\n",
+                   nackEnabled ? 1 : 0, static_cast<unsigned long long>(pipelineConfig.holdUs), nb ? 1 : 0);
+    }
+
+    int recvErr = 0;
+    int n;
+    if (udpRecvHookForTest_) {
+      // Test seam: scripted recv result (n, err). Null in production.
+      n = udpRecvHookForTest_(datagram.data(), datagram.size(), recvErr);
+    } else {
+      // Bounded readiness wait + nonblocking recv; recvErr is captured immediately inside the helper.
+      n = udp_receive_with_readiness(udpSocket, reinterpret_cast<char*>(datagram.data()),
+                                     static_cast<int>(datagram.size()), recvTimeoutMs, recvErr);
+    }
+    if (n <= 0) {
+      if (stopRequested_.load(std::memory_order_acquire)) break;
+      const UdpRecvClass cls = classify_udp_recv(n, recvErr);
+      const uint64_t sinceDatagramMs = (now_us() - lastDatagramUs) / 1000;
+      if (cls == UdpRecvClass::Terminal) {
+        std::fprintf(stderr,
+                     "[native-video-client-session] udp video receive terminal sock=%llu n=%d err=%d "
+                     "empty=%llu truncated=%llu reset=%llu sinceDatagramMs=%llu\n",
+                     static_cast<unsigned long long>(udpSocket), n, recvErr,
+                     static_cast<unsigned long long>(recvEmpty),
+                     static_cast<unsigned long long>(recvTruncated), static_cast<unsigned long long>(recvReset),
+                     static_cast<unsigned long long>(sinceDatagramMs));
+        SignalRuntimeFailure("udp video receive failed");
+        break;
+      }
+      // Non-terminal: a legal empty datagram, a truncated oversize one, an advisory reset, or a timeout.
+      // Discard the input (never hand a truncated prefix to the parser), keep the maintenance ticks going,
+      // but do NOT count any of this as a healthy receive. The read timeout is also the channel heartbeat;
+      // a quiet/dropping socket is exactly when a lost chunk or an expiring hold must still be serviced.
+      switch (cls) {
+        case UdpRecvClass::Empty: ++recvEmpty; break;
+        case UdpRecvClass::TruncatedDrop: ++recvTruncated; break;
+        case UdpRecvClass::ResetAdvisory: ++recvReset; break;
+        case UdpRecvClass::Retryable: ++recvRetry; break;
+        default: break;
+      }
+      // r2 U2: TIME-bounded diagnostics -- the first drop, then at most ~1/s even when the error code
+      // alternates (reset<->oversize). All counters are preserved and printed, so nothing is lost; the
+      // receive thread's stderr cannot flood and stall input/control. The socket handle disambiguates
+      // sessions during this intermittent-#2 hunt.
+      const uint64_t logNow = now_us();
+      if (!loggedFirstDrop || (logNow - lastDropLogUs) >= kUdpDropLogGapUs) {
+        loggedFirstDrop = true;
+        lastDropLogUs = logNow;
+        std::fprintf(stderr,
+                     "[native-video-client-session] udp recv drop sock=%llu class=%d n=%d errValid=%d err=%d "
+                     "empty=%llu truncated=%llu reset=%llu retry=%llu sinceDatagramMs=%llu stop=%d\n",
+                     static_cast<unsigned long long>(udpSocket), static_cast<int>(cls), n, (n < 0) ? 1 : 0,
+                     recvErr, static_cast<unsigned long long>(recvEmpty),
+                     static_cast<unsigned long long>(recvTruncated), static_cast<unsigned long long>(recvReset),
+                     static_cast<unsigned long long>(recvRetry), static_cast<unsigned long long>(sinceDatagramMs),
+                     stopRequested_.load(std::memory_order_acquire) ? 1 : 0);
+      }
+      if (controlOverUdp_.load(std::memory_order_acquire)) udpControl_.Tick();
+      pipeline.OnTick(now_us());
+      // r2 U2 anti-spin: do NOT assume a Retryable waited -- would-block/interrupted can return at once
+      // too. Bound EVERY drop iteration (empty/truncated/reset/retry alike) to ~1 kHz: if the previous
+      // drop iteration was less than the gap ago, sleep the remainder. A real blocking timeout naturally
+      // spans more than the gap, so it never sleeps; a flood of immediate returns cannot peg the CPU.
+      // stop is re-checked at the loop top, so this stays bounded against shutdown.
+      const uint64_t loopNow = now_us();
+      if (lastDropLoopUs != 0 && loopNow - lastDropLoopUs < kUdpDropSpinGapUs) {
+        std::this_thread::sleep_for(std::chrono::microseconds(kUdpDropSpinGapUs - (loopNow - lastDropLoopUs)));
+      }
+      lastDropLoopUs = now_us();
+      continue;
+    }
+    lastDatagramUs = now_us();
+    lastDropLoopUs = 0;  // a real datagram breaks any immediate-drop streak
+
+    if (controlOverUdp_.load(std::memory_order_acquire) &&
+        udpControl_.OnPacket(datagram.data(), static_cast<size_t>(n))) {
+      sessionBytesReceived_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+      pipeline.OnTick(now_us());
+      continue;
+    }
+    if (n < static_cast<int>(sizeof(UdpVideoChunkHeader))) continue;
+
+    sessionBytesReceived_.fetch_add(static_cast<uint64_t>(n), std::memory_order_relaxed);
+    const uint64_t malformedBefore = pipeline.stats().malformed;
+    pipeline.OnDatagram(datagram.data(), static_cast<size_t>(n), now_us());
+    const auto& ps = pipeline.stats();
+    if (ps.fecRecoveredChunks != lastFecLogged && (ps.fecRecoveredChunks % 120ULL) == 1ULL) {
+      lastFecLogged = ps.fecRecoveredChunks;
+      std::fprintf(stderr, "[native-video-client-session] udp fec recovered chunks=%llu\n",
+                   static_cast<unsigned long long>(ps.fecRecoveredChunks));
+    }
+    if (ps.malformed != malformedBefore && ((++oversizePayloadDropCount % 30ULL) == 1ULL)) {
+      std::fprintf(stderr, "[native-video-client-session] dropped malformed udp payload count=%llu\n",
+                   static_cast<unsigned long long>(oversizePayloadDropCount));
+    }
+    if (ps.delivered >= nextSummaryAt) {
+      nextSummaryAt = ps.delivered + 900;
+      std::fprintf(stderr,
+                   "[native-video-client-session] video delivered=%llu keyReq=%llu gapsBehindKey=%llu "
+                   "nacks=%llu stuckGiveUps=%llu discontinuities=%llu\n",
+                   static_cast<unsigned long long>(ps.delivered),
+                   static_cast<unsigned long long>(ps.keyframeRequests),
+                   static_cast<unsigned long long>(ps.gapsBehindCompleteKey),
+                   static_cast<unsigned long long>(ps.nacksSent),
+                   static_cast<unsigned long long>(ps.stuckHeadGiveUps),
+                   static_cast<unsigned long long>(ps.discontinuities));
+    }
+  }
+}
+
+void ClientSessionController::RunVideoReceiveForTest(SocketHandle udpSocket, ClientEncodedFrameSink* sink) {
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    udpVideoSocket_ = udpSocket;
+    encodedFrameSink_ = sink;
+  }
+  stopRequested_.store(false, std::memory_order_release);
+  VideoReceiveMain();  // runs the REAL loop; the test's recv hook scripts the results and stops it
+}
+
+void ClientSessionController::StopWorker() {
+  stopRequested_.store(true, std::memory_order_release);
+  // Wakes the control loop out of a blocking read before the sockets go away.
+  udpControl_.Close();
+  {
+    std::lock_guard<std::mutex> lock(mu_);
+    snapshot_.controlLoopActive = false;
+    shutdown_socket(&tcpControlSocket_);
+    ShutdownVideoSocketLocked();
+  }
+  if (workerThread_.joinable()) {
+    workerThread_.join();
+  }
+  if (videoThread_.joinable()) {
+    videoThread_.join();
+  }
+  stopRequested_.store(false, std::memory_order_release);
+}
+
+void ClientSessionController::FinalizeWorkerExit() {
+  std::lock_guard<std::mutex> lock(mu_);
+  CloseSocketsUnlocked();
+  snapshot_.transport = {};
+  snapshot_.controlLoopActive = false;
+  snapshot_.sessionThreadActive = false;
+}
+
+void ClientSessionController::FailWorker(const std::string& error) {
+  std::lock_guard<std::mutex> lock(mu_);
+  if (stopRequested_.load(std::memory_order_acquire)) return;
+  snapshot_.state = ClientSessionState::Error;
+  snapshot_.status = "error";
+  snapshot_.lastError = error.empty() ? "session failed" : error;
+  snapshot_.controlLoopActive = false;
+}
+
+void ClientSessionController::SignalRuntimeFailure(const std::string& error) {
+  bool expected = false;
+  if (!stopRequested_.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+    return;
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  snapshot_.state = ClientSessionState::Error;
+  snapshot_.status = "error";
+  snapshot_.lastError = error.empty() ? "session failed" : error;
+  snapshot_.controlLoopActive = false;
+  shutdown_socket(&tcpControlSocket_);
+  ShutdownVideoSocketLocked();
+}
+
+// Wakes the video reader by shutting its socket down -- unless that socket is shared with a standby lease
+// (preparedSocketShared): then it is left alone (the reader sees stopRequested_ on its next receive tick, <= 100 ms) and
+// only this descriptor is closed later (CloseSocketsUnlocked, after the join).
+void ClientSessionController::ShutdownVideoSocketLocked() {
+  if (udpVideoSocketShared_) return;
+  shutdown_socket(&udpVideoSocket_);
+}
+
+bool ClientSessionController::ConnectTcpControlWithRetry(const ClientSessionConnectArgs& args, std::string* error) {
+  const uint64_t deadlineUs = now_us() + (static_cast<uint64_t>(kTcpControlConnectRetryMs) * 1000ULL);
+  std::string lastError;
+  while (!stopRequested_.load(std::memory_order_acquire)) {
+    if (ConnectTcpControl(args, &lastError)) {
+      if (error) error->clear();
+      return true;
+    }
+    if (now_us() >= deadlineUs) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(kTcpControlConnectRetrySleepMs));
+  }
+  if (error) {
+    *error = lastError.empty() ? "tcp control connect failed" : lastError;
+  }
+  return false;
+}
+
+bool ClientSessionController::ConnectTcpControl(const ClientSessionConnectArgs& args, std::string* error) {
+  SocketHandle connected =
+      connect_first_endpoint(args.host, args.controlPort, SOCK_STREAM, IPPROTO_TCP, error);
+  if (connected == kInvalidSocket) {
+    if (error && error->empty()) *error = "tcp control connect failed";
+    return false;
+  }
+
+  (void)set_tcp_nodelay(connected);
+  (void)set_recv_timeout(connected, kDefaultControlResponseTimeoutMs);
+  if (stopRequested_.load(std::memory_order_acquire)) {
+    close_socket(&connected);
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  if (stopRequested_.load(std::memory_order_acquire)) {
+    close_socket(&connected);
+    return false;
+  }
+  close_socket(&tcpControlSocket_);
+  tcpControlSocket_ = connected;
+  snapshot_.transport.tcpControlConnected = true;
+  return true;
+}
+
+bool ClientSessionController::ConnectUdpVideo(const ClientSessionConnectArgs& args, std::string* error) {
+  SocketHandle connected = kInvalidSocket;
+  if (args.preparedUdpSocket != kInvalidSocket) {
+    // Already punched. connect() only fixes the default peer for send/recv; it leaves the
+    // local binding, and therefore the NAT mapping the host was told about, untouched.
+    connected = args.preparedUdpSocket;
+    addrinfo* results = nullptr;
+    if (!resolve_endpoint(args.host, args.videoPort, SOCK_DGRAM, IPPROTO_UDP, &results, error)) {
+      close_socket(&connected);
+      if (error && error->empty()) *error = "cannot resolve punched host address";
+      return false;
+    }
+    bool bound = false;
+    for (addrinfo* it = results; it != nullptr; it = it->ai_next) {
+      if (connect(connected, it->ai_addr, static_cast<int>(it->ai_addrlen)) == 0) {
+        bound = true;
+        break;
+      }
+    }
+    freeaddrinfo(results);
+    if (!bound) {
+      close_socket(&connected);
+      if (error) *error = "punched socket connect failed";
+      return false;
+    }
+  } else {
+    connected = connect_first_endpoint(args.host, args.videoPort, SOCK_DGRAM, IPPROTO_UDP, error);
+  }
+  if (connected == kInvalidSocket) {
+    if (error && error->empty()) *error = "udp video connect failed";
+    return false;
+  }
+
+  // A single 1080p keyframe arrives as a burst of well over a hundred datagrams. Android's
+  // default UDP receive buffer is around 100 KB, so the tail of that burst was being dropped
+  // by the kernel before the receive thread could drain it, which showed up as the picture
+  // breaking up and then slowly recovering.
+  {
+    int recvBuf = 4 * 1024 * 1024;
+    if (setsockopt(connected, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf),
+                   sizeof(recvBuf)) != 0) {
+      recvBuf = 1024 * 1024;
+      (void)setsockopt(connected, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&recvBuf),
+                       sizeof(recvBuf));
+    }
+  }
+
+  // A directory connect and the host heartbeat are independent HTTP requests. The first
+  // authenticated Hello can therefore reach the host a few milliseconds before its matching
+  // capability. Retry on the already-punched socket instead of turning that harmless race into
+  // the intermittent "connecting -> error" seen by the mobile client. The exchange itself is the
+  // shared udp_hello_handshake (F-09); a failed send stays fatal here (retrySleepMs = 0).
+  UdpHelloOptions hello;
+  hello.authToken = args.peerAuthToken;
+  hello.budgetMs = args.peerAuthToken.empty() ? std::max<uint32_t>(1, args.udpHandshakeTimeoutMs)
+                                              : std::max<uint32_t>(3000, args.udpHandshakeTimeoutMs);
+  hello.requestNack = true;  // ask for selective retransmit (video NACK.)
+  uint32_t ackFeatures = 0;
+  // keepalive-r2 (2): a standby activation replaces the Hello on this socket (the lease's); everything after it is the same
+  const bool admitted = args.udpHandshake ? args.udpHandshake(connected, stopRequested_, error, &ackFeatures)
+                                          : udp_hello_handshake(connected, hello, &stopRequested_, error, &ackFeatures);
+  if (!admitted) {
+    close_socket(&connected);
+    return false;
+  }
+  hostSupportsNack_.store(
+      (ackFeatures & remote60::native_poc::kUdpFeatureVideoNack) != 0, std::memory_order_relaxed);
+
+  // The hello handshake above ran in blocking mode. udp-recv-nonblock r1: now that Hello is done and
+  // BEFORE the receive worker starts, switch the UDP socket to nonblocking (Windows) so the worker uses a
+  // bounded readiness wait instead of a blocking recv + SO_RCVTIMEO (the WSA_IO_PENDING(997) session-end
+  // path). Confirm the switch -- a failure here means the receive model's premise does not hold. POSIX is
+  // a no-op (true) and keeps the SO_RCVTIMEO set above for its blocking recv.
+  (void)set_recv_timeout(connected, kVideoReceiveTimeoutMs);
+  if (!set_udp_nonblocking(connected)) {
+    if (error) *error = "udp video socket could not be set nonblocking";
+    close_socket(&connected);
+    return false;
+  }
+  if (stopRequested_.load(std::memory_order_acquire)) {
+    close_socket(&connected);
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(mu_);
+  if (stopRequested_.load(std::memory_order_acquire)) {
+    close_socket(&connected);
+    return false;
+  }
+  udpVideoSocket_ = connected;
+  udpVideoSocketShared_ = args.preparedUdpSocket != kInvalidSocket && args.preparedSocketShared;
+  snapshot_.transport.udpVideoReady = true;
+  return true;
+}
+
+bool ClientSessionController::CanQueueControlRequestLocked() const {
+  // What matters is that a control link exists, not which transport carries it. Checking the
+  // TCP socket alone silently refused every request once control moved onto the video socket.
+  const bool haveTransport =
+      tcpControlSocket_ != kInvalidSocket ||
+      (controlOverUdp_.load(std::memory_order_acquire) && udpVideoSocket_ != kInvalidSocket);
+  return snapshot_.state == ClientSessionState::Connected &&
+         snapshot_.controlLoopActive && haveTransport;
+}
+
+void ClientSessionController::UpdateConnectedStatusLocked(const std::string& detail) {
+  snapshot_.status = "connected";
+  if (!detail.empty()) {
+    snapshot_.status += " ";
+    snapshot_.status += detail;
+    if (should_append_selected_title(detail)) {
+      snapshot_.status += " selected=";
+      snapshot_.status += snapshot_.selectedWindowTitle;
+    }
+  }
+}
+
+void ClientSessionController::SyncWindowPanelSnapshotLocked(const WindowPanelSnapshot& panelSnapshot) {
+  snapshot_.latestWindowListCount = static_cast<uint32_t>(panelSnapshot.items.size());
+  snapshot_.selectedWindowId = panelSnapshot.selectedId;
+  snapshot_.selectedWindowTitle =
+      panelSnapshot.selectedTitle.empty() ? std::string("desktop") : panelSnapshot.selectedTitle;
+}
+
+void ClientSessionController::ResetUnlocked() {
+  CloseSocketsUnlocked();
+  snapshot_ = ClientSessionSnapshot{};
+  windowPanel_.Reset();
+  decoderRekeyPending_.store(false, std::memory_order_release);
+  owedSelection_ = 0;
+  owedAttempts_ = 0;
+  owedNextUs_ = 0;
+  streamState_.Reset();
+  captureMode_.Reset();
+  keyframeRequests_.Reset();
+  runtimeTune_.Reset(0, 0);
+  desktopBackend_.Reset();
+  {
+    std::lock_guard<std::mutex> lk(backendStatusMu_);
+    backendStatus_ = DesktopBackendStatusSnapshot{};  // capture-lifecycle r1: never carried to the next connection
+  }
+  inputQueue_.Reset();
+  {
+    std::lock_guard<std::mutex> lk(parkMu_);
+    park_.End();
+    heldInput_.Reset();
+    mouseXLedger_.Reset();  // r2: no press record carried into another connection
+  }
+  parkInhibit_.store(false, std::memory_order_release);
+  parkReleased_.store(0, std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lk(thumbMu_);
+    thumbs_.clear();
+    thumbFetchQueue_.clear();
+  }
+  hostSupportsThumbnails_.store(false, std::memory_order_relaxed);
+  hostRole_.Reset();  // r7 H6: unknown again until the next pong (r10: nothing deferred either)
+  localSelectTag_.store(0, std::memory_order_release);  // apk-0232 r1
+  {
+    // A request not sent yet does not survive into another session; an answer already taken stays.
+    std::lock_guard<std::mutex> lk(rebootMu_);
+    rebootPendingId_ = 0;
+    rebootInFlight_ = false;
+    sasPendingId_ = 0;
+  }
+  // Clipboard text sync (K1): a reconnect may be to a different host, so the echo state, the
+  // generation and both mailboxes start clean. The user's on/off choice is NOT reset -- that is a
+  // preference, not session state. (The capability is re-learned from the next pong.)
+  {
+    std::lock_guard<std::mutex> lk(clipMu_);
+    clipCore_.Reset();
+    clipHasPending_ = false;
+    clipPendingText_.clear();
+    clipPendingHash_ = 0;
+    clipHasIncoming_ = false;
+    clipIncomingText_.clear();
+    clipPolicy_ = ClipboardClientPolicy{};
+  }
+  hostSupportsClipboard_.store(false, std::memory_order_relaxed);
+  clipInitialPushWanted_.store(false, std::memory_order_relaxed);
+  sessionBytesReceived_.store(0, std::memory_order_relaxed);
+  controlOverUdp_.store(false, std::memory_order_release);
+  udpControl_.Reset();
+  if (encodedFrameSink_) {
+    encodedFrameSink_->OnVideoStreamReset();
+  }
+  encodedFrameSink_ = nullptr;
+}
+
+void ClientSessionController::CloseSocketsUnlocked() {
+  close_socket(&tcpControlSocket_);
+  close_socket(&udpVideoSocket_);
+  udpVideoSocketShared_ = false;
+}
+
+}  // namespace remote60::native_poc

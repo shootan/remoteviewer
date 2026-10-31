@@ -1,0 +1,40 @@
+﻿exe=C:\work\gnlink-wt\apk-decoder-liveness\build\apps\native_poc\Release\remote60_android_decoder_session_liveness_test.exe
+exe_sha256=B8B4C3200FE4392728C446A53180B55E1C2D6932E8959D8B4E512C1F818D913C
+exit=0
+remote60_android_decoder_session_liveness_test.exe : [native-video-client-session] video receive nack=0 holdUs=0 nonblo
+cking=1
+At line:1 char:1045
++ ... est-Path $exe)){ "missing $exe"; continue }; $o = & $exe 2>&1 | Out-S ...
++                                                       ~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([native-video-c...0 nonblocking=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+android_decoder_session_liveness_test  hold=8000 ms  control budget=24 x 250 ms = 6000 ms
+      [decoder I] updated codec config csd0=9 csd1=8
+PASS  [A] healthy: host -> client control flows (longest silence < 600 ms)  gap=252ms n=12
+PASS  [A] healthy: client -> host control flows (longest silence < 600 ms)  gap=270ms n=12
+      [decoder I] decoder inbox full: oldest frame dropped drops=1
+      [decoder I] decoder inbox full: oldest frame dropped drops=31
+      [decoder I] decoder inbox full: oldest frame dropped drops=61
+      [decoder I] decoder inbox full: oldest frame dropped drops=91
+      [decoder I] decoder inbox full: oldest frame dropped drops=121
+      [decoder I] decoder inbox full: oldest frame dropped drops=151
+      [decoder I] decoder inbox full: oldest frame dropped drops=181
+      [decoder I] decoder inbox full: oldest frame dropped drops=211
+PASS  [B] the codec's create was really held, longer than the control budget  held 8002 ms
+PASS  [B] host -> client control kept flowing while the codec was held (longest silence < 1000 ms)  gap=252ms n=32
+PASS  [B] client -> host control kept flowing (its ACKs came back: longest silence < 1000 ms)  gap=270ms n=31
+PASS  [B] no peer-lost on the host
+PASS  [B] no peer-lost on the client
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=0 remoteUs=11999890 localUs=618082005211 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=25 key=1 ptsUs=618082088543
+      [decoder I] queued h264 frame count=31 bytes=25 key=1 ptsUs=618083088533
+PASS  [C] after the hold the codec takes frames, and its FIRST input is an IDR  queued=45 first=139
+PASS  [C] control still open on both ends
+      [decoder I] video surface cleared
+
+android_decoder_session_liveness_test: 9 checks, 0 failed
+RESULT: PASS
+

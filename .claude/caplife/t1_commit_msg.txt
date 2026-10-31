@@ -1,0 +1,19 @@
+test(safety): the gate self-test's cleanup prunes a link before it would go below it -- a directory junction is never entered (test-injection-finding, Codex avd_guard r3 T1)
+
+8a84198 walked bottom-up (topdown=False) and checked for a link only at each entry: on this
+Windows / Python the walk had already gone inside a directory junction, so the files below it -- in
+a folder outside the run -- were chosen for removal (Codex probe: a sibling's sentinel chosen,
+nothing deleted). Now the walk is top-down and every subfolder is judged BEFORE it is descended
+into: a link (symlink or junction) is pruned from the walk, left in place and said; what remains
+is removed files first, then folders deepest first; a run root that is not a plain folder is not
+touched at all.
+
+Test (root_test 20/20): a REAL junction in the run folder to a sibling of the test's own with a
+sentinel -- with removals recorded (nothing deleted) the pre-fix cleanup (from git, 8a84198)
+chooses the sentinel below the junction, the fixed one chooses only the run's own file; the real
+cleanup then keeps the sentinel and the junction and says the run is not clean; the junction is
+removed as a link (rmdir of itself), the sentinel untouched. The commit message of 8a84198 shows
+its anchor path mangled by a shell escape (D:\remote\remote\.claude\test-tmp is meant); its code
+was right.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

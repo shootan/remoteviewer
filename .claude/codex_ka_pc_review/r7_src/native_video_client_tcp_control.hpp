@@ -1,0 +1,147 @@
+#pragma once
+
+#include <atomic>
+#include <cstdint>
+#include <string>
+#include <vector>
+
+#include "native_socket.hpp"
+#include "native_video_client_shared_core.hpp"
+#include "udp_control_channel.hpp"
+
+namespace remote60::native_poc {
+
+enum class TcpControlResponseKind : uint8_t {
+  None = 0,
+  Pong,
+  WindowList,
+  WindowSelected,
+  InputAck,
+  MonitorList,
+  UnlockChallenge,
+  UnlockAccepted,
+  UnlockStatusResult,
+  ImeStateResponse,
+  RebootReply,  // prelogin-service r3
+  PreloginStatus,  // prelogin-ui r9 R5
+  DesktopBackendStatus,  // capture-lifecycle r1 (UA-2)
+};
+
+struct TcpControlResponse {
+  TcpControlResponseKind kind = TcpControlResponseKind::None;
+  ControlPongMessage pong{};
+  ControlWindowListMessage windowList{};
+  ControlWindowSelectedMessage windowSelected{};
+  ControlInputAckMessage inputAck{};
+  ControlMonitorListMessage monitorList{};
+  ControlUnlockChallengeMessage unlockChallenge{};
+  ControlUnlockAcceptedMessage unlockAccepted{};
+  ControlUnlockStatusResultMessage unlockStatusResult{};
+  ControlImeStateResponseMessage imeStateResponse{};
+  ControlRebootReplyMessage rebootReply{};  // prelogin-service r3
+  ControlPreloginStatusMessage preloginStatus{};  // prelogin-ui r9 R5
+  ControlDesktopBackendStatusMessage desktopBackendStatus{};  // capture-lifecycle r1 (UA-2)
+};
+
+// These take a ControlLink rather than a socket because the same exchange runs over TCP on a
+// LAN and over the hole-punched UDP socket when the host was reached through the directory.
+bool send_control_action(ControlLink& link, const ControlOutboundAction& action);
+// The message type an action puts on the wire (its message's header) -- what a pre-login host's allowlist
+// decides on (prelogin-ui r9). MessageType 0 for None.
+MessageType outbound_message_type(const ControlOutboundAction& action);
+bool recv_control_response(ControlLink& link, const ControlOutboundAction& action,
+                           TcpControlResponse* out);
+bool execute_control_action(ControlLink& link, const ControlOutboundAction& action,
+                            TcpControlResponse* out);
+
+// One thumbnail exchange on the strict request/response control stream (viewer ledger F-09: the
+// Android session and the Windows viewer each spoke this by hand). Asks for `windowId` (0 = the
+// desktop) at most maxWidth x maxHeight, reads the header and the payload. False on a link
+// failure -- the stream is then desynced and the session must drop; true otherwise, with
+// `out->present` saying whether a picture came back. Pixels are left in wire order (BGRA,
+// top-down); a caller whose bitmap wants another order converts them itself.
+struct WindowThumbnailReply {
+  bool present = false;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint64_t version = 0;  // host timestamp; changes when the preview content changes
+  std::vector<uint8_t> bgra;
+};
+bool fetch_window_thumbnail(ControlLink& link, uint64_t windowId, uint32_t maxWidth,
+                            uint32_t maxHeight, uint64_t nowUs, WindowThumbnailReply* out);
+
+// Clipboard text sync (K1). Both ride the same strict request/response control link as the
+// thumbnail fetch, and like it they are only ever called against a host that advertised
+// kCaptureFlagClipboardTextV1 -- an older host would mis-drain the variable payload.
+//
+// send_clipboard_update pushes the viewer's clipboard to the host and waits for its input ack.
+// False means the link failed (the session must drop); true means the host received it.
+bool send_clipboard_update(ControlLink& link, uint32_t seq, const std::u16string& text, uint64_t hash,
+                           uint64_t nowUs);
+
+// poll_clipboard asks whether the host clipboard is newer than knownGeneration and reads the reply
+// (with its text when there is any). False on a link failure; true with `out` filled otherwise.
+struct ClipboardPollReply {
+  bool hasData = false;
+  uint64_t generation = 0;
+  uint64_t hash = 0;
+  std::u16string text;
+  // Paste on demand r4: the host's copy generation (kClipboardDataFlagHostCopyGen), when it sent one.
+  bool hasCopyGen = false;
+  uint32_t copyGen = 0;
+};
+bool poll_clipboard(ControlLink& link, uint64_t knownGeneration, uint64_t nowUs,
+                    ClipboardPollReply* out);
+
+// The UDP video handshake (F-09, same story): Hello until a valid HelloAck or the budget is spent.
+// Valid means the protocol version, the FEC feature and -- when a directory token was sent -- the
+// DirectoryAuth feature that says the host accepted it. The socket's receive timeout is left at the
+// last wait slice; the caller sets what it wants for the stream. `stop` (optional) aborts early.
+/** What the handshake did, for the log. Observation only; nothing reads it to decide. */
+struct UdpHelloStats {
+  uint32_t attempts = 0;     // hellos actually sent
+  uint32_t badAcks = 0;      // answers that came back and were not the ack we needed
+  // hello-delay-fix r1: receives that failed for one item only -- a truncated datagram, or (Windows)
+  // the ICMP reset an earlier send earned. Not answers; counted apart from badAcks.
+  uint32_t recvErrors = 0;
+  // r2: how many times a round read a full batch before its slice ended (and paused, not re-sent).
+  uint32_t fullBatches = 0;
+  uint64_t elapsedMs = 0;    // from the first send to the ack, or to the budget running out
+  bool budgetSpent = false;  // true when the deadline ended it rather than an ack or a stop
+};
+
+struct UdpHelloOptions {
+  std::string authToken;      // capability from /api/connect; empty on the LAN
+  uint32_t budgetMs = 800;    // how long to keep re-sending Hello
+  uint32_t sliceMaxMs = 250;  // one round: a Hello, then this long reading for the ack (hello-delay-fix)
+  uint32_t retrySleepMs = 0;  // pause after a round without the ack, or after a failed send; 0 = no
+                              // pause, and a failed send is fatal
+  bool requestNack = false;   // advertise kUdpFeatureVideoNack in the Hello (video NACK.)
+  // Advertise kUdpFeatureControlResume (item 8). The host offers it to everyone and acts on
+  // it only for a client that asked, so a client that does not set this is never sent a
+  // resume answer -- and, until C3, no client set it at all.
+  bool requestControlResume = false;
+  // Advertise kUdpFeatureBandwidthObserve (C0 stage 1): this client will report bandwidth
+  // observations to a host that acknowledges it.
+  bool requestBandwidthObserve = false;
+  // Advertise kUdpFeatureBulkChannel (clipboard image v1): this viewer routes bulk-stream datagrams
+  // ahead of its control channel. The Android session does not set it.
+  bool requestBulkChannel = false;
+};
+// `outAckFeatures` (optional) receives the host's HelloAck feature bits on success, so the caller
+// learns whether the host supports NACK (kUdpFeatureVideoNack) etc.
+// The HelloAck test every handshake applies (the ordinary Hello's, and -- keepalive-r2 ② r3, Codex scope2 N1 -- a standby
+// activation's, which adds the declared-size check): enough bytes, the magic, a HelloAck, this protocol version, video
+// FEC; DirectoryAuth when the session was authenticated by a directory capability.
+inline bool udp_hello_ack_acceptable(const UdpHelloPacket& ack, int received, bool requireDirectoryAuth) {
+  return received >= static_cast<int>(sizeof(UdpHelloPacket)) && ack.magic == kMagic &&
+         ack.kind == static_cast<uint16_t>(UdpPacketKind::HelloAck) && ack.version == kUdpProtocolVersion &&
+         (ack.features & kUdpFeatureVideoFec) != 0 && (!requireDirectoryAuth || (ack.features & kUdpFeatureDirectoryAuth) != 0);
+}
+
+bool udp_hello_handshake(SocketHandle sock, const UdpHelloOptions& options,
+                         const std::atomic<bool>* stop, std::string* error,
+                         uint32_t* outAckFeatures = nullptr,
+                         UdpHelloStats* outStats = nullptr);
+
+}  // namespace remote60::native_poc

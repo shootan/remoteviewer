@@ -1,0 +1,24 @@
+2026-09-08 11:31:46 NAS
+/opt/gnlink/remote60-directory/logs/shotan/51bd6657-9b5b-41d0-8385-6557d42c3990/:
+-rw-rw-r-- 1 gnlink gnlink  2091108 2026-09-06 20:14:11.924958277 +0900 host.log
+-rw-rw-r-- 1 gnlink gnlink 16780218 2026-09-06 14:27:12.277741178 +0900 host.log.1
+/opt/gnlink/remote60-directory/logs/shotan/68f79d01-d6c4-4a4a-a3ae-69da5be54826/:
+-rw-rw-r-- 1 gnlink gnlink    16031 2026-09-08 11:27:45.597777868 +0900 client.log
+-rw-rw-r-- 1 gnlink gnlink  4143326 2026-09-08 11:31:44.595874380 +0900 viewer.log
+-rw-rw-r-- 1 gnlink gnlink 16780764 2026-09-08 11:12:24.617381283 +0900 viewer.log.1
+-rw-rw-r-- 1 gnlink gnlink 16781850 2026-09-07 18:41:12.237718588 +0900 viewer.log.2
+-rw-rw-r-- 1 gnlink gnlink 16783145 2026-09-07 16:05:58.450694476 +0900 viewer.log.3
+/opt/gnlink/remote60-directory/logs/shotan/8ec6ecb1-11fb-4db3-8127-aea0c5311225/:
+-rw-rw-r-- 1 gnlink gnlink  5243116 2026-09-08 11:31:44.726874622 +0900 host.log
+-rw-rw-r-- 1 gnlink gnlink 16780788 2026-09-08 10:36:55.497181327 +0900 host.log.1
+-rw-rw-r-- 1 gnlink gnlink 16781862 2026-09-05 12:29:50.031517080 +0900 host.log.2
+-rw-rw-r-- 1 gnlink gnlink 16777673 2026-09-04 16:37:58.646806789 +0900 host.log.3
+/opt/gnlink/remote60-directory/logs/shotan/SM-S948N-b7378c/:
+-rw-rw-r-- 1 gnlink gnlink 348804 2026-09-04 23:51:57.548643945 +0900 apk.log
+== journal 11:20-
+Sep 08 11:21:11 CHO node[86932]: [wake] sent=27 suppressed=0 skippedStale=0 failed=0
+Sep 08 11:26:11 CHO node[86932]: [wake] sent=27 suppressed=0 skippedStale=0 failed=0
+Sep 08 11:27:44 CHO node[86932]: [relay] connect=4e6296bd eligible client=211.218.222.1:56584 host=shotan Desktop@175.207.45.151:43000
+Sep 08 11:27:44 CHO node[86932]: [wake] connect=4e6296bd tx host=192.168.0.1:43000 (advertised 175.207.45.151:43000)
+Sep 08 11:27:44 CHO node[86932]: [relay] connect=4e6296bd punch from 211.218.222.1:56584; answering in 2500ms x3
+Sep 08 11:31:11 CHO node[86932]: [wake] sent=28 suppressed=0 skippedStale=0 failed=0

@@ -1,0 +1,1 @@
+{"repo_path":"D:/remote/remote","message":"docs(agents): distinguish task handoff from turn completion\n\nRecord observed UI work stalls and the separate GMux runtime fix. Require real initial delegation and subsequent execution, preserve user pause, and distinguish tested source from runtime activation. No GNLink product or deployment changes."}

@@ -1,0 +1,56 @@
+PASS  a scratch root inside the repository
+PASS  a sentinel directory outside the scratch root, inside the repository -- D:\remote\remote\.claude\worktrees\verify-c2-ef533f2\build-verify\test-scratch-sentinel-17284
+PASS  ...which the scratch boundary refuses to remove
+
+--- gone means gone ---
+PASS  a path that does not exist is gone (FILE_NOT_FOUND) -- 0
+PASS  a path beneath a missing directory is gone (PATH_NOT_FOUND) -- 2
+PASS  the root, which exists, is not gone
+PASS  a malformed path (bad name) is NOT gone: its attributes are unreadable, which is a different thing -- 0
+
+--- keep: the directory outlives the object ---
+PASS  created
+PASS  ...inside this run's scratch directory
+PASS  Remove() on a kept directory returns false and leaves it
+KEPT  staging directory D:\remote\remote\.claude\worktrees\verify-c2-ef533f2\build-verify\test-scratch\run-17284-19065749107923-0\keep-1\: --keep-dir
+PASS  ...and it is still there after the object is gone
+PASS  ...until removed through the boundary
+
+--- the tidy path: files, a subdirectory, a junction out ---
+PASS  created
+PASS  a junction inside it that points at the sentinel
+PASS  ...through which the sentinel is visible
+PASS  Remove() removes the directory
+PASS  ...it is gone
+PASS  THE SENTINEL BEHIND THE JUNCTION SURVIVES
+PASS  removed() reports it, why() is empty
+PASS  Remove() again is a harmless yes
+
+--- a name already taken is never adopted ---
+PASS  probe directory made -- D:\remote\remote\.claude\worktrees\verify-c2-ef533f2\build-verify\test-scratch\run-17284-19065749107923-0\pre-3
+PASS  the next name is pre-made by 'somebody else' -- D:\remote\remote\.claude\worktrees\verify-c2-ef533f2\build-verify\test-scratch\run-17284-19065749107923-0\pre-4
+PASS  Create() still succeeds
+PASS  ...on a DIFFERENT directory, not the one already there -- D:\remote\remote\.claude\worktrees\verify-c2-ef533f2\build-verify\test-scratch\run-17284-19065749107923-0\pre-5
+PASS  Remove() removes only its own
+PASS  the pre-made directory and its contents are untouched
+PASS  (cleanup) the pre-made directory goes through the boundary
+PASS  (cleanup) the probe too
+
+--- the start point replaced by a junction ---
+PASS  created
+PASS  the directory is swapped for a junction to the sentinel
+PASS  ...through which the sentinel is visible
+      Remove() -> true ()
+PASS  THE SENTINEL SURVIVES: the junction was removed as a link (or refused), never entered
+PASS  no file inside the sentinel directory was touched
+
+--- a failure is reported, not discarded ---
+PASS  created
+PASS  a file inside it is held open without sharing
+PASS  Remove() (2 attempts) fails and says why -- staging directory not removed (D:\remote\remote\.claude\worktrees\verify-c2-ef533f2\build-verify\test-scratch\run-17284-19065749107923-0\held-7, attributes error 0)
+PASS  ...and the directory is still there
+PASS  once released, Remove() succeeds
+PASS  (cleanup) this run's scratch directory is removed
+PASS  (cleanup) the sentinel, by this test, with plain calls
+
+RESULT: ALL PASS  (40 checks, 0 failed)

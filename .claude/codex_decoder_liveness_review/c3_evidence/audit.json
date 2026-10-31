@@ -1,0 +1,60 @@
+{
+  "run": "C:\\work\\gnlink-wt\\feat-apk-0233\\.claude\\e2e\\runs\\c3-shoff-v-20261030073538-28856",
+  "hashes": {
+    "slot.txt": "aa55aade7340e744e35812762b7b6b174154b07207f10301aeafd42ba62107ae",
+    "fixture_result.txt": "7ef9cfec6f92541c457db54a3039f78bd1a8c21454053611852b046e8d46bab1",
+    "avd/steps.txt": "782394a56cad452fc7a4ef56f45fe6d2635dde73e1585ed2053dcf6252d4e5fd",
+    "avd/result.json": "8f2b450eb10b7229ae93397e21a1fbe171e8731232b54c8e3d1f62b90a15f1b0",
+    "avd/app_final.log": "594f068120d08e7b933f9837bc50ec32df33643881ed1d820f38b1f6fe442c24",
+    "avd/logcat.txt": "a6ac6ca35c673d11da0b8bffbfc435523655e999ebd8f8a6845874b46d6de2f1",
+    "a/directoryhost_host.log": "d7898b43c708df94bef012d2f17c59a5a4451287e022d0d27a1890f81297f059",
+    "dir/server.stdout.txt": "826985ebbdb6d169673b8eeb3dd5ca9ae66221f848872ea6cc21c5be07dc24b7"
+  },
+  "segment_ms": 122928,
+  "video_sample_span_ms": 122482,
+  "video_rows": 172,
+  "out_delta": 1333,
+  "in_delta": 1333,
+  "decoder_out_per_sec": 10.883231821818717,
+  "out_monotonic": true,
+  "host_key_requests": 101,
+  "host_unique_key_requests": 101,
+  "keyWant_delta": {
+    "ovs": 0,
+    "ovf": 674,
+    "gap": 0,
+    "await": 0,
+    "pend": 8,
+    "abort": 0,
+    "up": 0
+  },
+  "drop_reconciliation": {
+    "total": 1420,
+    "gap_subset": 580,
+    "markloss_trim_subset": 10,
+    "overflow_subset": 830,
+    "overflow_events": 94,
+    "bulk_events": 92,
+    "bulk_lost": 828,
+    "tail_events": 2,
+    "tail_lost": 2
+  },
+  "host_config_sets": {
+    "fpsTarget": [
+      "30"
+    ],
+    "bitrateTarget": [
+      "1500000"
+    ],
+    "abrProfile": [
+      "high"
+    ],
+    "abrOverride": [
+      "0"
+    ],
+    "encoderResets": [
+      "0"
+    ]
+  },
+  "note": "Host encodedFrames/sentFrames are interval counters, not a monotonic cumulative series; no end-minus-start rate inferred."
+}

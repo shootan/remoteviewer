@@ -1,0 +1,180 @@
+{
+  "rev": "98d71efca956f07d24009c8baa5416f2e5424a29",
+  "scope": "actual parser AST, synthetic dumpsys strings, no process/adb/device",
+  "files": {
+    "automation/old_apk_lane/oa_avd.py": "39a0d515a03341e4e6f8b88f38dd3a23b5d558fb053d30b060bc810b71a39cdc",
+    "automation/old_apk_lane/oa_pick_test.py": "0decb28628764745a8a4a16af42c55a8bf0b38f4f2c58e829008caed2b1b1ced",
+    "automation/old_apk_lane/stubs/fake_ui_adb.py": "3dd6a073290274e7e65564ce551213d7f157e1f4d1025630a8eb28dd7def7465"
+  },
+  "patch_sha256": "c92b40e86664276d6829cfdb8074e350af745fc9df552b5b7cb062f80b9fba36",
+  "checks": [
+    {
+      "mode": "original",
+      "case": "all hidden",
+      "got": "hidden",
+      "expected": "hidden",
+      "pass": true
+    },
+    {
+      "mode": "original",
+      "case": "internal only",
+      "got": "hidden",
+      "expected": "hidden",
+      "pass": true
+    },
+    {
+      "mode": "original",
+      "case": "public true contradiction",
+      "got": "hidden",
+      "expected": "shown",
+      "pass": false
+    },
+    {
+      "mode": "original",
+      "case": "system true",
+      "got": "shown",
+      "expected": "shown",
+      "pass": true
+    },
+    {
+      "mode": "original",
+      "case": "window true",
+      "got": "shown",
+      "expected": "shown",
+      "pass": true
+    },
+    {
+      "mode": "original",
+      "case": "decor true",
+      "got": "shown",
+      "expected": "shown",
+      "pass": true
+    },
+    {
+      "mode": "original",
+      "case": "only system false",
+      "got": "unknown",
+      "expected": "unknown",
+      "pass": true
+    },
+    {
+      "mode": "original",
+      "case": "missing system",
+      "got": "unknown",
+      "expected": "unknown",
+      "pass": true
+    },
+    {
+      "mode": "original",
+      "case": "missing window",
+      "got": "unknown",
+      "expected": "unknown",
+      "pass": true
+    },
+    {
+      "mode": "original",
+      "case": "missing decor",
+      "got": "unknown",
+      "expected": "unknown",
+      "pass": true
+    },
+    {
+      "mode": "original",
+      "case": "no flags",
+      "got": "unknown",
+      "expected": "unknown",
+      "pass": true
+    },
+    {
+      "mode": "original",
+      "case": "conflict",
+      "got": "shown",
+      "expected": "shown",
+      "pass": true
+    },
+    {
+      "mode": "fixed",
+      "case": "all hidden",
+      "got": "hidden",
+      "expected": "hidden",
+      "pass": true
+    },
+    {
+      "mode": "fixed",
+      "case": "internal only",
+      "got": "hidden",
+      "expected": "hidden",
+      "pass": true
+    },
+    {
+      "mode": "fixed",
+      "case": "public true contradiction",
+      "got": "shown",
+      "expected": "shown",
+      "pass": true
+    },
+    {
+      "mode": "fixed",
+      "case": "system true",
+      "got": "shown",
+      "expected": "shown",
+      "pass": true
+    },
+    {
+      "mode": "fixed",
+      "case": "window true",
+      "got": "shown",
+      "expected": "shown",
+      "pass": true
+    },
+    {
+      "mode": "fixed",
+      "case": "decor true",
+      "got": "shown",
+      "expected": "shown",
+      "pass": true
+    },
+    {
+      "mode": "fixed",
+      "case": "only system false",
+      "got": "unknown",
+      "expected": "unknown",
+      "pass": true
+    },
+    {
+      "mode": "fixed",
+      "case": "missing system",
+      "got": "unknown",
+      "expected": "unknown",
+      "pass": true
+    },
+    {
+      "mode": "fixed",
+      "case": "missing window",
+      "got": "unknown",
+      "expected": "unknown",
+      "pass": true
+    },
+    {
+      "mode": "fixed",
+      "case": "missing decor",
+      "got": "unknown",
+      "expected": "unknown",
+      "pass": true
+    },
+    {
+      "mode": "fixed",
+      "case": "no flags",
+      "got": "unknown",
+      "expected": "unknown",
+      "pass": true
+    },
+    {
+      "mode": "fixed",
+      "case": "conflict",
+      "got": "shown",
+      "expected": "shown",
+      "pass": true
+    }
+  ]
+}

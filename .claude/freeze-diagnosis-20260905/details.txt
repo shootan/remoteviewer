@@ -1,0 +1,48 @@
+﻿LATEST REQUEST CORRELATION {'reason2': 90, 'adjacent_completed_key_with_gap': 90} unmatched []
+KEY REQUEST NEIGHBORHOOD sample
+17274 09-05 15:44:45.481 [native-video-client][present] seq=131 frameGapUs=15966
+17275 09-05 15:44:45.540 [native-video-client][telemetry] stage=assembly seq=133 gen=2 key=1 lastChunkRecvUs=187944621639 bytes=296244 fecRecovered=0 fecRecoveredChunks=0 reorder=0 droppedPrev=1
+17276 09-05 15:44:45.542 [native-video-client][control] keyframe-request seq=1 reason=2
+17277 09-05 15:44:45.558 [native-video-client][telemetry] stage=decode seq=133 gen=2 key=1 recvUs=187944621639 decodeStartUs=187944621692 decodeEndUs=187944640388 decodeUs=18696 r2dUs=53 decodeQueueLagUs=227959 pts=586420902597
+17278 09-05 15:44:45.576 [native-video-client][present] seq=133 frameGapUs=93944
+17279 09-05 15:44:45.576 [native-video-client][telemetry] stage=present seq=133 gen=2 key=1 presentUs=187944657253 presentedIntervalUs=93944 presentBacklog=0 paintUs=335 totalUs=0
+17495 09-05 15:44:56.966 [native-video-client] udp-assembly chunks=278 completed=6 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+17496 09-05 15:44:56.989 [native-video-client][telemetry] stage=assembly seq=256 gen=2 key=1 lastChunkRecvUs=187956071800 bytes=297102 fecRecovered=0 fecRecoveredChunks=0 reorder=0 droppedPrev=1
+17497 09-05 15:44:57.005 [native-video-client][control] keyframe-request seq=2 reason=2
+17498 09-05 15:44:57.011 [native-video-client][telemetry] stage=decode seq=256 gen=2 key=1 recvUs=187956071800 decodeStartUs=187956071895 decodeEndUs=187956092141 decodeUs=20246 r2dUs=95 decodeQueueLagUs=0 pts=586432353792
+17499 09-05 15:44:57.011 [native-video-client] recvFrames=7 decodedFrames=7 syntheticFrames=0 skippedQueued=0 avgLatencyUs=29782 maxLatencyUs=101117 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=4.49418 decodedRawMbps=175.473 decodeRatioX100=3904 size=1920x1080 codedSize=1920x1088 congestionState=normal congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSampl
+17500 09-05 15:44:57.020 [native-video-client][present] seq=256 frameGapUs=435475
+LOSS vs KEY REQUEST summaries (15:45 dense motion)
+18604 09-05 15:45:45.834 [native-video-client] udp-assembly chunks=1966 completed=41 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+18663 09-05 15:45:46.834 [native-video-client] udp-assembly chunks=3031 completed=58 dropped=2 dropPm=33 malformed=0 reorder=0 keyReq=2 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+18717 09-05 15:45:47.833 [native-video-client] udp-assembly chunks=3044 completed=58 dropped=1 dropPm=16 malformed=0 reorder=0 keyReq=1 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+18767 09-05 15:45:48.833 [native-video-client] udp-assembly chunks=3210 completed=60 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+18823 09-05 15:45:49.848 [native-video-client] udp-assembly chunks=2993 completed=61 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+18871 09-05 15:45:50.850 [native-video-client] udp-assembly chunks=3098 completed=60 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+18924 09-05 15:45:51.836 [native-video-client] udp-assembly chunks=3092 completed=60 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+18974 09-05 15:45:52.834 [native-video-client] udp-assembly chunks=2874 completed=56 dropped=2 dropPm=34 malformed=0 reorder=0 keyReq=2 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+19037 09-05 15:45:53.851 [native-video-client] udp-assembly chunks=3199 completed=60 dropped=1 dropPm=16 malformed=0 reorder=0 keyReq=1 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+19086 09-05 15:45:54.834 [native-video-client] udp-assembly chunks=3094 completed=60 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+19132 09-05 15:45:55.882 [native-video-client] udp-assembly chunks=2584 completed=54 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+19173 09-05 15:45:56.835 [native-video-client] udp-assembly chunks=2589 completed=48 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+19221 09-05 15:45:57.836 [native-video-client] udp-assembly chunks=2570 completed=53 dropped=1 dropPm=18 malformed=0 reorder=0 keyReq=1 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+19272 09-05 15:45:58.835 [native-video-client] udp-assembly chunks=3322 completed=58 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+19327 09-05 15:45:59.834 [native-video-client] udp-assembly chunks=2974 completed=59 dropped=1 dropPm=16 malformed=0 reorder=0 keyReq=1 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+19380 09-05 15:46:00.834 [native-video-client] udp-assembly chunks=3120 completed=60 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+19432 09-05 15:46:01.833 [native-video-client] udp-assembly chunks=3069 completed=59 dropped=1 dropPm=16 malformed=0 reorder=0 keyReq=1 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+19489 09-05 15:46:02.841 [native-video-client] udp-assembly chunks=2474 completed=49 dropped=2 dropPm=39 malformed=0 reorder=0 keyReq=2 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+19543 09-05 15:46:03.842 [native-video-client] udp-assembly chunks=2761 completed=57 dropped=1 dropPm=17 malformed=0 reorder=0 keyReq=1 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+19592 09-05 15:46:04.991 [native-video-client] udp-assembly chunks=2576 completed=50 dropped=1 dropPm=19 malformed=0 reorder=0 keyReq=1 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+19638 09-05 15:46:05.861 [native-video-client] udp-assembly chunks=1528 completed=31 dropped=1 dropPm=31 malformed=0 reorder=0 keyReq=1 fecRecovered=0 simDropPm=0 simDropTotal=0 waitForKey=0 catchup=0
+HOST START HEAD
+2627 09-05 15:26:13.717 [native-video-host] latency-priority processAboveNormal=1 mainThreadAboveNormal=1
+2628 09-05 15:26:13.718 [native-video-host] waiting client bindPort=43000,3478 transport=udp fps=30 bitrate=8000000 seconds=0
+2629 09-05 15:26:13.718 [native-video-host] h264 pacing=on udpPacePeakPercent=500 udpPacePeakBps=40000000 udpPacePeakFloorBps=40000000 udpKeyframePacePeakBps=100000000 stalePreEncodeGuard=0 capturePoolBuffers=2 encoderTuneMode=low_latency abr=on abrMode=default frameGating=on staticSceneFps=8 gatingStaticPm=6 m9=off m9Mode=dry-run keyReqMinUs=120000 keyReqBucketCap=3 captureInputMinPushPerSec=10 captureInputStallSec=3 captureInputWarmupSec=4 captureIdlePollIntervalUs=33333 queueWaitTimeoutUs=8333
+2630 09-05 15:26:13.718 [native-video-host] input injection enabled mode=background_message targetPid=0 targetProcess= targetTitle=
+2631 09-05 15:26:13.719 [native-video-host] udp bound port=43000
+2632 09-05 15:26:13.719 [native-video-host] lan direct-dial listener port=3478
+2633 09-05 15:26:13.721 [native-video-host] directory agent started url=http://175.209.236.194:29180
+2634 09-05 15:26:13.976 [directory] advertising localPort=43000 altPort=3478 localIps=192.168.0.76,172.18.0.1,172.30.80.1
+2635 09-05 15:26:13.988 [native-video-host] directory online public=175.209.236.194:43000
+HOST sample per-frame stage times
+5379 09-05 15:48:29.442 {'seq': '3945', 'key': '0', 'captureToQueueUs': '1000131', 'captureUnmapWaitUs': '499824', 'captureD3DWaitUs': '0', 'captureCopyMapUs': '171', 'captureUnmapUs': '17', 'captureMemcpyUs': '970', 'encUs': '3416', 'scaleUs': '0', 'queueToEncodeUs': '1461', 'preEncodePrepUs': '3333', 'auCaptureUs': '586643400308', 'encodeInputUs': '586643912292', 'captureToAuSkewUs': '511984'}

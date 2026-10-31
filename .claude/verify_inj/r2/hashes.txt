@@ -1,0 +1,14 @@
+﻿5885AFC8D48462D3D491B7A553D37293FA4A3E6D23800DCD9D637562A5F5F029  D:\remote\remote\.claude\worktrees\verify-inj-b8\build-verify\apps\native_poc\Release\GNLinkCapture.exe
+BCDC5FEE91A4D5E5C26E9E6EF5B22F4A0E72609E74AE48C25D25D82DFDBAD59A  D:\remote\remote\.claude\worktrees\verify-inj-b8\build-verify\apps\native_poc\Release\GNLinkStream.exe
+FFEDCFD7795D4E3BD507508A579B3DEEEBF18155482CFDB44D658ECFF9779715  D:\remote\remote\.claude\worktrees\verify-inj-b8\build-verify\apps\native_poc\Release\GNLinkStreamInputRecordTest.exe
+9087A81DB35FFC0D46253A6BE63818779546EA9D02FFDBA8E841D5ABFE03267B  D:\remote\remote\.claude\worktrees\verify-inj-b8\build-verify\apps\native_poc\Release\GNLinkStreamMigrationTest.exe
+9F2D1C64099A904C1ECE7F60BC4ACA13FB662CB306E24D1A1A94517A96EBA6A9  D:\remote\remote\.claude\worktrees\verify-inj-b8\build-verify\apps\native_poc\Release\remote60_android_session_reboot_e2e_test.exe
+AA81690DF8C0894CC8D9EC45BF56885F3565E381E8F7CAAD6F5A44B2628739B9  D:\remote\remote\.claude\worktrees\verify-inj-b8\build-verify\apps\native_poc\Release\remote60_bwe_observe_e2e_test.exe
+53CEFE31219234C12FB03A0549D9124F0795D30340D37874448DED83661AB8C3  D:\remote\remote\.claude\worktrees\verify-inj-b8\build-verify\apps\native_poc\Release\remote60_host_control_deadline_e2e_test.exe
+9F27873BA27C7BAE28433CC7A1119426F9F73BF1B5DE5C138F47B52114588963  D:\remote\remote\.claude\worktrees\verify-inj-b8\build-verify\apps\native_poc\Release\remote60_host_fatal_exception_test.exe
+E989C9E3223DFE5F2124BAF43121A149F6762B6C17092FA6919C9BEF6D54EC1F  D:\remote\remote\.claude\worktrees\verify-inj-b8\build-verify\apps\native_poc\Release\remote60_host_migration_e2e_test.exe
+2AF3D7A84FF48755712514AD7A50D47573A6FB7A13508F6F16FAB2CDA8FD1C58  D:\remote\remote\.claude\worktrees\verify-inj-b8\build-verify\apps\native_poc\Release\remote60_host_punch_reply_e2e_test.exe
+6FF99336FD65D082F65C9F958339BFE154D7F84C465901A90B5FDADEE6A20D82  D:\remote\remote\.claude\worktrees\verify-inj-b8\build-verify\apps\native_poc\Release\remote60_host_reboot_delegate_e2e_test.exe
+3EC1F4DAD941F216DA325C5EC72059479008D9B34E00C5C8C4CA7F56E4F56E3B  D:\remote\remote\.claude\worktrees\verify-inj-b8\build-verify\apps\native_poc\Release\remote60_host_standby_admission_e2e_test.exe
+0CE77B9F318178BD52B30AD6CF70FA9A64CA74E5C0B5489A12589E28B6AADDF4  D:\remote\remote\.claude\worktrees\verify-inj-b8\build-verify\apps\native_poc\Release\remote60_host_two_dispatcher_e2e_test.exe
+E676405FAF2225213CF712A209F2004DF725EDC374A4E9891CDE9F4EA1043948  D:\remote\remote\.claude\worktrees\verify-inj-b8\build-verify\apps\native_poc\Release\remote60_os_input_record_e2e_test.exe

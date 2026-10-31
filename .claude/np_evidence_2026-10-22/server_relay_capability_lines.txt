@@ -1,0 +1,1630 @@
+Oct 09 16:46:02 [capability] connect=7015180b minted host=df15b73b queued=1 ttlMs=30000
+Oct 09 16:46:02 [relay] connect=7015180b eligible client=106.240.162.249:45897 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 09 16:46:02 [relay] connect=7015180b punch from 106.240.162.249:45897; answering in 2500ms x3
+Oct 09 16:49:42 [capability] connect=cb661bf0 minted host=df15b73b queued=1 ttlMs=30000
+Oct 09 16:49:42 [relay] connect=cb661bf0 eligible client=106.240.162.249:53140 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 09 16:49:42 [relay] connect=cb661bf0 punch from 106.240.162.249:53140; answering in 2500ms x3
+Oct 09 16:52:57 [capability] connect=0e43a5ff minted host=df15b73b queued=1 ttlMs=30000
+Oct 09 16:52:57 [relay] connect=0e43a5ff eligible client=106.240.162.249:57004 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 09 16:52:57 [relay] connect=0e43a5ff punch from 106.240.162.249:57004; answering in 2500ms x3
+Oct 09 16:53:00 [capability] connect=1ceb1043 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 09 16:53:00 [relay] connect=1ceb1043 eligible client=106.240.162.249:45958 host=shotan Desktop@175.207.45.151:43000
+Oct 09 16:53:00 [relay] connect=1ceb1043 punch from 106.240.162.249:45958; answering in 2500ms x3
+Oct 09 16:53:03 [relay] connect=1ceb1043 bound client=106.240.162.249:45958 host=192.168.0.76:43000
+Oct 09 16:53:03 [relay] connect=1ceb1043 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 09 16:53:03 [relay] connect=1ceb1043 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 09 16:53:03 [relay] connect=1ceb1043 active; helloAck in 1ms
+Oct 09 17:04:25 [capability] connect=8e485a2f minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 09 17:04:25 [relay] connect=8e485a2f eligible client=106.240.162.249:57156 host=Home@175.207.45.151:42342
+Oct 09 17:04:25 [relay] connect=8e485a2f punch from 106.240.162.249:57156; answering in 2500ms x3
+Oct 09 17:04:28 [relay] connect=8e485a2f bound client=106.240.162.249:57156 host=192.168.0.16:43000
+Oct 09 17:04:28 [relay] connect=8e485a2f first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=1
+Oct 09 17:04:28 [relay] connect=8e485a2f first h2c <- 192.168.0.16:43000 afterBindMs=1 afterFirstC2HMs=0
+Oct 09 17:04:28 [relay] connect=8e485a2f active; helloAck in 1ms
+Oct 09 17:05:27 [relay] connect=1ceb1043 closed reason=client silent state=active c2h=5517/622725B h2c=62165/65371584B ackMs=1
+Oct 09 17:05:47 [capability] connect=605388a6 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 09 17:05:47 [relay] connect=605388a6 eligible client=106.240.162.249:53326 host=Home@175.207.45.151:42342
+Oct 09 17:05:47 [relay] connect=605388a6 punch from 106.240.162.249:53326; answering in 2500ms x3
+Oct 09 17:05:50 [relay] connect=8e485a2f closed reason=newer connect state=active c2h=576/58965B h2c=3191/3181236B ackMs=1
+Oct 09 17:05:50 [relay] connect=605388a6 bound client=106.240.162.249:53326 host=192.168.0.16:43000
+Oct 09 17:05:50 [relay] connect=605388a6 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 09 17:05:50 [relay] connect=605388a6 first h2c <- 192.168.0.16:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 09 17:05:50 [relay] connect=605388a6 active; helloAck in 0ms
+Oct 09 17:06:05 [capability] connect=20792d19 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 09 17:06:05 [relay] connect=20792d19 eligible client=106.240.162.249:55970 host=Home@175.207.45.151:42342
+Oct 09 17:06:05 [relay] connect=20792d19 punch from 106.240.162.249:55970; answering in 2500ms x3
+Oct 09 17:06:08 [relay] connect=605388a6 closed reason=newer connect state=active c2h=26/2457B h2c=531/611798B ackMs=0
+Oct 09 17:06:08 [relay] connect=20792d19 bound client=106.240.162.249:55970 host=192.168.0.16:43000
+Oct 09 17:06:08 [relay] connect=20792d19 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 09 17:06:08 [relay] connect=20792d19 first h2c <- 192.168.0.16:43000 afterBindMs=64 afterFirstC2HMs=64
+Oct 09 17:06:08 [relay] connect=20792d19 active; helloAck in 64ms
+Oct 09 17:06:25 [capability] connect=0c3923d6 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 09 17:06:25 [relay] connect=0c3923d6 eligible client=106.240.162.249:45959 host=shotan Desktop@175.207.45.151:43000
+Oct 09 17:06:25 [relay] connect=0c3923d6 punch from 106.240.162.249:45959; answering in 2500ms x3
+Oct 09 17:06:28 [relay] connect=0c3923d6 bound client=106.240.162.249:45959 host=192.168.0.76:43000
+Oct 09 17:06:28 [relay] connect=0c3923d6 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 09 17:06:28 [relay] connect=0c3923d6 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 09 17:06:28 [relay] connect=0c3923d6 active; helloAck in 1ms
+Oct 09 17:07:12 [relay] connect=20792d19 closed reason=client silent state=active c2h=41/3970B h2c=784/902026B ackMs=64
+Oct 09 17:25:57 [capability] connect=eca9ed4b minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 09 17:25:57 [relay] connect=eca9ed4b eligible client=106.240.162.249:45665 host=Home@175.207.45.151:42342
+Oct 09 17:25:57 [relay] connect=eca9ed4b punch from 106.240.162.249:45665; answering in 2500ms x3
+Oct 09 17:25:59 [relay] connect=eca9ed4b bound client=106.240.162.249:45665 host=192.168.0.16:43000
+Oct 09 17:25:59 [relay] connect=eca9ed4b first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 09 17:25:59 [relay] connect=eca9ed4b first h2c <- 192.168.0.16:43000 afterBindMs=78 afterFirstC2HMs=78
+Oct 09 17:25:59 [relay] connect=eca9ed4b active; helloAck in 78ms
+Oct 09 17:26:30 [capability] connect=c2349e57 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 09 17:26:30 [relay] connect=c2349e57 eligible client=106.240.162.249:56758 host=Home@175.207.45.151:42342
+Oct 09 17:26:30 [relay] connect=c2349e57 punch from 106.240.162.249:56758; answering in 2500ms x3
+Oct 09 17:26:32 [relay] connect=eca9ed4b closed reason=newer connect state=active c2h=36/3537B h2c=2588/2986812B ackMs=78
+Oct 09 17:26:32 [relay] connect=c2349e57 bound client=106.240.162.249:56758 host=192.168.0.16:43000
+Oct 09 17:26:32 [relay] connect=c2349e57 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 09 17:26:32 [relay] connect=c2349e57 first h2c <- 192.168.0.16:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 09 17:26:32 [relay] connect=c2349e57 active; helloAck in 1ms
+Oct 09 17:26:57 [relay] connect=0c3923d6 closed reason=client silent state=active c2h=11071/1246825B h2c=92830/95372497B ackMs=1
+Oct 09 17:26:58 [capability] connect=5a10ed22 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 09 17:26:58 [relay] connect=5a10ed22 eligible client=106.240.162.249:52612 host=shotan Desktop@175.207.45.151:43000
+Oct 09 17:26:58 [relay] connect=5a10ed22 punch from 106.240.162.249:52612; answering in 2500ms x3
+Oct 09 17:27:01 [relay] connect=5a10ed22 bound client=106.240.162.249:52612 host=192.168.0.76:43000
+Oct 09 17:27:01 [relay] connect=5a10ed22 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 09 17:27:01 [relay] connect=5a10ed22 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 09 17:27:01 [relay] connect=5a10ed22 active; helloAck in 1ms
+Oct 09 17:28:02 [relay] connect=c2349e57 closed reason=client silent state=active c2h=250/25613B h2c=8279/9602383B ackMs=1
+Oct 09 17:28:32 [relay] connect=5a10ed22 closed reason=client silent state=active c2h=485/53593B h2c=5276/5610937B ackMs=1
+Oct 10 17:10:19 [capability] connect=e3f8e180 minted host=df15b73b queued=1 ttlMs=30000
+Oct 10 17:10:19 [relay] connect=e3f8e180 eligible client=175.209.195.154:58022 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 10 17:10:19 [relay] connect=e3f8e180 punch from 175.209.195.154:58022; answering in 2500ms x3
+Oct 10 19:51:56 [capability] connect=e2e55ff2 minted host=df15b73b queued=1 ttlMs=30000
+Oct 10 19:51:56 [relay] connect=e2e55ff2 eligible client=118.235.73.170:23929 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 10 19:51:56 [relay] connect=e2e55ff2 punch from 118.235.73.170:23929; answering in 2500ms x3
+Oct 11 01:26:59 [capability] connect=cd0ad6c5 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 01:26:59 [relay] connect=cd0ad6c5 eligible client=175.209.195.154:50104 host=shotan Desktop@175.207.45.151:43000
+Oct 11 01:26:59 [relay] connect=cd0ad6c5 punch from 175.209.195.154:50104; answering in 2500ms x3
+Oct 11 01:29:27 [capability] connect=fdace431 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 11 01:29:27 [relay] connect=fdace431 eligible client=175.209.195.154:50102 host=Home@175.207.45.151:6564
+Oct 11 01:29:27 [relay] connect=fdace431 punch from 175.209.195.154:50102; answering in 2500ms x3
+Oct 11 01:29:29 [relay] connect=fdace431 bound client=175.209.195.154:50102 host=192.168.0.16:43000
+Oct 11 01:29:29 [relay] connect=fdace431 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 11 01:29:29 [relay] connect=fdace431 first h2c <- 192.168.0.16:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 11 01:29:29 [relay] connect=fdace431 active; helloAck in 1ms
+Oct 11 01:30:04 [capability] connect=2e9d7fa5 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 01:30:04 [relay] connect=2e9d7fa5 eligible client=175.209.195.154:37825 host=shotan Desktop@175.207.45.151:43000
+Oct 11 01:30:04 [relay] connect=2e9d7fa5 punch from 175.209.195.154:37825; answering in 2500ms x3
+Oct 11 01:30:13 [capability] connect=c15a8bda minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 01:30:13 [relay] connect=c15a8bda eligible client=175.209.195.154:42110 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 01:30:13 [relay] connect=c15a8bda punch from 175.209.195.154:42110; answering in 2500ms x3
+Oct 11 01:31:02 [relay] connect=fdace431 closed reason=client silent state=active c2h=354/39277B h2c=12286/13922406B ackMs=1
+Oct 11 01:31:21 [capability] connect=4b54b29d minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 11 01:31:21 [relay] connect=4b54b29d eligible client=175.209.195.154:49583 host=Home@175.207.45.151:6564
+Oct 11 01:31:21 [relay] connect=4b54b29d punch from 175.209.195.154:49583; answering in 2500ms x3
+Oct 11 01:31:23 [relay] connect=4b54b29d bound client=175.209.195.154:49583 host=192.168.0.16:43000
+Oct 11 01:31:23 [relay] connect=4b54b29d first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 11 01:31:23 [relay] connect=4b54b29d first h2c <- 192.168.0.16:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 11 01:31:23 [relay] connect=4b54b29d active; helloAck in 1ms
+Oct 11 01:32:10 [capability] connect=514b720d minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 11 01:32:10 [relay] connect=514b720d eligible client=175.209.195.154:35096 host=Home@175.207.45.151:6564
+Oct 11 01:32:10 [relay] connect=514b720d punch from 175.209.195.154:35096; answering in 2500ms x3
+Oct 11 01:32:13 [relay] connect=4b54b29d closed reason=newer connect state=active c2h=542/63481B h2c=11141/12551774B ackMs=1
+Oct 11 01:32:13 [relay] connect=514b720d bound client=175.209.195.154:35096 host=192.168.0.16:43000
+Oct 11 01:32:13 [relay] connect=514b720d first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=1
+Oct 11 01:32:13 [relay] connect=514b720d first h2c <- 192.168.0.16:43000 afterBindMs=1 afterFirstC2HMs=0
+Oct 11 01:32:13 [relay] connect=514b720d active; helloAck in 1ms
+Oct 11 01:32:20 [capability] connect=0502b568 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 01:32:20 [relay] connect=0502b568 eligible client=175.209.195.154:48930 host=shotan Desktop@175.207.45.151:43000
+Oct 11 01:32:20 [relay] connect=0502b568 punch from 175.209.195.154:48930; answering in 2500ms x3
+Oct 11 01:33:22 [relay] connect=514b720d closed reason=client silent state=active c2h=71/7781B h2c=5709/6611980B ackMs=1
+Oct 11 02:04:41 [capability] connect=f524f2e5 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 02:04:41 [relay] connect=f524f2e5 eligible client=175.209.195.154:35990 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 02:04:41 [relay] connect=f524f2e5 punch from 175.209.195.154:35990; answering in 2500ms x3
+Oct 11 02:04:59 [capability] connect=40dd2826 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 02:04:59 [relay] connect=40dd2826 eligible client=175.209.195.154:44353 host=shotan Desktop@175.207.45.151:43000
+Oct 11 02:04:59 [relay] connect=40dd2826 punch from 175.209.195.154:44353; answering in 2500ms x3
+Oct 11 02:05:33 [capability] connect=642f017c minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 02:05:33 [relay] connect=642f017c eligible client=175.209.195.154:46923 host=shotan Desktop@175.207.45.151:43000
+Oct 11 02:05:33 [relay] connect=642f017c punch from 175.209.195.154:46923; answering in 2500ms x3
+Oct 11 02:17:11 [capability] connect=e2737c9a minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 02:17:11 [relay] connect=e2737c9a eligible client=175.209.195.154:36846 host=shotan Desktop@175.207.45.151:43000
+Oct 11 02:17:11 [relay] connect=e2737c9a punch from 175.209.195.154:36846; answering in 2500ms x3
+Oct 11 02:17:14 [relay] connect=e2737c9a bound client=175.209.195.154:36846 host=192.168.0.76:43000
+Oct 11 02:17:14 [relay] connect=e2737c9a first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 11 02:17:14 [relay] connect=e2737c9a first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 11 02:17:14 [relay] connect=e2737c9a active; helloAck in 1ms
+Oct 11 02:17:30 [capability] connect=f713d661 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 02:17:30 [relay] connect=f713d661 eligible client=175.209.195.154:42052 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 02:17:30 [relay] connect=f713d661 punch from 175.209.195.154:42052; answering in 2500ms x3
+Oct 11 02:17:45 [capability] connect=f8016eb1 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 02:17:45 [relay] connect=f8016eb1 eligible client=175.209.195.154:42041 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 02:17:45 [relay] connect=f8016eb1 punch from 175.209.195.154:42041; answering in 2500ms x3
+Oct 11 02:18:28 [capability] connect=64044e5c minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 02:18:28 [relay] connect=64044e5c eligible client=175.209.195.154:41472 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 02:18:28 [relay] connect=64044e5c punch from 175.209.195.154:41472; answering in 2500ms x3
+Oct 11 02:18:33 [relay] connect=e2737c9a closed reason=client silent state=active c2h=152/16833B h2c=3106/3476047B ackMs=1
+Oct 11 02:21:05 [capability] connect=279190d9 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 02:21:05 [relay] connect=279190d9 eligible client=175.209.195.154:52951 host=shotan Desktop@175.207.45.151:43000
+Oct 11 02:21:05 [relay] connect=279190d9 punch from 175.209.195.154:52951; answering in 2500ms x3
+Oct 11 02:21:13 [capability] connect=2a444fed minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 02:21:13 [relay] connect=2a444fed eligible client=175.209.195.154:32858 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 02:21:13 [relay] connect=2a444fed punch from 175.209.195.154:32858; answering in 2500ms x3
+Oct 11 02:21:24 [capability] connect=86d836c5 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 02:21:24 [relay] connect=86d836c5 eligible client=175.209.195.154:46446 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 02:21:24 [relay] connect=86d836c5 punch from 175.209.195.154:46446; answering in 2500ms x3
+Oct 11 02:22:02 [capability] connect=e91fab4d minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 02:22:02 [relay] connect=e91fab4d eligible client=175.209.195.154:53016 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 02:22:02 [relay] connect=e91fab4d punch from 175.209.195.154:53016; answering in 2500ms x3
+Oct 11 02:22:10 [capability] connect=6a9ebc0f minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 02:22:10 [relay] connect=6a9ebc0f eligible client=175.209.195.154:34506 host=shotan Desktop@175.207.45.151:43000
+Oct 11 02:22:10 [relay] connect=6a9ebc0f punch from 175.209.195.154:34506; answering in 2500ms x3
+Oct 11 02:30:11 [capability] connect=5a963a12 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 02:30:11 [relay] connect=5a963a12 eligible client=175.209.195.154:44234 host=shotan Desktop@175.207.45.151:43000
+Oct 11 02:30:11 [relay] connect=5a963a12 punch from 175.209.195.154:44234; answering in 2500ms x3
+Oct 11 02:30:14 [relay] connect=5a963a12 bound client=175.209.195.154:44234 host=192.168.0.76:43000
+Oct 11 02:30:14 [relay] connect=5a963a12 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 11 02:30:14 [relay] connect=5a963a12 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 11 02:30:14 [relay] connect=5a963a12 active; helloAck in 1ms
+Oct 11 02:41:28 [relay] connect=5a963a12 closed reason=client silent state=active c2h=6640/782969B h2c=68829/72430838B ackMs=1
+Oct 11 09:27:29 [capability] connect=8ab46579 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 09:27:29 [relay] connect=8ab46579 eligible client=175.207.45.151:65496 host=shotan Desktop@175.207.45.151:43000
+Oct 11 09:31:11 [capability] connect=adf15429 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 09:31:11 [relay] connect=adf15429 eligible client=175.207.45.151:19466 host=shotan Desktop@175.207.45.151:43000
+Oct 11 09:47:08 [capability] connect=94bc048e minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 09:47:08 [relay] connect=94bc048e eligible client=175.207.45.151:20912 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 09:47:51 [capability] connect=aa0b2061 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 09:47:51 [relay] connect=aa0b2061 eligible client=175.207.45.151:21108 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 09:48:21 [capability] connect=2a45947e minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 09:48:21 [relay] connect=2a45947e eligible client=175.207.45.151:21292 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 09:48:36 [capability] connect=c86d584d minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 09:48:36 [relay] connect=c86d584d eligible client=175.207.45.151:52707 host=shotan Desktop@175.207.45.151:43000
+Oct 11 09:49:16 [capability] connect=ba865271 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 09:49:16 [relay] connect=ba865271 eligible client=175.207.45.151:54163 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 10:29:03 [capability] connect=f95bce00 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 10:29:03 [relay] connect=f95bce00 eligible client=175.207.45.151:27342 host=shotan Desktop@175.207.45.151:25870
+Oct 11 10:42:38 [capability] connect=baafd807 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 10:42:38 [relay] connect=baafd807 eligible client=175.207.45.151:29448 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 10:42:56 [capability] connect=209eb350 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 10:42:56 [relay] connect=209eb350 eligible client=118.235.4.240:58238 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 10:42:56 [relay] connect=209eb350 punch from 118.235.4.240:58238; answering in 2500ms x3
+Oct 11 11:58:57 [capability] connect=d565936b minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 11:58:57 [relay] connect=d565936b eligible client=175.207.45.151:55969 host=shotan Desktop@175.207.45.151:25870
+Oct 11 12:00:28 [capability] connect=1b9619c9 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 12:00:28 [relay] connect=1b9619c9 eligible client=175.207.45.151:57641 host=shotan Desktop@175.207.45.151:25870
+Oct 11 12:16:29 [capability] connect=edd7e585 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 12:16:29 [relay] connect=edd7e585 eligible client=118.235.7.22:48588 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 12:16:29 [relay] connect=edd7e585 punch from 118.235.7.22:48588; answering in 2500ms x3
+Oct 11 15:01:00 [capability] connect=2ef608dd minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 15:01:00 [relay] connect=2ef608dd eligible client=175.207.45.151:40307 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 15:01:00 [relay] connect=2ef608dd punch from 192.168.0.1:40307; answering in 2500ms x3
+Oct 11 15:01:02 [relay] connect=2ef608dd bound client=192.168.0.1:40307 host=211.218.222.1:43000
+Oct 11 15:01:02 [relay] connect=2ef608dd first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 11 15:01:02 [relay] connect=2ef608dd first h2c <- 211.218.222.1:43000 afterBindMs=3 afterFirstC2HMs=3
+Oct 11 15:01:02 [relay] connect=2ef608dd active; helloAck in 3ms
+Oct 11 15:02:15 [relay] connect=2ef608dd closed reason=client silent state=active c2h=212/22857B h2c=15107/17429011B ackMs=3
+Oct 11 16:29:01 [capability] connect=0402ee69 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 16:29:01 [relay] connect=0402ee69 eligible client=175.209.195.154:49865 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:25870
+Oct 11 16:29:01 [relay] connect=0402ee69 punch from 175.209.195.154:49865; answering in 2500ms x3
+Oct 11 16:29:03 [relay] connect=0402ee69 bound client=175.209.195.154:49865 host=192.168.0.76:43000
+Oct 11 16:29:03 [relay] connect=0402ee69 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 11 16:29:03 [relay] connect=0402ee69 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 11 16:29:03 [relay] connect=0402ee69 active; helloAck in 1ms
+Oct 11 16:30:22 [relay] connect=0402ee69 closed reason=client silent state=active c2h=154/16683B h2c=2545/2810904B ackMs=1
+Oct 11 16:34:25 [capability] connect=d4313402 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 16:34:25 [relay] connect=d4313402 eligible client=175.207.45.151:56565 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 16:34:25 [relay] connect=d4313402 punch from 192.168.0.1:56565; answering in 2500ms x3
+Oct 11 16:34:27 [relay] connect=d4313402 bound client=192.168.0.1:56565 host=211.218.222.1:43000
+Oct 11 16:34:27 [relay] connect=d4313402 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 11 16:34:27 [relay] connect=d4313402 first h2c <- 211.218.222.1:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 11 16:34:27 [relay] connect=d4313402 active; helloAck in 2ms
+Oct 11 16:36:21 [capability] connect=e5f68669 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 16:36:21 [relay] connect=e5f68669 eligible client=175.207.45.151:56183 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 16:36:21 [relay] connect=e5f68669 punch from 192.168.0.1:56183; answering in 2500ms x3
+Oct 11 16:37:17 [relay] connect=d4313402 closed reason=client silent state=active c2h=4472/487217B h2c=107018/121355213B ackMs=2
+Oct 11 16:38:47 [capability] connect=f21c9197 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 16:38:47 [relay] connect=f21c9197 eligible client=175.207.45.151:41094 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 16:38:47 [relay] connect=f21c9197 punch from 192.168.0.1:41094; answering in 2500ms x3
+Oct 11 16:38:50 [relay] connect=f21c9197 bound client=192.168.0.1:41094 host=211.218.222.1:43000
+Oct 11 16:38:50 [relay] connect=f21c9197 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 11 16:38:50 [relay] connect=f21c9197 first h2c <- 211.218.222.1:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 11 16:38:50 [relay] connect=f21c9197 active; helloAck in 2ms
+Oct 11 16:38:58 [capability] connect=2d3c30f3 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 16:38:58 [relay] connect=2d3c30f3 eligible client=175.207.45.151:64846 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 16:38:58 [relay] connect=2d3c30f3 punch from 192.168.0.1:64846; answering in 2500ms x3
+Oct 11 16:39:01 [relay] connect=f21c9197 closed reason=newer connect state=active c2h=125/13385B h2c=516/462567B ackMs=2
+Oct 11 16:39:01 [relay] connect=2d3c30f3 bound client=192.168.0.1:64846 host=211.218.222.1:43000
+Oct 11 16:39:01 [relay] connect=2d3c30f3 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 11 16:39:01 [relay] connect=2d3c30f3 first h2c <- 211.218.222.1:43000 afterBindMs=3 afterFirstC2HMs=3
+Oct 11 16:39:01 [relay] connect=2d3c30f3 active; helloAck in 3ms
+Oct 11 16:39:26 [capability] connect=7c28b9d3 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 16:39:26 [relay] connect=7c28b9d3 eligible client=175.207.45.151:42624 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 16:39:26 [relay] connect=7c28b9d3 punch from 192.168.0.1:42624; answering in 2500ms x3
+Oct 11 16:39:28 [relay] connect=2d3c30f3 closed reason=newer connect state=active c2h=137/14369B h2c=3938/4526743B ackMs=3
+Oct 11 16:39:28 [relay] connect=7c28b9d3 bound client=192.168.0.1:42624 host=211.218.222.1:43000
+Oct 11 16:39:28 [relay] connect=7c28b9d3 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 11 16:39:28 [relay] connect=7c28b9d3 first h2c <- 211.218.222.1:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 11 16:39:28 [relay] connect=7c28b9d3 active; helloAck in 2ms
+Oct 11 16:40:58 [capability] connect=2097efed minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 16:40:58 [relay] connect=2097efed eligible client=175.207.45.151:42912 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 16:40:58 [relay] connect=2097efed punch from 192.168.0.1:42912; answering in 2500ms x3
+Oct 11 16:41:01 [relay] connect=7c28b9d3 closed reason=newer connect state=active c2h=2215/240281B h2c=110374/127665375B ackMs=2
+Oct 11 16:41:01 [relay] connect=2097efed bound client=192.168.0.1:42912 host=211.218.222.1:43000
+Oct 11 16:41:01 [relay] connect=2097efed first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 11 16:41:07 [relay] connect=2097efed host silent h2c=0 c2h=22 host=211.218.222.1:43000 afterBindMs=6357
+Oct 11 16:41:12 [capability] connect=22fae213 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 16:41:12 [relay] connect=22fae213 eligible client=175.207.45.151:42465 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 16:41:12 [relay] connect=22fae213 punch from 192.168.0.1:42465; answering in 2500ms x3
+Oct 11 16:41:15 [relay] connect=2097efed closed reason=newer connect state=provisional c2h=22/1078B h2c=0/0B ackMs=never
+Oct 11 16:41:15 [relay] connect=22fae213 bound client=192.168.0.1:42465 host=211.218.222.1:43000
+Oct 11 16:41:15 [relay] connect=22fae213 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 11 16:41:15 [relay] connect=22fae213 first h2c <- 211.218.222.1:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 11 16:41:15 [relay] connect=22fae213 active; helloAck in 2ms
+Oct 11 17:39:18 [capability] connect=e0e06226 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 17:39:18 [relay] connect=e0e06226 eligible client=175.207.45.151:48022 wire=192.168.0.1 host=shotan Desktop@175.207.45.151:25870
+Oct 11 17:39:18 [relay] connect=e0e06226 punch from 192.168.0.1:48022; answering in 2500ms x3
+Oct 11 17:39:41 [capability] connect=8e9a0bfb minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 17:39:41 [relay] connect=8e9a0bfb eligible client=175.207.45.151:47447 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 17:39:41 [relay] connect=8e9a0bfb punch from 192.168.0.1:47447; answering in 2500ms x3
+Oct 11 17:39:43 [relay] connect=22fae213 closed reason=newer connect state=active c2h=85379/9279553B h2c=5077775/5891753232B ackMs=2
+Oct 11 17:39:43 [relay] connect=8e9a0bfb bound client=192.168.0.1:47447 host=211.218.222.1:43000
+Oct 11 17:39:43 [relay] connect=8e9a0bfb first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 11 17:39:43 [relay] connect=8e9a0bfb first h2c <- 211.218.222.1:43000 afterBindMs=3 afterFirstC2HMs=3
+Oct 11 17:39:43 [relay] connect=8e9a0bfb active; helloAck in 3ms
+Oct 11 17:47:06 [capability] connect=49b9df19 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 17:47:06 [relay] connect=49b9df19 eligible client=175.207.45.151:59885 wire=192.168.0.1 host=shotan Desktop@175.207.45.151:25870
+Oct 11 17:47:06 [relay] connect=49b9df19 punch from 192.168.0.1:59885; answering in 2500ms x3
+Oct 11 17:48:07 [relay] connect=8e9a0bfb closed reason=client silent state=active c2h=8127/885505B h2c=554307/642571491B ackMs=3
+Oct 11 18:24:53 [capability] connect=7e759a27 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 18:24:53 [relay] connect=7e759a27 eligible client=175.207.45.151:58617 wire=192.168.0.1 host=shotan Desktop@175.207.45.151:25870
+Oct 11 18:24:53 [relay] connect=7e759a27 punch from 192.168.0.1:58617; answering in 2500ms x3
+Oct 11 20:56:45 [capability] connect=b63b61a6 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 20:56:45 [relay] connect=b63b61a6 eligible client=175.207.45.151:60637 wire=192.168.0.1 host=shotan Desktop@175.207.45.151:25870
+Oct 11 20:56:45 [relay] connect=b63b61a6 punch from 192.168.0.1:60637; answering in 2500ms x3
+Oct 11 20:57:50 [capability] connect=1d4d4fb7 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 20:57:50 [relay] connect=1d4d4fb7 eligible client=175.207.45.151:61456 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 20:57:50 [relay] connect=1d4d4fb7 punch from 192.168.0.1:61456; answering in 2500ms x3
+Oct 11 20:57:52 [relay] connect=1d4d4fb7 bound client=192.168.0.1:61456 host=211.218.222.1:43000
+Oct 11 20:57:52 [relay] connect=1d4d4fb7 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 11 20:57:52 [relay] connect=1d4d4fb7 first h2c <- 211.218.222.1:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 11 20:57:52 [relay] connect=1d4d4fb7 active; helloAck in 2ms
+Oct 11 21:27:21 [capability] connect=34e47c27 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 21:27:21 [relay] connect=34e47c27 eligible client=175.207.45.151:61719 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 21:27:21 [relay] connect=34e47c27 punch from 192.168.0.1:61719; answering in 2500ms x3
+Oct 11 21:27:23 [relay] connect=1d4d4fb7 closed reason=newer connect state=active c2h=44246/4815261B h2c=2507961/2906186531B ackMs=2
+Oct 11 21:27:23 [relay] connect=34e47c27 bound client=192.168.0.1:61719 host=211.218.222.1:43000
+Oct 11 21:27:23 [relay] connect=34e47c27 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 11 21:27:23 [relay] connect=34e47c27 first h2c <- 211.218.222.1:43000 afterBindMs=3 afterFirstC2HMs=3
+Oct 11 21:27:23 [relay] connect=34e47c27 active; helloAck in 3ms
+Oct 11 21:27:27 [capability] connect=69e2e48e minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 21:27:27 [relay] connect=69e2e48e eligible client=175.207.45.151:61586 wire=192.168.0.1 host=shotan Desktop@175.207.45.151:25870
+Oct 11 21:27:27 [relay] connect=69e2e48e punch from 192.168.0.1:61586; answering in 2500ms x3
+Oct 11 21:28:26 [relay] connect=34e47c27 closed reason=client silent state=active c2h=73/7589B h2c=648/700016B ackMs=3
+Oct 11 22:51:15 [capability] connect=f99c0931 minted host=df15b73b queued=1 ttlMs=30000
+Oct 11 22:51:15 [relay] connect=f99c0931 eligible client=175.207.45.151:1340 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 11 22:51:15 [relay] connect=f99c0931 punch from 192.168.0.1:1340; answering in 2500ms x3
+Oct 11 22:51:17 [relay] connect=f99c0931 bound client=192.168.0.1:1340 host=211.218.222.1:43000
+Oct 11 22:51:17 [relay] connect=f99c0931 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 11 22:51:17 [relay] connect=f99c0931 first h2c <- 211.218.222.1:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 11 22:51:17 [relay] connect=f99c0931 active; helloAck in 2ms
+Oct 11 22:54:13 [relay] connect=f99c0931 closed reason=client silent state=active c2h=1491/166053B h2c=29345/32229284B ackMs=2
+Oct 11 23:34:24 [capability] connect=8d0c436d minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 11 23:34:24 [relay] connect=8d0c436d eligible client=175.209.195.154:51237 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:25870
+Oct 11 23:34:24 [relay] connect=8d0c436d punch from 175.209.195.154:51237; answering in 2500ms x3
+Oct 11 23:34:27 [relay] connect=8d0c436d bound client=175.209.195.154:51237 host=192.168.0.76:43000
+Oct 11 23:34:27 [relay] connect=8d0c436d first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 11 23:34:27 [relay] connect=8d0c436d first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 11 23:34:27 [relay] connect=8d0c436d active; helloAck in 1ms
+Oct 11 23:37:19 [relay] connect=8d0c436d closed reason=client silent state=active c2h=1838/204233B h2c=14690/14901678B ackMs=1
+Oct 12 11:35:44 [capability] connect=4c7b662d minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 11:35:44 [relay] connect=4c7b662d eligible client=211.218.222.1:49242 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 11:35:44 [relay] connect=4c7b662d punch from 211.218.222.1:49242; answering in 2500ms x3
+Oct 12 11:35:46 [relay] connect=4c7b662d bound client=211.218.222.1:49242 host=192.168.0.76:43000
+Oct 12 11:35:46 [relay] connect=4c7b662d first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=1
+Oct 12 11:35:46 [relay] connect=4c7b662d first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=0
+Oct 12 11:35:46 [relay] connect=4c7b662d active; helloAck in 1ms
+Oct 12 11:46:46 [capability] connect=93a0dfb1 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 12 11:46:46 [relay] connect=93a0dfb1 eligible client=211.218.222.1:60466 wire=211.218.222.1 host=Home@175.207.45.151:16166
+Oct 12 11:46:46 [relay] connect=93a0dfb1 punch from 211.218.222.1:60466; answering in 2500ms x3
+Oct 12 11:46:49 [relay] connect=93a0dfb1 bound client=211.218.222.1:60466 host=192.168.0.16:43000
+Oct 12 11:46:49 [relay] connect=93a0dfb1 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 12 11:46:49 [relay] connect=93a0dfb1 first h2c <- 192.168.0.16:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 12 11:46:49 [relay] connect=93a0dfb1 active; helloAck in 1ms
+Oct 12 11:47:09 [relay] connect=4c7b662d closed reason=client silent state=active c2h=7295/794437B h2c=87865/95808989B ackMs=1
+Oct 12 11:47:39 [capability] connect=e2725265 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 12 11:47:39 [relay] connect=e2725265 eligible client=211.218.222.1:50819 wire=211.218.222.1 host=Home@175.207.45.151:16166
+Oct 12 11:47:39 [relay] connect=e2725265 punch from 211.218.222.1:50819; answering in 2500ms x3
+Oct 12 11:47:42 [relay] connect=93a0dfb1 closed reason=newer connect state=active c2h=5300/582293B h2c=9840/5771571B ackMs=1
+Oct 12 11:47:42 [relay] connect=e2725265 bound client=211.218.222.1:50819 host=192.168.0.16:43000
+Oct 12 11:47:42 [relay] connect=e2725265 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 12 11:47:42 [relay] connect=e2725265 first h2c <- 192.168.0.16:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 12 11:47:42 [relay] connect=e2725265 active; helloAck in 0ms
+Oct 12 11:47:50 [capability] connect=ba6c7a5a minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 11:47:50 [relay] connect=ba6c7a5a eligible client=211.218.222.1:59612 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 11:47:50 [relay] connect=ba6c7a5a punch from 211.218.222.1:59612; answering in 2500ms x3
+Oct 12 11:47:52 [relay] connect=ba6c7a5a bound client=211.218.222.1:59612 host=192.168.0.76:43000
+Oct 12 11:47:52 [relay] connect=ba6c7a5a first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 12 11:47:52 [relay] connect=ba6c7a5a first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 12 11:47:52 [relay] connect=ba6c7a5a active; helloAck in 1ms
+Oct 12 11:48:49 [relay] connect=e2725265 closed reason=client silent state=active c2h=2408/264409B h2c=4541/2743596B ackMs=0
+Oct 12 12:16:34 [relay] connect=ba6c7a5a closed reason=client silent state=active c2h=24214/2640165B h2c=363401/402171854B ackMs=1
+Oct 12 13:13:30 [capability] connect=e1725cd7 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 13:13:30 [relay] connect=e1725cd7 eligible client=211.218.222.1:51187 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 13:13:30 [relay] connect=e1725cd7 punch from 211.218.222.1:51187; answering in 2500ms x3
+Oct 12 13:13:32 [relay] connect=e1725cd7 bound client=211.218.222.1:51187 host=192.168.0.76:43000
+Oct 12 13:13:32 [relay] connect=e1725cd7 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 12 13:13:32 [relay] connect=e1725cd7 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 12 13:13:32 [relay] connect=e1725cd7 active; helloAck in 1ms
+Oct 12 13:26:37 [capability] connect=d114710c minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 12 13:26:37 [relay] connect=d114710c eligible client=211.218.222.1:61026 wire=211.218.222.1 host=Home@175.207.45.151:16166
+Oct 12 13:26:37 [relay] connect=d114710c punch from 211.218.222.1:61026; answering in 2500ms x3
+Oct 12 13:26:40 [relay] connect=d114710c bound client=211.218.222.1:61026 host=192.168.0.16:43000
+Oct 12 13:26:40 [relay] connect=d114710c first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 12 13:26:40 [relay] connect=d114710c first h2c <- 192.168.0.16:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 12 13:26:40 [relay] connect=d114710c active; helloAck in 0ms
+Oct 12 13:27:35 [relay] connect=e1725cd7 closed reason=client silent state=active c2h=11531/1252085B h2c=260725/294328545B ackMs=1
+Oct 12 13:28:32 [capability] connect=40c51cad minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 13:28:32 [relay] connect=40c51cad eligible client=211.218.222.1:58433 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 13:28:32 [relay] connect=40c51cad punch from 211.218.222.1:58433; answering in 2500ms x3
+Oct 12 13:28:34 [relay] connect=40c51cad bound client=211.218.222.1:58433 host=192.168.0.76:43000
+Oct 12 13:28:34 [relay] connect=40c51cad first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 12 13:28:34 [relay] connect=40c51cad first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 12 13:28:34 [relay] connect=40c51cad active; helloAck in 0ms
+Oct 12 13:28:40 [relay] connect=d114710c closed reason=client silent state=active c2h=1279/138245B h2c=18231/20100571B ackMs=0
+Oct 12 13:45:27 [capability] connect=7a3eba4e minted host=df15b73b queued=1 ttlMs=30000
+Oct 12 13:45:27 [relay] connect=7a3eba4e eligible client=211.218.222.1:53724 wire=211.218.222.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 12 13:45:27 [relay] connect=7a3eba4e punch from 211.218.222.1:53724; answering in 2500ms x3
+Oct 12 13:46:25 [relay] connect=40c51cad closed reason=client silent state=active c2h=16833/1824157B h2c=258149/286072316B ackMs=0
+Oct 12 13:57:45 [capability] connect=1587e7c1 minted host=df15b73b queued=1 ttlMs=30000
+Oct 12 13:57:45 [relay] connect=1587e7c1 eligible client=211.218.222.1:49500 wire=211.218.222.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 12 13:57:45 [relay] connect=1587e7c1 punch from 211.218.222.1:49500; answering in 2500ms x3
+Oct 12 14:06:41 [capability] connect=d8c91b39 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 14:06:41 [relay] connect=d8c91b39 eligible client=211.218.222.1:57396 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 14:06:41 [relay] connect=d8c91b39 punch from 211.218.222.1:57396; answering in 2500ms x3
+Oct 12 14:06:43 [relay] connect=d8c91b39 bound client=211.218.222.1:57396 host=192.168.0.76:43000
+Oct 12 14:06:43 [relay] connect=d8c91b39 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 12 14:06:43 [relay] connect=d8c91b39 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 12 14:06:43 [relay] connect=d8c91b39 active; helloAck in 1ms
+Oct 12 14:22:46 [capability] connect=6f4ae763 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 14:22:46 [relay] connect=6f4ae763 eligible client=211.218.222.1:62095 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 14:22:46 [relay] connect=6f4ae763 punch from 211.218.222.1:62095; answering in 2500ms x3
+Oct 12 14:22:49 [relay] connect=d8c91b39 closed reason=newer connect state=active c2h=26254/2868281B h2c=208584/217729928B ackMs=1
+Oct 12 14:22:49 [relay] connect=6f4ae763 bound client=211.218.222.1:62095 host=192.168.0.76:43000
+Oct 12 14:22:49 [relay] connect=6f4ae763 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 12 14:22:49 [relay] connect=6f4ae763 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 12 14:22:49 [relay] connect=6f4ae763 active; helloAck in 0ms
+Oct 12 14:24:40 [relay] connect=6f4ae763 closed reason=client silent state=active c2h=789/85857B h2c=35276/40737440B ackMs=0
+Oct 12 14:25:39 [capability] connect=89bb6bfb minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 14:25:39 [relay] connect=89bb6bfb eligible client=211.218.222.1:64115 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 14:25:39 [relay] connect=89bb6bfb punch from 211.218.222.1:64115; answering in 2500ms x3
+Oct 12 14:25:41 [relay] connect=89bb6bfb bound client=211.218.222.1:64115 host=192.168.0.76:43000
+Oct 12 14:25:41 [relay] connect=89bb6bfb first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=1
+Oct 12 14:25:41 [relay] connect=89bb6bfb first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=0
+Oct 12 14:25:41 [relay] connect=89bb6bfb active; helloAck in 1ms
+Oct 12 14:30:36 [relay] connect=89bb6bfb closed reason=client silent state=active c2h=2869/312489B h2c=44701/49649659B ackMs=1
+Oct 12 14:31:51 [capability] connect=e25b2226 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 14:31:51 [relay] connect=e25b2226 eligible client=211.218.222.1:64310 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 14:31:51 [relay] connect=e25b2226 punch from 211.218.222.1:64310; answering in 2500ms x3
+Oct 12 14:31:54 [relay] connect=e25b2226 bound client=211.218.222.1:64310 host=192.168.0.76:43000
+Oct 12 14:31:54 [relay] connect=e25b2226 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 12 14:31:54 [relay] connect=e25b2226 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 12 14:31:54 [relay] connect=e25b2226 active; helloAck in 0ms
+Oct 12 17:10:46 [relay] connect=e25b2226 closed reason=client silent state=active c2h=146548/15921753B h2c=1740451/1895332462B ackMs=0
+Oct 12 17:21:56 [capability] connect=7b1d0290 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 17:21:56 [relay] connect=7b1d0290 eligible client=211.218.222.1:60100 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 17:21:56 [relay] connect=7b1d0290 punch from 211.218.222.1:60100; answering in 2500ms x3
+Oct 12 17:21:58 [relay] connect=7b1d0290 bound client=211.218.222.1:60100 host=192.168.0.76:43000
+Oct 12 17:21:58 [relay] connect=7b1d0290 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 12 17:21:58 [relay] connect=7b1d0290 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 12 17:21:58 [relay] connect=7b1d0290 active; helloAck in 1ms
+Oct 12 17:53:11 [relay] connect=7b1d0290 closed reason=client silent state=active c2h=22721/2472569B h2c=286905/314147184B ackMs=1
+Oct 12 18:01:05 [capability] connect=3f457d57 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 18:01:05 [relay] connect=3f457d57 eligible client=211.218.222.1:51574 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 18:01:05 [relay] connect=3f457d57 punch from 211.218.222.1:51574; answering in 2500ms x3
+Oct 12 18:01:08 [relay] connect=3f457d57 bound client=211.218.222.1:51574 host=192.168.0.76:43000
+Oct 12 18:01:08 [relay] connect=3f457d57 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 12 18:01:08 [relay] connect=3f457d57 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 12 18:01:08 [relay] connect=3f457d57 active; helloAck in 1ms
+Oct 12 18:11:12 [capability] connect=9a4cd272 minted host=df15b73b queued=1 ttlMs=30000
+Oct 12 18:11:12 [relay] connect=9a4cd272 eligible client=211.218.222.1:53196 wire=211.218.222.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 12 18:11:13 [relay] connect=9a4cd272 punch from 211.218.222.1:53196; answering in 2500ms x3
+Oct 12 18:11:39 [capability] connect=4bf08608 minted host=df15b73b queued=1 ttlMs=30000
+Oct 12 18:11:39 [relay] connect=4bf08608 eligible client=211.218.222.1:65118 wire=211.218.222.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 12 18:11:39 [relay] connect=4bf08608 punch from 211.218.222.1:65118; answering in 2500ms x3
+Oct 12 18:12:11 [relay] connect=3f457d57 closed reason=client silent state=active c2h=15008/1629325B h2c=83927/81824437B ackMs=1
+Oct 12 18:13:38 [capability] connect=f4e1b965 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 18:13:38 [relay] connect=f4e1b965 eligible client=211.218.222.1:55275 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 18:13:38 [relay] connect=f4e1b965 punch from 211.218.222.1:55275; answering in 2500ms x3
+Oct 12 18:13:40 [relay] connect=f4e1b965 bound client=211.218.222.1:55275 host=192.168.0.76:43000
+Oct 12 18:13:40 [relay] connect=f4e1b965 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 12 18:13:40 [relay] connect=f4e1b965 first h2c <- 192.168.0.76:43000 afterBindMs=3 afterFirstC2HMs=3
+Oct 12 18:13:40 [relay] connect=f4e1b965 active; helloAck in 3ms
+Oct 12 18:14:51 [relay] connect=f4e1b965 closed reason=client silent state=active c2h=306/32497B h2c=5486/6100281B ackMs=3
+Oct 12 18:14:55 [capability] connect=b2f693b6 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 18:14:55 [relay] connect=b2f693b6 eligible client=211.218.222.4:60591 wire=211.218.222.4 host=shotan Desktop@175.207.45.151:25870
+Oct 12 18:14:55 [relay] connect=b2f693b6 punch from 211.218.222.4:60591; answering in 2500ms x3
+Oct 12 18:14:57 [relay] connect=b2f693b6 bound client=211.218.222.4:60591 host=192.168.0.76:43000
+Oct 12 18:14:57 [relay] connect=b2f693b6 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=1
+Oct 12 18:14:57 [relay] connect=b2f693b6 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=0
+Oct 12 18:14:57 [relay] connect=b2f693b6 active; helloAck in 1ms
+Oct 12 18:15:55 [capability] connect=f6d45d37 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 18:15:55 [relay] connect=f6d45d37 eligible client=211.218.222.1:51137 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 18:15:55 [relay] connect=f6d45d37 punch from 211.218.222.1:51137; answering in 2500ms x3
+Oct 12 18:15:58 [relay] connect=b2f693b6 closed reason=newer connect state=active c2h=226/24633B h2c=4054/4454049B ackMs=1
+Oct 12 18:15:58 [relay] connect=f6d45d37 bound client=211.218.222.1:51137 host=192.168.0.76:43000
+Oct 12 18:15:58 [relay] connect=f6d45d37 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 12 18:15:58 [relay] connect=f6d45d37 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 12 18:15:58 [relay] connect=f6d45d37 active; helloAck in 0ms
+Oct 12 18:16:14 [capability] connect=197d18c9 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 18:16:14 [relay] connect=197d18c9 eligible client=211.218.222.1:56292 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 18:16:14 [relay] connect=197d18c9 punch from 211.218.222.1:56292; answering in 2500ms x3
+Oct 12 18:16:16 [relay] connect=f6d45d37 closed reason=newer connect state=active c2h=307/33313B h2c=6261/7018372B ackMs=0
+Oct 12 18:16:16 [relay] connect=197d18c9 bound client=211.218.222.1:56292 host=192.168.0.76:43000
+Oct 12 18:16:16 [relay] connect=197d18c9 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 12 18:16:16 [relay] connect=197d18c9 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 12 18:16:16 [relay] connect=197d18c9 active; helloAck in 0ms
+Oct 12 18:20:45 [capability] connect=dfdc0324 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 12 18:20:45 [relay] connect=dfdc0324 eligible client=211.218.222.1:51385 wire=211.218.222.1 host=Home@175.207.45.151:16166
+Oct 12 18:20:45 [relay] connect=dfdc0324 punch from 211.218.222.1:51385; answering in 2500ms x3
+Oct 12 18:20:48 [relay] connect=dfdc0324 bound client=211.218.222.1:51385 host=192.168.0.16:43000
+Oct 12 18:20:48 [relay] connect=dfdc0324 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 12 18:20:48 [relay] connect=dfdc0324 first h2c <- 192.168.0.16:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 12 18:20:48 [relay] connect=dfdc0324 active; helloAck in 1ms
+Oct 12 18:21:07 [capability] connect=388e64fe minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 12 18:21:07 [relay] connect=388e64fe eligible client=211.218.222.1:65272 wire=211.218.222.1 host=Home@175.207.45.151:16166
+Oct 12 18:21:07 [relay] connect=388e64fe punch from 211.218.222.1:65272; answering in 2500ms x3
+Oct 12 18:21:09 [relay] connect=dfdc0324 closed reason=newer connect state=active c2h=375/39389B h2c=1493/1380509B ackMs=1
+Oct 12 18:21:09 [relay] connect=388e64fe bound client=211.218.222.1:65272 host=192.168.0.16:43000
+Oct 12 18:21:09 [relay] connect=388e64fe first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 12 18:21:09 [relay] connect=388e64fe first h2c <- 192.168.0.16:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 12 18:21:09 [relay] connect=388e64fe active; helloAck in 0ms
+Oct 12 18:21:46 [relay] connect=197d18c9 closed reason=client silent state=active c2h=9715/1039145B h2c=69069/70359706B ackMs=0
+Oct 12 18:21:50 [capability] connect=7a855039 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 12 18:21:50 [relay] connect=7a855039 eligible client=211.218.222.1:51088 wire=211.218.222.1 host=Home@175.207.45.151:16166
+Oct 12 18:21:50 [relay] connect=7a855039 punch from 211.218.222.1:51088; answering in 2500ms x3
+Oct 12 18:21:53 [relay] connect=388e64fe closed reason=newer connect state=active c2h=52/5321B h2c=649/725062B ackMs=0
+Oct 12 18:21:53 [relay] connect=7a855039 bound client=211.218.222.1:51088 host=192.168.0.16:43000
+Oct 12 18:21:53 [relay] connect=7a855039 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 12 18:21:53 [relay] connect=7a855039 first h2c <- 192.168.0.16:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 12 18:21:53 [relay] connect=7a855039 active; helloAck in 1ms
+Oct 12 18:23:08 [capability] connect=6a959fd0 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 18:23:08 [relay] connect=6a959fd0 eligible client=211.218.222.1:62402 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 18:23:08 [relay] connect=6a959fd0 punch from 211.218.222.1:62402; answering in 2500ms x3
+Oct 12 18:23:10 [relay] connect=6a959fd0 bound client=211.218.222.1:62402 host=192.168.0.76:43000
+Oct 12 18:23:10 [relay] connect=6a959fd0 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 12 18:23:10 [relay] connect=6a959fd0 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 12 18:23:10 [relay] connect=6a959fd0 active; helloAck in 1ms
+Oct 12 18:24:11 [relay] connect=7a855039 closed reason=client silent state=active c2h=4186/459253B h2c=8552/5486744B ackMs=1
+Oct 12 18:34:56 [relay] connect=6a959fd0 closed reason=client silent state=active c2h=13682/1543113B h2c=97804/99649772B ackMs=1
+Oct 12 18:39:10 [capability] connect=d7afd98f minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 12 18:39:10 [relay] connect=d7afd98f eligible client=211.218.222.1:63645 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 12 18:39:10 [relay] connect=d7afd98f punch from 211.218.222.1:63645; answering in 2500ms x3
+Oct 12 18:39:13 [relay] connect=d7afd98f bound client=211.218.222.1:63645 host=192.168.0.76:43000
+Oct 12 18:39:13 [relay] connect=d7afd98f first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 12 18:39:13 [relay] connect=d7afd98f first h2c <- 192.168.0.76:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 12 18:39:13 [relay] connect=d7afd98f active; helloAck in 2ms
+Oct 12 18:59:51 [relay] connect=d7afd98f closed reason=client silent state=active c2h=13596/1482721B h2c=105787/109717215B ackMs=2
+Oct 13 11:38:26 [capability] connect=581ab300 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 13 11:38:26 [relay] connect=581ab300 eligible client=211.218.222.1:51679 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 13 11:38:26 [relay] connect=581ab300 punch from 211.218.222.1:51679; answering in 2500ms x3
+Oct 13 11:38:29 [relay] connect=581ab300 bound client=211.218.222.1:51679 host=192.168.0.76:43000
+Oct 13 11:38:29 [relay] connect=581ab300 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 13 11:38:29 [relay] connect=581ab300 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 13 11:38:29 [relay] connect=581ab300 active; helloAck in 2ms
+Oct 13 11:53:20 [relay] connect=581ab300 closed reason=client silent state=active c2h=17490/1875365B h2c=161923/170641765B ackMs=2
+Oct 13 12:04:22 [capability] connect=bb4bc4df minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 13 12:04:22 [relay] connect=bb4bc4df eligible client=211.218.222.1:63283 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 13 12:04:22 [relay] connect=bb4bc4df punch from 211.218.222.1:63283; answering in 2500ms x3
+Oct 13 12:04:25 [relay] connect=bb4bc4df bound client=211.218.222.1:63283 host=192.168.0.76:43000
+Oct 13 12:04:25 [relay] connect=bb4bc4df first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=1
+Oct 13 12:04:25 [relay] connect=bb4bc4df first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=0
+Oct 13 12:04:25 [relay] connect=bb4bc4df active; helloAck in 1ms
+Oct 13 12:41:15 [relay] connect=bb4bc4df closed reason=client silent state=active c2h=63562/6881811B h2c=470938/482301387B ackMs=1
+Oct 13 13:37:34 [capability] connect=4b9c59c7 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 13 13:37:34 [relay] connect=4b9c59c7 eligible client=211.218.222.1:56814 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 13 13:37:34 [relay] connect=4b9c59c7 punch from 211.218.222.1:56814; answering in 2500ms x3
+Oct 13 13:37:36 [relay] connect=4b9c59c7 bound client=211.218.222.1:56814 host=192.168.0.76:43000
+Oct 13 13:37:36 [relay] connect=4b9c59c7 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 13 13:37:36 [relay] connect=4b9c59c7 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 13 13:37:36 [relay] connect=4b9c59c7 active; helloAck in 0ms
+Oct 13 14:14:41 [relay] connect=4b9c59c7 closed reason=client silent state=active c2h=46598/5046525B h2c=583572/631858393B ackMs=0
+Oct 13 14:34:32 [capability] connect=8d70de17 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 13 14:34:32 [relay] connect=8d70de17 eligible client=211.218.222.1:59642 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 13 14:34:32 [relay] connect=8d70de17 punch from 211.218.222.1:59642; answering in 2500ms x3
+Oct 13 14:34:35 [relay] connect=8d70de17 bound client=211.218.222.1:59642 host=192.168.0.76:43000
+Oct 13 14:34:35 [relay] connect=8d70de17 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 13 14:34:35 [relay] connect=8d70de17 first h2c <- 192.168.0.76:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 13 14:34:35 [relay] connect=8d70de17 active; helloAck in 2ms
+Oct 13 15:32:01 [relay] connect=8d70de17 closed reason=client silent state=active c2h=53047/5764629B h2c=741103/809738049B ackMs=2
+Oct 13 15:43:25 [capability] connect=d1d19a4e minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 13 15:43:25 [relay] connect=d1d19a4e eligible client=211.218.222.1:51870 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 13 15:43:25 [relay] connect=d1d19a4e punch from 211.218.222.1:51870; answering in 2500ms x3
+Oct 13 15:43:27 [relay] connect=d1d19a4e bound client=211.218.222.1:51870 host=192.168.0.76:43000
+Oct 13 15:43:27 [relay] connect=d1d19a4e first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=1
+Oct 13 15:43:27 [relay] connect=d1d19a4e first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=0
+Oct 13 15:43:27 [relay] connect=d1d19a4e active; helloAck in 1ms
+Oct 13 15:44:46 [relay] connect=d1d19a4e closed reason=client silent state=active c2h=336/36393B h2c=7908/8921438B ackMs=1
+Oct 13 16:13:20 [capability] connect=e79b0f89 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 13 16:13:20 [relay] connect=e79b0f89 eligible client=211.218.222.1:58252 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 13 16:13:20 [relay] connect=e79b0f89 punch from 211.218.222.1:58252; answering in 2500ms x3
+Oct 13 16:13:22 [relay] connect=e79b0f89 bound client=211.218.222.1:58252 host=192.168.0.76:43000
+Oct 13 16:13:22 [relay] connect=e79b0f89 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 13 16:13:22 [relay] connect=e79b0f89 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 13 16:13:22 [relay] connect=e79b0f89 active; helloAck in 0ms
+Oct 13 16:35:57 [capability] connect=377a9526 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 13 16:35:57 [relay] connect=377a9526 eligible client=211.218.222.1:55296 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 13 16:35:57 [relay] connect=377a9526 punch from 211.218.222.1:55296; answering in 2500ms x3
+Oct 13 16:35:59 [relay] connect=e79b0f89 closed reason=newer connect state=active c2h=25935/2813737B h2c=367928/401949740B ackMs=0
+Oct 13 16:35:59 [relay] connect=377a9526 bound client=211.218.222.1:55296 host=192.168.0.76:43000
+Oct 13 16:35:59 [relay] connect=377a9526 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 13 16:35:59 [relay] connect=377a9526 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 13 16:35:59 [relay] connect=377a9526 active; helloAck in 1ms
+Oct 13 16:44:42 [relay] connect=377a9526 closed reason=client silent state=active c2h=5451/593569B h2c=100465/112392379B ackMs=1
+Oct 13 16:46:20 [capability] connect=2e3b7b22 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 13 16:46:20 [relay] connect=2e3b7b22 eligible client=211.218.222.1:57284 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 13 16:46:20 [relay] connect=2e3b7b22 punch from 211.218.222.1:57284; answering in 2500ms x3
+Oct 13 16:46:23 [relay] connect=2e3b7b22 bound client=211.218.222.1:57284 host=192.168.0.76:43000
+Oct 13 16:46:23 [relay] connect=2e3b7b22 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 13 16:46:23 [relay] connect=2e3b7b22 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 13 16:46:23 [relay] connect=2e3b7b22 active; helloAck in 0ms
+Oct 13 17:17:57 [relay] connect=2e3b7b22 closed reason=client silent state=active c2h=30930/3342333B h2c=379086/410306706B ackMs=0
+Oct 13 17:26:34 [capability] connect=5e13f97e minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 13 17:26:34 [relay] connect=5e13f97e eligible client=211.218.222.1:52623 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 13 17:26:34 [relay] connect=5e13f97e punch from 211.218.222.1:52623; answering in 2500ms x3
+Oct 13 17:26:37 [relay] connect=5e13f97e bound client=211.218.222.1:52623 host=192.168.0.76:43000
+Oct 13 17:26:37 [relay] connect=5e13f97e first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 13 17:26:37 [relay] connect=5e13f97e first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 13 17:26:37 [relay] connect=5e13f97e active; helloAck in 1ms
+Oct 13 18:13:32 [relay] connect=5e13f97e closed reason=client silent state=active c2h=44934/4964435B h2c=580152/630340920B ackMs=1
+Oct 13 18:39:58 [capability] connect=fd261a05 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 13 18:39:58 [relay] connect=fd261a05 eligible client=211.218.222.1:62164 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 13 18:39:58 [relay] connect=fd261a05 punch from 211.218.222.1:62164; answering in 2500ms x3
+Oct 13 18:40:01 [relay] connect=fd261a05 bound client=211.218.222.1:62164 host=192.168.0.76:43000
+Oct 13 18:40:01 [relay] connect=fd261a05 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 13 18:40:01 [relay] connect=fd261a05 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 13 18:40:01 [relay] connect=fd261a05 active; helloAck in 1ms
+Oct 13 18:42:28 [relay] connect=fd261a05 closed reason=client silent state=active c2h=2865/305713B h2c=32703/35132103B ackMs=1
+Oct 13 18:51:33 [capability] connect=fa2d3cf9 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 13 18:51:33 [relay] connect=fa2d3cf9 eligible client=211.218.222.1:49472 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 13 18:51:33 [relay] connect=fa2d3cf9 punch from 211.218.222.1:49472; answering in 2500ms x3
+Oct 13 18:51:36 [relay] connect=fa2d3cf9 bound client=211.218.222.1:49472 host=192.168.0.76:43000
+Oct 13 18:51:36 [relay] connect=fa2d3cf9 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 13 18:51:36 [relay] connect=fa2d3cf9 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 13 18:51:36 [relay] connect=fa2d3cf9 active; helloAck in 0ms
+Oct 13 18:56:18 [capability] connect=a1be116a minted host=df15b73b queued=1 ttlMs=30000
+Oct 13 18:56:18 [relay] connect=a1be116a eligible client=211.218.222.1:53682 wire=211.218.222.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 13 18:56:18 [relay] connect=a1be116a punch from 211.218.222.1:53682; answering in 2500ms x3
+Oct 13 18:56:23 [capability] connect=281adc36 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 13 18:56:23 [relay] connect=281adc36 eligible client=211.218.222.1:51447 wire=211.218.222.1 host=Home@175.207.45.151:16166
+Oct 13 18:56:23 [relay] connect=281adc36 punch from 211.218.222.1:51447; answering in 2500ms x3
+Oct 13 18:56:25 [relay] connect=281adc36 bound client=211.218.222.1:51447 host=192.168.0.16:43000
+Oct 13 18:56:25 [relay] connect=281adc36 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 13 18:56:25 [relay] connect=281adc36 first h2c <- 192.168.0.16:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 13 18:56:25 [relay] connect=281adc36 active; helloAck in 1ms
+Oct 13 18:57:18 [relay] connect=fa2d3cf9 closed reason=client silent state=active c2h=6888/747273B h2c=68568/72801964B ackMs=0
+Oct 13 18:57:48 [relay] connect=281adc36 closed reason=client silent state=active c2h=292/31585B h2c=3637/3849707B ackMs=1
+Oct 13 19:09:54 [capability] connect=d883730b minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 13 19:09:54 [relay] connect=d883730b eligible client=211.218.222.1:56139 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 13 19:09:54 [relay] connect=d883730b punch from 211.218.222.1:56139; answering in 2500ms x3
+Oct 13 19:09:57 [relay] connect=d883730b bound client=211.218.222.1:56139 host=192.168.0.76:43000
+Oct 13 19:09:57 [relay] connect=d883730b first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 13 19:09:57 [relay] connect=d883730b first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 13 19:09:57 [relay] connect=d883730b active; helloAck in 1ms
+Oct 13 19:14:23 [relay] connect=d883730b closed reason=client silent state=active c2h=6966/839871B h2c=61057/64064608B ackMs=1
+Oct 14 09:51:36 [capability] connect=df5a4358 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 14 09:51:36 [relay] connect=df5a4358 eligible client=211.218.222.1:60100 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 14 09:51:36 [relay] connect=df5a4358 punch from 211.218.222.1:60100; answering in 2500ms x3
+Oct 14 09:51:39 [relay] connect=df5a4358 bound client=211.218.222.1:60100 host=192.168.0.76:43000
+Oct 14 09:51:39 [relay] connect=df5a4358 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 14 09:51:39 [relay] connect=df5a4358 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 14 09:51:39 [relay] connect=df5a4358 active; helloAck in 0ms
+Oct 14 09:53:22 [relay] connect=df5a4358 closed reason=client silent state=active c2h=1156/123013B h2c=14588/15833232B ackMs=0
+Oct 14 10:25:48 [capability] connect=80740a17 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 14 10:25:48 [relay] connect=80740a17 eligible client=211.218.222.1:51619 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 14 10:25:48 [relay] connect=80740a17 punch from 211.218.222.1:51619; answering in 2500ms x3
+Oct 14 10:25:51 [relay] connect=80740a17 bound client=211.218.222.1:51619 host=192.168.0.76:43000
+Oct 14 10:25:51 [relay] connect=80740a17 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 14 10:25:51 [relay] connect=80740a17 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 14 10:25:51 [relay] connect=80740a17 active; helloAck in 1ms
+Oct 14 10:29:20 [capability] connect=6a01bbd1 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 14 10:29:20 [relay] connect=6a01bbd1 eligible client=211.218.222.1:56202 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 14 10:29:20 [relay] connect=6a01bbd1 punch from 211.218.222.1:56202; answering in 2500ms x3
+Oct 14 10:29:23 [relay] connect=80740a17 closed reason=newer connect state=active c2h=3163/338589B h2c=20693/20781574B ackMs=1
+Oct 14 10:29:23 [relay] connect=6a01bbd1 bound client=211.218.222.1:56202 host=192.168.0.76:43000
+Oct 14 10:29:23 [relay] connect=6a01bbd1 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 14 10:29:23 [relay] connect=6a01bbd1 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 14 10:29:23 [relay] connect=6a01bbd1 active; helloAck in 0ms
+Oct 14 10:31:43 [relay] connect=6a01bbd1 closed reason=client silent state=active c2h=1797/192221B h2c=17638/18692301B ackMs=0
+Oct 14 11:03:06 [capability] connect=59ed47d5 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 14 11:03:06 [relay] connect=59ed47d5 eligible client=211.218.222.1:61789 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 14 11:03:06 [relay] connect=59ed47d5 punch from 211.218.222.1:61789; answering in 2500ms x3
+Oct 14 11:03:09 [relay] connect=59ed47d5 bound client=211.218.222.1:61789 host=192.168.0.76:43000
+Oct 14 11:03:09 [relay] connect=59ed47d5 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 14 11:03:09 [relay] connect=59ed47d5 first h2c <- 192.168.0.76:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 14 11:03:09 [relay] connect=59ed47d5 active; helloAck in 2ms
+Oct 14 11:03:42 [capability] connect=dd002352 minted host=df15b73b queued=1 ttlMs=30000
+Oct 14 11:03:42 [relay] connect=dd002352 eligible client=211.218.222.1:60503 wire=211.218.222.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 14 11:03:42 [relay] connect=dd002352 punch from 211.218.222.1:60503; answering in 2500ms x3
+Oct 14 11:04:28 [relay] connect=59ed47d5 closed reason=client silent state=active c2h=777/84329B h2c=4350/4324079B ackMs=2
+Oct 14 12:08:39 [capability] connect=aa89d6ef minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 14 12:08:39 [relay] connect=aa89d6ef eligible client=211.218.222.1:53607 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 14 12:08:39 [relay] connect=aa89d6ef punch from 211.218.222.1:53607; answering in 2500ms x3
+Oct 14 12:08:42 [relay] connect=aa89d6ef bound client=211.218.222.1:53607 host=192.168.0.76:43000
+Oct 14 12:08:42 [relay] connect=aa89d6ef first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 14 12:08:42 [relay] connect=aa89d6ef first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 14 12:08:42 [relay] connect=aa89d6ef active; helloAck in 1ms
+Oct 14 12:37:29 [relay] connect=aa89d6ef closed reason=client silent state=active c2h=20198/2205013B h2c=78104/70358577B ackMs=1
+Oct 14 13:46:22 [capability] connect=1846a529 minted host=df15b73b queued=1 ttlMs=30000
+Oct 14 13:46:22 [relay] connect=1846a529 eligible client=211.218.222.4:35604 wire=211.218.222.4 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 14 13:46:22 [relay] connect=1846a529 punch from 211.218.222.4:35604; answering in 2500ms x3
+Oct 14 13:46:24 [relay] connect=1846a529 bound client=211.218.222.4:35604 host=211.218.222.1:43000
+Oct 14 13:46:24 [relay] connect=1846a529 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 14 13:46:24 [relay] connect=1846a529 first h2c <- 211.218.222.1:43000 afterBindMs=16 afterFirstC2HMs=16
+Oct 14 13:46:24 [relay] connect=1846a529 active; helloAck in 16ms
+Oct 14 13:49:34 [capability] connect=6de15664 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 14 13:49:34 [relay] connect=6de15664 eligible client=211.218.222.4:42989 wire=211.218.222.4 host=shotan Desktop@175.207.45.151:25870
+Oct 14 13:49:34 [relay] connect=6de15664 punch from 211.218.222.4:42989; answering in 2500ms x3
+Oct 14 13:49:37 [relay] connect=6de15664 bound client=211.218.222.4:42989 host=192.168.0.76:43000
+Oct 14 13:49:37 [relay] connect=6de15664 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 14 13:49:37 [relay] connect=6de15664 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 14 13:49:37 [relay] connect=6de15664 active; helloAck in 1ms
+Oct 14 13:49:41 [relay] connect=1846a529 closed reason=client silent state=active c2h=2169/241901B h2c=19151/19028564B ackMs=16
+Oct 14 13:52:01 [relay] connect=6de15664 closed reason=client silent state=active c2h=788/89393B h2c=6367/6421909B ackMs=1
+Oct 14 14:04:45 [capability] connect=2b4e2e45 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 14 14:04:45 [relay] connect=2b4e2e45 eligible client=211.218.222.4:41788 wire=211.218.222.4 host=shotan Desktop@175.207.45.151:25870
+Oct 14 14:04:45 [relay] connect=2b4e2e45 punch from 211.218.222.4:41788; answering in 2500ms x3
+Oct 14 14:04:48 [relay] connect=2b4e2e45 bound client=211.218.222.4:41788 host=192.168.0.76:43000
+Oct 14 14:04:48 [relay] connect=2b4e2e45 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 14 14:04:48 [relay] connect=2b4e2e45 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 14 14:04:48 [relay] connect=2b4e2e45 active; helloAck in 1ms
+Oct 14 14:04:50 [capability] connect=30048591 minted host=df15b73b queued=1 ttlMs=30000
+Oct 14 14:04:50 [relay] connect=30048591 eligible client=211.218.222.4:49175 wire=211.218.222.4 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 14 14:04:50 [relay] connect=30048591 punch from 211.218.222.4:49175; answering in 2500ms x3
+Oct 14 14:04:52 [relay] connect=30048591 bound client=211.218.222.4:49175 host=211.218.222.1:43000
+Oct 14 14:04:52 [relay] connect=30048591 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 14 14:04:52 [relay] connect=30048591 first h2c <- 211.218.222.1:43000 afterBindMs=7 afterFirstC2HMs=7
+Oct 14 14:04:52 [relay] connect=30048591 active; helloAck in 8ms
+Oct 14 14:05:51 [relay] connect=2b4e2e45 closed reason=client silent state=active c2h=35/3509B h2c=2653/3132705B ackMs=1
+Oct 14 14:10:49 [capability] connect=60e16b80 minted host=df15b73b queued=1 ttlMs=30000
+Oct 14 14:10:49 [relay] connect=60e16b80 eligible client=211.218.222.4:35407 wire=211.218.222.4 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 14 14:10:49 [relay] connect=60e16b80 punch from 211.218.222.4:35407; answering in 2500ms x3
+Oct 14 14:10:51 [relay] connect=30048591 closed reason=newer connect state=active c2h=5030/560577B h2c=43394/42738410B ackMs=8
+Oct 14 14:10:51 [relay] connect=60e16b80 bound client=211.218.222.4:35407 host=211.218.222.1:43000
+Oct 14 14:10:51 [relay] connect=60e16b80 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 14 14:10:51 [relay] connect=60e16b80 first h2c <- 211.218.222.1:43000 afterBindMs=3 afterFirstC2HMs=3
+Oct 14 14:10:51 [relay] connect=60e16b80 active; helloAck in 3ms
+Oct 14 14:15:56 [relay] connect=60e16b80 closed reason=client silent state=active c2h=2916/329285B h2c=64767/70621768B ackMs=3
+Oct 14 14:16:47 [capability] connect=706507d1 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 14 14:16:47 [relay] connect=706507d1 eligible client=211.218.222.1:64226 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 14 14:16:47 [relay] connect=706507d1 punch from 211.218.222.1:64226; answering in 2500ms x3
+Oct 14 14:16:49 [relay] connect=706507d1 bound client=211.218.222.1:64226 host=192.168.0.76:43000
+Oct 14 14:16:49 [relay] connect=706507d1 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 14 14:16:49 [relay] connect=706507d1 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 14 14:16:49 [relay] connect=706507d1 active; helloAck in 1ms
+Oct 14 14:20:16 [capability] connect=7ebc216e minted host=df15b73b queued=1 ttlMs=30000
+Oct 14 14:20:16 [relay] connect=7ebc216e eligible client=211.218.222.4:47880 wire=211.218.222.4 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 14 14:20:16 [relay] connect=7ebc216e punch from 211.218.222.4:47880; answering in 2500ms x3
+Oct 14 14:20:18 [relay] connect=7ebc216e bound client=211.218.222.4:47880 host=211.218.222.1:43000
+Oct 14 14:20:18 [relay] connect=7ebc216e first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 14 14:20:18 [relay] connect=7ebc216e first h2c <- 211.218.222.1:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 14 14:20:18 [relay] connect=7ebc216e active; helloAck in 2ms
+Oct 14 14:25:12 [capability] connect=187c151c minted host=df15b73b queued=1 ttlMs=30000
+Oct 14 14:25:12 [relay] connect=187c151c eligible client=211.218.222.4:46169 wire=211.218.222.4 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 14 14:25:12 [relay] connect=187c151c punch from 211.218.222.4:46169; answering in 2500ms x3
+Oct 14 14:25:15 [relay] connect=7ebc216e closed reason=newer connect state=active c2h=4177/465601B h2c=73410/78966996B ackMs=2
+Oct 14 14:25:15 [relay] connect=187c151c bound client=211.218.222.4:46169 host=211.218.222.1:43000
+Oct 14 14:25:15 [relay] connect=187c151c first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 14 14:25:15 [relay] connect=187c151c first h2c <- 211.218.222.1:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 14 14:25:15 [relay] connect=187c151c active; helloAck in 1ms
+Oct 14 14:26:25 [capability] connect=bad0aeab minted host=df15b73b queued=1 ttlMs=30000
+Oct 14 14:26:25 [relay] connect=bad0aeab eligible client=211.218.222.4:43165 wire=211.218.222.4 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 14 14:26:25 [relay] connect=bad0aeab punch from 211.218.222.4:43165; answering in 2500ms x3
+Oct 14 14:26:28 [relay] connect=187c151c closed reason=newer connect state=active c2h=418/47413B h2c=12990/14358694B ackMs=1
+Oct 14 14:26:28 [relay] connect=bad0aeab bound client=211.218.222.4:43165 host=211.218.222.1:43000
+Oct 14 14:26:28 [relay] connect=bad0aeab first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 14 14:26:28 [relay] connect=bad0aeab first h2c <- 211.218.222.1:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 14 14:26:28 [relay] connect=bad0aeab active; helloAck in 2ms
+Oct 14 14:29:21 [relay] connect=bad0aeab closed reason=client silent state=active c2h=2494/276261B h2c=23796/24262612B ackMs=2
+Oct 14 15:49:01 [relay] connect=706507d1 closed reason=client silent state=active c2h=89774/9748513B h2c=1738476/1936754898B ackMs=1
+Oct 14 16:16:49 [capability] connect=6ab91f91 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 14 16:16:49 [relay] connect=6ab91f91 eligible client=211.218.222.1:58148 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 14 16:16:49 [relay] connect=6ab91f91 punch from 211.218.222.1:58148; answering in 2500ms x3
+Oct 14 16:16:51 [relay] connect=6ab91f91 bound client=211.218.222.1:58148 host=192.168.0.76:43000
+Oct 14 16:16:51 [relay] connect=6ab91f91 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 14 16:16:51 [relay] connect=6ab91f91 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 14 16:16:51 [relay] connect=6ab91f91 active; helloAck in 1ms
+Oct 14 17:50:32 [relay] connect=6ab91f91 closed reason=client silent state=active c2h=86743/9429773B h2c=1841443/2058914321B ackMs=1
+Oct 14 18:19:27 [capability] connect=9789bd3c minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 14 18:19:27 [relay] connect=9789bd3c eligible client=211.218.222.1:56655 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 14 18:19:27 [relay] connect=9789bd3c punch from 211.218.222.1:56655; answering in 2500ms x3
+Oct 14 18:19:30 [relay] connect=9789bd3c bound client=211.218.222.1:56655 host=192.168.0.76:43000
+Oct 14 18:19:30 [relay] connect=9789bd3c first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=1
+Oct 14 18:19:30 [relay] connect=9789bd3c first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=0
+Oct 14 18:19:30 [relay] connect=9789bd3c active; helloAck in 1ms
+Oct 14 19:00:27 [relay] connect=9789bd3c closed reason=client silent state=active c2h=48604/5263329B h2c=851739/942412435B ackMs=1
+Oct 15 10:08:35 [capability] connect=59410e75 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 10:08:35 [relay] connect=59410e75 eligible client=211.218.222.1:50676 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 15 10:08:35 [relay] connect=59410e75 punch from 211.218.222.1:50676; answering in 2500ms x3
+Oct 15 10:08:38 [relay] connect=59410e75 bound client=211.218.222.1:50676 host=192.168.0.76:43000
+Oct 15 10:08:38 [relay] connect=59410e75 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=1
+Oct 15 10:08:38 [relay] connect=59410e75 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=0
+Oct 15 10:08:38 [relay] connect=59410e75 active; helloAck in 1ms
+Oct 15 10:33:05 [relay] connect=59410e75 closed reason=client silent state=active c2h=15991/1730741B h2c=174984/187935835B ackMs=1
+Oct 15 11:06:41 [capability] connect=325c2cea minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 11:06:41 [relay] connect=325c2cea eligible client=211.218.222.1:58920 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 15 11:06:41 [relay] connect=325c2cea punch from 211.218.222.1:58920; answering in 2500ms x3
+Oct 15 11:06:43 [relay] connect=325c2cea bound client=211.218.222.1:58920 host=192.168.0.76:43000
+Oct 15 11:06:43 [relay] connect=325c2cea first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 11:06:43 [relay] connect=325c2cea first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 11:06:43 [relay] connect=325c2cea active; helloAck in 0ms
+Oct 15 11:16:30 [relay] connect=325c2cea closed reason=client silent state=active c2h=9938/1067973B h2c=106769/114243399B ackMs=0
+Oct 15 11:17:27 [capability] connect=b195889c minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 11:17:27 [relay] connect=b195889c eligible client=211.218.222.1:52744 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 15 11:17:27 [relay] connect=b195889c punch from 211.218.222.1:52744; answering in 2500ms x3
+Oct 15 11:17:29 [relay] connect=b195889c bound client=211.218.222.1:52744 host=192.168.0.76:43000
+Oct 15 11:17:29 [relay] connect=b195889c first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 11:17:29 [relay] connect=b195889c first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 11:17:29 [relay] connect=b195889c active; helloAck in 0ms
+Oct 15 11:59:35 [relay] connect=b195889c closed reason=client silent state=active c2h=52522/5695805B h2c=736187/803549472B ackMs=0
+Oct 15 12:04:00 [capability] connect=dd63d1cb minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 12:04:00 [relay] connect=dd63d1cb eligible client=211.218.222.1:50800 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 15 12:04:01 [relay] connect=dd63d1cb punch from 211.218.222.1:50800; answering in 2500ms x3
+Oct 15 12:04:03 [relay] connect=dd63d1cb bound client=211.218.222.1:50800 host=192.168.0.76:43000
+Oct 15 12:04:03 [relay] connect=dd63d1cb first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 12:04:03 [relay] connect=dd63d1cb first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 12:04:03 [relay] connect=dd63d1cb active; helloAck in 0ms
+Oct 15 12:32:30 [relay] connect=dd63d1cb closed reason=client silent state=active c2h=28081/3047953B h2c=526604/585103416B ackMs=0
+Oct 15 13:34:58 [capability] connect=7818d3fd minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 13:34:58 [relay] connect=7818d3fd eligible client=211.218.222.4:46272 wire=211.218.222.4 host=shotan Desktop@175.207.45.151:25870
+Oct 15 13:34:58 [relay] connect=7818d3fd punch from 211.218.222.4:46272; answering in 2500ms x3
+Oct 15 13:35:00 [relay] connect=7818d3fd bound client=211.218.222.4:46272 host=192.168.0.76:43000
+Oct 15 13:35:00 [relay] connect=7818d3fd first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 13:35:00 [relay] connect=7818d3fd first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 15 13:35:00 [relay] connect=7818d3fd active; helloAck in 1ms
+Oct 15 13:35:16 [capability] connect=0d6817bd minted host=df15b73b queued=1 ttlMs=30000
+Oct 15 13:35:16 [relay] connect=0d6817bd eligible client=211.218.222.4:59670 wire=211.218.222.4 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 15 13:35:16 [relay] connect=0d6817bd punch from 211.218.222.4:59670; answering in 2500ms x3
+Oct 15 13:35:19 [relay] connect=0d6817bd bound client=211.218.222.4:59670 host=211.218.222.1:43000
+Oct 15 13:35:19 [relay] connect=0d6817bd first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 15 13:35:19 [relay] connect=0d6817bd first h2c <- 211.218.222.1:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 15 13:35:19 [relay] connect=0d6817bd active; helloAck in 2ms
+Oct 15 13:36:16 [relay] connect=7818d3fd closed reason=client silent state=active c2h=171/18689B h2c=3647/4061190B ackMs=1
+Oct 15 13:38:11 [relay] connect=0d6817bd closed reason=client silent state=active c2h=2216/246081B h2c=29495/31159115B ackMs=2
+Oct 15 13:39:54 [capability] connect=9e4c5b82 minted host=df15b73b queued=1 ttlMs=30000
+Oct 15 13:39:54 [relay] connect=9e4c5b82 eligible client=211.218.222.4:43882 wire=211.218.222.4 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 15 13:39:54 [relay] connect=9e4c5b82 punch from 211.218.222.4:43882; answering in 2500ms x3
+Oct 15 13:39:57 [relay] connect=9e4c5b82 bound client=211.218.222.4:43882 host=211.218.222.1:43000
+Oct 15 13:39:57 [relay] connect=9e4c5b82 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=1
+Oct 15 13:39:57 [relay] connect=9e4c5b82 first h2c <- 211.218.222.1:43000 afterBindMs=2 afterFirstC2HMs=1
+Oct 15 13:39:57 [relay] connect=9e4c5b82 active; helloAck in 2ms
+Oct 15 13:41:42 [relay] connect=9e4c5b82 closed reason=client silent state=active c2h=774/85809B h2c=12292/13115359B ackMs=2
+Oct 15 13:41:43 [capability] connect=2f093a34 minted host=df15b73b queued=1 ttlMs=30000
+Oct 15 13:41:43 [relay] connect=2f093a34 eligible client=211.218.222.1:61643 wire=211.218.222.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 15 13:41:43 [relay] connect=2f093a34 punch from 211.218.222.1:61643; answering in 2500ms x3
+Oct 15 14:04:18 [capability] connect=384975fa minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 14:04:18 [relay] connect=384975fa eligible client=211.218.222.1:62867 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 15 14:04:18 [relay] connect=384975fa punch from 211.218.222.1:62867; answering in 2500ms x3
+Oct 15 14:04:20 [relay] connect=384975fa bound client=211.218.222.1:62867 host=192.168.0.76:43000
+Oct 15 14:04:20 [relay] connect=384975fa first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 14:04:20 [relay] connect=384975fa first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 15 14:04:20 [relay] connect=384975fa active; helloAck in 1ms
+Oct 15 15:06:42 [relay] connect=384975fa closed reason=client silent state=active c2h=79275/8576485B h2c=958667/1035868272B ackMs=1
+Oct 15 15:24:05 [capability] connect=1d1e5b89 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 15 15:24:05 [relay] connect=1d1e5b89 eligible client=211.218.222.4:47679 wire=211.218.222.4 host=Home@175.207.45.151:16166
+Oct 15 15:24:05 [relay] connect=1d1e5b89 punch from 211.218.222.4:47679; answering in 2500ms x3
+Oct 15 15:24:08 [relay] connect=1d1e5b89 bound client=211.218.222.4:47679 host=192.168.0.16:43000
+Oct 15 15:24:08 [relay] connect=1d1e5b89 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=1
+Oct 15 15:24:08 [relay] connect=1d1e5b89 first h2c <- 192.168.0.16:43000 afterBindMs=1 afterFirstC2HMs=0
+Oct 15 15:24:08 [relay] connect=1d1e5b89 active; helloAck in 1ms
+Oct 15 15:25:17 [relay] connect=1d1e5b89 closed reason=client silent state=active c2h=75/7913B h2c=3812/4316111B ackMs=1
+Oct 15 15:37:36 [capability] connect=119a0e80 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 15 15:37:36 [relay] connect=119a0e80 eligible client=211.218.222.4:46232 wire=211.218.222.4 host=Home@175.207.45.151:16166
+Oct 15 15:37:36 [relay] connect=119a0e80 punch from 211.218.222.4:46232; answering in 2500ms x3
+Oct 15 15:37:39 [relay] connect=119a0e80 bound client=211.218.222.4:46232 host=192.168.0.16:43000
+Oct 15 15:37:39 [relay] connect=119a0e80 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 15 15:37:39 [relay] connect=119a0e80 first h2c <- 192.168.0.16:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 15:37:39 [relay] connect=119a0e80 active; helloAck in 0ms
+Oct 15 15:37:49 [capability] connect=8aa4e05f minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 15 15:37:49 [relay] connect=8aa4e05f eligible client=118.235.74.179:56083 wire=118.235.74.179 host=Home@175.207.45.151:16166
+Oct 15 15:37:49 [relay] connect=8aa4e05f punch from 118.235.74.179:56083; answering in 2500ms x3
+Oct 15 15:37:52 [relay] connect=119a0e80 closed reason=newer connect state=active c2h=279/37614B h2c=2676/3022994B ackMs=0
+Oct 15 15:37:52 [relay] connect=8aa4e05f bound client=118.235.74.179:56083 host=192.168.0.16:43000
+Oct 15 15:37:52 [relay] connect=8aa4e05f first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 15 15:37:52 [relay] connect=8aa4e05f first h2c <- 192.168.0.16:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 15:37:52 [relay] connect=8aa4e05f active; helloAck in 0ms
+Oct 15 15:38:39 [capability] connect=3aa942f4 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 15 15:38:39 [relay] connect=3aa942f4 eligible client=118.235.2.168:38241 wire=118.235.2.168 host=Home@175.207.45.151:16166
+Oct 15 15:38:39 [relay] connect=3aa942f4 punch from 118.235.2.168:38241; answering in 2500ms x3
+Oct 15 15:38:42 [relay] connect=8aa4e05f closed reason=newer connect state=active c2h=400/44449B h2c=10531/11539608B ackMs=0
+Oct 15 15:38:42 [relay] connect=3aa942f4 bound client=118.235.2.168:38241 host=192.168.0.16:43000
+Oct 15 15:38:42 [relay] connect=3aa942f4 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 15 15:38:42 [relay] connect=3aa942f4 first h2c <- 192.168.0.16:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 15:38:42 [relay] connect=3aa942f4 active; helloAck in 0ms
+Oct 15 15:45:58 [capability] connect=a07d693a minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 15 15:45:58 [relay] connect=a07d693a eligible client=118.235.2.168:59025 wire=118.235.2.168 host=Home@175.207.45.151:16166
+Oct 15 15:45:58 [relay] connect=a07d693a punch from 118.235.2.168:59025; answering in 2500ms x3
+Oct 15 15:46:01 [relay] connect=3aa942f4 closed reason=newer connect state=active c2h=4284/482577B h2c=98531/107250492B ackMs=0
+Oct 15 15:46:01 [relay] connect=a07d693a bound client=118.235.2.168:59025 host=192.168.0.16:43000
+Oct 15 15:46:01 [relay] connect=a07d693a first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 15 15:46:01 [relay] connect=a07d693a first h2c <- 192.168.0.16:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 15:46:01 [relay] connect=a07d693a active; helloAck in 0ms
+Oct 15 15:47:12 [capability] connect=7e88d30e minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 15 15:47:12 [relay] connect=7e88d30e eligible client=118.235.2.168:58769 wire=118.235.2.168 host=Home@175.207.45.151:16166
+Oct 15 15:47:12 [relay] connect=7e88d30e punch from 118.235.2.168:58769; answering in 2500ms x3
+Oct 15 15:47:15 [relay] connect=a07d693a closed reason=newer connect state=active c2h=249/27398B h2c=8602/9522688B ackMs=0
+Oct 15 15:47:15 [relay] connect=7e88d30e bound client=118.235.2.168:58769 host=192.168.0.16:43000
+Oct 15 15:47:15 [relay] connect=7e88d30e first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 15 15:47:15 [relay] connect=7e88d30e first h2c <- 192.168.0.16:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 15 15:47:15 [relay] connect=7e88d30e active; helloAck in 1ms
+Oct 15 15:48:16 [capability] connect=c3aa10e8 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 15 15:48:16 [relay] connect=c3aa10e8 eligible client=118.235.2.168:35106 wire=118.235.2.168 host=Home@175.207.45.151:16166
+Oct 15 15:48:16 [relay] connect=c3aa10e8 punch from 118.235.2.168:35106; answering in 2500ms x3
+Oct 15 15:48:19 [relay] connect=7e88d30e closed reason=newer connect state=active c2h=271/29949B h2c=10167/11289451B ackMs=1
+Oct 15 15:48:19 [relay] connect=c3aa10e8 bound client=118.235.2.168:35106 host=192.168.0.16:43000
+Oct 15 15:48:19 [relay] connect=c3aa10e8 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 15 15:48:19 [relay] connect=c3aa10e8 first h2c <- 192.168.0.16:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 15:48:19 [relay] connect=c3aa10e8 active; helloAck in 0ms
+Oct 15 15:50:08 [capability] connect=01589824 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 15:50:08 [relay] connect=01589824 eligible client=118.235.2.168:35016 wire=118.235.2.168 host=shotan Desktop@175.207.45.151:25870
+Oct 15 15:50:08 [relay] connect=01589824 punch from 118.235.2.168:35016; answering in 2500ms x3
+Oct 15 15:50:10 [relay] connect=01589824 bound client=118.235.2.168:35016 host=192.168.0.76:43000
+Oct 15 15:50:10 [relay] connect=01589824 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 15:50:10 [relay] connect=01589824 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 15 15:50:10 [relay] connect=01589824 active; helloAck in 1ms
+Oct 15 15:51:08 [relay] connect=c3aa10e8 closed reason=client silent state=active c2h=1374/153525B h2c=29250/31791048B ackMs=0
+Oct 15 15:52:01 [capability] connect=e4804524 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 15:52:01 [relay] connect=e4804524 eligible client=118.235.2.168:33148 wire=118.235.2.168 host=shotan Desktop@175.207.45.151:25870
+Oct 15 15:52:01 [relay] connect=e4804524 punch from 118.235.2.168:33148; answering in 2500ms x3
+Oct 15 15:52:03 [relay] connect=01589824 closed reason=client silent state=active c2h=515/57733B h2c=10401/11333598B ackMs=1
+Oct 15 15:52:03 [relay] connect=e4804524 bound client=118.235.2.168:33148 host=192.168.0.76:43000
+Oct 15 15:52:03 [relay] connect=e4804524 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 15:52:03 [relay] connect=e4804524 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 15:52:03 [relay] connect=e4804524 active; helloAck in 0ms
+Oct 15 15:54:27 [capability] connect=dc701785 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 15 15:54:27 [relay] connect=dc701785 eligible client=118.235.2.168:58799 wire=118.235.2.168 host=Home@175.207.45.151:16166
+Oct 15 15:54:27 [relay] connect=dc701785 punch from 118.235.2.168:58799; answering in 2500ms x3
+Oct 15 15:54:30 [relay] connect=dc701785 bound client=118.235.2.168:58799 host=192.168.0.16:43000
+Oct 15 15:54:30 [relay] connect=dc701785 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 15 15:54:30 [relay] connect=dc701785 first h2c <- 192.168.0.16:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 15 15:54:30 [relay] connect=dc701785 active; helloAck in 1ms
+Oct 15 15:54:37 [capability] connect=c0255fc0 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 15:54:37 [relay] connect=c0255fc0 eligible client=118.235.2.168:59345 wire=118.235.2.168 host=shotan Desktop@175.207.45.151:25870
+Oct 15 15:54:38 [relay] connect=c0255fc0 punch from 118.235.2.168:59345; answering in 2500ms x3
+Oct 15 15:54:40 [relay] connect=e4804524 closed reason=newer connect state=active c2h=955/111721B h2c=17572/19158657B ackMs=0
+Oct 15 15:54:40 [relay] connect=c0255fc0 bound client=118.235.2.168:59345 host=192.168.0.76:43000
+Oct 15 15:54:40 [relay] connect=c0255fc0 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 15:54:40 [relay] connect=c0255fc0 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 15 15:54:40 [relay] connect=c0255fc0 active; helloAck in 1ms
+Oct 15 15:55:38 [relay] connect=dc701785 closed reason=client silent state=active c2h=70/7357B h2c=3331/3690363B ackMs=1
+Oct 15 15:56:53 [relay] connect=c0255fc0 closed reason=client silent state=active c2h=1394/155397B h2c=8619/8419830B ackMs=1
+Oct 15 16:01:13 [capability] connect=93634386 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 16:01:13 [relay] connect=93634386 eligible client=118.235.2.168:37887 wire=118.235.2.168 host=shotan Desktop@175.207.45.151:25870
+Oct 15 16:01:13 [relay] connect=93634386 punch from 118.235.2.168:37887; answering in 2500ms x3
+Oct 15 16:01:15 [relay] connect=93634386 bound client=118.235.2.168:37887 host=192.168.0.76:43000
+Oct 15 16:01:15 [relay] connect=93634386 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 16:01:15 [relay] connect=93634386 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 15 16:01:15 [relay] connect=93634386 active; helloAck in 1ms
+Oct 15 16:02:38 [relay] connect=93634386 closed reason=client silent state=active c2h=176/19461B h2c=3671/4053078B ackMs=1
+Oct 15 16:05:48 [capability] connect=a515cd77 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 16:05:48 [relay] connect=a515cd77 eligible client=118.235.2.168:57014 wire=118.235.2.168 host=shotan Desktop@175.207.45.151:25870
+Oct 15 16:05:48 [relay] connect=a515cd77 punch from 118.235.2.168:57014; answering in 2500ms x3
+Oct 15 16:05:51 [relay] connect=a515cd77 bound client=118.235.2.168:57014 host=192.168.0.76:43000
+Oct 15 16:05:51 [relay] connect=a515cd77 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 16:05:51 [relay] connect=a515cd77 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 15 16:05:51 [relay] connect=a515cd77 active; helloAck in 1ms
+Oct 15 16:09:53 [relay] connect=a515cd77 closed reason=client silent state=active c2h=2067/246197B h2c=18041/18424783B ackMs=1
+Oct 15 16:11:28 [capability] connect=1d920713 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 16:11:28 [relay] connect=1d920713 eligible client=118.235.2.168:50351 wire=118.235.2.168 host=shotan Desktop@175.207.45.151:25870
+Oct 15 16:11:28 [relay] connect=1d920713 punch from 118.235.2.168:50351; answering in 2500ms x3
+Oct 15 16:11:30 [relay] connect=1d920713 bound client=118.235.2.168:50351 host=192.168.0.76:43000
+Oct 15 16:11:30 [relay] connect=1d920713 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=1
+Oct 15 16:11:30 [relay] connect=1d920713 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=0
+Oct 15 16:11:30 [relay] connect=1d920713 active; helloAck in 1ms
+Oct 15 16:14:03 [relay] connect=1d920713 closed reason=client silent state=active c2h=1784/223441B h2c=16781/17223449B ackMs=1
+Oct 15 16:16:41 [capability] connect=f212db68 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 15 16:16:41 [relay] connect=f212db68 eligible client=118.235.2.168:45294 wire=118.235.2.168 host=Home@175.207.45.151:16166
+Oct 15 16:16:41 [relay] connect=f212db68 punch from 118.235.2.168:45294; answering in 2500ms x3
+Oct 15 16:16:43 [relay] connect=f212db68 bound client=118.235.2.168:45294 host=192.168.0.16:43000
+Oct 15 16:16:43 [relay] connect=f212db68 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 15 16:16:43 [relay] connect=f212db68 first h2c <- 192.168.0.16:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 16:16:43 [relay] connect=f212db68 active; helloAck in 0ms
+Oct 15 16:17:27 [capability] connect=9f219218 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 16:17:27 [relay] connect=9f219218 eligible client=118.235.2.168:38306 wire=118.235.2.168 host=shotan Desktop@175.207.45.151:25870
+Oct 15 16:17:27 [relay] connect=9f219218 punch from 118.235.2.168:38306; answering in 2500ms x3
+Oct 15 16:17:30 [relay] connect=9f219218 bound client=118.235.2.168:38306 host=192.168.0.76:43000
+Oct 15 16:17:30 [relay] connect=9f219218 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 16:17:30 [relay] connect=9f219218 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 16:17:30 [relay] connect=9f219218 active; helloAck in 0ms
+Oct 15 16:18:28 [relay] connect=f212db68 closed reason=client silent state=active c2h=453/50505B h2c=12333/13490013B ackMs=0
+Oct 15 16:20:38 [relay] connect=9f219218 closed reason=client silent state=active c2h=1200/138829B h2c=12233/12536722B ackMs=0
+Oct 15 16:41:37 [capability] connect=ed767111 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 16:41:37 [relay] connect=ed767111 eligible client=211.218.222.1:55025 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:25870
+Oct 15 16:41:37 [relay] connect=ed767111 punch from 211.218.222.1:55025; answering in 2500ms x3
+Oct 15 16:41:39 [relay] connect=ed767111 bound client=211.218.222.1:55025 host=192.168.0.76:43000
+Oct 15 16:41:39 [relay] connect=ed767111 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 16:41:39 [relay] connect=ed767111 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 16:41:39 [relay] connect=ed767111 active; helloAck in 0ms
+Oct 15 16:51:40 [capability] connect=90e9081f minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 15 16:51:40 [relay] connect=90e9081f eligible client=211.218.222.4:42969 wire=211.218.222.4 host=Home@175.207.45.151:16166
+Oct 15 16:51:40 [relay] connect=90e9081f punch from 211.218.222.4:42969; answering in 2500ms x3
+Oct 15 16:51:42 [relay] connect=90e9081f bound client=211.218.222.4:42969 host=192.168.0.16:43000
+Oct 15 16:51:42 [relay] connect=90e9081f first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 15 16:51:42 [relay] connect=90e9081f first h2c <- 192.168.0.16:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 16:51:42 [relay] connect=90e9081f active; helloAck in 0ms
+Oct 15 16:52:58 [relay] connect=90e9081f closed reason=client silent state=active c2h=540/59261B h2c=5428/5630401B ackMs=0
+Oct 15 17:37:03 [relay] connect=ed767111 closed reason=client silent state=active c2h=76877/8324525B h2c=660165/689402858B ackMs=0
+Oct 15 17:39:17 [capability] connect=e3dcdb15 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 17:39:17 [relay] connect=e3dcdb15 eligible client=211.218.222.1:52659 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 15 17:39:17 [relay] connect=e3dcdb15 punch from 211.218.222.1:52659; answering in 2500ms x3
+Oct 15 17:39:20 [relay] connect=e3dcdb15 bound client=211.218.222.1:52659 host=192.168.0.76:43000
+Oct 15 17:39:20 [relay] connect=e3dcdb15 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 17:39:20 [relay] connect=e3dcdb15 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 17:39:20 [relay] connect=e3dcdb15 active; helloAck in 0ms
+Oct 15 17:41:18 [capability] connect=6b1c3413 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 17:41:18 [relay] connect=6b1c3413 eligible client=211.218.222.1:50869 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 15 17:41:18 [relay] connect=6b1c3413 punch from 211.218.222.1:50869; answering in 2500ms x3
+Oct 15 17:41:20 [relay] connect=e3dcdb15 closed reason=newer connect state=active c2h=1502/163213B h2c=15936/16541962B ackMs=0
+Oct 15 17:41:20 [relay] connect=6b1c3413 bound client=211.218.222.1:50869 host=192.168.0.76:43000
+Oct 15 17:41:20 [relay] connect=6b1c3413 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 17:41:20 [relay] connect=6b1c3413 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 15 17:41:20 [relay] connect=6b1c3413 active; helloAck in 0ms
+Oct 15 18:38:54 [relay] connect=6b1c3413 closed reason=client silent state=active c2h=66296/7161313B h2c=1032025/1134656607B ackMs=0
+Oct 15 18:48:40 [capability] connect=96c85618 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 18:48:40 [relay] connect=96c85618 eligible client=211.218.222.1:62333 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 15 18:48:40 [relay] connect=96c85618 punch from 211.218.222.1:62333; answering in 2500ms x3
+Oct 15 20:21:59 [capability] connect=31aeb983 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 15 20:21:59 [relay] connect=31aeb983 eligible client=118.235.2.168:44323 wire=118.235.2.168 host=shotan Desktop@175.207.45.151:43000
+Oct 15 20:21:59 [relay] connect=31aeb983 punch from 118.235.2.168:44323; answering in 2500ms x3
+Oct 15 20:22:01 [relay] connect=31aeb983 bound client=118.235.2.168:44323 host=192.168.0.76:43000
+Oct 15 20:22:01 [relay] connect=31aeb983 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 15 20:22:01 [relay] connect=31aeb983 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 15 20:22:01 [relay] connect=31aeb983 active; helloAck in 1ms
+Oct 15 20:24:26 [relay] connect=31aeb983 closed reason=client silent state=active c2h=756/85005B h2c=12962/13989517B ackMs=1
+Oct 16 10:10:38 [capability] connect=8902eea8 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 10:10:38 [relay] connect=8902eea8 eligible client=211.218.222.1:57713 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 16 10:10:38 [relay] connect=8902eea8 punch from 211.218.222.1:57713; answering in 2500ms x3
+Oct 16 10:10:40 [relay] connect=8902eea8 bound client=211.218.222.1:57713 host=192.168.0.76:43000
+Oct 16 10:10:40 [relay] connect=8902eea8 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 16 10:10:40 [relay] connect=8902eea8 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 16 10:10:40 [relay] connect=8902eea8 active; helloAck in 1ms
+Oct 16 10:27:36 [relay] connect=8902eea8 closed reason=client silent state=active c2h=24220/2628933B h2c=275872/296571661B ackMs=1
+Oct 16 10:33:58 [capability] connect=5b9d5b5e minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 10:33:58 [relay] connect=5b9d5b5e eligible client=211.218.222.1:49817 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 16 10:33:58 [relay] connect=5b9d5b5e punch from 211.218.222.1:49817; answering in 2500ms x3
+Oct 16 12:01:26 [capability] connect=78f7c423 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 12:01:26 [relay] connect=78f7c423 eligible client=211.218.222.1:61548 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 16 12:01:26 [relay] connect=78f7c423 punch from 211.218.222.1:61548; answering in 2500ms x3
+Oct 16 12:01:28 [relay] connect=78f7c423 bound client=211.218.222.1:61548 host=192.168.0.76:43000
+Oct 16 12:01:28 [relay] connect=78f7c423 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 16 12:01:28 [relay] connect=78f7c423 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 16 12:01:28 [relay] connect=78f7c423 active; helloAck in 1ms
+Oct 16 12:22:57 [relay] connect=78f7c423 closed reason=client silent state=active c2h=25197/2733341B h2c=425646/470398208B ackMs=1
+Oct 16 14:05:56 [capability] connect=c9176cf3 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 14:05:56 [relay] connect=c9176cf3 eligible client=211.218.222.1:49762 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 16 14:05:56 [relay] connect=c9176cf3 punch from 211.218.222.1:49762; answering in 2500ms x3
+Oct 16 14:28:37 [capability] connect=898f634f minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 14:28:37 [relay] connect=898f634f eligible client=211.218.222.1:54771 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 16 14:28:37 [relay] connect=898f634f punch from 211.218.222.1:54771; answering in 2500ms x3
+Oct 16 14:45:14 [capability] connect=40fb519b minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 14:45:14 [relay] connect=40fb519b eligible client=211.218.222.4:53832 wire=211.218.222.4 host=shotan Desktop@175.207.45.151:43000
+Oct 16 14:45:14 [relay] connect=40fb519b punch from 211.218.222.4:53832; answering in 2500ms x3
+Oct 16 14:48:19 [capability] connect=9c14a688 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 14:48:19 [relay] connect=9c14a688 eligible client=211.218.222.4:58306 wire=211.218.222.4 host=shotan Desktop@175.207.45.151:43000
+Oct 16 14:48:19 [relay] connect=9c14a688 punch from 211.218.222.4:58306; answering in 2500ms x3
+Oct 16 14:50:55 [capability] connect=84a12670 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 14:50:55 [relay] connect=84a12670 eligible client=211.218.222.4:48547 wire=211.218.222.4 host=shotan Desktop@175.207.45.151:43000
+Oct 16 14:50:55 [relay] connect=84a12670 punch from 211.218.222.4:48547; answering in 2500ms x3
+Oct 16 14:51:00 [capability] connect=56a3b6f9 minted host=df15b73b queued=1 ttlMs=30000
+Oct 16 14:51:00 [relay] connect=56a3b6f9 eligible client=211.218.222.4:39198 wire=211.218.222.4 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 16 14:51:00 [relay] connect=56a3b6f9 punch from 211.218.222.4:39198; answering in 2500ms x3
+Oct 16 14:51:03 [relay] connect=56a3b6f9 bound client=211.218.222.4:39198 host=211.218.222.1:43000
+Oct 16 14:51:03 [relay] connect=56a3b6f9 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 16 14:51:03 [relay] connect=56a3b6f9 first h2c <- 211.218.222.1:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 16 14:51:03 [relay] connect=56a3b6f9 active; helloAck in 2ms
+Oct 16 14:51:35 [capability] connect=b2617477 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 14:51:35 [relay] connect=b2617477 eligible client=211.218.222.4:48493 wire=211.218.222.4 host=shotan Desktop@175.207.45.151:43000
+Oct 16 14:51:35 [relay] connect=b2617477 punch from 211.218.222.4:48493; answering in 2500ms x3
+Oct 16 14:52:35 [relay] connect=56a3b6f9 closed reason=client silent state=active c2h=253/27775B h2c=7089/7849231B ackMs=2
+Oct 16 14:53:50 [capability] connect=833ad8f1 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 14:53:50 [relay] connect=833ad8f1 eligible client=211.218.222.1:52471 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 16 14:53:50 [relay] connect=833ad8f1 punch from 211.218.222.1:52471; answering in 2500ms x3
+Oct 16 15:22:56 [capability] connect=0277dc7f minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 15:22:56 [relay] connect=0277dc7f eligible client=211.218.222.1:56860 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 16 15:22:56 [relay] connect=0277dc7f punch from 211.218.222.1:56860; answering in 2500ms x3
+Oct 16 15:25:43 [capability] connect=b38ab226 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 15:25:43 [relay] connect=b38ab226 eligible client=211.218.222.1:49977 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 16 15:25:43 [relay] connect=b38ab226 punch from 211.218.222.1:49977; answering in 2500ms x3
+Oct 16 15:50:28 [capability] connect=c3d4bc03 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 15:50:28 [relay] connect=c3d4bc03 eligible client=211.218.222.1:54932 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 16 15:50:28 [relay] connect=c3d4bc03 punch from 211.218.222.1:54932; answering in 2500ms x3
+Oct 16 17:31:00 [capability] connect=b865429d minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 17:31:00 [relay] connect=b865429d eligible client=211.218.222.1:54671 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 16 17:31:00 [relay] connect=b865429d punch from 211.218.222.1:54671; answering in 2500ms x3
+Oct 16 19:08:59 [capability] connect=812ba9ea minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 16 19:08:59 [relay] connect=812ba9ea eligible client=211.218.222.1:64008 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 16 19:08:59 [relay] connect=812ba9ea punch from 211.218.222.1:64008; answering in 2500ms x3
+Oct 16 19:09:01 [relay] connect=812ba9ea bound client=211.218.222.1:64008 host=192.168.0.76:43000
+Oct 16 19:09:01 [relay] connect=812ba9ea first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 16 19:09:01 [relay] connect=812ba9ea first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 16 19:09:01 [relay] connect=812ba9ea active; helloAck in 1ms
+Oct 16 19:13:48 [relay] connect=812ba9ea closed reason=client silent state=active c2h=10203/1115553B h2c=60739/59992227B ackMs=1
+Oct 17 13:46:20 [capability] connect=bd891679 minted host=df15b73b queued=1 ttlMs=30000
+Oct 17 13:46:20 [relay] connect=bd891679 eligible client=175.207.45.151:28600 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 17 13:46:20 [relay] connect=bd891679 punch from 192.168.0.1:28600; answering in 2500ms x3
+Oct 17 13:46:23 [relay] connect=bd891679 bound client=192.168.0.1:28600 host=211.218.222.1:43000
+Oct 17 13:46:23 [relay] connect=bd891679 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 17 13:46:23 [relay] connect=bd891679 first h2c <- 211.218.222.1:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 17 13:46:23 [relay] connect=bd891679 active; helloAck in 2ms
+Oct 17 13:46:53 [capability] connect=150f263f minted host=df15b73b queued=1 ttlMs=30000
+Oct 17 13:46:53 [relay] connect=150f263f eligible client=175.207.45.151:56685 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 17 13:46:53 [relay] connect=150f263f punch from 192.168.0.1:56685; answering in 2500ms x3
+Oct 17 13:46:55 [relay] connect=bd891679 closed reason=newer connect state=active c2h=490/52809B h2c=19088/21716436B ackMs=2
+Oct 17 13:46:55 [relay] connect=150f263f bound client=192.168.0.1:56685 host=211.218.222.1:43000
+Oct 17 13:46:55 [relay] connect=150f263f first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 17 13:46:55 [relay] connect=150f263f first h2c <- 211.218.222.1:43000 afterBindMs=4 afterFirstC2HMs=4
+Oct 17 13:46:55 [relay] connect=150f263f active; helloAck in 4ms
+Oct 17 14:30:03 [capability] connect=eecef3c0 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 17 14:30:03 [relay] connect=eecef3c0 eligible client=175.207.45.151:30685 wire=192.168.0.1 host=shotan Desktop@175.207.45.151:43000
+Oct 17 14:30:03 [relay] connect=eecef3c0 punch from 192.168.0.1:30685; answering in 2500ms x3
+Oct 17 14:30:51 [relay] connect=150f263f closed reason=client silent state=active c2h=63649/6936813B h2c=2344317/2664236667B ackMs=4
+Oct 17 14:32:53 [capability] connect=c0139067 minted host=df15b73b queued=1 ttlMs=30000
+Oct 17 14:32:53 [relay] connect=c0139067 eligible client=175.207.45.151:58429 wire=192.168.0.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 17 14:32:53 [relay] connect=c0139067 punch from 192.168.0.1:58429; answering in 2500ms x3
+Oct 17 14:32:56 [relay] connect=c0139067 bound client=192.168.0.1:58429 host=211.218.222.1:43000
+Oct 17 14:32:56 [relay] connect=c0139067 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 17 14:32:56 [relay] connect=c0139067 first h2c <- 211.218.222.1:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 17 14:32:56 [relay] connect=c0139067 active; helloAck in 2ms
+Oct 17 14:34:06 [relay] connect=c0139067 closed reason=client silent state=active c2h=148/15833B h2c=13036/14886001B ackMs=2
+Oct 18 00:47:07 [capability] connect=40508a01 minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 18 00:47:07 [relay] connect=40508a01 eligible client=175.209.195.154:54167 wire=175.209.195.154 host=Home@175.207.45.151:58029
+Oct 18 00:47:07 [relay] connect=40508a01 punch from 175.209.195.154:54167; answering in 2500ms x3
+Oct 18 00:47:10 [relay] connect=40508a01 bound client=175.209.195.154:54167 host=192.168.0.16:43000
+Oct 18 00:47:10 [relay] connect=40508a01 first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 18 00:47:10 [relay] connect=40508a01 first h2c <- 192.168.0.16:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 18 00:47:10 [relay] connect=40508a01 active; helloAck in 1ms
+Oct 18 00:47:26 [capability] connect=6131190f minted host=1c8ebffe queued=1 ttlMs=30000
+Oct 18 00:47:26 [relay] connect=6131190f eligible client=175.209.195.154:41788 wire=175.209.195.154 host=Home@175.207.45.151:58029
+Oct 18 00:47:26 [relay] connect=6131190f punch from 175.209.195.154:41788; answering in 2500ms x3
+Oct 18 00:47:28 [relay] connect=40508a01 closed reason=newer connect state=active c2h=30/3099B h2c=381/421030B ackMs=1
+Oct 18 00:47:28 [relay] connect=6131190f bound client=175.209.195.154:41788 host=192.168.0.16:43000
+Oct 18 00:47:28 [relay] connect=6131190f first c2h -> 192.168.0.16:43000 kind=300 afterBindMs=0
+Oct 18 00:47:28 [relay] connect=6131190f first h2c <- 192.168.0.16:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 18 00:47:28 [relay] connect=6131190f active; helloAck in 1ms
+Oct 18 00:51:10 [capability] connect=96d75598 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 18 00:51:10 [relay] connect=96d75598 eligible client=175.209.195.154:36225 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:43000
+Oct 18 00:51:10 [relay] connect=96d75598 punch from 175.209.195.154:36225; answering in 2500ms x3
+Oct 18 00:51:13 [relay] connect=96d75598 bound client=175.209.195.154:36225 host=192.168.0.76:43000
+Oct 18 00:51:13 [relay] connect=96d75598 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 18 00:51:13 [relay] connect=96d75598 first h2c <- 192.168.0.76:43000 afterBindMs=15 afterFirstC2HMs=15
+Oct 18 00:51:13 [relay] connect=96d75598 active; helloAck in 15ms
+Oct 18 00:51:13 [capability] connect=b211fba7 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 18 00:51:13 [relay] connect=b211fba7 eligible client=175.209.195.154:42616 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:43000
+Oct 18 00:51:13 [relay] connect=b211fba7 punch from 175.209.195.154:42616; answering in 2500ms x3
+Oct 18 00:51:15 [relay] connect=96d75598 closed reason=newer connect state=active c2h=12/1185B h2c=333/380490B ackMs=15
+Oct 18 00:51:15 [relay] connect=b211fba7 bound client=175.209.195.154:42616 host=192.168.0.76:43000
+Oct 18 00:51:15 [relay] connect=b211fba7 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 18 00:51:15 [relay] connect=b211fba7 first h2c <- 192.168.0.76:43000 afterBindMs=7 afterFirstC2HMs=7
+Oct 18 00:51:16 [relay] connect=b211fba7 active; helloAck in 953ms
+Oct 18 00:52:09 [relay] connect=6131190f closed reason=client silent state=active c2h=4503/502195B h2c=65538/70834744B ackMs=1
+Oct 18 00:52:51 [capability] connect=2a1522f9 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 18 00:52:51 [relay] connect=2a1522f9 eligible client=175.209.195.154:42386 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:43000
+Oct 18 00:52:51 [relay] connect=2a1522f9 punch from 175.209.195.154:42386; answering in 2500ms x3
+Oct 18 00:52:53 [relay] connect=b211fba7 closed reason=newer connect state=active c2h=813/90073B h2c=8678/9272874B ackMs=953
+Oct 18 00:52:53 [relay] connect=2a1522f9 bound client=175.209.195.154:42386 host=192.168.0.76:43000
+Oct 18 00:52:53 [relay] connect=2a1522f9 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 18 00:52:53 [relay] connect=2a1522f9 first h2c <- 192.168.0.76:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 18 00:52:53 [relay] connect=2a1522f9 active; helloAck in 4ms
+Oct 18 01:05:14 [capability] connect=76e92cea minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 18 01:05:14 [relay] connect=76e92cea eligible client=175.209.195.154:47289 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:43000
+Oct 18 01:05:14 [relay] connect=76e92cea punch from 175.209.195.154:47289; answering in 2500ms x3
+Oct 18 01:05:14 [relay] connect=2a1522f9 closed reason=client silent state=active c2h=8154/975608B h2c=74052/75871551B ackMs=4
+Oct 18 01:18:42 [capability] connect=fa2ebd54 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 18 01:18:42 [relay] connect=fa2ebd54 eligible client=175.209.195.154:58870 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:43000
+Oct 18 01:18:42 [relay] connect=fa2ebd54 punch from 175.209.195.154:58870; answering in 2500ms x3
+Oct 18 02:04:06 [capability] connect=64d1813b minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 18 02:04:06 [relay] connect=64d1813b eligible client=175.209.195.154:53400 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:43000
+Oct 18 02:04:06 [relay] connect=64d1813b punch from 175.209.195.154:53400; answering in 2500ms x3
+Oct 18 02:04:09 [relay] connect=64d1813b bound client=175.209.195.154:53400 host=192.168.0.76:43000
+Oct 18 02:04:09 [relay] connect=64d1813b first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 18 02:04:09 [relay] connect=64d1813b first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 18 02:04:09 [relay] connect=64d1813b active; helloAck in 0ms
+Oct 18 02:04:41 [capability] connect=4bdd2a33 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 18 02:04:41 [relay] connect=4bdd2a33 eligible client=175.209.195.154:48937 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:43000
+Oct 18 02:04:41 [relay] connect=4bdd2a33 punch from 175.209.195.154:48937; answering in 2500ms x3
+Oct 18 02:04:44 [relay] connect=64d1813b closed reason=newer connect state=active c2h=139/15687B h2c=1523/1652265B ackMs=0
+Oct 18 02:04:44 [relay] connect=4bdd2a33 bound client=175.209.195.154:48937 host=192.168.0.76:43000
+Oct 18 02:04:44 [relay] connect=4bdd2a33 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 18 02:04:44 [relay] connect=4bdd2a33 first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 18 02:04:44 [relay] connect=4bdd2a33 active; helloAck in 0ms
+Oct 18 02:04:44 [capability] connect=620b2df6 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 18 02:04:44 [relay] connect=620b2df6 eligible client=175.209.195.154:33105 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:43000
+Oct 18 02:04:44 [relay] connect=620b2df6 punch from 175.209.195.154:33105; answering in 2500ms x3
+Oct 18 02:04:47 [relay] connect=4bdd2a33 closed reason=newer connect state=active c2h=53/5659B h2c=1349/1550464B ackMs=0
+Oct 18 02:04:47 [relay] connect=620b2df6 bound client=175.209.195.154:33105 host=192.168.0.76:43000
+Oct 18 02:04:47 [relay] connect=620b2df6 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 18 02:04:47 [relay] connect=620b2df6 first h2c <- 192.168.0.76:43000 afterBindMs=233 afterFirstC2HMs=233
+Oct 18 02:04:47 [relay] connect=620b2df6 active; helloAck in 353ms
+Oct 18 02:08:05 [relay] connect=620b2df6 closed reason=client silent state=active c2h=1249/140219B h2c=12463/12874955B ackMs=353
+Oct 18 23:06:44 [capability] connect=1bd9e520 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 18 23:06:44 [relay] connect=1bd9e520 eligible client=175.209.195.154:50130 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:43000
+Oct 18 23:06:44 [relay] connect=1bd9e520 punch from 175.209.195.154:50130; answering in 2500ms x3
+Oct 18 23:06:47 [relay] connect=1bd9e520 bound client=175.209.195.154:50130 host=192.168.0.76:43000
+Oct 18 23:06:47 [relay] connect=1bd9e520 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 18 23:06:47 [relay] connect=1bd9e520 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 18 23:06:47 [relay] connect=1bd9e520 active; helloAck in 1ms
+Oct 18 23:13:58 [capability] connect=76d878f6 minted host=df15b73b queued=1 ttlMs=30000
+Oct 18 23:13:58 [relay] connect=76d878f6 eligible client=175.209.195.154:56158 wire=175.209.195.154 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 18 23:13:58 [relay] connect=76d878f6 punch from 175.209.195.154:56158; answering in 2500ms x3
+Oct 18 23:14:57 [relay] connect=1bd9e520 closed reason=client silent state=active c2h=4313/492749B h2c=75045/83170173B ackMs=1
+Oct 19 12:09:16 [capability] connect=026fd8b6 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 12:09:16 [relay] connect=026fd8b6 eligible client=211.218.222.1:59480 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 19 12:09:16 [relay] connect=026fd8b6 punch from 211.218.222.1:59480; answering in 2500ms x3
+Oct 19 14:01:40 [capability] connect=91f4c6f0 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 14:01:40 [relay] connect=91f4c6f0 eligible client=211.218.222.1:61056 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 19 14:01:40 [relay] connect=91f4c6f0 punch from 211.218.222.1:61056; answering in 2500ms x3
+Oct 19 14:55:45 [capability] connect=e0094509 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 14:55:45 [relay] connect=e0094509 eligible client=211.218.222.1:59570 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 19 14:55:45 [relay] connect=e0094509 punch from 211.218.222.1:59570; answering in 2500ms x3
+Oct 19 15:01:32 [capability] connect=3ae39feb minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 15:01:32 [relay] connect=3ae39feb eligible client=211.218.222.1:65187 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 19 15:01:32 [relay] connect=3ae39feb punch from 211.218.222.1:65187; answering in 2500ms x3
+Oct 19 15:03:05 [capability] connect=311b4dd7 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 15:03:05 [relay] connect=311b4dd7 eligible client=211.218.222.1:58927 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 19 15:03:05 [relay] connect=311b4dd7 punch from 211.218.222.1:58927; answering in 2500ms x3
+Oct 19 15:04:47 [capability] connect=d7171f91 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 15:04:47 [relay] connect=d7171f91 eligible client=211.218.222.1:57129 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 19 15:04:47 [relay] connect=d7171f91 punch from 211.218.222.1:57129; answering in 2500ms x3
+Oct 19 15:06:57 [capability] connect=066ba09e minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 15:06:57 [relay] connect=066ba09e eligible client=211.218.222.1:55347 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 19 15:06:57 [relay] connect=066ba09e punch from 211.218.222.1:55347; answering in 2500ms x3
+Oct 19 15:11:30 [capability] connect=9cfa96b5 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 15:11:30 [relay] connect=9cfa96b5 eligible client=211.218.222.1:54561 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 19 15:11:30 [relay] connect=9cfa96b5 punch from 211.218.222.1:54561; answering in 2500ms x3
+Oct 19 16:27:24 [capability] connect=d2cbedea minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 16:27:24 [relay] connect=d2cbedea eligible client=211.218.222.1:59786 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 19 16:27:24 [relay] connect=d2cbedea punch from 211.218.222.1:59786; answering in 2500ms x3
+Oct 19 16:34:00 [capability] connect=43f478f3 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 16:34:00 [relay] connect=43f478f3 eligible client=211.218.222.1:61746 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 19 16:34:00 [relay] connect=43f478f3 punch from 211.218.222.1:61746; answering in 2500ms x3
+Oct 19 17:07:49 [capability] connect=7ff3e45f minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 17:07:49 [relay] connect=7ff3e45f eligible client=211.218.222.1:53525 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 19 17:07:49 [relay] connect=7ff3e45f punch from 211.218.222.1:53525; answering in 2500ms x3
+Oct 19 17:07:51 [relay] connect=7ff3e45f bound client=211.218.222.1:53525 host=192.168.0.76:43000
+Oct 19 17:07:51 [relay] connect=7ff3e45f first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 19 17:07:51 [relay] connect=7ff3e45f first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 19 17:07:51 [relay] connect=7ff3e45f active; helloAck in 1ms
+Oct 19 17:29:11 [relay] connect=7ff3e45f closed reason=client silent state=active c2h=20867/2266549B h2c=145885/148206721B ackMs=1
+Oct 19 17:36:28 [capability] connect=67b53ae2 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 17:36:28 [relay] connect=67b53ae2 eligible client=211.218.222.1:51476 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 19 17:36:28 [relay] connect=67b53ae2 punch from 211.218.222.1:51476; answering in 2500ms x3
+Oct 19 17:36:31 [relay] connect=67b53ae2 bound client=211.218.222.1:51476 host=192.168.0.76:43000
+Oct 19 17:36:31 [relay] connect=67b53ae2 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 19 17:36:31 [relay] connect=67b53ae2 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 19 17:36:31 [relay] connect=67b53ae2 active; helloAck in 1ms
+Oct 19 18:24:51 [relay] connect=67b53ae2 closed reason=client silent state=active c2h=54840/5995594B h2c=356950/358854974B ackMs=1
+Oct 19 18:25:46 [capability] connect=a0d1d0fb minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 18:25:46 [relay] connect=a0d1d0fb eligible client=211.218.222.1:63043 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 19 18:25:46 [relay] connect=a0d1d0fb punch from 211.218.222.1:63043; answering in 2500ms x3
+Oct 19 18:25:49 [relay] connect=a0d1d0fb bound client=211.218.222.1:63043 host=192.168.0.76:43000
+Oct 19 18:25:49 [relay] connect=a0d1d0fb first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 19 18:25:49 [relay] connect=a0d1d0fb first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 19 18:25:49 [relay] connect=a0d1d0fb active; helloAck in 1ms
+Oct 19 18:27:26 [relay] connect=a0d1d0fb closed reason=client silent state=active c2h=1286/140065B h2c=8688/8814213B ackMs=1
+Oct 19 18:28:27 [capability] connect=e321a3b4 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 18:28:27 [relay] connect=e321a3b4 eligible client=211.218.222.1:55110 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 19 18:28:27 [relay] connect=e321a3b4 punch from 211.218.222.1:55110; answering in 2500ms x3
+Oct 19 19:29:58 [capability] connect=05792ac2 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 19:29:58 [relay] connect=05792ac2 eligible client=118.235.3.54:34265 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 19:29:58 [relay] connect=05792ac2 punch from 118.235.3.54:34265; answering in 2500ms x3
+Oct 19 19:30:01 [relay] connect=05792ac2 bound client=118.235.3.54:34265 host=192.168.0.76:43000
+Oct 19 19:30:01 [relay] connect=05792ac2 first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 19 19:30:01 [relay] connect=05792ac2 first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 19 19:30:01 [relay] connect=05792ac2 active; helloAck in 1ms
+Oct 19 19:33:07 [capability] connect=59539969 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 19:33:07 [relay] connect=59539969 eligible client=118.235.3.54:41315 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 19:33:07 [relay] connect=59539969 punch from 118.235.3.54:41315; answering in 2500ms x3
+Oct 19 19:33:37 [relay] connect=05792ac2 closed reason=client silent state=active c2h=1914/216341B h2c=26755/29249233B ackMs=1
+Oct 19 19:37:14 [capability] connect=1f218c9e minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 19:37:14 [relay] connect=1f218c9e eligible client=118.235.3.54:39523 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 19:37:14 [relay] connect=1f218c9e punch from 118.235.3.54:39523; answering in 2500ms x3
+Oct 19 19:38:06 [capability] connect=7db67427 minted host=df15b73b queued=1 ttlMs=30000
+Oct 19 19:38:06 [relay] connect=7db67427 eligible client=118.235.3.54:47644 wire=118.235.3.54 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 19 19:38:06 [relay] connect=7db67427 punch from 118.235.3.54:47644; answering in 2500ms x3
+Oct 19 19:40:01 [capability] connect=304c76ae minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 19:40:01 [relay] connect=304c76ae eligible client=118.235.3.54:44850 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 19:40:01 [relay] connect=304c76ae punch from 118.235.3.54:44850; answering in 2500ms x3
+Oct 19 19:40:38 [capability] connect=796194dc minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 19:40:38 [relay] connect=796194dc eligible client=118.235.3.54:59447 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 19:40:38 [relay] connect=796194dc punch from 118.235.3.54:59447; answering in 2500ms x3
+Oct 19 19:42:13 [capability] connect=1ee86cc8 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 19:42:13 [relay] connect=1ee86cc8 eligible client=118.235.3.54:34029 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 19:42:13 [relay] connect=1ee86cc8 punch from 118.235.3.54:34029; answering in 2500ms x3
+Oct 19 19:49:04 [capability] connect=51de5e65 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 19:49:04 [relay] connect=51de5e65 eligible client=118.235.3.54:37672 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 19:49:04 [relay] connect=51de5e65 punch from 118.235.3.54:37672; answering in 2500ms x3
+Oct 19 19:50:48 [capability] connect=67edb772 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 19:50:48 [relay] connect=67edb772 eligible client=118.235.3.54:33969 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 19:50:48 [relay] connect=67edb772 punch from 118.235.3.54:33969; answering in 2500ms x3
+Oct 19 19:51:51 [capability] connect=5ee538f9 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 19:51:51 [relay] connect=5ee538f9 eligible client=118.235.3.54:38597 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 19:51:51 [relay] connect=5ee538f9 punch from 118.235.3.54:38597; answering in 2500ms x3
+Oct 19 19:55:41 [capability] connect=6aa30899 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 19:55:41 [relay] connect=6aa30899 eligible client=118.235.3.54:55219 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 19:55:41 [relay] connect=6aa30899 punch from 118.235.3.54:55219; answering in 2500ms x3
+Oct 19 19:57:35 [capability] connect=270479b9 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 19:57:35 [relay] connect=270479b9 eligible client=118.235.3.54:35232 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 19:57:35 [relay] connect=270479b9 punch from 118.235.3.54:35232; answering in 2500ms x3
+Oct 19 19:58:53 [capability] connect=78564d5d minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 19:58:53 [relay] connect=78564d5d eligible client=118.235.3.54:37531 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 19:58:53 [relay] connect=78564d5d punch from 118.235.3.54:37531; answering in 2500ms x3
+Oct 19 20:00:13 [capability] connect=8f7c2932 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 20:00:13 [relay] connect=8f7c2932 eligible client=118.235.3.54:55027 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 20:00:13 [relay] connect=8f7c2932 punch from 118.235.3.54:55027; answering in 2500ms x3
+Oct 19 20:02:57 [capability] connect=49c1b0d3 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 20:02:57 [relay] connect=49c1b0d3 eligible client=118.235.3.54:41354 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 20:02:57 [relay] connect=49c1b0d3 punch from 118.235.3.54:41354; answering in 2500ms x3
+Oct 19 20:09:21 [capability] connect=bf59ef49 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 20:09:21 [relay] connect=bf59ef49 eligible client=118.235.3.54:50950 wire=118.235.3.54 host=shotan Desktop@175.207.45.151:43000
+Oct 19 20:09:32 [capability] connect=8a9c8f3d minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 20:09:32 [relay] connect=8a9c8f3d eligible client=175.209.195.154:60685 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:43000
+Oct 19 20:09:32 [relay] connect=8a9c8f3d punch from 175.209.195.154:60685; answering in 2500ms x3
+Oct 19 20:12:51 [capability] connect=645ad539 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 20:12:51 [relay] connect=645ad539 eligible client=175.209.195.154:52330 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:43000
+Oct 19 20:12:51 [relay] connect=645ad539 punch from 175.209.195.154:52330; answering in 2500ms x3
+Oct 19 20:20:39 [capability] connect=f60e365f minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 19 20:20:39 [relay] connect=f60e365f eligible client=175.209.195.154:49783 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:43000
+Oct 19 20:20:39 [relay] connect=f60e365f punch from 175.209.195.154:49783; answering in 2500ms x3
+Oct 19 20:20:42 [relay] connect=f60e365f bound client=175.209.195.154:49783 host=192.168.0.76:43000
+Oct 19 20:20:42 [relay] connect=f60e365f first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 19 20:20:42 [relay] connect=f60e365f first h2c <- 192.168.0.76:43000 afterBindMs=0 afterFirstC2HMs=0
+Oct 19 20:20:42 [relay] connect=f60e365f active; helloAck in 1ms
+Oct 19 20:22:28 [relay] connect=f60e365f closed reason=client silent state=active c2h=398/45249B h2c=6929/7742416B ackMs=1
+Oct 20 09:58:08 [capability] connect=119c53ed minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 09:58:08 [relay] connect=119c53ed eligible client=211.218.222.1:62421 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 20 09:58:08 [relay] connect=119c53ed punch from 211.218.222.1:62421; answering in 2500ms x3
+Oct 20 10:55:22 [capability] connect=b80dac3d minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 10:55:22 [relay] connect=b80dac3d eligible client=211.218.222.1:61802 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 20 10:55:22 [relay] connect=b80dac3d punch from 211.218.222.1:61802; answering in 2500ms x3
+Oct 20 12:10:24 [capability] connect=a343c078 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 12:10:24 [relay] connect=a343c078 eligible client=211.218.222.1:51666 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 20 12:10:24 [relay] connect=a343c078 punch from 211.218.222.1:51666; answering in 2500ms x3
+Oct 20 12:15:07 [capability] connect=0a762cca minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 12:15:07 [relay] connect=0a762cca eligible client=211.218.222.1:50493 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 20 12:15:07 [relay] connect=0a762cca punch from 211.218.222.1:50493; answering in 2500ms x3
+Oct 20 12:18:07 [capability] connect=e00c092c minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 12:18:07 [relay] connect=e00c092c eligible client=211.218.222.1:52762 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:43000
+Oct 20 12:18:07 [relay] connect=e00c092c punch from 211.218.222.1:52762; answering in 2500ms x3
+Oct 20 12:18:55 [capability] connect=7a72d47c minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 12:18:55 [relay] connect=7a72d47c eligible client=211.218.222.1:56522 wire=211.218.222.1 host=SHOTAN@175.207.45.151:43000
+Oct 20 12:18:55 [relay] connect=7a72d47c punch from 211.218.222.1:56522; answering in 2500ms x3
+Oct 20 12:21:50 [capability] connect=f90a316a minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 12:21:50 [relay] connect=f90a316a eligible client=211.218.222.1:59791 wire=211.218.222.1 host=SHOTAN@175.207.45.151:43000
+Oct 20 12:21:50 [relay] connect=f90a316a punch from 211.218.222.1:59791; answering in 2500ms x3
+Oct 20 12:22:01 [capability] connect=3f6025be minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 12:22:01 [relay] connect=3f6025be eligible client=211.218.222.1:51215 wire=211.218.222.1 host=SHOTAN@175.207.45.151:43000
+Oct 20 12:22:01 [relay] connect=3f6025be punch from 211.218.222.1:51215; answering in 2500ms x3
+Oct 20 12:22:03 [relay] connect=3f6025be bound client=211.218.222.1:51215 host=192.168.0.76:43000
+Oct 20 12:22:03 [relay] connect=3f6025be first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=1
+Oct 20 12:22:08 [relay] connect=3f6025be host silent h2c=0 c2h=19 host=192.168.0.76:43000 afterBindMs=4662
+Oct 20 12:22:38 [relay] connect=3f6025be closed reason=no HelloAck state=provisional c2h=114/5586B h2c=0/0B ackMs=never
+Oct 20 12:26:32 [capability] connect=37fe30b5 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 12:26:32 [relay] connect=37fe30b5 eligible client=211.218.222.1:59522 wire=211.218.222.1 host=SHOTAN@175.207.45.151:43000
+Oct 20 12:26:32 [relay] connect=37fe30b5 punch from 211.218.222.1:59522; answering in 2500ms x3
+Oct 20 12:30:21 [capability] connect=59a9f2b5 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 12:30:21 [relay] connect=59a9f2b5 eligible client=211.218.222.1:52134 wire=211.218.222.1 host=SHOTAN@175.207.45.151:43000
+Oct 20 12:30:21 [relay] connect=59a9f2b5 punch from 211.218.222.1:52134; answering in 2500ms x3
+Oct 20 14:02:57 [capability] connect=3d93ebe5 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 14:02:57 [relay] connect=3d93ebe5 eligible client=211.218.222.1:63059 wire=211.218.222.1 host=SHOTAN@175.207.45.151:43000
+Oct 20 14:02:57 [relay] connect=3d93ebe5 punch from 211.218.222.1:63059; answering in 2500ms x3
+Oct 20 14:03:12 [capability] connect=81616f87 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 14:03:12 [relay] connect=81616f87 eligible client=211.218.222.1:57317 wire=211.218.222.1 host=SHOTAN@175.207.45.151:43000
+Oct 20 14:03:12 [relay] connect=81616f87 punch from 211.218.222.1:57317; answering in 2500ms x3
+Oct 20 14:03:27 [capability] connect=38448ae5 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 14:03:27 [relay] connect=38448ae5 eligible client=211.218.222.1:54517 wire=211.218.222.1 host=SHOTAN@175.207.45.151:43000
+Oct 20 14:03:27 [relay] connect=38448ae5 punch from 211.218.222.1:54517; answering in 2500ms x3
+Oct 20 14:05:03 [capability] connect=429ef3b0 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 14:05:03 [relay] connect=429ef3b0 eligible client=211.218.222.1:53950 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 14:05:03 [relay] connect=429ef3b0 punch from 211.218.222.1:53950; answering in 2500ms x3
+Oct 20 14:13:11 [capability] connect=4f660eeb minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 14:13:11 [relay] connect=4f660eeb eligible client=211.218.222.1:59676 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 14:13:11 [relay] connect=4f660eeb punch from 211.218.222.1:59676; answering in 2500ms x3
+Oct 20 14:34:07 [capability] connect=4e4d98a5 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 14:34:07 [relay] connect=4e4d98a5 eligible client=211.218.222.1:57816 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 14:34:07 [relay] connect=4e4d98a5 punch from 211.218.222.1:57816; answering in 2500ms x3
+Oct 20 14:53:54 [capability] connect=35ed6f3c minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 14:53:54 [relay] connect=35ed6f3c eligible client=211.218.222.1:51050 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 14:53:54 [relay] connect=35ed6f3c punch from 211.218.222.1:51050; answering in 2500ms x3
+Oct 20 14:53:57 [relay] connect=35ed6f3c bound client=211.218.222.1:51050 host=192.168.0.76:3478
+Oct 20 14:53:57 [relay] connect=35ed6f3c first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 20 14:53:57 [relay] connect=35ed6f3c first h2c <- 192.168.0.76:3478 afterBindMs=0 afterFirstC2HMs=0
+Oct 20 14:53:57 [relay] connect=35ed6f3c active; helloAck in 0ms
+Oct 20 14:55:16 [relay] connect=35ed6f3c closed reason=client silent state=active c2h=685/74485B h2c=2738/2472726B ackMs=0
+Oct 20 15:06:51 [capability] connect=182b0f07 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 15:06:51 [relay] connect=182b0f07 eligible client=211.218.222.1:57543 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 15:06:51 [relay] connect=182b0f07 punch from 211.218.222.1:57543; answering in 2500ms x3
+Oct 20 15:17:29 [capability] connect=1f538979 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 15:17:29 [relay] connect=1f538979 eligible client=211.218.222.1:62260 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 15:17:29 [relay] connect=1f538979 punch from 211.218.222.1:62260; answering in 2500ms x3
+Oct 20 15:17:32 [relay] connect=1f538979 bound client=211.218.222.1:62260 host=192.168.0.76:3478
+Oct 20 15:17:32 [relay] connect=1f538979 first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 20 15:17:32 [relay] connect=1f538979 first h2c <- 192.168.0.76:3478 afterBindMs=1 afterFirstC2HMs=1
+Oct 20 15:17:32 [relay] connect=1f538979 active; helloAck in 1ms
+Oct 20 15:21:31 [capability] connect=6f0a4ede minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 15:21:31 [relay] connect=6f0a4ede eligible client=211.218.222.1:58252 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 15:21:31 [relay] connect=6f0a4ede punch from 211.218.222.1:58252; answering in 2500ms x3
+Oct 20 15:22:17 [relay] connect=1f538979 closed reason=client silent state=active c2h=2590/282129B h2c=9931/8914846B ackMs=1
+Oct 20 16:18:31 [capability] connect=cce3a80f minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 16:18:31 [relay] connect=cce3a80f eligible client=211.218.222.1:62628 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 16:18:31 [relay] connect=cce3a80f punch from 211.218.222.1:62628; answering in 2500ms x3
+Oct 20 16:18:34 [relay] connect=cce3a80f bound client=211.218.222.1:62628 host=192.168.0.76:3478
+Oct 20 16:18:34 [relay] connect=cce3a80f first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 20 16:18:34 [relay] connect=cce3a80f first h2c <- 192.168.0.76:3478 afterBindMs=1 afterFirstC2HMs=1
+Oct 20 16:18:34 [relay] connect=cce3a80f active; helloAck in 1ms
+Oct 20 16:20:17 [relay] connect=cce3a80f closed reason=client silent state=active c2h=856/93457B h2c=5877/6022698B ackMs=1
+Oct 20 16:28:48 [capability] connect=0cc7fc16 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 16:28:48 [relay] connect=0cc7fc16 eligible client=211.218.222.1:62302 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 16:28:48 [relay] connect=0cc7fc16 punch from 211.218.222.1:62302; answering in 2500ms x3
+Oct 20 17:26:33 [capability] connect=2fa10b66 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 17:26:33 [relay] connect=2fa10b66 eligible client=211.218.222.1:62494 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 17:26:33 [relay] connect=2fa10b66 punch from 211.218.222.1:62494; answering in 2500ms x3
+Oct 20 17:26:35 [relay] connect=2fa10b66 bound client=211.218.222.1:62494 host=192.168.0.76:3478
+Oct 20 17:26:35 [relay] connect=2fa10b66 first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=1
+Oct 20 17:26:35 [relay] connect=2fa10b66 first h2c <- 192.168.0.76:3478 afterBindMs=1 afterFirstC2HMs=0
+Oct 20 17:26:35 [relay] connect=2fa10b66 active; helloAck in 1ms
+Oct 20 17:36:18 [relay] connect=2fa10b66 closed reason=client silent state=active c2h=9037/981225B h2c=41997/39621572B ackMs=1
+Oct 20 17:41:08 [capability] connect=d2ad73bf minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 17:41:08 [relay] connect=d2ad73bf eligible client=211.218.222.1:60283 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 17:41:08 [relay] connect=d2ad73bf punch from 211.218.222.1:60283; answering in 2500ms x3
+Oct 20 17:56:28 [capability] connect=0e59c811 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 17:56:28 [relay] connect=0e59c811 eligible client=211.218.222.1:55502 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 17:56:28 [relay] connect=0e59c811 punch from 211.218.222.1:55502; answering in 2500ms x3
+Oct 20 18:05:33 [capability] connect=7e19b97c minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 18:05:33 [relay] connect=7e19b97c eligible client=211.218.222.1:56336 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 18:05:33 [relay] connect=7e19b97c punch from 211.218.222.1:56336; answering in 2500ms x3
+Oct 20 18:06:49 [capability] connect=608453a6 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 18:06:49 [relay] connect=608453a6 eligible client=211.218.222.1:61082 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 18:06:49 [relay] connect=608453a6 punch from 211.218.222.1:61082; answering in 2500ms x3
+Oct 20 18:19:20 [capability] connect=f2804008 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 18:19:20 [relay] connect=f2804008 eligible client=211.218.222.1:55534 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 18:19:20 [relay] connect=f2804008 punch from 211.218.222.1:55534; answering in 2500ms x3
+Oct 20 19:05:50 [capability] connect=6af78608 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 19:05:50 [relay] connect=6af78608 eligible client=211.218.222.1:63843 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 20 19:05:50 [relay] connect=6af78608 punch from 211.218.222.1:63843; answering in 2500ms x3
+Oct 20 19:59:01 [capability] connect=fefb65d9 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 19:59:01 [relay] connect=fefb65d9 eligible client=118.235.7.232:48140 wire=118.235.7.232 host=shotan Desktop@175.207.45.151:3478
+Oct 20 19:59:01 [relay] connect=fefb65d9 punch from 118.235.7.232:48140; answering in 2500ms x3
+Oct 20 19:59:08 [capability] connect=39087121 minted host=df15b73b queued=1 ttlMs=30000
+Oct 20 19:59:08 [relay] connect=39087121 eligible client=118.235.7.232:58047 wire=118.235.7.232 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 20 19:59:08 [relay] connect=39087121 punch from 118.235.7.232:58047; answering in 2500ms x3
+Oct 20 20:02:02 [capability] connect=d7e8811a minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 20 20:02:02 [relay] connect=d7e8811a eligible client=118.235.7.232:54413 wire=118.235.7.232 host=shotan Desktop@175.207.45.151:3478
+Oct 20 20:02:02 [relay] connect=d7e8811a punch from 118.235.7.232:54413; answering in 2500ms x3
+Oct 20 20:08:12 [capability] connect=1127cd59 minted host=df15b73b queued=1 ttlMs=30000
+Oct 20 20:08:12 [relay] connect=1127cd59 eligible client=118.235.7.232:53665 wire=118.235.7.232 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 20 20:08:12 [relay] connect=1127cd59 punch from 118.235.7.232:53665; answering in 2500ms x3
+Oct 21 13:56:22 [capability] connect=c8e06158 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 13:56:22 [relay] connect=c8e06158 eligible client=118.235.74.57:28777 wire=118.235.74.57 host=shotan Desktop@175.207.45.151:3478
+Oct 21 13:56:23 [relay] connect=c8e06158 punch from 118.235.74.57:28777; answering in 2500ms x3
+Oct 21 13:56:25 [capability] connect=8c377675 minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 13:56:25 [relay] connect=8c377675 eligible client=118.235.74.57:36940 wire=118.235.74.57 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 13:56:25 [relay] connect=8c377675 punch from 118.235.74.57:36940; answering in 2500ms x3
+Oct 21 14:06:14 [capability] connect=8e59d674 minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 14:06:14 [relay] connect=8e59d674 eligible client=118.235.74.57:31943 wire=118.235.74.57 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 14:06:14 [relay] connect=8e59d674 punch from 118.235.74.57:31943; answering in 2500ms x3
+Oct 21 14:06:22 [capability] connect=e222f63e minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 14:06:22 [relay] connect=e222f63e eligible client=211.218.222.4:42939 wire=211.218.222.4 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 14:06:22 [relay] connect=e222f63e punch from 211.218.222.4:42939; answering in 2500ms x3
+Oct 21 14:06:24 [relay] connect=e222f63e bound client=211.218.222.4:42939 host=211.218.222.1:43000
+Oct 21 14:06:24 [relay] connect=e222f63e first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 21 14:06:24 [relay] connect=e222f63e first h2c <- 211.218.222.1:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 21 14:06:24 [relay] connect=e222f63e active; helloAck in 2ms
+Oct 21 14:16:14 [capability] connect=6266abf5 minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 14:16:14 [relay] connect=6266abf5 eligible client=211.218.222.4:44427 wire=211.218.222.4 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 14:16:14 [relay] connect=6266abf5 punch from 211.218.222.4:44427; answering in 2500ms x3
+Oct 21 14:16:16 [relay] connect=e222f63e closed reason=newer connect state=active c2h=7148/801711B h2c=237751/267966449B ackMs=2
+Oct 21 14:16:16 [relay] connect=6266abf5 bound client=211.218.222.4:44427 host=211.218.222.1:43000
+Oct 21 14:16:16 [relay] connect=6266abf5 first c2h -> 211.218.222.1:43000 kind=300 afterBindMs=0
+Oct 21 14:16:16 [relay] connect=6266abf5 first h2c <- 211.218.222.1:43000 afterBindMs=2 afterFirstC2HMs=2
+Oct 21 14:16:16 [relay] connect=6266abf5 active; helloAck in 2ms
+Oct 21 14:18:55 [relay] connect=6266abf5 closed reason=client silent state=active c2h=1486/165555B h2c=39704/44327806B ackMs=2
+Oct 21 14:19:17 [capability] connect=04c5cf3d minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 14:19:17 [relay] connect=04c5cf3d eligible client=211.218.222.1:61030 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:3478
+Oct 21 14:19:17 [relay] connect=04c5cf3d punch from 211.218.222.1:61030; answering in 2500ms x3
+Oct 21 14:23:34 [capability] connect=ca33332e minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 14:23:34 [relay] connect=ca33332e eligible client=211.218.222.1:62037 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:14570
+Oct 21 14:23:34 [relay] connect=ca33332e punch from 211.218.222.1:62037; answering in 2500ms x3
+Oct 21 14:23:37 [relay] connect=ca33332e bound client=211.218.222.1:62037 host=192.168.0.76:43000
+Oct 21 14:23:37 [relay] connect=ca33332e first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=1
+Oct 21 14:23:37 [relay] connect=ca33332e first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=0
+Oct 21 14:23:37 [relay] connect=ca33332e active; helloAck in 1ms
+Oct 21 14:24:01 [capability] connect=f61f41fa minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 14:24:01 [relay] connect=f61f41fa eligible client=211.218.222.1:51107 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:14570
+Oct 21 14:24:01 [relay] connect=f61f41fa punch from 211.218.222.1:51107; answering in 2500ms x3
+Oct 21 14:24:04 [relay] connect=ca33332e closed reason=newer connect state=active c2h=186/18517B h2c=1895/2050227B ackMs=1
+Oct 21 14:24:04 [relay] connect=f61f41fa bound client=211.218.222.1:51107 host=192.168.0.76:43000
+Oct 21 14:24:04 [relay] connect=f61f41fa first c2h -> 192.168.0.76:43000 kind=300 afterBindMs=0
+Oct 21 14:24:04 [relay] connect=f61f41fa first h2c <- 192.168.0.76:43000 afterBindMs=1 afterFirstC2HMs=1
+Oct 21 14:24:04 [relay] connect=f61f41fa active; helloAck in 1ms
+Oct 21 14:34:24 [relay] connect=f61f41fa host moved 192.168.0.76:43000 -> 192.168.0.76:3478 via=lan
+Oct 21 14:34:30 [relay] connect=f61f41fa closed reason=client silent state=active c2h=9528/1031677B h2c=49172/47454775B ackMs=1
+Oct 21 14:35:31 [capability] connect=85a9ca3e minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 14:35:31 [relay] connect=85a9ca3e eligible client=211.218.222.1:60797 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:16016
+Oct 21 14:35:31 [relay] connect=85a9ca3e punch from 211.218.222.1:60797; answering in 2500ms x3
+Oct 21 14:35:34 [relay] connect=85a9ca3e bound client=211.218.222.1:60797 host=192.168.0.76:3478
+Oct 21 14:35:34 [relay] connect=85a9ca3e first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 21 14:35:34 [relay] connect=85a9ca3e first h2c <- 192.168.0.76:3478 afterBindMs=2 afterFirstC2HMs=2
+Oct 21 14:35:34 [relay] connect=85a9ca3e active; helloAck in 2ms
+Oct 21 14:37:10 [relay] connect=85a9ca3e closed reason=client silent state=active c2h=907/97549B h2c=3301/2892158B ackMs=2
+Oct 21 14:37:48 [capability] connect=2fbeb56d minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 14:37:48 [relay] connect=2fbeb56d eligible client=211.218.222.1:50977 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:16016
+Oct 21 14:37:48 [relay] connect=2fbeb56d punch from 211.218.222.1:50977; answering in 2500ms x3
+Oct 21 14:37:50 [relay] connect=2fbeb56d bound client=211.218.222.1:50977 host=192.168.0.76:3478
+Oct 21 14:37:50 [relay] connect=2fbeb56d first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 21 14:37:50 [relay] connect=2fbeb56d first h2c <- 192.168.0.76:3478 afterBindMs=1 afterFirstC2HMs=1
+Oct 21 14:37:50 [relay] connect=2fbeb56d active; helloAck in 1ms
+Oct 21 14:38:17 [capability] connect=92ff9a9b minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 14:38:17 [relay] connect=92ff9a9b eligible client=211.218.222.1:54742 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:16016
+Oct 21 14:38:17 [relay] connect=92ff9a9b punch from 211.218.222.1:54742; answering in 2500ms x3
+Oct 21 14:38:19 [relay] connect=2fbeb56d closed reason=newer connect state=active c2h=103/10713B h2c=1928/1976440B ackMs=1
+Oct 21 14:38:19 [relay] connect=92ff9a9b bound client=211.218.222.1:54742 host=192.168.0.76:3478
+Oct 21 14:38:19 [relay] connect=92ff9a9b first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 21 14:38:19 [relay] connect=92ff9a9b first h2c <- 192.168.0.76:3478 afterBindMs=0 afterFirstC2HMs=0
+Oct 21 14:38:19 [relay] connect=92ff9a9b active; helloAck in 0ms
+Oct 21 14:39:22 [capability] connect=fe0b9cd8 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 14:39:22 [relay] connect=fe0b9cd8 eligible client=211.218.222.1:64192 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:16016
+Oct 21 14:39:22 [relay] connect=fe0b9cd8 punch from 211.218.222.1:64192; answering in 2500ms x3
+Oct 21 14:39:25 [relay] connect=92ff9a9b closed reason=newer connect state=active c2h=1085/117761B h2c=16548/18145366B ackMs=0
+Oct 21 14:39:25 [relay] connect=fe0b9cd8 bound client=211.218.222.1:64192 host=192.168.0.76:3478
+Oct 21 14:39:25 [relay] connect=fe0b9cd8 first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 21 14:39:25 [relay] connect=fe0b9cd8 first h2c <- 192.168.0.76:3478 afterBindMs=0 afterFirstC2HMs=0
+Oct 21 14:39:25 [relay] connect=fe0b9cd8 active; helloAck in 0ms
+Oct 21 15:03:13 [capability] connect=c0c15135 minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 15:03:13 [relay] connect=c0c15135 eligible client=211.218.222.1:53479 wire=211.218.222.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 15:03:13 [relay] connect=c0c15135 punch from 211.218.222.1:53479; answering in 2500ms x3
+Oct 21 15:03:15 [capability] connect=5afcbd42 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 15:03:15 [relay] connect=5afcbd42 eligible client=211.218.222.1:53480 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:16016
+Oct 21 15:03:15 [relay] connect=5afcbd42 punch from 211.218.222.1:53480; answering in 2500ms x3
+Oct 21 15:03:18 [relay] connect=fe0b9cd8 closed reason=newer connect state=active c2h=29990/4341540B h2c=127836/119025056B ackMs=0
+Oct 21 15:03:18 [relay] connect=5afcbd42 bound client=211.218.222.1:53480 host=192.168.0.76:3478
+Oct 21 15:03:18 [relay] connect=5afcbd42 first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 21 15:03:18 [relay] connect=5afcbd42 first h2c <- 192.168.0.76:3478 afterBindMs=0 afterFirstC2HMs=0
+Oct 21 15:03:18 [relay] connect=5afcbd42 active; helloAck in 0ms
+Oct 21 15:03:43 [capability] connect=ffb387b6 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 15:03:43 [relay] connect=ffb387b6 eligible client=211.218.222.1:65136 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:16016
+Oct 21 15:03:43 [relay] connect=ffb387b6 punch from 211.218.222.1:65136; answering in 2500ms x3
+Oct 21 15:03:45 [relay] connect=5afcbd42 closed reason=newer connect state=active c2h=614/65117B h2c=5524/5808927B ackMs=0
+Oct 21 15:03:45 [relay] connect=ffb387b6 bound client=211.218.222.1:65136 host=192.168.0.76:3478
+Oct 21 15:03:45 [relay] connect=ffb387b6 first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 21 15:03:45 [relay] connect=ffb387b6 first h2c <- 192.168.0.76:3478 afterBindMs=1 afterFirstC2HMs=1
+Oct 21 15:03:45 [relay] connect=ffb387b6 active; helloAck in 1ms
+Oct 21 15:04:32 [capability] connect=a83ff8fe minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 15:04:32 [relay] connect=a83ff8fe eligible client=211.218.222.1:51117 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:16016
+Oct 21 15:04:32 [relay] connect=a83ff8fe punch from 211.218.222.1:51117; answering in 2500ms x3
+Oct 21 15:04:34 [relay] connect=ffb387b6 closed reason=newer connect state=active c2h=415/44797B h2c=4688/5034149B ackMs=1
+Oct 21 15:04:34 [relay] connect=a83ff8fe bound client=211.218.222.1:51117 host=192.168.0.76:3478
+Oct 21 15:04:34 [relay] connect=a83ff8fe first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 21 15:04:34 [relay] connect=a83ff8fe first h2c <- 192.168.0.76:3478 afterBindMs=1 afterFirstC2HMs=1
+Oct 21 15:04:34 [relay] connect=a83ff8fe active; helloAck in 1ms
+Oct 21 15:08:21 [capability] connect=00ee6bbd minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 15:08:21 [relay] connect=00ee6bbd eligible client=211.218.222.1:64991 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:16016
+Oct 21 15:08:21 [relay] connect=00ee6bbd punch from 211.218.222.1:64991; answering in 2500ms x3
+Oct 21 15:08:23 [relay] connect=a83ff8fe closed reason=newer connect state=active c2h=4618/974445B h2c=19333/18194800B ackMs=1
+Oct 21 15:08:23 [relay] connect=00ee6bbd bound client=211.218.222.1:64991 host=192.168.0.76:3478
+Oct 21 15:08:23 [relay] connect=00ee6bbd first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 21 15:08:23 [relay] connect=00ee6bbd first h2c <- 192.168.0.76:3478 afterBindMs=1 afterFirstC2HMs=1
+Oct 21 15:08:23 [relay] connect=00ee6bbd active; helloAck in 1ms
+Oct 21 15:08:40 [capability] connect=fc714569 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 15:08:40 [relay] connect=fc714569 eligible client=211.218.222.1:49743 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:16016
+Oct 21 15:08:40 [relay] connect=fc714569 punch from 211.218.222.1:49743; answering in 2500ms x3
+Oct 21 15:08:42 [relay] connect=00ee6bbd closed reason=newer connect state=active c2h=164/16813B h2c=983/986307B ackMs=1
+Oct 21 15:08:42 [relay] connect=fc714569 bound client=211.218.222.1:49743 host=192.168.0.76:3478
+Oct 21 15:08:42 [relay] connect=fc714569 first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 21 15:08:42 [relay] connect=fc714569 first h2c <- 192.168.0.76:3478 afterBindMs=0 afterFirstC2HMs=0
+Oct 21 15:08:42 [relay] connect=fc714569 active; helloAck in 0ms
+Oct 21 15:16:39 [capability] connect=8306596a minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 15:16:39 [relay] connect=8306596a eligible client=211.218.222.1:56063 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:16016
+Oct 21 15:16:39 [relay] connect=8306596a punch from 211.218.222.1:56063; answering in 2500ms x3
+Oct 21 15:16:41 [relay] connect=fc714569 closed reason=newer connect state=active c2h=7603/820337B h2c=40273/39007813B ackMs=0
+Oct 21 15:16:41 [relay] connect=8306596a bound client=211.218.222.1:56063 host=192.168.0.76:3478
+Oct 21 15:16:41 [relay] connect=8306596a first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 21 15:16:41 [relay] connect=8306596a first h2c <- 192.168.0.76:3478 afterBindMs=1 afterFirstC2HMs=1
+Oct 21 15:16:41 [relay] connect=8306596a active; helloAck in 1ms
+Oct 21 15:16:42 [capability] connect=010d3149 minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 15:16:42 [relay] connect=010d3149 eligible client=211.218.222.1:56064 wire=211.218.222.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 15:16:42 [relay] connect=010d3149 punch from 211.218.222.1:56064; answering in 2500ms x3
+Oct 21 15:17:08 [capability] connect=32d20cb4 minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 15:17:08 [relay] connect=32d20cb4 eligible client=211.218.222.1:53067 wire=211.218.222.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 15:17:08 [relay] connect=32d20cb4 punch from 211.218.222.1:53067; answering in 2500ms x3
+Oct 21 15:17:14 [capability] connect=f95990e8 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 15:17:14 [relay] connect=f95990e8 eligible client=211.218.222.1:53071 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:16016
+Oct 21 15:17:14 [relay] connect=f95990e8 punch from 211.218.222.1:53071; answering in 2500ms x3
+Oct 21 15:17:16 [relay] connect=8306596a closed reason=newer connect state=active c2h=6/533B h2c=186/177588B ackMs=1
+Oct 21 15:17:16 [relay] connect=f95990e8 bound client=211.218.222.1:53071 host=192.168.0.76:3478
+Oct 21 15:17:16 [relay] connect=f95990e8 first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=1
+Oct 21 15:17:16 [relay] connect=f95990e8 first h2c <- 192.168.0.76:3478 afterBindMs=1 afterFirstC2HMs=0
+Oct 21 15:17:16 [relay] connect=f95990e8 active; helloAck in 1ms
+Oct 21 16:35:05 [relay] connect=f95990e8 closed reason=client silent state=active c2h=85981/9374377B h2c=600615/611488466B ackMs=1
+Oct 21 16:55:33 [capability] connect=81a188c4 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 16:55:33 [relay] connect=81a188c4 eligible client=211.218.222.1:63059 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:16016
+Oct 21 16:55:33 [relay] connect=81a188c4 punch from 211.218.222.1:63059; answering in 2500ms x3
+Oct 21 16:55:35 [relay] connect=81a188c4 bound client=211.218.222.1:63059 host=192.168.0.76:3478
+Oct 21 16:55:35 [relay] connect=81a188c4 first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 21 16:55:35 [relay] connect=81a188c4 first h2c <- 192.168.0.76:3478 afterBindMs=1 afterFirstC2HMs=1
+Oct 21 16:55:35 [relay] connect=81a188c4 active; helloAck in 1ms
+Oct 21 17:14:29 [capability] connect=e0a3ed8b minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 17:14:29 [relay] connect=e0a3ed8b eligible client=211.218.222.1:57723 wire=211.218.222.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 17:14:29 [relay] connect=e0a3ed8b punch from 211.218.222.1:57723; answering in 2500ms x3
+Oct 21 17:15:31 [relay] connect=81a188c4 closed reason=client silent state=active c2h=26903/2934569B h2c=162542/161460161B ackMs=1
+Oct 21 17:21:58 [capability] connect=9a8e7073 minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 17:21:58 [relay] connect=9a8e7073 eligible client=211.218.222.1:65239 wire=211.218.222.1 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 17:21:58 [relay] connect=9a8e7073 punch from 211.218.222.1:65239; answering in 2500ms x3
+Oct 21 17:24:13 [capability] connect=d9fcb67c minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 17:24:13 [relay] connect=d9fcb67c eligible client=211.218.222.1:59416 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:16016
+Oct 21 17:24:13 [relay] connect=d9fcb67c punch from 211.218.222.1:59416; answering in 2500ms x3
+Oct 21 17:24:15 [relay] connect=d9fcb67c bound client=211.218.222.1:59416 host=192.168.0.76:3478
+Oct 21 17:24:15 [relay] connect=d9fcb67c first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 21 17:24:15 [relay] connect=d9fcb67c first h2c <- 192.168.0.76:3478 afterBindMs=1 afterFirstC2HMs=1
+Oct 21 17:24:15 [relay] connect=d9fcb67c active; helloAck in 1ms
+Oct 21 18:31:31 [relay] connect=d9fcb67c closed reason=client silent state=active c2h=97986/10807119B h2c=571827/564271326B ackMs=1
+Oct 21 18:34:32 [capability] connect=17003235 minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 21 18:34:32 [relay] connect=17003235 eligible client=211.218.222.1:62889 wire=211.218.222.1 host=shotan Desktop@175.207.45.151:16016
+Oct 21 18:34:32 [relay] connect=17003235 punch from 211.218.222.1:62889; answering in 2500ms x3
+Oct 21 18:34:34 [relay] connect=17003235 bound client=211.218.222.1:62889 host=192.168.0.76:3478
+Oct 21 18:34:34 [relay] connect=17003235 first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 21 18:34:34 [relay] connect=17003235 first h2c <- 192.168.0.76:3478 afterBindMs=0 afterFirstC2HMs=0
+Oct 21 18:34:34 [relay] connect=17003235 active; helloAck in 0ms
+Oct 21 18:47:21 [relay] connect=17003235 closed reason=client silent state=active c2h=10654/1160365B h2c=222732/248766272B ackMs=0
+Oct 21 22:04:29 [capability] connect=25d1c7bc minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 22:04:29 [relay] connect=25d1c7bc eligible client=175.209.195.154:59130 wire=175.209.195.154 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 22:04:29 [relay] connect=25d1c7bc punch from 175.209.195.154:59130; answering in 2500ms x3
+Oct 21 22:36:46 [capability] connect=9e779d3f minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 22:36:46 [relay] connect=9e779d3f eligible client=175.209.195.154:60830 wire=175.209.195.154 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 22:36:46 [relay] connect=9e779d3f punch from 175.209.195.154:60830; answering in 2500ms x3
+Oct 21 22:38:05 [capability] connect=92011ed1 minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 22:38:05 [relay] connect=92011ed1 eligible client=175.209.195.154:41523 wire=175.209.195.154 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 22:38:05 [relay] connect=92011ed1 punch from 175.209.195.154:41523; answering in 2500ms x3
+Oct 21 22:38:59 [capability] connect=29e31d7c minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 22:38:59 [relay] connect=29e31d7c eligible client=175.209.195.154:44248 wire=175.209.195.154 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 22:38:59 [relay] connect=29e31d7c punch from 175.209.195.154:44248; answering in 2500ms x3
+Oct 21 22:39:31 [capability] connect=7d7d63ca minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 22:39:31 [relay] connect=7d7d63ca eligible client=175.209.195.154:54160 wire=175.209.195.154 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 22:39:31 [relay] connect=7d7d63ca punch from 175.209.195.154:54160; answering in 2500ms x3
+Oct 21 22:39:50 [capability] connect=b0357b88 minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 22:39:50 [relay] connect=b0357b88 eligible client=175.209.195.154:43806 wire=175.209.195.154 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 22:39:50 [relay] connect=b0357b88 punch from 175.209.195.154:43806; answering in 2500ms x3
+Oct 21 22:49:45 [capability] connect=0b8b81fb minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 22:49:45 [relay] connect=0b8b81fb eligible client=175.209.195.154:41466 wire=175.209.195.154 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 22:49:45 [relay] connect=0b8b81fb punch from 175.209.195.154:41466; answering in 2500ms x3
+Oct 21 23:04:11 [capability] connect=73b7e792 minted host=df15b73b queued=1 ttlMs=30000
+Oct 21 23:04:11 [relay] connect=73b7e792 eligible client=175.209.195.154:41863 wire=175.209.195.154 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 21 23:04:11 [relay] connect=73b7e792 punch from 175.209.195.154:41863; answering in 2500ms x3
+Oct 22 00:47:38 [capability] connect=04dc5f52 minted host=df15b73b queued=1 ttlMs=30000
+Oct 22 00:47:38 [relay] connect=04dc5f52 eligible client=175.209.195.154:38480 wire=175.209.195.154 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 22 00:47:38 [relay] connect=04dc5f52 punch from 175.209.195.154:38480; answering in 2500ms x3
+Oct 22 00:47:47 [capability] connect=24d354fa minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 22 00:47:47 [relay] connect=24d354fa eligible client=175.209.195.154:55162 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:16016
+Oct 22 00:47:47 [relay] connect=24d354fa punch from 175.209.195.154:55162; answering in 2500ms x3
+Oct 22 00:47:50 [relay] connect=24d354fa bound client=175.209.195.154:55162 host=192.168.0.76:3478
+Oct 22 00:47:50 [relay] connect=24d354fa first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 22 00:47:50 [relay] connect=24d354fa first h2c <- 192.168.0.76:3478 afterBindMs=1 afterFirstC2HMs=1
+Oct 22 00:47:50 [relay] connect=24d354fa active; helloAck in 1ms
+Oct 22 00:53:14 [relay] connect=24d354fa closed reason=client silent state=active c2h=4024/480861B h2c=66867/73785019B ackMs=1
+Oct 22 01:14:00 [capability] connect=185bab4d minted host=df15b73b queued=1 ttlMs=30000
+Oct 22 01:14:00 [relay] connect=185bab4d eligible client=175.209.195.154:38141 wire=175.209.195.154 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 22 01:14:00 [relay] connect=185bab4d punch from 175.209.195.154:38141; answering in 2500ms x3
+Oct 22 01:18:09 [capability] connect=e410fa00 minted host=df15b73b queued=1 ttlMs=30000
+Oct 22 01:18:09 [relay] connect=e410fa00 eligible client=175.209.195.154:55353 wire=175.209.195.154 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 22 01:18:09 [relay] connect=e410fa00 punch from 175.209.195.154:55353; answering in 2500ms x3
+Oct 22 01:23:11 [capability] connect=0cb7f02f minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 22 01:23:11 [relay] connect=0cb7f02f eligible client=175.209.195.154:41810 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:16016
+Oct 22 01:23:11 [relay] connect=0cb7f02f punch from 175.209.195.154:41810; answering in 2500ms x3
+Oct 22 01:23:13 [relay] connect=0cb7f02f bound client=175.209.195.154:41810 host=192.168.0.76:3478
+Oct 22 01:23:13 [relay] connect=0cb7f02f first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=1
+Oct 22 01:23:13 [relay] connect=0cb7f02f first h2c <- 192.168.0.76:3478 afterBindMs=1 afterFirstC2HMs=0
+Oct 22 01:23:13 [relay] connect=0cb7f02f active; helloAck in 1ms
+Oct 22 01:26:55 [relay] connect=0cb7f02f closed reason=client silent state=active c2h=1549/174461B h2c=21235/23158663B ackMs=1
+Oct 22 01:28:14 [capability] connect=298efa9c minted host=df15b73b queued=1 ttlMs=30000
+Oct 22 01:28:14 [relay] connect=298efa9c eligible client=175.209.195.154:42315 wire=175.209.195.154 host=DEV-SHOTAN-L@211.218.222.1:43000
+Oct 22 01:28:14 [relay] connect=298efa9c punch from 175.209.195.154:42315; answering in 2500ms x3
+Oct 22 01:28:44 [capability] connect=bc2fefcd minted host=f6e8e54a queued=1 ttlMs=30000
+Oct 22 01:28:44 [relay] connect=bc2fefcd eligible client=175.209.195.154:45437 wire=175.209.195.154 host=shotan Desktop@175.207.45.151:16016
+Oct 22 01:28:44 [relay] connect=bc2fefcd punch from 175.209.195.154:45437; answering in 2500ms x3
+Oct 22 01:28:46 [relay] connect=bc2fefcd bound client=175.209.195.154:45437 host=192.168.0.76:3478
+Oct 22 01:28:46 [relay] connect=bc2fefcd first c2h -> 192.168.0.76:3478 kind=300 afterBindMs=0
+Oct 22 01:28:46 [relay] connect=bc2fefcd first h2c <- 192.168.0.76:3478 afterBindMs=6 afterFirstC2HMs=6
+Oct 22 01:28:46 [relay] connect=bc2fefcd active; helloAck in 6ms

@@ -1,0 +1,3 @@
+﻿slot taken 21:00:15
+host_standby_admission_e2e     rc=0 secs=31 PASS=61 FAIL=0 | job_run: child_exit=0 residual=0 forced=0 ended_confirmed=1 | last: RESULT: ALL PASS  (60 checks, 0 failed)
+slot released 21:00:48

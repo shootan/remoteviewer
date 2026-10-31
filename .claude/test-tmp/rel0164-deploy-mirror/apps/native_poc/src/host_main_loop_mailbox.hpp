@@ -1,0 +1,243 @@
+#pragma once
+
+// Requests posted to the host main loop from the threads that cannot act on them.
+//
+// Role:    MainLoopMailbox -- a coalescing, allocation-free mailbox. The control thread, the
+//          sender thread and the UDP reader ask the main loop to do things it alone owns
+//          (rebuild capture, re-tune the encoder, force a keyframe); the loop drains the mailbox
+//          at the top of a tick.
+// Thread:  any producer; one consumer (the main loop). Everything is under mu_.
+// Callers: host_control_session.cpp, host_encoded_sender.cpp, the loop stages.
+//
+// Why (plan §7.1(b)): each of these used to be a hand-rolled mailbox -- a `*Pending` atomic that
+// the loop consumed with exchange(), plus the request's payload scattered across two to four more
+// atomics stored just before it. Two things were wrong with that. The payload was not published
+// with the flag, so a second request landing between the loop's exchange() and its payload reads
+// was silently half-applied; and because a bool cannot carry a reason, "force a keyframe" needed
+// three separate flags with three different consumption points. Here a request is one value,
+// published under one lock, and coalescing is explicit: latest-wins per kind, which is exactly
+// what the overwriting atomics meant.
+//
+// Allocation-free on purpose: producers include threads that must not block for long, and one
+// future producer is the capture callback.
+
+#include <cstdint>
+#include <mutex>
+#include <optional>
+
+#include "host_backend_owner.hpp"
+
+namespace remote60::native_poc {
+
+// --- request payloads ---
+
+struct SelectMonitorRequest {
+  // Session epoch this request was posted under; a request outlives its client otherwise.
+  uint64_t epoch = 0;  // 0 = unstamped (accept always)
+  uint32_t monitorId = 0;
+};
+
+struct CaptureModeRequest {
+  // Session epoch this request was posted under; a request outlives its client otherwise.
+  uint64_t epoch = 0;  // 0 = unstamped (accept always)
+  uint32_t seq = 0;
+  uint16_t mode = 0;         // 1 = overview, 2 = focus
+  uint32_t xPermille = 5000;
+  uint32_t yPermille = 5000;
+};
+
+struct TuneEncoderRequest {
+  // Session epoch this request was posted under; a request outlives its client otherwise.
+  uint64_t epoch = 0;  // 0 = unstamped (accept always)
+  uint32_t seq = 0;
+  uint32_t bitrate = 0;  // 0 = leave alone
+  uint32_t keyint = 0;   // 0 = leave alone
+  uint32_t fps = 0;      // 0 = leave alone
+};
+
+struct BackendRequest {
+  // Session epoch this request was posted under; a request outlives its client otherwise.
+  uint64_t epoch = 0;  // 0 = unstamped (accept always)
+  uint32_t seq = 0;
+  uint32_t backend = 0;  // 1 = dxgi, 2 = wgc, 3 = gdi
+  // capture-lifecycle r3 (Codex N2 end): the Serve() it was posted from (SessionState::backendServeSeq; 0 =
+  // unstamped). A request of a Serve() that has ended is dropped (host_backend_owner.hpp).
+  uint64_t serve = 0;
+};
+
+// Why a keyframe is being asked for. A bitmask, not an enum value: several reasons can accrue
+// between two ticks and each one has a different follow-up, so coalescing must not lose any.
+//
+// This is what dissolves the "never touch encoder.forceKeyNext from the sender thread" rule the
+// old code carried in a comment. forceKeyNext is a plain bool the main loop owns; the sender
+// worked around it with a second flag (recoveryPending) consumed at a different point in the tick
+// than the first (requestKey), because requestKey alone was only read after a real frame was
+// popped -- and on a static desktop no frame is ever popped, so a recovery IDR never happened.
+// With a typed request the sender simply says what it needs and the loop decides where to act.
+enum KeyframeReason : uint32_t {
+  kKeyframeReasonNone = 0,
+  kKeyframeReasonViewer = 1u << 0,        // the viewer asked (ControlRequestKeyFrame)
+  kKeyframeReasonSenderBarrier = 1u << 1, // a send failed; the media barrier was re-armed
+  kKeyframeReasonSenderBacklog = 1u << 2, // the sender queue dropped a backlog and needs a resync
+};
+
+class MainLoopMailbox {
+ public:
+  // A deferred request must not overwrite a newer user request that arrived while applying it.
+  void RetryTuneEncoder(const TuneEncoderRequest& r) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!tuneEncoder_) tuneEncoder_ = r;
+    else if (tuneEncoder_->epoch == r.epoch) {
+      if (!tuneEncoder_->bitrate) tuneEncoder_->bitrate = r.bitrate;
+      if (!tuneEncoder_->keyint) tuneEncoder_->keyint = r.keyint;
+      if (!tuneEncoder_->fps) tuneEncoder_->fps = r.fps;
+    }
+  }
+  void RetryCaptureMode(const CaptureModeRequest& r) {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (!captureMode_) captureMode_ = r;
+  }
+  // --- producers ---
+  void PostSelectMonitor(const SelectMonitorRequest& r) {
+    std::lock_guard<std::mutex> lk(mu_);
+    selectMonitor_ = r;
+  }
+  void PostCaptureMode(const CaptureModeRequest& r) {
+    std::lock_guard<std::mutex> lk(mu_);
+    captureMode_ = r;
+  }
+  void PostTuneEncoder(const TuneEncoderRequest& r) {
+    std::lock_guard<std::mutex> lk(mu_);
+    // Coalesced field-wise, not whole-record: a viewer may send bitrate and keyint in separate
+    // messages and losing the earlier one would silently ignore half the request.
+    if (!tuneEncoder_ || tuneEncoder_->epoch != r.epoch) tuneEncoder_ = TuneEncoderRequest{};
+    tuneEncoder_->epoch = r.epoch;
+    tuneEncoder_->seq = r.seq;
+    if (r.bitrate) tuneEncoder_->bitrate = r.bitrate;
+    if (r.keyint) tuneEncoder_->keyint = r.keyint;
+    if (r.fps) tuneEncoder_->fps = r.fps;
+  }
+  void PostBackendRequest(const BackendRequest& r) {
+    std::lock_guard<std::mutex> lk(mu_);
+    backend_ = r;
+  }
+  // reasons is a mask; viewerReason is the wire code of the viewer's request, kept for the log.
+  void PostRequestKeyframe(uint32_t reasons, uint16_t viewerReason = 0) {
+    std::lock_guard<std::mutex> lk(mu_);
+    keyframeReasons_ |= reasons;
+    if (viewerReason != 0) viewerKeyframeReason_ = viewerReason;
+  }
+
+  // --- consumer (main loop) ---
+  //
+  // `currentEpoch` is the session the loop is serving right now. A request stamped for an older
+  // session is dropped instead of applied: Clear() covers the requests still sitting here when a
+  // rollover happens, but a request posted just before one and taken just after would otherwise
+  // retarget the NEW client's capture. Pass 0 to accept anything. (Ledger H-27.)
+  std::optional<SelectMonitorRequest> TakeSelectMonitor(uint64_t currentEpoch = 0) {
+    return TakeForEpoch(selectMonitor_, currentEpoch);
+  }
+  std::optional<CaptureModeRequest> TakeCaptureMode(uint64_t currentEpoch = 0) {
+    return TakeForEpoch(captureMode_, currentEpoch);
+  }
+  std::optional<TuneEncoderRequest> TakeTuneEncoder(uint64_t currentEpoch = 0) {
+    return TakeForEpoch(tuneEncoder_, currentEpoch);
+  }
+  std::optional<BackendRequest> TakeBackendRequest(uint64_t currentEpoch = 0) {
+    return TakeForEpoch(backend_, currentEpoch);
+  }
+  // capture-lifecycle r2 (Codex N2): taken under the owner the main loop settled THIS tick (ownerEpoch, from its
+  // one epoch read). Older -> dropped; NEWER -> left in place for the tick that makes its epoch the owner
+  // first (TakeForEpoch would have dropped it, and the new session's choice with it). See host_backend_owner.hpp.
+  std::optional<BackendRequest> TakeBackendRequestForOwner(const BackendOwnerState& owner) {
+    std::lock_guard<std::mutex> lk(mu_);
+    if (!backend_) return std::nullopt;
+    switch (ClassifyBackendRequest(backend_->epoch, backend_->serve, owner)) {
+      case BackendRequestFate::Leave:
+        return std::nullopt;
+      case BackendRequestFate::Drop:
+        backend_.reset();
+        ++staleDropped_;
+        return std::nullopt;
+      case BackendRequestFate::Handle:
+        break;
+    }
+    std::optional<BackendRequest> out;
+    out.swap(backend_);
+    return out;
+  }
+  // Returns the accumulated reason mask and clears it; kKeyframeReasonNone when nothing pending.
+  uint32_t TakeKeyframeReasons(uint16_t* outViewerReason = nullptr) {
+    std::lock_guard<std::mutex> lk(mu_);
+    const uint32_t r = keyframeReasons_;
+    if (outViewerReason) *outViewerReason = viewerKeyframeReason_;
+    keyframeReasons_ = kKeyframeReasonNone;
+    viewerKeyframeReason_ = 0;  // consumed; do not report it again next time
+    return r;
+  }
+  // Peek without consuming.
+  //
+  // NOT for the static-frame gate: the loop drains this in stage_time_limit, nine stages before
+  // that gate runs, so a peek there is false essentially always. The gate reads
+  // encoder.forceKeyNext instead, which is the authoritative main-owned state. (Ledger H-26a.)
+  bool KeyframePending() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return keyframeReasons_ != kKeyframeReasonNone;
+  }
+  // Does a runtime-tune request need applying this tick? The 1s tick peeks this before running
+  // ABR/M9: stage_stats now runs BEFORE stage_runtime_tune, so without the peek an explicit tune
+  // arriving on a second boundary would let ABR re-init the encoder from pre-tune state and the
+  // tune re-init it again in the same tick -- two teardowns and a visible gap where the old
+  // ordering had one. (Ledger H-26d.)
+  bool TuneEncoderPending() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return tuneEncoder_.has_value();
+  }
+
+  uint64_t StaleDroppedCount() const {
+    std::lock_guard<std::mutex> lk(mu_);
+    return staleDropped_;
+  }
+
+  // A new session starts with nothing outstanding: requests belong to the client that made them.
+  void Clear() {
+    std::lock_guard<std::mutex> lk(mu_);
+    selectMonitor_.reset();
+    captureMode_.reset();
+    tuneEncoder_.reset();
+    backend_.reset();
+    keyframeReasons_ = kKeyframeReasonNone;
+    viewerKeyframeReason_ = 0;
+  }
+
+ private:
+  template <typename T>
+  std::optional<T> Take(std::optional<T>& slot) {
+    std::lock_guard<std::mutex> lk(mu_);
+    std::optional<T> out;
+    out.swap(slot);
+    return out;
+  }
+  // Take, then drop it on the floor if it belonged to a session that has since ended. Taking
+  // first is deliberate: a stale request must not stay queued for the next Take either.
+  template <typename T>
+  std::optional<T> TakeForEpoch(std::optional<T>& slot, uint64_t currentEpoch) {
+    std::optional<T> out = Take(slot);
+    if (out && currentEpoch != 0 && out->epoch != 0 && out->epoch != currentEpoch) {
+      ++staleDropped_;
+      return std::nullopt;
+    }
+    return out;
+  }
+
+  mutable std::mutex mu_;
+  std::optional<SelectMonitorRequest> selectMonitor_;
+  std::optional<CaptureModeRequest> captureMode_;
+  std::optional<TuneEncoderRequest> tuneEncoder_;
+  std::optional<BackendRequest> backend_;
+  uint32_t keyframeReasons_ = kKeyframeReasonNone;
+  uint16_t viewerKeyframeReason_ = 0;
+  uint64_t staleDropped_ = 0;  // requests dropped because their session had ended (H-27)
+};
+
+}  // namespace remote60::native_poc

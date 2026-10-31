@@ -1,0 +1,13 @@
+새로 고침                        utf8 at 674024
+전체 화면                        utf8 at 674040
+호스트에 연결하는 중…                 utf8 at 673984
+공유할 수 있는 창                   utf8 at 680528
+선택하는 중…                      utf8 at 673920
+호스트 설정으로 대상이 고정              utf8 at 673864
+Refresh                      ascii at 674152  (should be -1)
+Desktop                      ascii at 673808  (should be -1)
+Selecting target...          ascii at -1  (should be -1)
+Connecting to host...        ascii at -1  (should be -1)
+Target locked by host config ascii at -1  (should be -1)
+
+Remote60 wide occurrences: 3

@@ -1,0 +1,108 @@
+#pragma once
+
+// Control session server: one viewer's control conversation on the host.
+//
+// Role:    receives the ControlXxx messages of one connected viewer (ping, stream state, client
+//          metrics, keyframe / runtime-tune / backend / capture-mode requests, window + monitor
+//          lists and selection, thumbnails, input events and text) and either answers them on the
+//          link or hands them to the main loop through the shared state structs (request atomics,
+//          the WindowSelectionTxn handshake). Serve() is the former serve_control_session lambda,
+//          moved verbatim (Phase 2-2 step 1); step 2 splits it into one Handle* per message.
+// Thread:  control thread only (TCP: one thread per accepted socket; UDP: the control dispatcher
+//          thread). Everything it shares with the main loop is an atomic / mutex-guarded field of
+//          the state structs it holds references to; it never touches capture resources itself.
+// Input:   ControlLink (TCP or UDP-tunnelled), Args, the host state structs.
+// Output:  control replies on the link; request flags/values in the state structs; counters.
+// Callers: native_video_host_main.cpp (TCP control accept loop, UDP control dispatcher thread).
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <mutex>
+#include <string>
+
+#include "host_args.hpp"
+
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+#include <string>
+namespace remote60::native_poc {
+// TEST BUILD ONLY (GNLinkStreamPinnedSelectTest): refuse to start unless pinned to an openable process
+// by pid and to a window of it carrying the title (host_control_session.cpp, r3 R3).
+bool pinned_select_seam_admit_start(const Args& args, std::string* why);
+}  // namespace remote60::native_poc
+#endif
+#include "host_backend_policy.hpp"
+#include "host_capture_session.hpp"
+#include "host_client_metrics.hpp"
+#include "host_encoder_manager.hpp"
+#include "host_input_router.hpp"
+#include "host_main_loop_mailbox.hpp"
+#include "host_session.hpp"
+#include "udp_control_channel.hpp"
+
+namespace remote60::native_poc {
+
+// The host clipboard, owned by main() and shared with the control sessions (clipboard text sync,
+// K1). A pointer, and it may be null: when clipboard sync is disabled the server never advertises
+// the capability and never touches it.
+class HostClipboardHub;
+
+// Window-selection handshake between the control thread (which receives ControlWindowSelect) and
+// the main loop (which owns the capture item and performs the switch). The control thread posts
+// the request and waits on cv for the main loop to fill in the response fields.
+struct WindowSelectionTxn {
+  std::mutex mu;
+  std::condition_variable cv;
+  bool pending = false;
+  bool completed = false;
+  uint32_t reqSeq = 0;
+  uint64_t requestedWindowId = 0;
+  // t-970r4zgo: which request this is. The main loop completes only the transaction it took; a
+  // request that replaced it (its asker gave up on a dead link) is not answered with its result.
+  uint64_t txnId = 0;
+  uint64_t nextTxnId = 0;
+  uint64_t completedTxnId = 0;
+  // r3 M5: the session the request was made in (SessionState::epoch when it was served). The main
+  // loop applies a request only while that session is still the current one; its asker cancels a
+  // request it gave up on before the main loop took it.
+  uint64_t ownerEpoch = 0;
+  // A monitor-select target (monitor_select_target.hpp): the screen's device name, resolved on the
+  // control thread against the monitor list THIS connection was sent; empty for a window/desktop.
+  std::wstring requestedMonitorDevice;
+  uint32_t responseFlags = 0;
+  uint64_t responseWindowId = 0;
+  uint64_t responseStreamGeneration = 0;
+  std::string responseReason;
+  std::string responseTitle;
+};
+
+class ControlSessionServer {
+ public:
+  ControlSessionServer(const Args& args, std::atomic<bool>& stop, SessionState& clientSession,
+                       CaptureState& capture, ClientMetricsSnapshot& clientMetrics,
+                       EncoderState& encoder, InputRouterState& inputRouter,
+                       DesktopBackendState& backend, WindowSelectionTxn& windowSelectionTxn,
+                       MainLoopMailbox& mailbox, HostClipboardHub* clipboard);
+
+  // Serve one control conversation until the link dies or the host stops. `linkDirectoryAuthenticated`
+  // is THIS link's own standing (r7 H4): the UDP control channel belongs to the peer whose Hello the
+  // directory capability admitted; an accepted TCP control connection is nobody's in particular, so it is
+  // false there -- and a privileged request (remote restart) on it is refused, whatever another link holds.
+  void Serve(ControlLink& link, bool linkDirectoryAuthenticated);
+
+ private:
+  // Named exactly like the main() locals they alias so the moved body reads unchanged.
+  const Args& args;
+  std::atomic<bool>& stop;
+  SessionState& clientSession;
+  CaptureState& capture;
+  ClientMetricsSnapshot& clientMetrics;
+  EncoderState& encoder;
+  InputRouterState& inputRouter;
+  DesktopBackendState& backend;
+  WindowSelectionTxn& windowSelectionTxn;
+  MainLoopMailbox& mailbox;
+  HostClipboardHub* clipboard;  // clipboard text sync (K1); null when disabled
+};
+
+}  // namespace remote60::native_poc

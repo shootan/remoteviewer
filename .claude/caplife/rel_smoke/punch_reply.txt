@@ -1,0 +1,263 @@
+﻿PASS  the fake directory starts
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  a real GNLinkStream starts against it
+PASS  ...and collects the capability from the heartbeat   directory cache path=C:\work\gnlink-wt\rel-0163\build-test\test-scratch\run-26232-3496340670712-0\punch_armed-1\host_cache.json (--directory-cache)
+
+10-26 17:37:00.519 [native-video-host] directory agent started url=http://127.0.0.1:49247
+
+10-26 17:37:00.519 [native-video-host][dir-cycle] n=1 start cause=first
+
+10-26 17:37:00.521 [native-video-host] directory registered hostId=h-e2e name=SHOTAN
+
+
+PASS  a relay that answers on the 2500ms grace starts
+PASS  the client observes itself through the directory
+PASS  the client picks a candidate
+PASS  ...and it is the private one  private at 0ms
+      punch race: 0ms (the relay answers at 2500ms)
+PASS  the punched socket is handed to the product session
+remote60_host_punch_reply_e2e_test.exe : [native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+At D:\remote\remote\.claude\caplife\rel_smoke.ps1:25 char:70
++ ...  @a > "$out\$name.txt" 2>&1 } else { & $exe > "$out\$name.txt" 2>&1 }
++                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([native-video-c...0 nonblocking=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[native-video-client-session] udp recv drop sock=428 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=22 stop=0
+PASS  a capability issued for the public tuple opens a session from a private source  connected window_list_received count=10 selected=desktop
+PASS  ...with the control loop running over that same socket
+PASS  ...and the host reports the endpoint it translated to  capability endpoint translated expected=211.218.222.1:60420
+PASS  ...and reports a client connected
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] udp recv drop sock=428 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=26 sinceDatagramMs=32 stop=0
+PASS  a control request makes the round trip over the tunnel  connected window_selected: desktop selected=desktop
+PASS  [inject] a second endpoint B opens a socket
+PASS  [inject] B binds its own port (a drop is then a real block, not a send failure)
+PASS  [inject] the host logs dropping control from the non-session endpoint B  e-started=1 acquireTimeoutMs=8 acquireIdleSleepUs=2000 d3dMt=off
+
+10-26 17:37:01.912 [native-video-host] capture-pipeline-flushed reason=window-select streamGen=2 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=26
+
+10-26 17:37:01.912 [native-video-host][control] window-select seq=1 requestedId=0 applied=1 selectedId=0 streamGen=2 reason=desktop_mode_selected title=desktop
+
+
+[native-video-client-session] udp recv drop sock=428 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=49 sinceDatagramMs=26 stop=0
+PASS  [inject] the host sends B nothing back
+PASS  [inject] A can still queue a control request after the injection
+[native-video-client-session] udp recv drop sock=428 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=72 sinceDatagramMs=52 stop=0
+PASS  [inject] the host processes A's post-injection request (ordering fence)  ueueDepth=0 epoch=1 clampBurst=0 burstWin2s=380307 cap2r=2000000
+
+10-26 17:37:02.919 [native-video-host][control] thumbnail windowId=4918118 gave up after 1005ms (spawn 5ms, wait 999ms, teardown 1ms): thumb_deadline
+
+10-26 17:37:02.922 [native-video-host] dxgi-acquire acquires=55 timeouts=65 dxgiContentAcquires=54 dxgiPointerOnly=1 coalesced=0 accumTotal=54 accumMax=1 holdAvgUs=120 holdMaxUs=167
+
+
+PASS  [inject] B's injected window-select never reached the host (dropped before the parser)  B's requestedId must be absent from the host log
+PASS  [inject] A's session stays connected and serving through the injection  connected window_select_failed: window_not_found_or_not_shareable selected=desktop
+[native-video-client-session] udp recv drop sock=428 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=96 sinceDatagramMs=35 stop=0
+PASS  [inject] a foreign video-NACK draws no retransmit to the stranger
+PASS  [inject] A can still request after the foreign-IP / nack / video-nack probes
+[native-video-client-session] udp recv drop sock=428 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=120 sinceDatagramMs=87 stop=0
+PASS  [inject] the host processes A's request after the F2 probes (ordering fence)  ueueDepth=0 epoch=1 clampBurst=0 burstWin2s=478531 cap2r=2000000
+
+10-26 17:37:04.939 [native-video-host] dxgi-acquire acquires=54 timeouts=65 dxgiContentAcquires=54 dxgiPointerOnly=0 coalesced=0 accumTotal=54 accumMax=1 holdAvgUs=121 holdMaxUs=184
+
+10-26 17:37:04.941 [native-video-host][control] thumbnail windowId=329338 gave up after 1007ms (spawn 4ms, wait 1001ms, teardown 1ms): thumb_deadline
+
+
+PASS  [inject] the different-IP (127.0.0.2) window-select never reached the host  127.0.0.2 id must be absent
+PASS  duplicate punches from one source are all answered, within budget  1 replies
+[native-video-client-session] udp recv drop sock=428 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=145 sinceDatagramMs=90 stop=0
+[native-video-client-session] udp recv drop sock=428 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=170 sinceDatagramMs=85 stop=0
+PASS  the relay's late answer does not disturb the established session  relay answered 1 time(s), endpoint 127.0.0.1:63316
+PASS  the host exited and its staging directory was removed
+PASS  [move] the fake directory starts
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  [move] a real GNLinkStream starts
+PASS  [move] the host registers (holds the capability for Hello auth)  6232-3496340670712-0\punch_move-2\host_cache.json (--directory-cache)
+
+10-26 17:37:08.860 [native-video-host] directory agent started url=http://127.0.0.1:51161
+
+10-26 17:37:08.860 [native-video-host][dir-cycle] n=1 start cause=first
+
+10-26 17:37:08.863 [native-video-host] directory registered hostId=h-move name=SHOTAN
+
+10-26 17:37:08.874 [native-video-host][dir-cycle] n=1 step=health ok=1 ms=11
+
+
+PASS  [move] A1 opens a socket
+PASS  [move] A1 authenticates and its window-select is processed  ch first-frame path=h264-udp streamGen=1 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> sendQpcUs=349644249812 captureQpcUs=349644222346 size=1920x1080 auEpoch=2 curEpoch=2 holdUs=27466
+
+10-26 17:37:10.609 [native-video-host][keyframe] seq=1 bytes=134775 reasons=initial|first_frame sinceLastKeyMs=0 enqueueDurUs=11 skipsSincePrevKeyAccepted=0 kick=0 size=1920x1080 bitrate=8000000
+
+
+PASS  [move] A2 opens a different port
+PASS  [move] after the admitted Hello from A2, A2's window-select is processed (re-adopted)  .824 [native-video-host][control] window-select seq=7 requestedId=11719107999768421026 applied=0 selectedId=11719107999768421026 streamGen=1 reason=window_not_found_or_not_shareable title=<empty>
+
+10-26 17:37:10.871 [native-video-host] wire seq=5 key=0 bytes=74 chunks=2 wireIntUs=64638 targetIntUs=33333 queueWaitUs=13 sendDurUs=82 queueDepth=0 epoch=1 clampBurst=0 burstWin2s=183899 cap2r=2000000
+
+
+PASS  [move] the host keeps serving A2 after A1's late packet (ordering fence)  0 selectedId=11719107999768421026 streamGen=1 reason=window_not_found_or_not_shareable title=<empty>
+
+10-26 17:37:10.871 [native-video-host] wire seq=5 key=0 bytes=74 chunks=2 wireIntUs=64638 targetIntUs=33333 queueWaitUs=13 sendDurUs=82 queueDepth=0 epoch=1 clampBurst=0 burstWin2s=183899 cap2r=2000000
+
+10-26 17:37:10.879 [native-video-host][control] dropped control from non-session peer total=1
+
+
+PASS  [move] A1's late packet from the OLD endpoint is refused (never processed)  A1 stale id must be absent
+PASS  [move] the host exited and its staging directory was removed
+PASS  [ackspoof] the fake directory starts
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  [ackspoof] a real GNLinkStream starts
+PASS  [ackspoof] the host registers  t] directory cache path=C:\work\gnlink-wt\rel-0163\build-test\test-scratch\run-26232-3496340670712-0\punch_ack-3\host_cache.json (--directory-cache)
+
+10-26 17:37:11.050 [native-video-host] directory agent started url=http://127.0.0.1:51166
+
+10-26 17:37:11.050 [native-video-host][dir-cycle] n=1 start cause=first
+
+10-26 17:37:11.052 [native-video-host] directory registered hostId=h-ack name=SHOTAN
+
+
+PASS  [ackspoof] raw-A opens a socket
+PASS  [ackspoof] the host sent a reliable host->client response raw-A can see  re-started=1 acquireTimeoutMs=8 acquireIdleSleepUs=2000 d3dMt=off
+
+10-26 17:37:13.452 [native-video-host] capture-pipeline-flushed reason=window-select streamGen=2 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=1
+
+10-26 17:37:13.452 [native-video-host][control] window-select seq=7 requestedId=0 applied=1 selectedId=0 streamGen=2 reason=desktop_mode_selected title=desktop
+
+
+PASS  [ackspoof] the host retransmits the unacked response  re-started=1 acquireTimeoutMs=8 acquireIdleSleepUs=2000 d3dMt=off
+
+10-26 17:37:13.452 [native-video-host] capture-pipeline-flushed reason=window-select streamGen=2 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=1
+
+10-26 17:37:13.452 [native-video-host][control] window-select seq=7 requestedId=0 applied=1 selectedId=0 streamGen=2 reason=desktop_mode_selected title=desktop
+
+
+PASS  [ackspoof] B opens a different port
+PASS  [ackspoof] B's spoofed ACK does NOT stop the retransmit (dropped as a foreign ACK)  ve-video-host] wire seq=1 key=1 bytes=134767 chunks=138 wireIntUs=0 targetIntUs=33333 queueWaitUs=29 sendDurUs=158725 queueDepth=0 epoch=1 clampBurst=0 burstWin2s=168567 cap2r=2000000
+
+10-26 17:37:13.694 [native-video-host] wire seq=2 key=0 bytes=10429 chunks=12 wireIntUs=158779 targetIntUs=33333 queueWaitUs=158758 sendDurUs=14351 queueDepth=1 epoch=1 clampBurst=0 burstWin2s=182612 cap2r=2000000
+
+
+PASS  [ackspoof] after raw-A's genuine ACK the retransmit of that seq stops  7 [native-video-host] wire seq=12 key=0 bytes=4327 chunks=5 wireIntUs=165810 targetIntUs=33333 queueWaitUs=13 sendDurUs=114 queueDepth=0 epoch=1 clampBurst=0 burstWin2s=192609 cap2r=2000000
+
+10-26 17:37:14.656 [native-video-host] wire seq=13 key=0 bytes=7812 chunks=9 wireIntUs=167483 targetIntUs=33333 queueWaitUs=16 sendDurUs=1802 queueDepth=0 epoch=1 clampBurst=0 burstWin2s=202577 cap2r=2000000
+
+
+PASS  [ackspoof] the host exited and its staging directory was removed
+PASS  the fake directory starts (bad token)
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  a real GNLinkStream starts (bad token)
+PASS  ...and collects the capability  ory cache path=C:\work\gnlink-wt\rel-0163\build-test\test-scratch\run-26232-3496340670712-0\punch_badtoken-4\host_cache.json (--directory-cache)
+
+10-26 17:37:17.944 [native-video-host] directory agent started url=http://127.0.0.1:51172
+
+10-26 17:37:17.944 [native-video-host][dir-cycle] n=1 start cause=first
+
+10-26 17:37:17.946 [native-video-host] directory registered hostId=h-e2e-bad name=SHOTAN
+
+
+PASS  the client observes itself (bad token)
+PASS  the host answers its punch all the same
+PASS  a capability nobody issued does not open a session  error
+PASS  ...and the host does not report a client connected
+PASS  the host exited and its staging directory was removed
+PASS  the fake directory starts (window expiry)
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  a real GNLinkStream starts (window expiry)
+PASS  ...and collects the capability, opening the window  6340670712-0\punch_expiry-5\host_cache.json (--directory-cache)
+
+10-26 17:37:24.355 [native-video-host] directory agent started url=http://127.0.0.1:51883
+
+10-26 17:37:24.355 [native-video-host][dir-cycle] n=1 start cause=first
+
+10-26 17:37:24.357 [native-video-host] directory registered hostId=h-e2e-expiry name=SHOTAN
+
+10-26 17:37:24.369 [native-video-host][dir-cycle] n=1 step=health ok=1 ms=12
+
+
+      waiting out the 10s reply window
+PASS  a forwarding relay starts
+PASS  the client observes itself (window expiry)
+PASS  once the window has closed the host is silent again and the relay wins  relay at 2514ms
+PASS  ...and it takes the relay's grace period to get there  2514ms
+PASS  ...and the host logged the refusal as a closed window  17 closed-window refusals
+      window: 10-26 17:37:24.637 [native-video-host][punch-reply] window open for 10000ms (capability collected)
+
+      punches: 10-26 17:37:36.213 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=1 replied=0 reason=closed
+ | 10-26 17:37:36.370 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=2 replied=0 reason=closed
+ | 10-26 17:37:36.529 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=3 replied=0 reason=closed
+ | 10-26 17:37:36.685 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=4 replied=0 reason=closed
+ | 10-26 17:37:36.841 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=5 replied=0 reason=closed
+ | 10-26 17:37:36.997 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=6 replied=0 reason=closed
+ | 10-26 17:37:37.153 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=7 replied=0 reason=closed
+ | 10-26 17:37:37.312 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=8 replied=0 reason=closed
+ | 10-26 17:37:37.469 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=9 replied=0 reason=closed
+ | 10-26 17:37:37.625 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=10 replied=0 reason=closed
+ | 10-26 17:37:37.784 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=11 replied=0 reason=closed
+ | 10-26 17:37:37.938 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=12 replied=0 reason=closed
+ | 10-26 17:37:38.096 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=13 replied=0 reason=closed
+ | 10-26 17:37:38.251 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=14 replied=0 reason=closed
+ | 10-26 17:37:38.409 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=15 replied=0 reason=closed
+ | 10-26 17:37:38.569 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=16 replied=0 reason=closed
+ | 10-26 17:37:38.727 [native-video-host][dir-punch] from=127.0.0.1:59943 refreshWasPending=0 total=17 replied=0 reason=closed
+
+PASS  the relay-chosen socket is handed to the product session
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=264 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=23 stop=0
+PASS  the same capability opens the session through the relay too  connected window_list_received count=10 selected=desktop
+PASS  ...and the host translated to the relay's address, not the client's  relay port 59942
+PASS  the host exited and its staging directory was removed
+PASS  the fake directory starts (late capability)
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  a real GNLinkStream starts (late capability)
+PASS  ...and reaches its directory with nothing pending  2-3496340670712-0\punch_late-6\host_cache.json (--directory-cache)
+
+10-26 17:37:38.856 [native-video-host] directory agent started url=http://127.0.0.1:51890
+
+10-26 17:37:38.856 [native-video-host][dir-cycle] n=1 start cause=first
+
+10-26 17:37:38.858 [native-video-host] directory registered hostId=h-e2e-late name=SHOTAN
+
+10-26 17:37:38.858 [native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+
+
+PASS  ...and has no capability yet
+PASS  the client asks before the host can answer
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=556 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=25 stop=0
+PASS  a capability that arrives late still opens the session  connected window_list_received count=10 selected=desktop after 5395ms
+PASS  ...and the host did collect it in the meantime
+      hello retried for 5395ms before the capability landed
+PASS  the host exited and its staging directory was removed
+PASS  [prelogin] the fake directory starts
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  [prelogin] a real GNLinkStream starts with --prelogin and directory arguments
+PASS  [prelogin] r6 V5: it did NOT register with the directory arguments it was given  registrations: 0
+PASS  [prelogin] r9 W2: the shipped worker, on a user's desktop, left at once (exit 14) and never served it  14
+PASS  [prelogin] no separate TCP control listener is opened (G2 side channel off)  prelogin must not expose an unauthenticated TCP control link
+PASS  [prelogin] the host exited and its staging directory was removed
+
+RESULT: ALL PASS  (102 checks, 0 failed)

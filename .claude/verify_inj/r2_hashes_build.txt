@@ -1,0 +1,4 @@
+9f27873ba27c7bae28433cc7a1119426f9f73bf1b5de5c138f47b52114588963 */d/remote/remote/.claude/worktrees/verify-inj-b8/build-verify/apps/native_poc/Release/remote60_host_fatal_exception_test.exe
+e676405faf2225213cf712a209f2004df725edc374a4e9891cde9f4ea1043948 */d/remote/remote/.claude/worktrees/verify-inj-b8/build-verify/apps/native_poc/Release/remote60_os_input_record_e2e_test.exe
+9087a81db35ffc0d46253a6be63818779546ea9d02ffdba8e841d5abfe03267b */d/remote/remote/.claude/worktrees/verify-inj-b8/build-verify/apps/native_poc/Release/GNLinkStreamMigrationTest.exe
+ffedcfd7795d4e3bd507508a579b3deeebf18155482cfdb44d658ecff9779715 */d/remote/remote/.claude/worktrees/verify-inj-b8/build-verify/apps/native_poc/Release/GNLinkStreamInputRecordTest.exe

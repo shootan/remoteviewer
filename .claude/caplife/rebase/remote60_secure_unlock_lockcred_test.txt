@@ -1,0 +1,91 @@
+﻿the lock-screen credential in the service (lockscreen-cred r1)
+
+[capabilities]
+PASS  a service that can type into the lock screen lists LockCredV1
+PASS  ...and one that cannot lists nothing
+PASS  lk-ux-retry: the service that types also lists LockCredRetryV1 (it can end a waiting credential)
+
+[who gets a lock-credential challenge]
+PASS  own session = console, ACTIVE, locked: issued, purpose LockCred, for that session
+PASS  the same ACTIVE locked console session asking the OLD unlock: still refused (reqActive kept)
+PASS  a DISCONNECTED locked session: no lock-credential challenge ...
+PASS  ... but its old unlock challenge is issued as before (purpose Unlock)
+PASS  refused: not locked (the desktop is in use, or a UAC prompt is up)
+PASS  refused: lock state unknown (WTS could not say) -- not taken as either
+PASS  refused: connect state unknown
+PASS  refused: the caller's session is not the console (console is 2)
+PASS  refused: no console session
+PASS  refused: the service cannot type into the lock screen
+PASS  refused: a caller whose session could not be read
+PASS  a refusal is one bounded line with its reason (no payload)  unlock challenge rejected purpose=lock-cred reason=no-requester requester=4294967295 console=1 lockKnown=0 locked=0 stateKnown=0 active=0
+
+[typed once, under its own purpose]
+PASS  LockCred-sealed: typed into session 1, exactly those units, once; Injected NOT terminal (it waits for the unlock)  stage=8 terminal=0
+PASS  a replay of the sealed request: answered with where it is, typed 0 more times  stage=8 terminal=0
+PASS  status while still locked: Injected, not terminal  stage=8 terminal=0
+PASS  unlocked but no session event since the typing: not counted as the unlock  stage=8 terminal=0
+PASS  the unlock of that session after the typing: SessionUnlocked, terminal  stage=9 terminal=1
+PASS  asked again later: the same cached answer
+PASS  ...and still typed once
+PASS  no unlock within the wait: UnlockUnconfirmed, terminal (typed is not reported as unlocked)  stage=15 terminal=1
+PASS  Q1: a new lock-screen request while the typed one still waits: refused ("pending"), nothing typed  unlock challenge rejected purpose=lock-cred reason=pending requester=1 console=1 lockKnown=1 locked=1 stateKnown=1 active=1
+PASS  Q1: ...and the waiting one is untouched
+PASS  Q1: once it is answered, a new request is issued
+PASS  a LockCred challenge, sealed under the Unlock purpose: DecryptFailed, typed 0, WTSConnectSession 0  stage=4 terminal=1
+PASS  a LockCred challenge, sealed under the PreloginCred purpose: DecryptFailed, typed 0, WTSConnectSession 0  stage=4 terminal=1
+PASS  an Unlock challenge (disconnected session), sealed under the LockCred purpose: DecryptFailed, typed 0, WTSConnectSession 0  stage=4 terminal=1
+PASS  control: the old unlock still runs WTSConnectSession once and types nothing  stage=9 terminal=1
+
+[nothing typed when what it was issued for no longer holds]
+PASS  a session event between challenge and seal: refused, typed 0  stage=2 terminal=1
+PASS  the caller left the pipe: refused, typed 0  stage=2 terminal=1
+PASS  the session is no longer locked (same topology): refused, typed 0  stage=2 terminal=1
+PASS  the session is no longer active: refused, typed 0  stage=2 terminal=1
+PASS  the console moved: refused, typed 0  stage=2 terminal=1
+PASS  the challenge expired: refused, typed 0  stage=11 terminal=1
+
+[what the agent said is the answer]
+PASS  the password field was not the target: TargetNotReady, terminal  stage=13 terminal=1
+PASS  ...a replay is not typed again: the cached answer
+PASS  the typing failed: InjectFailed with its win32, terminal  stage=14 terminal=1
+PASS  status of a job that was never typed: RejectedPolicy, terminal
+PASS  status of another requestId: RejectedPolicy (not this job's state)
+PASS  no log line carries the password
+
+[r2 L2: the request must still hold at the commit -- else nothing is typed]
+PASS  L2: a session event (unlock -> relock) while the agent waited: the fence was asked at the commit, NOTHING typed, RejectedStaleTopology  stage=2 terminal=1
+PASS  L2: the session was unlocked meanwhile (no event seen yet): the fence was asked at the commit, NOTHING typed, RejectedStaleTopology  stage=2 terminal=1
+PASS  L2: the session is no longer active: the fence was asked at the commit, NOTHING typed, RejectedStaleTopology  stage=2 terminal=1
+PASS  L2: the console moved: the fence was asked at the commit, NOTHING typed, RejectedStaleTopology  stage=2 terminal=1
+PASS  L2: another account is in the session: the fence was asked at the commit, NOTHING typed, RejectedStaleTopology  stage=2 terminal=1
+PASS  L2: the commit deadline passed (a slow child / target wait): the fence was asked at the commit, NOTHING typed, RejectedStaleTopology  stage=2 terminal=1
+PASS  L2: the service is stopping: the fence was asked at the commit, NOTHING typed, RejectedStaleTopology  stage=2 terminal=1
+PASS  L2: the caller (its control session) went away while the agent waited: nothing typed  stage=2 terminal=1
+PASS  L2-R: taken before the challenge expired, Ready after it (inside a new 20 s): NOTHING typed  stage=2 terminal=1
+PASS  L2-R control: taken late but Ready before the expiry -> typed once  stage=8 terminal=0
+PASS  L2 control: nothing changed -> the fence allows, typed once  stage=8 terminal=0
+
+[r2 L1: a result belongs to its control session]
+PASS  L1: the same requestId from ANOTHER control session gets nothing of this one's final result  mine stage=13 terminal=1 other stage=1 terminal=1
+PASS  L1: ...nor its cached sealed answer (another session's sealed request is not a 'duplicate' of it)  stage=1 terminal=1
+
+[lk-ux-retry r1: the same connection's explicit retry ends its own waiting credential]
+PASS  supersede of this connection's waiting request: Superseded, terminal  stage=17 terminal=1
+PASS  ...said in one line without the password  lock-cred requestId=41 superseded by the same connection's retry session=1
+PASS  its status from then on: the same Superseded (the old poll ends with it)  stage=17 terminal=1
+PASS  the old sealed request again: its final answer, typed 0 more times  stage=17 terminal=1
+PASS  the new attempt: a NEW challenge (not 'pending'), its own challenge id
+PASS  ...typed once, the new password (the agent replaces the field's content)  stage=8 terminal=0
+PASS  the old request's status does not reach the new one (new still Injected, waiting)  old stage=17 terminal=1 new stage=8 terminal=0
+PASS  a late supersede of the OLD id ends nothing of the new one (not Superseded for 42)  stage=17 terminal=1
+PASS  ...the new one still waits  stage=8 terminal=0
+PASS  the old seal re-sent during the new attempt: types nothing  stage=17 terminal=1
+PASS  the new attempt's unlock: SessionUnlocked  stage=9 terminal=1
+PASS  another control session cannot end it (RejectedPolicy)  stage=1 terminal=1
+PASS  nor a request id that is not the waiting one  stage=1 terminal=1
+PASS  ...and the waiting one is untouched  stage=8 terminal=0
+PASS  a retry after it already unlocked: the real answer (SessionUnlocked), not 'superseded'  stage=9 terminal=1
+PASS  a challenge not typed yet has nothing waiting to end: RejectedPolicy (the host then sends nothing)  stage=1 terminal=1
+PASS  a request that already ended untyped: its own final answer (TargetNotReady), not 'superseded'  stage=13 terminal=1
+
+RESULT: ALL PASS  (72 checks, 0 failed)

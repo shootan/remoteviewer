@@ -1,0 +1,242 @@
+{
+  "accounts": {
+    "tester": {
+      "id": "tester",
+      "salt": "27342137c7d22daa8ee224c747d63ce6",
+      "hash": "51f09a1fbcad0c58e5f3a503e59e0e8854d02b8d678b1b418a802d46644f58fa",
+      "status": "active",
+      "createdAt": 1793110090632,
+      "updatedAt": 1793110090632,
+      "approvedAt": 1793110090632,
+      "memo": "",
+      "lastLoginAt": 1793110091914
+    },
+    "other": {
+      "id": "other",
+      "salt": "e190c7b1bb2d0ff1eb093dbfcaeeb033",
+      "hash": "1c4c219f4c0bc437b57e6b05a98e30581566c746329962bd2dbd1c4f72e0a2e0",
+      "status": "active",
+      "createdAt": 1793110090740,
+      "updatedAt": 1793110090740,
+      "approvedAt": 1793110090740,
+      "memo": "",
+      "lastLoginAt": 1793110091625
+    }
+  },
+  "hosts": {
+    "6a4ef1e8849aabe5": {
+      "hostId": "6a4ef1e8849aabe5",
+      "accountId": "tester",
+      "machineId": "fixture-machine",
+      "hostName": "Fixture Host",
+      "tokenHash": "4f7bf77fadc18792a1b56b79d3366980e275494a6e31137d3d9a0c3503e885dc",
+      "lastSeen": 0,
+      "publicIp": "",
+      "publicUdpPort": 0,
+      "wireIp": "",
+      "wirePort": 0,
+      "localIps": [],
+      "localUdpPort": 0,
+      "alternateUdpPort": 0
+    },
+    "b7d8ed46882e057c": {
+      "hostId": "b7d8ed46882e057c",
+      "accountId": "tester",
+      "machineId": "rollback-machine",
+      "hostName": "Rollback Host",
+      "tokenHash": "822c5410565e48c77bf9c5b6b26c3da925d02f8377488b74da39dc927f1a34fe",
+      "lastSeen": 0,
+      "publicIp": "",
+      "publicUdpPort": 0,
+      "wireIp": "",
+      "wirePort": 0,
+      "localIps": [],
+      "localUdpPort": 0,
+      "alternateUdpPort": 0
+    }
+  },
+  "devices": {
+    "37660c6b8d62360b46a599b02eddc936": {
+      "deviceId": "37660c6b8d62360b46a599b02eddc936",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "Fixture PC",
+      "credHash": "dd788fd24e79d9dda084389145e5f079afc5f5a17593f5bb5fb968ee5ad6740b",
+      "prevCredHash": "d259ace61075b866c4d6dbf0a6b79565b47cfb01a39b584a0b424a0e30d55546",
+      "prevValidUntil": 0,
+      "prevUsesLeft": 0,
+      "issued": [
+        "8c8eed911222b09f3b6e2ce86799f6cf076be4b5ed413de87b744a8d25af8443",
+        "d259ace61075b866c4d6dbf0a6b79565b47cfb01a39b584a0b424a0e30d55546",
+        "444b28508e344d52058ce5f5b22773c2bc73cc22628f321160cec10d1ddf885e",
+        "dd788fd24e79d9dda084389145e5f079afc5f5a17593f5bb5fb968ee5ad6740b"
+      ],
+      "revokeHash": "6d444d2ceda5bef005b750ce75eb8078b699c039ce028033bfc3c425f0d62ce4",
+      "createdAt": 1793110090971,
+      "lastUsedAt": 1793110091196,
+      "expiresAt": 1800886091196,
+      "revokedAt": 1793110091200,
+      "revokedWhy": "a superseded credential was presented"
+    },
+    "3e807544dc813baab42cf8eac5eb3bde": {
+      "deviceId": "3e807544dc813baab42cf8eac5eb3bde",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "Fixture PC",
+      "credHash": "b23c547cc3e7aba2ceefd5620261f9b818f33075af2f107505fc47941636de45",
+      "prevCredHash": "3f0087daf4b1b73f1f9adee3f4eca65184716aeeab6e65015859e8a4ed89a320",
+      "prevValidUntil": 1793110151337,
+      "prevUsesLeft": 1,
+      "issued": [
+        "3f0087daf4b1b73f1f9adee3f4eca65184716aeeab6e65015859e8a4ed89a320",
+        "b23c547cc3e7aba2ceefd5620261f9b818f33075af2f107505fc47941636de45"
+      ],
+      "revokeHash": "f8df1d28ef3555d0f46e9ae3a4f8509937f3e74978d0648fc8b2bb695a08371f",
+      "createdAt": 1793110091324,
+      "lastUsedAt": 1793110091337,
+      "expiresAt": 1800886091337,
+      "revokedAt": 0,
+      "revokedWhy": ""
+    },
+    "33c9ff7c918fde9f3d9eb6ad53c8cea9": {
+      "deviceId": "33c9ff7c918fde9f3d9eb6ad53c8cea9",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "Fixture PC",
+      "credHash": "395e951849b1309c6039a7e92489a71616ac9eaab409710415816378b8ba4b29",
+      "prevCredHash": "66696025a33a84771b359d6d2cd4bad6c0434ceb52e5e443453e1837ca9d6ebc",
+      "prevValidUntil": 1793110151415,
+      "prevUsesLeft": 0,
+      "issued": [
+        "66696025a33a84771b359d6d2cd4bad6c0434ceb52e5e443453e1837ca9d6ebc",
+        "395e951849b1309c6039a7e92489a71616ac9eaab409710415816378b8ba4b29"
+      ],
+      "revokeHash": "2bcfb18cbbda0edf6571a31f7bb06a372497e1d2ef3325857ad3ece9283d558f",
+      "createdAt": 1793110091413,
+      "lastUsedAt": 1793110091415,
+      "expiresAt": 1800886091415,
+      "revokedAt": 1793110091418,
+      "revokedWhy": "signed out"
+    },
+    "24ae1c5b72905b3c2e8654b07a4ae7e6": {
+      "deviceId": "24ae1c5b72905b3c2e8654b07a4ae7e6",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "Fixture PC",
+      "credHash": "04408766c3a7a788fc46e8499861c39bdad1f19c5f7b472db860c64aeade529f",
+      "prevCredHash": "35cf29faf56ce5278c59055bb1b7ff3cc6bfa9d9a00f3310805a112b60ab6c1d",
+      "prevValidUntil": 1793110151465,
+      "prevUsesLeft": 0,
+      "issued": [
+        "35cf29faf56ce5278c59055bb1b7ff3cc6bfa9d9a00f3310805a112b60ab6c1d",
+        "04408766c3a7a788fc46e8499861c39bdad1f19c5f7b472db860c64aeade529f"
+      ],
+      "revokeHash": "cfcef5d81ed5d8352578e9055dedf6e3ba91a2fec16852283abdc85789a03140",
+      "createdAt": 1793110091463,
+      "lastUsedAt": 1793110091465,
+      "expiresAt": 1800886091465,
+      "revokedAt": 1793110091471,
+      "revokedWhy": "signed out"
+    },
+    "5ca5b913fb6a47df62e3de375263823a": {
+      "deviceId": "5ca5b913fb6a47df62e3de375263823a",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "Desk",
+      "credHash": "d04c524906f24ffecdcd6195b977e270695cb3e7b73094b5be9cfcccf307aea2",
+      "prevCredHash": "",
+      "prevValidUntil": 0,
+      "prevUsesLeft": 0,
+      "issued": [
+        "d04c524906f24ffecdcd6195b977e270695cb3e7b73094b5be9cfcccf307aea2"
+      ],
+      "revokeHash": "cf78743b27bc75223c760ca7c7db5be116cb0054ff28e2912f33630dc47c4762",
+      "createdAt": 1793110091546,
+      "lastUsedAt": 1793110091546,
+      "expiresAt": 1800886091546,
+      "revokedAt": 1793110091586,
+      "revokedWhy": "revoked by the account"
+    },
+    "3a406f8a17ca59a441f500ed2f7ba215": {
+      "deviceId": "3a406f8a17ca59a441f500ed2f7ba215",
+      "accountId": "tester",
+      "kind": "android",
+      "label": "Phone",
+      "credHash": "6c4e4d77daccf8f8776d33bfd01cbbecfe778a32827fb6d048ed4e18f6306c9c",
+      "prevCredHash": "ef589c3d4179cb1cbe8eaf0d9c6de2901196552879c7f2c401bcd535effbadac",
+      "prevValidUntil": 1793110151589,
+      "prevUsesLeft": 1,
+      "issued": [
+        "ef589c3d4179cb1cbe8eaf0d9c6de2901196552879c7f2c401bcd535effbadac",
+        "6c4e4d77daccf8f8776d33bfd01cbbecfe778a32827fb6d048ed4e18f6306c9c"
+      ],
+      "revokeHash": "9fba9a010e3038077c3a7727a934df68a9a2bc9dc9778e84a75c89fab44ab3bf",
+      "createdAt": 1793110091582,
+      "lastUsedAt": 1793110091589,
+      "expiresAt": 1800886091589,
+      "revokedAt": 0,
+      "revokedWhy": ""
+    },
+    "2bb8c822cc5602195d53b98910aad542": {
+      "deviceId": "2bb8c822cc5602195d53b98910aad542",
+      "accountId": "other",
+      "kind": "android",
+      "label": "Theirs",
+      "credHash": "ac9c0b629d96ea1be7c8cbf2a4590c1487d3064677cfa316012b9670d2add7e4",
+      "prevCredHash": "",
+      "prevValidUntil": 0,
+      "prevUsesLeft": 0,
+      "issued": [
+        "ac9c0b629d96ea1be7c8cbf2a4590c1487d3064677cfa316012b9670d2add7e4"
+      ],
+      "revokeHash": "faec04fdf5eaa82abf1e203d18ed99a5b9c3c055c43a3ffd13721772f85e7994",
+      "createdAt": 1793110091625,
+      "lastUsedAt": 1793110091625,
+      "expiresAt": 1800886091625,
+      "revokedAt": 0,
+      "revokedWhy": ""
+    },
+    "a22e4bed80e8841ad084cf8e00248117": {
+      "deviceId": "a22e4bed80e8841ad084cf8e00248117",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "Fixture PC",
+      "credHash": "a2f00455b9280d9f39113f40d9f39be4c7e678b6a86403adfe9a975dd8c5c65c",
+      "prevCredHash": "eb3c2d9d4df8955cb8e1fa487b95aab1519813936de7407e936149049185605d",
+      "prevValidUntil": 0,
+      "prevUsesLeft": 0,
+      "issued": [
+        "bbd950dff5151a9a4ba63780f367f39ce134c7b3aa9ae7ce08c84a18065fd4c3",
+        "eb3c2d9d4df8955cb8e1fa487b95aab1519813936de7407e936149049185605d",
+        "1c1c3fb67969e8fa9ba576fb73e28d4d8ebedab24c48d21eb3cc1133e1299672",
+        "a2f00455b9280d9f39113f40d9f39be4c7e678b6a86403adfe9a975dd8c5c65c"
+      ],
+      "revokeHash": "b64b0b628a18eaf4a1107bcbadc64fcf0d00203241c3928556fb98c495750b59",
+      "createdAt": 1793110091665,
+      "lastUsedAt": 1793110091749,
+      "expiresAt": 1800886091749,
+      "revokedAt": 0,
+      "revokedWhy": ""
+    },
+    "c4a79be2650980e8bc7ef3dcb20f1cf0": {
+      "deviceId": "c4a79be2650980e8bc7ef3dcb20f1cf0",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "Fixture PC",
+      "credHash": "a9774c9a238c938402ff532086d970abb136d142abbf5a83c2da6845771d3de4",
+      "prevCredHash": "938ed5f061790c49162d713647a30a63874e8ddfee7fdb8927802a79db9412d9",
+      "prevValidUntil": 1793110152160,
+      "prevUsesLeft": 1,
+      "issued": [
+        "938ed5f061790c49162d713647a30a63874e8ddfee7fdb8927802a79db9412d9",
+        "a9774c9a238c938402ff532086d970abb136d142abbf5a83c2da6845771d3de4"
+      ],
+      "revokeHash": "b1248f35f7bd0bd1e336b21d5b6fab22cefa73ded81db7343aa04d66d66023ec",
+      "createdAt": 1793110091914,
+      "lastUsedAt": 1793110092160,
+      "expiresAt": 1800886092160,
+      "revokedAt": 0,
+      "revokedWhy": ""
+    }
+  }
+}

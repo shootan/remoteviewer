@@ -1,0 +1,2 @@
+10-28 08:40:42.539 [native-video-host] latency-priority processAboveNormal=1 mainThreadAboveNormal=1
+10-28 08:40:42.554 [native-video-host][clipboard] monitor started

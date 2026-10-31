@@ -1,0 +1,40 @@
+﻿=== C:\work\gnlink-wt\feat-apk-0233\.claude\e2e\runs\bc-b-shoff-20261030081349-43476
+fixture (in its job, e2e_job_run dc4c5049e8e9d32a) runner pid 7200 at 2026-10-30T08:13:50
+job_run: child_exit=0 residual=0 forced=0 ended_confirmed=1
+slot run=bc-b-shoff-20261030081349-43476 done 2026-10-30T08:19:06: rc=0 (fixture 0, avd 0)
+fixture run=bc-b-shoff-20261030081349-43476 result /   node ended /   a exit 0 /   failures: none
+08:13:59 SEGMENT startup begin epoch_ms=1793315639522
+08:16:01 PASS  E2 A (ordinary connect, sharpening pipeline OFF): selection -> first frame  4316 ms
+08:16:03 SEGMENT startup end epoch_ms=1793315763311
+08:16:03   watch begins 996 ms after the first frame was seen (select returned)
+08:16:03 SEGMENT watch begin epoch_ms=1793315763618
+08:18:07 SEGMENT watch end epoch_ms=1793315887469
+08:18:07 PASS  E2-SHOFF the session stayed up 120 s after its first frame (no keep_end, still the viewer)  watched=120990ms liveness_trace lines=0 video_debug lines=186
+08:18:08 SEGMENT list begin epoch_ms=1793315888296
+08:19:04 SEGMENT list end epoch_ms=1793315944237
+startup: SEGMENT len=123.789s keyframe=18 bytes=29178 kreq=15 kreq/s=0.121
+watch: SEGMENT len=123.851s keyframe=142 bytes=234773 kreq=142 kreq/s=1.147
+list: SEGMENT len=55.941s keyframe=69 bytes=113642 kreq=69 kreq/s=1.233
+host peer-lost lines: 0
+relay b8e9f65e watch: snap0 errMs=-2351 snap1 errMs=-1194 dt=125.008s h2c 33,755 B/s c2h 591 B/s
+video_debug inside watch: n=185
+watch fps (same segment, first->last video_debug 122.734s apart): out 16.12/s  in 16.14/s  (out +1979, in +1981)
+  episodes: ? (not in this APK's video_debug)
+  asks: ? (not in this APK's video_debug)
+  recSent: ? (not in this APK's video_debug)
+  recExhausted: ? (not in this APK's video_debug)
+  recMoot: ? (not in this APK's video_debug)
+  recClosed: ? (not in this APK's video_debug)
+  chainSkipped: ? (not in this APK's video_debug)
+  inboxDrops: 82 -> 233 (+151)
+  gapDrops: 35 -> 547 (+512)
+  keyTaken: ? (not in this APK's video_debug)
+  chainDup: ? (not in this APK's video_debug)
+  chainStale: ? (not in this APK's video_debug)
+  chainTrim: ? (not in this APK's video_debug)
+  lossRecovered: ? (not in this APK's video_debug)
+  beyondGap: ? (not in this APK's video_debug)
+  covered: ? (not in this APK's video_debug)
+  coveredExh: ? (not in this APK's video_debug)
+  coveredStale: ? (not in this APK's video_debug)
+sample lines: 14 miss-nonempty: 1

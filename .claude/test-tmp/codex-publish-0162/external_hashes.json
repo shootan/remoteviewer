@@ -1,0 +1,79 @@
+[
+  {
+    "name": "GNLinkHost.exe",
+    "status": 200,
+    "size": 841216,
+    "sha256": "67a4d7658039380f14be2956be7a950f9ae9de37b880e3a6248ce518fb970120",
+    "ok": true
+  },
+  {
+    "name": "GNLinkStream.exe",
+    "status": 200,
+    "size": 1594368,
+    "sha256": "c6c3c313b62813d1cd5fa1faf52b99903f22da43182e77e3485617137a457d55",
+    "ok": true
+  },
+  {
+    "name": "GNLinkCapture.exe",
+    "status": 200,
+    "size": 221184,
+    "sha256": "5091b3748b43d57d9f07f67f6718888eca73040faa695fe19ce857074c8a5b5f",
+    "ok": true
+  },
+  {
+    "name": "GNLinkInputService.exe",
+    "status": 200,
+    "size": 456192,
+    "sha256": "ae849c5b3e34e4572fdf49854bf64808fa3b6c401b364606299df3dfcc739191",
+    "ok": true
+  },
+  {
+    "name": "GNLinkClient.exe",
+    "status": 200,
+    "size": 865280,
+    "sha256": "031117ff186f3931dc317de21404463e341e11b7895da5a74f7435ea73f0dc83",
+    "ok": true
+  },
+  {
+    "name": "GNLinkViewer.exe",
+    "status": 200,
+    "size": 1372160,
+    "sha256": "188f7479c5ed91433429604a56f595d869156f686a2afe2786f4e3a4f8425461",
+    "ok": true
+  },
+  {
+    "name": "GNLinkSetup.exe",
+    "status": 200,
+    "size": 6538752,
+    "sha256": "ed480e252b6a6a3b4910da115dc1b9f94be94e32a754949291568e07d52ae175",
+    "ok": true
+  },
+  {
+    "name": "GNLinkUpdater.exe",
+    "status": 200,
+    "size": 650752,
+    "sha256": "4a00c365ddd4823b741698dd69004a8eef7f69b2285b7613759adde0cc97282a",
+    "ok": true
+  },
+  {
+    "name": "GNLinkClipHelper.exe",
+    "status": 200,
+    "size": 295424,
+    "sha256": "8d7aade62e02ec8d0b499a82aabcc8732981b4956d4e3d9adaf963c1d2e669c2",
+    "ok": true
+  },
+  {
+    "name": "ui\\shell.html",
+    "status": 200,
+    "size": 21824,
+    "sha256": "8fac49cd810e1445d36305bf5e62e9e539982fb0b671be86cb9008ee5ad62811",
+    "ok": true
+  },
+  {
+    "name": "ui\\macro.html",
+    "status": 200,
+    "size": 11270,
+    "sha256": "380c232691d05e74506ce7269dd048d97b343735b1d3c86bd088b88227c1a268",
+    "ok": true
+  }
+]

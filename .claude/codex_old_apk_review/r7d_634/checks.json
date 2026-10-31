@@ -1,0 +1,54 @@
+{
+  "rev": "6345512499662471f222371399c006d0362ccbe7",
+  "blob_sha256": "871f1d151058d9b347f286c7658f56f8b0d8c15461d8dce266b59bc638478afd",
+  "scope": "fixed real functions/main statements, effect stubs only; unavailable helpers return empty as product harness does",
+  "results": [
+    {
+      "case": "S input False",
+      "return": 1,
+      "menu": [],
+      "pass": true
+    },
+    {
+      "case": "P input False",
+      "return": 1,
+      "menu": [],
+      "pass": true
+    },
+    {
+      "case": "no new events",
+      "got": true,
+      "expected": true,
+      "pass": true,
+      "detail": "since the pick: scenes=[] status=[] picks=0 host ended=[] host new clients=0"
+    },
+    {
+      "case": "scene changed",
+      "got": false,
+      "expected": false,
+      "pass": true,
+      "detail": "since the pick: scenes=['HOSTS'] status=[] picks=0 host ended=[] host new clients=0"
+    },
+    {
+      "case": "host ended",
+      "got": false,
+      "expected": false,
+      "pass": true,
+      "detail": "since the pick: scenes=[] status=[] picks=0 host ended=['udp control session ended'] host new clients=0"
+    },
+    {
+      "case": "host log unavailable/shortened",
+      "got": true,
+      "expected": false,
+      "pass": false,
+      "detail": "since the pick: scenes=[] status=[] picks=0 host ended=[] host new clients=0"
+    },
+    {
+      "case": "app pull unavailable",
+      "got": true,
+      "expected": false,
+      "pass": false,
+      "detail": "since the pick: scenes=[] status=[] picks=0 host ended=[] host new clients=0"
+    }
+  ]
+}

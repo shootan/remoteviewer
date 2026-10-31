@@ -1,0 +1,21 @@
+{
+  "repo_path": "D:/remote/remote",
+  "files": [
+    "apps/native_poc/src/update_effects.cpp",
+    "apps/native_poc/src/update_effects.hpp",
+    "apps/native_poc/src/update_effects_test.cpp",
+    "apps/native_poc/src/update_relaunch.cpp",
+    "apps/native_poc/src/update_relaunch.hpp",
+    "apps/native_poc/src/update_relaunch_test.cpp",
+    "apps/native_poc/src/update_release_test.cpp",
+    "apps/native_poc/src/update_state_machine.cpp",
+    "apps/native_poc/src/update_state_machine.hpp",
+    "apps/native_poc/src/update_state_machine_test.cpp",
+    "apps/native_poc/src/updater_assembly_test.cpp",
+    "apps/native_poc/src/updater_effects.cpp",
+    "apps/native_poc/src/updater_scenarios_test.cpp",
+    "docs/full_code_audit_2026-09-08.md",
+    "docs/history.md",
+    "docs/업데이트_기능_설계.md"
+  ]
+}

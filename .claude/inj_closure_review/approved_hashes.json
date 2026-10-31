@@ -1,0 +1,14 @@
+{
+  "docs/history.md": {
+    "before_utf8_lf_no_bom": "f46b06ab4841d89fb680017b2f2c532cb0ad745d7f0c594d0c319ed84b230408",
+    "after_utf8_lf_no_bom": "bac2757956b95c59802c83e2b845fe40bc76a918bc5130ead1aeadf09de3d324"
+  },
+  "docs/작업목록.md": {
+    "before_utf8_lf_no_bom": "7bcde1b96d0aecfed805e5383fd5d49e14ec7da409242a4c69f14889fa768013",
+    "after_utf8_lf_no_bom": "7bcde1b96d0aecfed805e5383fd5d49e14ec7da409242a4c69f14889fa768013"
+  },
+  "docs/구현계획.md": {
+    "before_utf8_lf_no_bom": "a4b0ffb221d1b7e58a5a67f77242595259fc6328a04c2f7894a4609cc7c50184",
+    "after_utf8_lf_no_bom": "9e2c0abf5015b731ca50d69c951ca94ffc9e615d35453891d11d9cf166911b05"
+  }
+}

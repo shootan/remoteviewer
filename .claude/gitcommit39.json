@@ -1,0 +1,4 @@
+{
+ "repo_path": "D:/remote/remote",
+ "message": "docs(observe): stop writing a number that the writing of it changes\n\nThe commit total was wrong twice in a row, and the second time was caused by\nfixing the first: a doc commit that corrects the count is itself a commit,\nso the corrected number is stale the moment it lands.\n\nThe list of product and test commits is fixed and stays enumerated. The doc\ncommits are named but not totalled, and the entry says to count the range\nwith git rather than trusting a number written inside the range it counts.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+}

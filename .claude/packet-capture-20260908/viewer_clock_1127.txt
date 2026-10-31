@@ -1,0 +1,12 @@
+09-08 11:27:30.230 [native-video-client][telemetry] stage=clock pingSeq=3102 rttUs=2186 clockOffsetUs=48970655749 clientSendUs=88566768454 hostRecvUs=137537425296 hostSendUs=137537425296 clientRecvUs=88566770640
+09-08 11:27:31.241 [native-video-client][telemetry] stage=clock pingSeq=3103 rttUs=2062 clockOffsetUs=48970655881 clientSendUs=88567780191 hostRecvUs=137538437103 hostSendUs=137538437103 clientRecvUs=88567782253
+09-08 11:27:32.254 [native-video-client][telemetry] stage=clock pingSeq=3104 rttUs=2391 clockOffsetUs=48970655754 clientSendUs=88568792969 hostRecvUs=137539449919 hostSendUs=137539449919 clientRecvUs=88568795360
+09-08 11:27:33.272 [native-video-client][telemetry] stage=clock pingSeq=3105 rttUs=1074 clockOffsetUs=48970656377 clientSendUs=88569811295 hostRecvUs=137540468209 hostSendUs=137540468210 clientRecvUs=88569812369
+09-08 11:27:34.287 [native-video-client][telemetry] stage=clock pingSeq=3106 rttUs=2181 clockOffsetUs=48970655943 clientSendUs=88570825777 hostRecvUs=137541482811 hostSendUs=137541482811 clientRecvUs=88570827958
+09-08 11:27:35.300 [native-video-client][telemetry] stage=clock pingSeq=3107 rttUs=2328 clockOffsetUs=48970655901 clientSendUs=88571838032 hostRecvUs=137542495097 hostSendUs=137542495097 clientRecvUs=88571840360
+09-08 11:27:36.314 [native-video-client][telemetry] stage=clock pingSeq=3108 rttUs=2940 clockOffsetUs=48970655565 clientSendUs=88572852648 hostRecvUs=137543509683 hostSendUs=137543509683 clientRecvUs=88572855588
+09-08 11:27:44.252 [native-video-client][telemetry] stage=clock pingSeq=1 rttUs=2205 clockOffsetUs=48970656146 clientSendUs=88580790310 hostRecvUs=137551447559 hostSendUs=137551447559 clientRecvUs=88580792515
+09-08 11:27:45.265 [native-video-client][telemetry] stage=clock pingSeq=2 rttUs=1543 clockOffsetUs=48970656566 clientSendUs=88581804276 hostRecvUs=137552461614 hostSendUs=137552461614 clientRecvUs=88581805819
+09-08 11:27:46.279 [native-video-client][telemetry] stage=clock pingSeq=3 rttUs=4782 clockOffsetUs=48970654987 clientSendUs=88582815375 hostRecvUs=137553472753 hostSendUs=137553472753 clientRecvUs=88582820157
+09-08 11:27:47.292 [native-video-client][telemetry] stage=clock pingSeq=4 rttUs=2179 clockOffsetUs=48970656423 clientSendUs=88583830784 hostRecvUs=137554488297 hostSendUs=137554488297 clientRecvUs=88583832963
+09-08 11:27:48.304 [native-video-client][telemetry] stage=clock pingSeq=5 rttUs=1692 clockOffsetUs=48970656611 clientSendUs=88584842868 hostRecvUs=137555500325 hostSendUs=137555500325 clientRecvUs=88584844560

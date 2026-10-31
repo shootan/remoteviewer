@@ -1,0 +1,17 @@
+test(e2e): e2e_job_run's start failures are ended and that end confirmed -- or said NOT confirmed; a failed resume ends the job (keepalive-r2 e, Codex avd_guard r3 J1)
+
+de2d60a's assign / membership failure branch ignored TerminateProcess and the wait and printed
+"ended before it ran" (Codex: with no child, assign false + terminate false + WAIT_TIMEOUT was
+still called ended); ResumeThread's result was ignored too. The start now lives in
+e2e_job_run_start.hpp (its Win32 calls through JobStartApi): a failed assign / membership
+terminates the suspended command and says ended_confirmed=1 only when the wait SAW it (exit 2),
+else ended_confirmed=0 (exit 98); a failed resume terminates the job and is confirmed only when the
+command's end was seen AND the job emptied (else 98) -- never handed on as running. The normal
+path is unchanged.
+
+e2e_job_run_start_test 8/8 x3 (a stand-in for the Win32 calls; no process, no job): Codex's case,
+the confirmed one, not a member, membership not askable, resume failed (confirmed / end not seen /
+job not empty), all succeed. With the results ignored again (the de2d60a branch): 5 FAIL.
+Orchestration (stubs, under the runner) 18/18, nothing left.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>

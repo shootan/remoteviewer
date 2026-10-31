@@ -1,0 +1,372 @@
+[product client: StandbyLease + ClientSessionController at a real host]
+PASS  the fake directory starts
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  a real GNLinkStream starts
+PASS  the host registers  777562009704-0\punch_standby-1\host_cache.json (--directory-cache)
+10-28 05:12:19.561 [native-video-host] directory agent started url=http://127.0.0.1:59611
+10-28 05:12:19.561 [native-video-host][dir-cycle] n=1 start cause=first
+10-28 05:12:19.563 [native-video-host] directory registered hostId=h-standby name=SHOTAN
+10-28 05:12:19.575 [native-video-host][dir-cycle] n=1 step=health ok=1 ms=11
+
+PASS  A's and B's leases open (one socket each)
+PASS  A parks (its StandbyHello admitted)
+PASS  B parks, its own entry
+PASS  ...and NEITHER started a session  -host] directory capability endpoint translated expected=211.218.222.1:60420 actual=127.0.0.1:62976
+10-28 05:12:20.104 [native-video-host][standby] hello admitted entries=1 active=0
+10-28 05:12:20.228 [native-video-host] directory capability endpoint translated expected=211.218.222.1:60420 actual=127.0.0.1:62977
+10-28 05:12:20.228 [native-video-host][standby] hello admitted entries=2 active=0
+
+PASS  A's activation arguments: its lease's socket and the activation handshake
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+P[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=21 stop=0
+ASS  A's ClientSessionController connects THROUGH the activation (no Hello)   | activated gen=2; 
+PASS  ...the host admitted it as the first session by activation  eo-host] control waiting port=59612
+10-28 05:12:20.324 [native-video-host][connection-version] localProcess=GNLinkStream localVersion=0.2.163 localPid=32080 peerProcess=GNLinkViewer peerVersion=unknown-awaiting-exchange
+10-28 05:12:20.329 [native-video-host][control] window-list seq=1 count=10 selectedId=0
+10-28 05:12:20.330 [native-video-host][control] monitor-list seq=1 count=1 selectedId=0
+
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  ...video reaches A's sink
+PASS  ...and A's control works (its window list arrives)
+  -- B, parked, pings for 12 s; A must not notice --
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=27 sinceDatagramMs=251 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=60 sinceDatagramMs=340 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=93 sinceDatagramMs=22 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=125 sinceDatagramMs=24 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=157 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=189 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=218 sinceDatagramMs=34 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=249 sinceDatagramMs=56 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=280 sinceDatagramMs=61 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=309 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=340 sinceDatagramMs=87 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=370 sinceDatagramMs=33 stop=0
+PASS  B stays parked (its Pings answered), no entry lost
+PASS  NO new session, NO control-session end while B pinged  0 gen=1
+10-28 05:12:32.555 [native-video-host] wire seq=28 key=0 bytes=14487 chunks=16 wireIntUs=502770 targetIntUs=33333 queueWaitUs=18 sendDurUs=9065 queueDepth=0 epoch=1 clampBurst=0 burstWin2s=171270 cap2r=2000000
+10-28 05:12:32.613 [native-video-host] dxgi-acquire acquires=1 timeouts=90 dxgiContentAcquires=1 dxgiPointerOnly=0 coalesced=0 accumTotal=1 accumMax=1 holdAvgUs=119 holdMaxUs=119
+
+PASS  A is still connected
+  -- B takes over explicitly; A's session ends; A parks again; A takes it back --
+PASS  B's activation arguments
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+PASS[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=27 stop=0
+  B connects through ITS activation   | activated gen=2; 
+PASS  ...a takeover: a new epoch for B  n-awaiting-exchange
+10-28 05:12:32.840 [native-video-host][control] window-list seq=1 count=10 selectedId=0
+10-28 05:12:32.840 [native-video-host][control] monitor-list seq=1 count=1 selectedId=0
+10-28 05:12:32.847 [native-video-host] udp peer updated; media barrier armed epoch=2 forcing keyframe
+10-28 05:12:32.847 [native-video-host][control] backend-owner epoch=2 requested=dxgi active=dxgi
+
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  ...video reaches B
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=402 sinceDatagramMs=866 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=27 sinceDatagramMs=27 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=434 sinceDatagramMs=1869 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=58 sinceDatagramMs=32 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=467 sinceDatagramMs=2898 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=90 sinceDatagramMs=54 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=500 sinceDatagramMs=3925 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=120 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=533 sinceDatagramMs=4947 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=149 sinceDatagramMs=34 stop=0
+[native-video-client-session] udp recv drop sock=420 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=566 sinceDatagramMs=5977 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=180 sinceDatagramMs=57 stop=0
+PASS  A's session ends (the host moved on)  error
+PASS  A's session over (its own operation)
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=210 sinceDatagramMs=52 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=240 sinceDatagramMs=50 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=271 sinceDatagramMs=24 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=303 sinceDatagramMs=22 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=333 sinceDatagramMs=22 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=363 sinceDatagramMs=33 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=391 sinceDatagramMs=28 stop=0
+PASS  A parks again on its lease's own socket: its entry answers its Pings  activated gen=2; 
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=464 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=28 stop=0
+PASS  A takes it back (a larger generation)   | activated gen=2; activated gen=3; 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  ...video reaches A again
+PASS  no ordinary Hello made a session: the first by activation, every rollover by activation  first=1 epochs=2 byActivation=2
+  -- the app's StandbyRunner (a pump thread per PC): start, activate, session over, release --
+PASS  the runner starts a lease for the PC (its own thread)
+PASS  ...it waits for a capability (none of its own), nothing sent
+PASS  the app hands one in (Provide)
+PASS  ...it parks without anyone pumping it here
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=472 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=27 stop=0
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  TakeActivation + Connect: the runner's PC takes the session by activation (video)
+PASS  ...while handed off the runner reports it so (the pump leaves the socket alone)
+PASS  ...the runner takes the session-over of its operation
+PASS  the host sees the session end (the grant ends with it)  5:12:47.551 [native-video-host][keyframe] seq=62 bytes=82448 reasons=peer|barrier_kick sinceLastKeyMs=934 enqueueDurUs=6 skipsSincePrevKeyAccepted=0 kick=1 size=1920x1080 bitrate=8000000
+10-28 05:12:47.645 [native-video-host] wire seq=62 key=1 bytes=82448 chunks=85 wireIntUs=507944 targetIntUs=33333 queueWaitUs=13 sendDurUs=93921 queueDepth=0 epoch=4 clampBurst=0 burstWin2s=389800 cap2r=2000000
+
+PASS  session over: parked again by the runner's own pings
+  -- the product's activation of a session entry (standby_session_link.hpp: its gate + the link) --
+PASS  an operation stale before its connect: not adopted, the arguments abandoned, the lease keeps its socket  stale_operation
+PASS  Connect refused before its worker: abandoned (the handle closed by the lease), parked again  connect_failed
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=27 stop=0
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  the entry's own operation: adopted, connected by activation, video   | 
+PASS  ...while it runs the lease is handed off (the pump leaves the socket to the session)
+PASS  closed as the bridge closes it: the lease is parked again on its own socket (SessionOver after Disconnect)
+PASS  ...a second Over says nothing
+PASS  ...the host sees that session end  10-28 05:12:54.956 [native-video-host] directory punch -> 211.218.222.1:60420
+10-28 05:12:54.956 [native-video-host] directory punch -> 211.218.222.1:60420
+10-28 05:12:54.956 [native-video-host] directory punch -> 211.218.222.1:60420
+10-28 05:12:54.956 [native-video-host] directory punch -> 211.218.222.1:60420
+10-28 05:12:54.956 [native-video-host][dir-cycle] n=8 sleep planMs=4737 workMs=263
+
+PASS  ...and the lease stays parked by its own pings
+PASS  Release: the lease is gone here and released at the host (one StandbyRelease)  ced=0 accumTotal=1 accumMax=1 holdAvgUs=109 holdMaxUs=109
+10-28 05:13:01.811 [native-video-host][control] udp control session ended epoch=5 resumed=0 reason=peer-lost
+10-28 05:13:01.813 [native-video-host] capture-pipeline-flushed reason=stream-inactive streamGen=1 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=44
+10-28 05:13:01.813 [native-video-host] stream inactive
+
+
+[product client through the REAL server.js relay: support from /api/hosts, standby connects, a lease each]
+PASS  the real directory server starts (relay on, loopback)
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  a real GNLinkStream starts against it
+PASS  the host is online  -socket] media bind=127.0.0.1:51826 pid=29388
+10-28 05:13:02.175 [native-video-host] directory cache path=C:\work\gnlink-wt\ka-r3\build-verify\test-scratch\run-32984-4777562009704-0\punch_realdir-3\host_cache.json (--directory-cache)
+10-28 05:13:02.176 [native-video-host] directory agent started url=http://127.0.0.1:54150
+10-28 05:13:02.176 [native-video-host][dir-cycle] n=1 start cause=first
+
+PASS  a client signs in (the product's directory_login)
+PASS  standby support is read from /api/hosts (no side effect): supported, with a relay
+PASS  two leases open
+PASS  each standby connect reserved its own relay lease  reserved
+PASS  A and B park THROUGH the relay, each its own entry   |  target=127.0.0.1:51825
+PASS  ...two relay leases bound and ready, no session  anslated expected=127.0.0.1:51828 actual=127.0.0.1:51830
+10-28 05:13:03.170 [native-video-host][standby] hello admitted entries=2 active=0
+10-28 05:13:03.247 [native-video-host][dir-cycle] n=3 step=observe ok=1 ms=262
+10-28 05:13:03.250 [native-video-host][dir-cycle] n=3 step=heartbeat ok=1 ms=3 capabilities=0
+10-28 05:13:03.250 [native-video-host][dir-cycle] n=3 sleep planMs=4734 workMs=266
+
+  -- the same device again at once: after a crash (no release), and after a release --
+PASS  device X parks through the relay   | relay: [relay] ENABLED ip=127.0.0.1 port=51825 grace=400ms allowIps=127.0.0.1 allowAccounts=tester / [wake] on / [relay] listening on udp 51825; grace=400ms / [host-hb] host=eff3b485 wire=127.0.0.1:51826 public=127.0.0.1:51826 aim=127.0.0.1:51826 via=wire localIps=2 sinceLastMs=-1 moved-from=-:0 / [capability] connect=811115e8 minted host=eff3b485 queued=1 ttlMs=30000 / [relay] connect=811115e8 standby reserved hostFacing=51829 host=eff3b485 onHost=1 / [relay] connect=811115e8 standby eligible client=127.0.0.1:51827 wire=127.0.0.1 hostFacing=51829 / [wake] connect=811115e8 tx host=127.0.0.1:51826 via=wire / [wake] connect=811115e8 resend armed every 1000ms max=10 timers=1 / [relay] connect=811115e8 standby bound client=127.0.0.1:51827 hostFacing=51829 host=127.0.0.1:51826 / [relay] connect=811115e8 first c2h -> 127.0.0.1:51826 kind=media afterBindMs=1 / [wake] connect=811115e8 tx[0] sent 127.0.0.1:51826 via=wire queuedMs=0 / [capability] connect=1825777a minted host=eff3b485 queued=3 ttlMs=30000 / [relay] connect=1825777a standby reserved hostFacing=51830 host=eff3b485 onHost=2 / [relay] connect=1825777a standby eligible client=127.0.0.1:51828 wire=127.0.0.1 hostFacing=51830 / [wake] connect=1825777a skipped reason=rate sinceLastMs=3 limitMs=1000 / [wake] connect=1825777a resend replaced connect=811115e8 after 0 / [wake] connect=1825777a resend armed every 1000ms max=10 timers=1 / [relay] connect=1825777a standby host-side datagram refused src=127.0.0.1:51826 reason=no-host-proof / [relay] connect=1825777a standby bound client=127.0.0.1:51828 hostFacing=51830 host=127.0.0.1:51826 / [relay] connect=1825777a first c2h -> 127.0.0.1:51826 kind=media afterBindMs=0 / [wake] connect=811115e8 tx[100] sent 127.0.0.1:51826 via=wire queuedMs=0 / [wake] connect=811115e8 tx[300] sent 127.0.0.1:51826 via=wire queuedMs=1 / [capability] collected host=eff3b485 count=4 waited=811115e8:442ms,811115e8:441ms,1825777a:438ms,1825777a:438ms meaning=handed-to-response / [wake] connect=1825777a resend stopped after 0 reason=collected / [relay] connect=811115e8 standby host pinned 127.0.0.1:51826 hostFacing=51829 / [relay] connect=1825777a standby host pinned 127.0.0.1:51826 hostFacing=51830 / [relay] connect=811115e8 first h2c (standby) <- 127.0.0.1:51826 afterBindMs=501 / [relay] connect=811115e8 standby ready; standbyAck in 501ms / [relay] connect=1825777a first h2c (standby) <- 127.0.0.1:51826 afterBindMs=624 / [relay] connect=1825777a standby ready; standbyAck in 624ms / [capability] connect=9f78e573 minted host=eff3b485 queued=1 ttlMs=30000 / [relay] connect=9f78e573 standby reserved hostFacing=51832 host=eff3b485 onHost=3 / [relay] connect=9f78e573 standby eligible client=127.0.0.1:51831 wire=127.0.0.1 hostFacing=51832 / [wake] connect=9f78e573 skipped reason=rate sinceLastMs=739 limitMs=1000 / [wake] connect=9f78e573 resend armed every 1000ms max=10 timers=1 / [relay] connect=9f78e573 standby host-side datagram refused src=127.0.0.1:51826 reason=no-host-proof / [relay] connect=9f78e573 standby bound client=127.0.0.1:51831 hostFacing=51832 host=127.0.0.1:51826 / [relay] connect=9f78e573 first c2h -> 127.0.0.1:51826 kind=media afterBindMs=1 / [wake] connect=9f78e573 resend[1/10] sent 127.0.0.1:51826 via=wire queuedMs=1 / [capability] collected host=eff3b485 count=2 waited=9f78e573:1463ms,9f78e573:1462ms meaning=handed-to-response / [wake] connect=9f78e573 resend stopped after 1 reason=collected / [relay] connect=9f78e573 standby host pinned 127.0.0.1:51826 hostFacing=51832 / [relay] connect=9f78e573 first h2c (standby) <- 127.0.0.1:51826 afterBindMs=1538 / [relay] connect=9f78e573 standby ready; standbyAck in 1538ms /  | host: 10-28 05:13:02.656 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=1 total=4 replied=0 reason=src / 10-28 05:13:02.701 [native-video-host][dir-cycle] n=1 wake cause=refresh sleptMs=210 / 10-28 05:13:02.701 [native-video-host][dir-cycle] n=2 start cause=refresh / 10-28 05:13:02.701 [native-video-host][dir-cycle] n=2 step=health ok=1 ms=0 / 10-28 05:13:02.858 [native-video-host] directory peer punch; refreshing capability / 10-28 05:13:02.858 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=0 total=5 replied=0 reason=src / 10-28 05:13:02.967 [native-video-host][dir-cycle] n=2 step=observe ok=1 ms=265 / 10-28 05:13:02.984 [native-video-host][dir-cycle] n=2 step=heartbeat ok=1 ms=17 capabilities=4 / 10-28 05:13:02.984 [native-video-host][dir-cycle] n=2 sleep planMs=4718 workMs=282 / 10-28 05:13:02.984 [native-video-host][dir-cycle] n=2 wake cause=refresh sleptMs=0 / 10-28 05:13:02.984 [native-video-host][dir-cycle] n=3 start cause=refresh / 10-28 05:13:02.984 [native-video-host][dir-cycle] n=3 step=health ok=1 ms=0 / 10-28 05:13:03.044 [native-video-host][standby] hello admitted entries=1 active=0 / 10-28 05:13:03.170 [native-video-host][standby] hello admitted entries=2 active=0 / 10-28 05:13:03.247 [native-video-host][dir-cycle] n=3 step=observe ok=1 ms=262 / 10-28 05:13:03.250 [native-video-host][dir-cycle] n=3 step=heartbeat ok=1 ms=3 capabilities=0 / 10-28 05:13:03.250 [native-video-host][dir-cycle] n=3 sleep planMs=4734 workMs=266 / 10-28 05:13:03.281 [native-video-host][dir-punch] from=127.0.0.1:51832 refreshWasPending=0 total=6 replied=1 reason=ok / 10-28 05:13:03.282 [native-video-host][standby] hello refused (capability) / 10-28 05:13:03.806 [native-video-host][standby] hello refused (capability) / 10-28 05:13:04.293 [native-video-host] directory peer punch; refreshing capability / 10-28 05:13:04.293 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=0 total=7 replied=0 reason=src / 10-28 05:13:04.307 [native-video-host][standby] hello refused (capability) / 10-28 05:13:04.477 [native-video-host][dir-cycle] n=3 wake cause=refresh sleptMs=1227 / 10-28 05:13:04.477 [native-video-host][dir-cycle] n=4 start cause=refresh / 10-28 05:13:04.477 [native-video-host][dir-cycle] n=4 step=health ok=1 ms=0 / 10-28 05:13:04.740 [native-video-host][dir-cycle] n=4 step=observe ok=1 ms=262 / 10-28 05:13:04.743 [native-video-host][dir-cycle] n=4 step=heartbeat ok=1 ms=3 capabilities=2 / 10-28 05:13:04.743 [native-video-host][dir-cycle] n=4 sleep planMs=4735 workMs=265 / 10-28 05:13:04.819 [native-video-host][standby] hello admitted entries=3 active=0 / 
+PASS  ...the same device again at once after a crash: parked within 10 s (a new admission, its own relay lease)  took 627 ms state=2 |  | relay: 1825777a minted host=eff3b485 queued=3 ttlMs=30000 / [relay] connect=1825777a standby reserved hostFacing=51830 host=eff3b485 onHost=2 / [relay] connect=1825777a standby eligible client=127.0.0.1:51828 wire=127.0.0.1 hostFacing=51830 / [wake] connect=1825777a skipped reason=rate sinceLastMs=3 limitMs=1000 / [wake] connect=1825777a resend replaced connect=811115e8 after 0 / [wake] connect=1825777a resend armed every 1000ms max=10 timers=1 / [relay] connect=1825777a standby host-side datagram refused src=127.0.0.1:51826 reason=no-host-proof / [relay] connect=1825777a standby bound client=127.0.0.1:51828 hostFacing=51830 host=127.0.0.1:51826 / [relay] connect=1825777a first c2h -> 127.0.0.1:51826 kind=media afterBindMs=0 / [wake] connect=811115e8 tx[100] sent 127.0.0.1:51826 via=wire queuedMs=0 / [wake] connect=811115e8 tx[300] sent 127.0.0.1:51826 via=wire queuedMs=1 / [capability] collected host=eff3b485 count=4 waited=811115e8:442ms,811115e8:441ms,1825777a:438ms,1825777a:438ms meaning=handed-to-response / [wake] connect=1825777a resend stopped after 0 reason=collected / [relay] connect=811115e8 standby host pinned 127.0.0.1:51826 hostFacing=51829 / [relay] connect=1825777a standby host pinned 127.0.0.1:51826 hostFacing=51830 / [relay] connect=811115e8 first h2c (standby) <- 127.0.0.1:51826 afterBindMs=501 / [relay] connect=811115e8 standby ready; standbyAck in 501ms / [relay] connect=1825777a first h2c (standby) <- 127.0.0.1:51826 afterBindMs=624 / [relay] connect=1825777a standby ready; standbyAck in 624ms / [capability] connect=9f78e573 minted host=eff3b485 queued=1 ttlMs=30000 / [relay] connect=9f78e573 standby reserved hostFacing=51832 host=eff3b485 onHost=3 / [relay] connect=9f78e573 standby eligible client=127.0.0.1:51831 wire=127.0.0.1 hostFacing=51832 / [wake] connect=9f78e573 skipped reason=rate sinceLastMs=739 limitMs=1000 / [wake] connect=9f78e573 resend armed every 1000ms max=10 timers=1 / [relay] connect=9f78e573 standby host-side datagram refused src=127.0.0.1:51826 reason=no-host-proof / [relay] connect=9f78e573 standby bound client=127.0.0.1:51831 hostFacing=51832 host=127.0.0.1:51826 / [relay] connect=9f78e573 first c2h -> 127.0.0.1:51826 kind=media afterBindMs=1 / [wake] connect=9f78e573 resend[1/10] sent 127.0.0.1:51826 via=wire queuedMs=1 / [capability] collected host=eff3b485 count=2 waited=9f78e573:1463ms,9f78e573:1462ms meaning=handed-to-response / [wake] connect=9f78e573 resend stopped after 1 reason=collected / [relay] connect=9f78e573 standby host pinned 127.0.0.1:51826 hostFacing=51832 / [relay] connect=9f78e573 first h2c (standby) <- 127.0.0.1:51826 afterBindMs=1538 / [relay] connect=9f78e573 standby ready; standbyAck in 1538ms / [capability] connect=7df80030 minted host=eff3b485 queued=1 ttlMs=30000 / [relay] connect=7df80030 standby reserved hostFacing=51834 host=eff3b485 onHost=4 / [relay] connect=7df80030 standby eligible client=127.0.0.1:51833 wire=127.0.0.1 hostFacing=51834 / [wake] connect=7df80030 tx host=127.0.0.1:51826 via=wire / [wake] connect=7df80030 resend armed every 1000ms max=10 timers=1 / [wake] connect=7df80030 tx[0] sent 127.0.0.1:51826 via=wire queuedMs=0 / [relay] connect=7df80030 standby host-side datagram refused src=127.0.0.1:51826 reason=no-host-proof / [relay] connect=7df80030 standby bound client=127.0.0.1:51833 hostFacing=51834 host=127.0.0.1:51826 / [relay] connect=7df80030 first c2h -> 127.0.0.1:51826 kind=media afterBindMs=0 / [wake] connect=7df80030 tx[100] sent 127.0.0.1:51826 via=wire queuedMs=1 / [wake] connect=7df80030 tx[300] sent 127.0.0.1:51826 via=wire queuedMs=0 / [capability] collected host=eff3b485 count=2 waited=7df80030:331ms,7df80030:330ms meaning=handed-to-response / [wake] connect=7df80030 resend stopped after 0 reason=collected / [relay] connect=7df80030 standby host pinned 127.0.0.1:51826 hostFacing=51834 / [relay] connect=7df80030 first h2c (standby) <- 127.0.0.1:51826 afterBindMs=531 / [relay] connect=7df80030 standby ready; standbyAck in 531ms /  | host: 10-28 05:13:04.293 [native-video-host] directory peer punch; refreshing capability / 10-28 05:13:04.293 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=0 total=7 replied=0 reason=src / 10-28 05:13:04.307 [native-video-host][standby] hello refused (capability) / 10-28 05:13:04.477 [native-video-host][dir-cycle] n=3 wake cause=refresh sleptMs=1227 / 10-28 05:13:04.477 [native-video-host][dir-cycle] n=4 start cause=refresh / 10-28 05:13:04.477 [native-video-host][dir-cycle] n=4 step=health ok=1 ms=0 / 10-28 05:13:04.740 [native-video-host][dir-cycle] n=4 step=observe ok=1 ms=262 / 10-28 05:13:04.743 [native-video-host][dir-cycle] n=4 step=heartbeat ok=1 ms=3 capabilities=2 / 10-28 05:13:04.743 [native-video-host][dir-cycle] n=4 sleep planMs=4735 workMs=265 / 10-28 05:13:04.819 [native-video-host][standby] hello admitted entries=3 active=0 / 10-28 05:13:04.895 [native-video-host] directory peer punch; refreshing capability / 10-28 05:13:04.895 [native-video-host][dir-punch] from=127.0.0.1:51834 refreshWasPending=0 total=8 replied=1 reason=ok / 10-28 05:13:04.896 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=1 total=9 replied=0 reason=src / 10-28 05:13:04.896 [native-video-host][standby] hello refused (capability) / 10-28 05:13:04.958 [native-video-host][dir-cycle] n=4 wake cause=refresh sleptMs=214 / 10-28 05:13:04.958 [native-video-host][dir-cycle] n=5 start cause=refresh / 10-28 05:13:04.958 [native-video-host][dir-cycle] n=5 step=health ok=1 ms=0 / 10-28 05:13:05.005 [native-video-host] directory peer punch; refreshing capability / 10-28 05:13:05.005 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=0 total=10 replied=0 reason=src / 10-28 05:13:05.207 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=1 total=11 replied=0 reason=src / 10-28 05:13:05.222 [native-video-host][dir-cycle] n=5 step=observe ok=1 ms=264 / 10-28 05:13:05.226 [native-video-host][dir-cycle] n=5 step=heartbeat ok=1 ms=3 capabilities=2 / 10-28 05:13:05.226 [native-video-host][dir-cycle] n=5 sleep planMs=4733 workMs=267 / 10-28 05:13:05.226 [native-video-host][dir-cycle] n=5 wake cause=refresh sleptMs=0 / 10-28 05:13:05.226 [native-video-host][dir-cycle] n=6 start cause=refresh / 10-28 05:13:05.226 [native-video-host][dir-cycle] n=6 step=health ok=1 ms=0 / 10-28 05:13:05.426 [native-video-host][standby] hello admitted entries=3 active=0 / 10-28 05:13:05.488 [native-video-host][dir-cycle] n=6 step=observe ok=1 ms=262 / 10-28 05:13:05.505 [native-video-host][dir-cycle] n=6 step=heartbeat ok=1 ms=16 capabilities=0 / 10-28 05:13:05.505 [native-video-host][dir-cycle] n=6 sleep planMs=4722 workMs=278 / 
+PASS  ...and again at once after a release: parked within 10 s  took 1619 ms |  | relay: reason=collected / [relay] connect=811115e8 standby host pinned 127.0.0.1:51826 hostFacing=51829 / [relay] connect=1825777a standby host pinned 127.0.0.1:51826 hostFacing=51830 / [relay] connect=811115e8 first h2c (standby) <- 127.0.0.1:51826 afterBindMs=501 / [relay] connect=811115e8 standby ready; standbyAck in 501ms / [relay] connect=1825777a first h2c (standby) <- 127.0.0.1:51826 afterBindMs=624 / [relay] connect=1825777a standby ready; standbyAck in 624ms / [capability] connect=9f78e573 minted host=eff3b485 queued=1 ttlMs=30000 / [relay] connect=9f78e573 standby reserved hostFacing=51832 host=eff3b485 onHost=3 / [relay] connect=9f78e573 standby eligible client=127.0.0.1:51831 wire=127.0.0.1 hostFacing=51832 / [wake] connect=9f78e573 skipped reason=rate sinceLastMs=739 limitMs=1000 / [wake] connect=9f78e573 resend armed every 1000ms max=10 timers=1 / [relay] connect=9f78e573 standby host-side datagram refused src=127.0.0.1:51826 reason=no-host-proof / [relay] connect=9f78e573 standby bound client=127.0.0.1:51831 hostFacing=51832 host=127.0.0.1:51826 / [relay] connect=9f78e573 first c2h -> 127.0.0.1:51826 kind=media afterBindMs=1 / [wake] connect=9f78e573 resend[1/10] sent 127.0.0.1:51826 via=wire queuedMs=1 / [capability] collected host=eff3b485 count=2 waited=9f78e573:1463ms,9f78e573:1462ms meaning=handed-to-response / [wake] connect=9f78e573 resend stopped after 1 reason=collected / [relay] connect=9f78e573 standby host pinned 127.0.0.1:51826 hostFacing=51832 / [relay] connect=9f78e573 first h2c (standby) <- 127.0.0.1:51826 afterBindMs=1538 / [relay] connect=9f78e573 standby ready; standbyAck in 1538ms / [capability] connect=7df80030 minted host=eff3b485 queued=1 ttlMs=30000 / [relay] connect=7df80030 standby reserved hostFacing=51834 host=eff3b485 onHost=4 / [relay] connect=7df80030 standby eligible client=127.0.0.1:51833 wire=127.0.0.1 hostFacing=51834 / [wake] connect=7df80030 tx host=127.0.0.1:51826 via=wire / [wake] connect=7df80030 resend armed every 1000ms max=10 timers=1 / [wake] connect=7df80030 tx[0] sent 127.0.0.1:51826 via=wire queuedMs=0 / [relay] connect=7df80030 standby host-side datagram refused src=127.0.0.1:51826 reason=no-host-proof / [relay] connect=7df80030 standby bound client=127.0.0.1:51833 hostFacing=51834 host=127.0.0.1:51826 / [relay] connect=7df80030 first c2h -> 127.0.0.1:51826 kind=media afterBindMs=0 / [wake] connect=7df80030 tx[100] sent 127.0.0.1:51826 via=wire queuedMs=1 / [wake] connect=7df80030 tx[300] sent 127.0.0.1:51826 via=wire queuedMs=0 / [capability] collected host=eff3b485 count=2 waited=7df80030:331ms,7df80030:330ms meaning=handed-to-response / [wake] connect=7df80030 resend stopped after 0 reason=collected / [relay] connect=7df80030 standby host pinned 127.0.0.1:51826 hostFacing=51834 / [relay] connect=7df80030 first h2c (standby) <- 127.0.0.1:51826 afterBindMs=531 / [relay] connect=7df80030 standby ready; standbyAck in 531ms / [capability] connect=3f749e18 minted host=eff3b485 queued=1 ttlMs=30000 / [relay] connect=3f749e18 standby reserved hostFacing=60387 host=eff3b485 onHost=5 / [relay] connect=3f749e18 standby eligible client=127.0.0.1:60386 wire=127.0.0.1 hostFacing=60387 / [wake] connect=3f749e18 skipped reason=rate sinceLastMs=639 limitMs=1000 / [wake] connect=3f749e18 resend armed every 1000ms max=10 timers=1 / [relay] connect=3f749e18 standby bound client=127.0.0.1:60386 hostFacing=60387 host=127.0.0.1:51826 / [relay] connect=3f749e18 first c2h -> 127.0.0.1:51826 kind=media afterBindMs=0 / [wake] connect=3f749e18 resend[1/10] sent 127.0.0.1:51826 via=wire queuedMs=0 / [capability] collected host=eff3b485 count=2 waited=3f749e18:1464ms,3f749e18:1464ms meaning=handed-to-response / [wake] connect=3f749e18 resend stopped after 1 reason=collected / [relay] connect=3f749e18 standby host pinned 127.0.0.1:51826 hostFacing=60387 / [relay] connect=3f749e18 first h2c (standby) <- 127.0.0.1:51826 afterBindMs=1554 / [relay] connect=3f749e18 standby ready; standbyAck in 1554ms /  | host: 10-28 05:13:04.958 [native-video-host][dir-cycle] n=4 wake cause=refresh sleptMs=214 / 10-28 05:13:04.958 [native-video-host][dir-cycle] n=5 start cause=refresh / 10-28 05:13:04.958 [native-video-host][dir-cycle] n=5 step=health ok=1 ms=0 / 10-28 05:13:05.005 [native-video-host] directory peer punch; refreshing capability / 10-28 05:13:05.005 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=0 total=10 replied=0 reason=src / 10-28 05:13:05.207 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=1 total=11 replied=0 reason=src / 10-28 05:13:05.222 [native-video-host][dir-cycle] n=5 step=observe ok=1 ms=264 / 10-28 05:13:05.226 [native-video-host][dir-cycle] n=5 step=heartbeat ok=1 ms=3 capabilities=2 / 10-28 05:13:05.226 [native-video-host][dir-cycle] n=5 sleep planMs=4733 workMs=267 / 10-28 05:13:05.226 [native-video-host][dir-cycle] n=5 wake cause=refresh sleptMs=0 / 10-28 05:13:05.226 [native-video-host][dir-cycle] n=6 start cause=refresh / 10-28 05:13:05.226 [native-video-host][dir-cycle] n=6 step=health ok=1 ms=0 / 10-28 05:13:05.426 [native-video-host][standby] hello admitted entries=3 active=0 / 10-28 05:13:05.488 [native-video-host][dir-cycle] n=6 step=observe ok=1 ms=262 / 10-28 05:13:05.505 [native-video-host][dir-cycle] n=6 step=heartbeat ok=1 ms=16 capabilities=0 / 10-28 05:13:05.505 [native-video-host][dir-cycle] n=6 sleep planMs=4722 workMs=278 / 10-28 05:13:05.533 [native-video-host][standby] released entries=2 / 10-28 05:13:05.535 [native-video-host][dir-punch] from=127.0.0.1:60387 refreshWasPending=0 total=12 replied=1 reason=ok / 10-28 05:13:05.535 [native-video-host][standby] hello refused (capability) / 10-28 05:13:06.062 [native-video-host][standby] hello refused (capability) / 10-28 05:13:06.546 [native-video-host] directory peer punch; refreshing capability / 10-28 05:13:06.546 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=0 total=13 replied=0 reason=src / 10-28 05:13:06.562 [native-video-host][standby] hello refused (capability) / 10-28 05:13:06.731 [native-video-host][dir-cycle] n=6 wake cause=refresh sleptMs=1226 / 10-28 05:13:06.731 [native-video-host][dir-cycle] n=7 start cause=refresh / 10-28 05:13:06.731 [native-video-host][dir-cycle] n=7 step=health ok=1 ms=0 / 10-28 05:13:06.995 [native-video-host][dir-cycle] n=7 step=observe ok=1 ms=264 / 10-28 05:13:06.999 [native-video-host][dir-cycle] n=7 step=heartbeat ok=1 ms=3 capabilities=2 / 10-28 05:13:06.999 [native-video-host][dir-cycle] n=7 sleep planMs=4732 workMs=268 / 10-28 05:13:07.089 [native-video-host][standby] hello admitted entries=3 active=0 / 
+PASS  ...each one its own relay lease (ready twice more)
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=26 stop=0
+PASS  A's session through its relay lease, by activation   | activated gen=2; 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  ...video through the relay
+PASS  ...the relay marks A's lease active
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=29 sinceDatagramMs=179 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=61 sinceDatagramMs=207 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=93 sinceDatagramMs=34 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=124 sinceDatagramMs=33 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=157 sinceDatagramMs=55 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=189 sinceDatagramMs=53 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=219 sinceDatagramMs=57 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=249 sinceDatagramMs=65 stop=0
+PASS  B pings through its own lease: parked, A untouched
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=282 sinceDatagramMs=830 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=32 sinceDatagramMs=25 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=315 sinceDatagramMs=1851 stop=0
+[native-video-client-session] video delivered=1 keyReq=3 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  B takes over through ITS relay lease (a new epoch, video)   | activated gen=2; 
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=60 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=348 sinceDatagramMs=2880 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=91 sinceDatagramMs=33 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=381 sinceDatagramMs=3908 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=122 sinceDatagramMs=54 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=414 sinceDatagramMs=4935 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=153 sinceDatagramMs=61 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=447 sinceDatagramMs=5964 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=184 sinceDatagramMs=83 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=480 sinceDatagramMs=6992 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=214 sinceDatagramMs=86 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=513 sinceDatagramMs=8022 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=244 sinceDatagramMs=92 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=546 sinceDatagramMs=9051 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=274 sinceDatagramMs=114 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=579 sinceDatagramMs=10079 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=304 sinceDatagramMs=114 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=612 sinceDatagramMs=11103 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=333 sinceDatagramMs=119 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=645 sinceDatagramMs=12130 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=363 sinceDatagramMs=91 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=678 sinceDatagramMs=13156 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=391 sinceDatagramMs=59 stop=0
+[native-video-client-session] udp recv drop sock=440 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=711 sinceDatagramMs=14179 stop=0
+PASS  A's relay session over (its own operation)
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=418 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=447 sinceDatagramMs=26 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=476 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=508 sinceDatagramMs=28 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=537 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=564 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=591 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=619 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=645 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=676 sinceDatagramMs=28 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=707 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=738 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=768 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=798 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=827 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=855 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=883 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=910 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=937 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=963 sinceDatagramMs=30 stop=0
+PASS  through the relay, A's lease after its session: still parked on the same socket -- no loss, no new connect  activated gen=2; 
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=480 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=26 stop=0
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  ...and takes the session back through the same relay lease (video)   | activated gen=2; activated gen=3; 
+HOSTLOG 10-28 05:13:02.176 [native-video-host][dir-cycle] n=1 start cause=first
+HOSTLOG 10-28 05:13:02.221 [native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:02.485 [native-video-host][dir-cycle] n=1 step=observe ok=1 ms=263
+HOSTLOG 10-28 05:13:02.491 [native-video-host][dir-cycle] n=1 step=heartbeat ok=1 ms=6 capabilities=0
+HOSTLOG 10-28 05:13:02.491 [native-video-host][dir-cycle] n=1 sleep planMs=4685 workMs=315
+HOSTLOG 10-28 05:13:02.543 [native-video-host] directory peer punch; refreshing capability
+HOSTLOG 10-28 05:13:02.543 [native-video-host][dir-punch] from=127.0.0.1:51829 refreshWasPending=0 total=1 replied=0 reason=closed
+HOSTLOG 10-28 05:13:02.544 [native-video-host][standby] hello refused (capability)
+HOSTLOG 10-28 05:13:02.544 [native-video-host][punch-reply] window open for 10000ms (directory wake)
+HOSTLOG 10-28 05:13:02.544 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=1 total=2 replied=0 reason=src
+HOSTLOG 10-28 05:13:02.546 [native-video-host][dir-punch] from=127.0.0.1:51830 refreshWasPending=1 total=3 replied=1 reason=ok
+HOSTLOG 10-28 05:13:02.546 [native-video-host][standby] hello refused (capability)
+HOSTLOG 10-28 05:13:02.656 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=1 total=4 replied=0 reason=src
+HOSTLOG 10-28 05:13:02.701 [native-video-host][dir-cycle] n=1 wake cause=refresh sleptMs=210
+HOSTLOG 10-28 05:13:02.701 [native-video-host][dir-cycle] n=2 start cause=refresh
+HOSTLOG 10-28 05:13:02.701 [native-video-host][dir-cycle] n=2 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:02.858 [native-video-host] directory peer punch; refreshing capability
+HOSTLOG 10-28 05:13:02.858 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=0 total=5 replied=0 reason=src
+HOSTLOG 10-28 05:13:02.967 [native-video-host][dir-cycle] n=2 step=observe ok=1 ms=265
+HOSTLOG 10-28 05:13:02.984 [native-video-host][dir-cycle] n=2 step=heartbeat ok=1 ms=17 capabilities=4
+HOSTLOG 10-28 05:13:02.984 [native-video-host][dir-cycle] n=2 sleep planMs=4718 workMs=282
+HOSTLOG 10-28 05:13:02.984 [native-video-host][dir-cycle] n=2 wake cause=refresh sleptMs=0
+HOSTLOG 10-28 05:13:02.984 [native-video-host][dir-cycle] n=3 start cause=refresh
+HOSTLOG 10-28 05:13:02.984 [native-video-host][dir-cycle] n=3 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:03.044 [native-video-host][standby] hello admitted entries=1 active=0
+HOSTLOG 10-28 05:13:03.170 [native-video-host][standby] hello admitted entries=2 active=0
+HOSTLOG 10-28 05:13:03.247 [native-video-host][dir-cycle] n=3 step=observe ok=1 ms=262
+HOSTLOG 10-28 05:13:03.250 [native-video-host][dir-cycle] n=3 step=heartbeat ok=1 ms=3 capabilities=0
+HOSTLOG 10-28 05:13:03.250 [native-video-host][dir-cycle] n=3 sleep planMs=4734 workMs=266
+HOSTLOG 10-28 05:13:03.281 [native-video-host][dir-punch] from=127.0.0.1:51832 refreshWasPending=0 total=6 replied=1 reason=ok
+HOSTLOG 10-28 05:13:03.282 [native-video-host][standby] hello refused (capability)
+HOSTLOG 10-28 05:13:03.806 [native-video-host][standby] hello refused (capability)
+HOSTLOG 10-28 05:13:04.293 [native-video-host] directory peer punch; refreshing capability
+HOSTLOG 10-28 05:13:04.293 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=0 total=7 replied=0 reason=src
+HOSTLOG 10-28 05:13:04.307 [native-video-host][standby] hello refused (capability)
+HOSTLOG 10-28 05:13:04.477 [native-video-host][dir-cycle] n=3 wake cause=refresh sleptMs=1227
+HOSTLOG 10-28 05:13:04.477 [native-video-host][dir-cycle] n=4 start cause=refresh
+HOSTLOG 10-28 05:13:04.477 [native-video-host][dir-cycle] n=4 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:04.740 [native-video-host][dir-cycle] n=4 step=observe ok=1 ms=262
+HOSTLOG 10-28 05:13:04.743 [native-video-host][dir-cycle] n=4 step=heartbeat ok=1 ms=3 capabilities=2
+HOSTLOG 10-28 05:13:04.743 [native-video-host][dir-cycle] n=4 sleep planMs=4735 workMs=265
+HOSTLOG 10-28 05:13:04.819 [native-video-host][standby] hello admitted entries=3 active=0
+HOSTLOG 10-28 05:13:04.895 [native-video-host] directory peer punch; refreshing capability
+HOSTLOG 10-28 05:13:04.895 [native-video-host][dir-punch] from=127.0.0.1:51834 refreshWasPending=0 total=8 replied=1 reason=ok
+HOSTLOG 10-28 05:13:04.896 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=1 total=9 replied=0 reason=src
+HOSTLOG 10-28 05:13:04.896 [native-video-host][standby] hello refused (capability)
+HOSTLOG 10-28 05:13:04.958 [native-video-host][dir-cycle] n=4 wake cause=refresh sleptMs=214
+HOSTLOG 10-28 05:13:04.958 [native-video-host][dir-cycle] n=5 start cause=refresh
+HOSTLOG 10-28 05:13:04.958 [native-video-host][dir-cycle] n=5 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:05.005 [native-video-host] directory peer punch; refreshing capability
+HOSTLOG 10-28 05:13:05.005 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=0 total=10 replied=0 reason=src
+HOSTLOG 10-28 05:13:05.207 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=1 total=11 replied=0 reason=src
+HOSTLOG 10-28 05:13:05.222 [native-video-host][dir-cycle] n=5 step=observe ok=1 ms=264
+HOSTLOG 10-28 05:13:05.226 [native-video-host][dir-cycle] n=5 step=heartbeat ok=1 ms=3 capabilities=2
+HOSTLOG 10-28 05:13:05.226 [native-video-host][dir-cycle] n=5 sleep planMs=4733 workMs=267
+HOSTLOG 10-28 05:13:05.226 [native-video-host][dir-cycle] n=5 wake cause=refresh sleptMs=0
+HOSTLOG 10-28 05:13:05.226 [native-video-host][dir-cycle] n=6 start cause=refresh
+HOSTLOG 10-28 05:13:05.226 [native-video-host][dir-cycle] n=6 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:05.426 [native-video-host][standby] hello admitted entries=3 active=0
+HOSTLOG 10-28 05:13:05.488 [native-video-host][dir-cycle] n=6 step=observe ok=1 ms=262
+HOSTLOG 10-28 05:13:05.505 [native-video-host][dir-cycle] n=6 step=heartbeat ok=1 ms=16 capabilities=0
+HOSTLOG 10-28 05:13:05.505 [native-video-host][dir-cycle] n=6 sleep planMs=4722 workMs=278
+HOSTLOG 10-28 05:13:05.533 [native-video-host][standby] released entries=2
+HOSTLOG 10-28 05:13:05.535 [native-video-host][dir-punch] from=127.0.0.1:60387 refreshWasPending=0 total=12 replied=1 reason=ok
+HOSTLOG 10-28 05:13:05.535 [native-video-host][standby] hello refused (capability)
+HOSTLOG 10-28 05:13:06.062 [native-video-host][standby] hello refused (capability)
+HOSTLOG 10-28 05:13:06.546 [native-video-host] directory peer punch; refreshing capability
+HOSTLOG 10-28 05:13:06.546 [native-video-host][dir-punch] from=127.0.0.1:51824 refreshWasPending=0 total=13 replied=0 reason=src
+HOSTLOG 10-28 05:13:06.562 [native-video-host][standby] hello refused (capability)
+HOSTLOG 10-28 05:13:06.731 [native-video-host][dir-cycle] n=6 wake cause=refresh sleptMs=1226
+HOSTLOG 10-28 05:13:06.731 [native-video-host][dir-cycle] n=7 start cause=refresh
+HOSTLOG 10-28 05:13:06.731 [native-video-host][dir-cycle] n=7 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:06.995 [native-video-host][dir-cycle] n=7 step=observe ok=1 ms=264
+HOSTLOG 10-28 05:13:06.999 [native-video-host][dir-cycle] n=7 step=heartbeat ok=1 ms=3 capabilities=2
+HOSTLOG 10-28 05:13:06.999 [native-video-host][dir-cycle] n=7 sleep planMs=4732 workMs=268
+HOSTLOG 10-28 05:13:07.089 [native-video-host][standby] hello admitted entries=3 active=0
+HOSTLOG 10-28 05:13:07.165 [native-video-host][standby] released entries=2
+HOSTLOG 10-28 05:13:07.165 [native-video-host][standby] first session by activation entries=2
+HOSTLOG 10-28 05:13:11.744 [native-video-host][dir-cycle] n=7 wake cause=elapsed sleptMs=4745
+HOSTLOG 10-28 05:13:11.744 [native-video-host][dir-cycle] n=8 start cause=elapsed
+HOSTLOG 10-28 05:13:11.744 [native-video-host][dir-cycle] n=8 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:11.995 [native-video-host][dir-cycle] n=8 step=observe ok=1 ms=250
+HOSTLOG 10-28 05:13:11.998 [native-video-host][dir-cycle] n=8 step=heartbeat ok=1 ms=3 capabilities=0
+HOSTLOG 10-28 05:13:11.998 [native-video-host][dir-cycle] n=8 sleep planMs=4746 workMs=254
+HOSTLOG 10-28 05:13:16.762 [native-video-host][dir-cycle] n=8 wake cause=elapsed sleptMs=4764
+HOSTLOG 10-28 05:13:16.762 [native-video-host][dir-cycle] n=9 start cause=elapsed
+HOSTLOG 10-28 05:13:16.762 [native-video-host][dir-cycle] n=9 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:17.013 [native-video-host][dir-cycle] n=9 step=observe ok=1 ms=250
+HOSTLOG 10-28 05:13:17.016 [native-video-host][dir-cycle] n=9 step=heartbeat ok=1 ms=2 capabilities=0
+HOSTLOG 10-28 05:13:17.016 [native-video-host][dir-cycle] n=9 sleep planMs=4747 workMs=253
+HOSTLOG 10-28 05:13:21.776 [native-video-host][dir-cycle] n=9 wake cause=elapsed sleptMs=4760
+HOSTLOG 10-28 05:13:21.776 [native-video-host][dir-cycle] n=10 start cause=elapsed
+HOSTLOG 10-28 05:13:21.776 [native-video-host][dir-cycle] n=10 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:22.027 [native-video-host][dir-cycle] n=10 step=observe ok=1 ms=250
+HOSTLOG 10-28 05:13:22.031 [native-video-host][dir-cycle] n=10 step=heartbeat ok=1 ms=3 capabilities=0
+HOSTLOG 10-28 05:13:22.031 [native-video-host][dir-cycle] n=10 sleep planMs=4746 workMs=254
+HOSTLOG 10-28 05:13:26.788 [native-video-host][dir-cycle] n=10 wake cause=elapsed sleptMs=4757
+HOSTLOG 10-28 05:13:26.788 [native-video-host][dir-cycle] n=11 start cause=elapsed
+HOSTLOG 10-28 05:13:26.788 [native-video-host][dir-cycle] n=11 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:27.039 [native-video-host][dir-cycle] n=11 step=observe ok=1 ms=250
+HOSTLOG 10-28 05:13:27.042 [native-video-host][dir-cycle] n=11 step=heartbeat ok=1 ms=2 capabilities=0
+HOSTLOG 10-28 05:13:27.042 [native-video-host][dir-cycle] n=11 sleep planMs=4747 workMs=253
+HOSTLOG 10-28 05:13:31.804 [native-video-host][dir-cycle] n=11 wake cause=elapsed sleptMs=4762
+HOSTLOG 10-28 05:13:31.804 [native-video-host][dir-cycle] n=12 start cause=elapsed
+HOSTLOG 10-28 05:13:31.804 [native-video-host][dir-cycle] n=12 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:32.055 [native-video-host][dir-cycle] n=12 step=observe ok=1 ms=250
+HOSTLOG 10-28 05:13:32.058 [native-video-host][dir-cycle] n=12 step=heartbeat ok=1 ms=2 capabilities=0
+HOSTLOG 10-28 05:13:32.058 [native-video-host][dir-cycle] n=12 sleep planMs=4747 workMs=253
+HOSTLOG 10-28 05:13:36.817 [native-video-host][dir-cycle] n=12 wake cause=elapsed sleptMs=4759
+HOSTLOG 10-28 05:13:36.817 [native-video-host][dir-cycle] n=13 start cause=elapsed
+HOSTLOG 10-28 05:13:36.817 [native-video-host][dir-cycle] n=13 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:37.068 [native-video-host][dir-cycle] n=13 step=observe ok=1 ms=250
+HOSTLOG 10-28 05:13:37.070 [native-video-host][dir-cycle] n=13 step=heartbeat ok=1 ms=2 capabilities=0
+HOSTLOG 10-28 05:13:37.070 [native-video-host][dir-cycle] n=13 sleep planMs=4747 workMs=253
+HOSTLOG 10-28 05:13:41.831 [native-video-host][dir-cycle] n=13 wake cause=elapsed sleptMs=4761
+HOSTLOG 10-28 05:13:41.832 [native-video-host][dir-cycle] n=14 start cause=elapsed
+HOSTLOG 10-28 05:13:41.832 [native-video-host][dir-cycle] n=14 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:42.082 [native-video-host][dir-cycle] n=14 step=observe ok=1 ms=250
+HOSTLOG 10-28 05:13:42.085 [native-video-host][dir-cycle] n=14 step=heartbeat ok=1 ms=2 capabilities=0
+HOSTLOG 10-28 05:13:42.085 [native-video-host][dir-cycle] n=14 sleep planMs=4747 workMs=253
+HOSTLOG 10-28 05:13:46.847 [native-video-host][dir-cycle] n=14 wake cause=elapsed sleptMs=4761
+HOSTLOG 10-28 05:13:46.847 [native-video-host][dir-cycle] n=15 start cause=elapsed
+HOSTLOG 10-28 05:13:46.847 [native-video-host][dir-cycle] n=15 step=health ok=1 ms=0
+HOSTLOG 10-28 05:13:47.097 [native-video-host][dir-cycle] n=15 step=observe ok=1 ms=250
+HOSTLOG 10-28 05:13:47.111 [native-video-host][dir-cycle] n=15 step=heartbeat ok=1 ms=13 capabilities=0
+HOSTLOG 10-28 05:13:47.111 [native-video-host][dir-cycle] n=15 sleep planMs=4736 workMs=264
+
+[product client at an OLDER host: Unsupported, no Hello]
+PASS  the fake directory starts
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  the older GNLinkStream starts
+PASS  a lease opens at the older host
+PASS  no answer: Unsupported (no automatic connect to it)  unsupported: no answer to StandbyHello; 
+PASS  ...and its session table untouched: no session, no Hello admission  78 [native-video-host] directory punch -> 211.218.222.1:60420
+10-28 05:13:50.978 [native-video-host] directory punch -> 211.218.222.1:60420
+10-28 05:13:50.978 [native-video-host] directory punch -> 211.218.222.1:60420
+10-28 05:13:50.978 [native-video-host] directory punch -> 211.218.222.1:60420
+10-28 05:13:50.978 [native-video-host][punch-reply] window open for 10000ms (capability collected)
+
+
+RESULT: ALL PASS  (78 checks, 0 failed)

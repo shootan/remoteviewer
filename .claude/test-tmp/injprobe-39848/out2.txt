@@ -1,0 +1,1 @@
+10-28 08:41:27.435 [native-video-host] latency-priority processAboveNormal=1 mainThreadAboveNormal=1

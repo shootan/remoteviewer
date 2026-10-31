@@ -1,0 +1,199 @@
+#pragma once
+
+// Encoded-frame sender queue/thread state (EncodedSendItem, SenderState).
+//
+// Host split refactor Phase 2-0: this state moved out of native_video_host_main.cpp verbatim so
+// it can be read on its own; the struct comment below documents role and thread ownership.
+// Phase 2 turns it into the class that owns the matching main() lambdas.
+
+#include <winsock2.h>
+#include <windows.h>
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+#include "host_net_io.hpp"
+#include "native_video_transport.hpp"
+#include "poc_protocol.hpp"
+
+namespace remote60::native_poc {
+
+struct Args;
+struct EncoderState;
+struct MainLoopMailbox;
+struct SessionState;
+
+// H4: the encode thread hands encoded frames to this sender instead of pacing the wire
+// inline. Pacing a 60ms keyframe used to stall the next frame's encode start directly.
+// Depth is 2: an arriving keyframe supersedes the whole backlog, and a delta that would
+// overflow the queue drops the backlog and requests a fresh keyframe -- an encoded delta
+// must never be skipped silently or the reference chain corrupts until the next IDR.
+struct EncodedSendItem {
+  std::vector<uint8_t> bytes;
+  UdpVideoChunkHeader udpHdr{};
+  bool keyFrame = false;
+  uint64_t frameIntervalUs = 0;
+  // qpc time the encode/main thread handed this AU to the sender queue. The sender subtracts it
+  // from its actual wire-start to expose queueWaitUs -- the gap between "AU ready" and "bytes on
+  // the wire" -- so a stutter can be pinned to AU supply vs the sender/wire, not guessed.
+  uint64_t enqueueUs = 0;
+  // Media epoch live when this item was handed to the sender. streamGeneration is a
+  // target-selection id that does NOT change on a session rollover, so it cannot fence a delta
+  // encoded for the previous client. The sender drops any dequeued item whose mediaEpoch no
+  // longer matches the current one (see mediaSessionEpoch).
+  uint64_t mediaEpoch = 0;
+  // Flush epoch of the input this AU was encoded from (H264AccessUnit::inputEpoch, P11). The
+  // sender drops a dequeued item whose epoch is behind CaptureState::inputEpoch: an AU queued
+  // before a flush must not start on the wire after it (host_epoch_gate.hpp states the scope --
+  // one AU already being chunked when the flush happens completes). 0 = untagged (raw path).
+  uint64_t inputEpoch = 0;
+};
+
+// Encoded-frame sender (Phase 1-2 state struct). The encode/main thread enqueues AUs; the sender
+// thread paces them onto the wire. Depth is 2: a keyframe supersedes the backlog, an overflowing
+// delta drops the backlog and requests a fresh keyframe, and deltas are held back until that key
+// passes (waitingForKey). mediaSessionEpoch fences items of a previous session at dequeue. See the
+// comment blocks in main() (H4 sender, session media barrier, IDR telemetry) for the rationale.
+// thread: queue/peer/waitingForKey under mu (main + sender + reader rollover); the atomics are the
+// cross-thread signals (sender -> main: sendFailed; reader -> main: udpPeer*); keyframe requests
+// go through MainLoopMailbox; the plain sent*/udpTx*/heldFrames/nonKeyAu*/firstKeyEnqueuedUs
+// counters are main-thread stats-interval accumulators.
+struct SenderState {
+  // UDP pacing env config (REMOTE60_NATIVE_H264_NO_PACING / UDP_PACE_PEAK_* / UDP_KEYFRAME_PACE_PEAK_BPS),
+  // fixed after startup; EncoderState::ApplyTarget derives the live pacing budget from these.
+  bool noPacingH264 = false;
+  uint32_t udpPacePeakPercent = 0;
+  uint32_t udpPacePeakFloorBps = 0;
+  uint32_t udpKeyframePacePeakBps = 0;
+  // Config (REMOTE60_NATIVE_SENDER_MAX_CADENCE_HOLD_US), fixed after startup.
+  uint32_t maxCadenceHoldUs = 0;
+  bool cadenceSmoothing = false;
+  // cross-thread: live egress parameters. pacePeakBps is written by the main loop
+  // (EncoderState::ApplyTarget), fecInterleaved by the UDP handshake / control thread from the
+  // viewer's hello, keyframePacePeakBps once at startup; the sender thread reads all three. These
+  // were process globals in host_net_io.hpp until ledger H-22 -- the fields above are the policy
+  // INPUTS (percent/floor), these are the derived and negotiated values.
+  std::atomic<uint32_t> pacePeakBps{0};
+  std::atomic<uint32_t> keyframePacePeakBps{100000000};
+  std::atomic<bool> fecInterleaved{false};
+  // ---- Video NACK (selective retransmit) ----
+  // Set from the client's Hello: true only when the client advertised kUdpFeatureVideoNack, so an
+  // old client is never handed retransmits it did not ask for. Reader thread writes, sender reads.
+  std::atomic<bool> nackEnabled{false};
+  struct CachedAu {
+    uint64_t generation = 0;
+    uint32_t seq = 0;
+    uint32_t mtu = 0;
+    UdpVideoChunkHeader baseHeader{};
+    std::vector<uint8_t> payload;
+  };
+  static constexpr size_t kNackCacheMaxAus = 24;
+  std::mutex nackCacheMu;
+  std::deque<CachedAu> nackCache;  // most-recent at back; bounded by kNackCacheMaxAus
+  std::atomic<uint64_t> nackRetransmitChunks{0};  // telemetry: chunks replayed answering NACKs
+  std::atomic<uint64_t> nackRequests{0};          // telemetry: NACK packets served
+  std::atomic<uint64_t> nackMisses{0};            // telemetry: NACKs for an AU no longer cached
+  std::atomic<uint64_t> nackSuppressed{0};        // telemetry: retransmits skipped over the budget
+  // Retransmit byte budget (token bucket): caps replayed bytes to a fraction of the live send rate
+  // so a NACK storm cannot amplify congestion. Guarded by nackBudgetMu; refilled on demand. (Codex.)
+  std::mutex nackBudgetMu;
+  uint64_t nackBudgetTokensBytes = 0;
+  uint64_t nackBudgetLastUs = 0;
+  // Cache one just-sent AU for possible retransmit; drops the oldest past the bound. (sender thread)
+  void StoreAu(uint64_t generation, uint32_t seq, const UdpVideoChunkHeader& baseHeader,
+               uint32_t mtu, const uint8_t* payload, size_t payloadSize);
+  // Answer a NACK: replay the requested chunks of (generation, seq) if still cached. (reader thread)
+  void RetransmitAu(SOCKET sock, const sockaddr_in& peer, uint64_t generation, uint32_t seq,
+                    const uint16_t* missing, uint16_t count);
+  // Taken once per dequeue so one frame is paced and chunked by a single consistent set.
+  UdpEgressConfig EgressSnapshot() const {
+    UdpEgressConfig c;
+    c.pacePeakBps = pacePeakBps.load(std::memory_order_relaxed);
+    c.keyframePacePeakBps = keyframePacePeakBps.load(std::memory_order_relaxed);
+    c.fecInterleaved = fecInterleaved.load(std::memory_order_relaxed);
+    return c;
+  }
+  // UDP peer as the reader thread sees it (the render loop picks up changes through the atomics).
+  sockaddr_in udpPeer{};
+  bool udpPeerReady = false;
+  std::atomic<uint32_t> udpPeerIpNet{0};
+  std::atomic<uint16_t> udpPeerPortNet{0};
+  std::atomic<bool> udpPeerChanged{false};
+  // Queue + peer the sender thread writes to (all under mu).
+  std::mutex mu;
+  std::condition_variable cv;
+  std::deque<EncodedSendItem> queue;
+  sockaddr_in peer{};
+  bool peerReady = false;
+  bool waitingForKey = false;  // deltas held back until the requested keyframe passes
+  // Session media barrier: bumped (under mu) by the rollover transaction; starts at 1 like clientSession.epoch.
+  std::atomic<uint64_t> mediaSessionEpoch{1};
+  // The host's flush epoch (CaptureState::inputEpoch), read by the sender thread to fence AUs of
+  // another epoch (P11). nullptr = the fence is inactive (legacy / tests), the only case in which
+  // an untagged item passes. With the fence active an item is sent only if its epoch EQUALS the
+  // current one at the permission point -- old, untagged (0) and future epochs are all dropped.
+  //
+  // Permission point: right before the first datagram, after pacing. What the fence guarantees is
+  // therefore: no AU whose first datagram was not yet permitted when the flush landed starts on
+  // the wire after it. The exception is one AU per flush whose first datagram WAS permitted before
+  // the flush (the window between that check and the first sendto is a few microseconds and is not
+  // closed; the AU then completes with the metadata it was encoded with -- nothing is relabelled).
+  // A single sender thread means at most one such AU exists at a time.
+  const std::atomic<uint64_t>* inputEpochRef = nullptr;
+  std::atomic<uint64_t> inputEpochDropCount{0};
+  // Test seam: called after pacing, right before the permission check for the first datagram, so a
+  // test can hold the sender there, move the epoch and resume. Never set in production.
+  std::function<void(const EncodedSendItem&)> beforeFirstDatagramHook;
+  std::atomic<bool> stop{false};
+  std::atomic<bool> sendFailed{false};
+  // requestKey / recoveryPending used to live here: two flags for "the stream needs an IDR",
+  // consumed at two different points in the tick because one of them was only read after a real
+  // frame had been popped. Both are RequestKeyframe posts on the mailbox now. (Phase 4.)
+  std::atomic<uint64_t> barrierRearmCount{0};  // same-epoch send-failure barrier re-arms (telemetry)
+  std::atomic<uint64_t> dropCount{0};
+  std::atomic<uint64_t> txFrames{0};
+  std::atomic<uint64_t> txChunks{0};
+  std::atomic<uint64_t> txBytes{0};
+  std::atomic<uint64_t> txNoPeer{0};
+  std::atomic<uint64_t> lastSendStartUs{0};
+  std::atomic<uint64_t> sendDurSumUs{0};
+  std::atomic<uint64_t> sendDurMaxUs{0};
+  std::atomic<uint64_t> sendCount{0};
+  // IDR telemetry per media epoch (sender thread writes; reset by the rollover). Diagnostic only.
+  std::atomic<uint64_t> firstKeyWireUs{0};
+  std::atomic<uint64_t> lastKeyAuBytes{0};
+  std::atomic<uint64_t> lastKeyAuChunks{0};
+  std::thread thread;
+  // Where the sender posts RequestKeyframe. Bound by StartThread; null when no sender runs
+  // (TCP / raw), where nothing on this path executes anyway.
+  MainLoopMailbox* mailbox = nullptr;
+  // Main-thread stats-interval accumulators (reset every stats print).
+  uint64_t sentFrames = 0;
+  uint64_t sentBytes = 0;
+  uint64_t heldFrames = 0;             // AUs the queue policy discarded (backlog resync / waiting for IDR)
+  uint64_t nonKeyAuWhileWaiting = 0;   // delta AUs seen while the barrier was closed
+  uint64_t firstKeyEnqueuedUs = 0;     // wire-time stamp of the first key enqueued this media epoch
+  uint64_t udpTxFrames = 0;
+  uint64_t udpTxChunks = 0;
+  uint64_t udpTxBytes = 0;
+  uint64_t udpTxFail = 0;
+  uint64_t udpTxNoPeer = 0;
+
+  // --- behaviour (Phase 2-3: former main() lambdas start_encoded_sender / pump_udp_hello;
+  //     bodies in host_encoded_sender.cpp) ---
+  // Start the sender thread (UDP + H.264 only). It dequeues AUs, paces them onto the wire and
+  // drives the media barrier; see the thread body for the full policy.
+  void StartThread(VideoTransport transport, bool useH264, const Args& args,
+                   SessionState& clientSession, MainLoopMailbox& mailbox);
+  // Consume a reader-thread peer change: swap the peer and roll the media session over in one
+  // transaction (drop backlog, hold deltas until an IDR, bump the epoch, force a keyframe).
+  void PumpUdpHello(VideoTransport transport, EncoderState& encoder);
+};
+
+}  // namespace remote60::native_poc

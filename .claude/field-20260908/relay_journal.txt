@@ -1,0 +1,22 @@
+pid=86932
+0::/user.slice/user-1006.slice/user@1006.service/app.slice/remote60-directory.service
+unit=user@1006.service
+● user@1006.service - User Manager for UID 1006
+     Loaded: loaded (/usr/lib/systemd/system/user@.service; static)
+    Drop-In: /usr/lib/systemd/system/user@.service.d
+             └─10-login-barrier.conf, timeout.conf
+     Active: active (running) since Sun 2026-09-06 21:14:02 KST; 1 day 12h ago
+== journal since 09:50 ==
+Sep 08 09:51:11 CHO node[86932]: [wake] sent=22 suppressed=0 skippedStale=0 failed=0
+Sep 08 09:56:11 CHO node[86932]: [wake] sent=22 suppressed=0 skippedStale=0 failed=0
+Sep 08 09:56:54 CHO node[86932]: [relay] connect=7919b08b eligible client=211.218.222.1:62645 host=shotan Desktop@175.207.45.151:43000
+Sep 08 09:56:54 CHO node[86932]: [wake] connect=7919b08b tx host=192.168.0.1:43000 (advertised 175.207.45.151:43000)
+Sep 08 09:56:54 CHO node[86932]: [relay] connect=7919b08b punch from 211.218.222.1:62645; answering in 2500ms x3
+Sep 08 09:59:36 CHO node[86932]: [relay] connect=d167b564 eligible client=211.218.222.1:58906 host=shotan Desktop@175.207.45.151:43000
+Sep 08 09:59:36 CHO node[86932]: [wake] connect=d167b564 tx host=192.168.0.1:43000 (advertised 175.207.45.151:43000)
+Sep 08 09:59:36 CHO node[86932]: [relay] connect=d167b564 punch from 211.218.222.1:58906; answering in 2500ms x3
+Sep 08 09:59:46 CHO node[86932]: [relay] connect=17745862 eligible client=211.218.222.1:64652 host=shotan Desktop@175.207.45.151:43000
+Sep 08 09:59:46 CHO node[86932]: [wake] connect=17745862 tx host=192.168.0.1:43000 (advertised 175.207.45.151:43000)
+Sep 08 09:59:46 CHO node[86932]: [relay] connect=17745862 punch from 211.218.222.1:64652; answering in 2500ms x3
+Sep 08 10:01:11 CHO node[86932]: [wake] sent=25 suppressed=0 skippedStale=0 failed=0
+Sep 08 10:06:11 CHO node[86932]: [wake] sent=25 suppressed=0 skippedStale=0 failed=0

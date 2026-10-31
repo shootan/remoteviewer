@@ -1,0 +1,6 @@
+FULL_BUILD_EXIT=0
+errors=0
+remote60_viewer_picker_gesture_test                  exit=0      0s  viewer_picker_gesture_test: PASS
+remote60_viewer_selection_gate_test                  exit=0      0s  viewer_selection_gate_test: PASS
+remote60_viewer_udp_recovery_test                    exit=0     50s  viewer_udp_recovery_test: PASS
+--- summary: 39 ok / 1 not ok

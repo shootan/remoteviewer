@@ -1,0 +1,10 @@
+﻿[T2] pick -> ack -> first frame of the acked generation -> commit; stragglers filtered afterwards
+[T2] a failed ack leaves the transaction to the caller to clear; no transaction -> NotPending
+[T2] reveal race: cancel / new pick / disconnect between the post and the commit -> no commit, latch released
+  FAIL C:\work\gnlink-wt\rel-0163\apps\native_poc\src\viewer_selection_gate_test.cpp:284: !g.CommitFrame(a, true, 0, 4, &gen)
+  FAIL C:\work\gnlink-wt\rel-0163\apps\native_poc\src\viewer_selection_gate_test.cpp:289: !g.CommitFrame(a, true, 4, 4, &gen)
+  FAIL C:\work\gnlink-wt\rel-0163\apps\native_poc\src\viewer_selection_gate_test.cpp:290: g.expectedGeneration.load() == 0 && g.localFramesRefused.load() >= 1
+  FAIL C:\work\gnlink-wt\rel-0163\apps\native_poc\src\viewer_selection_gate_test.cpp:292: !g.CommitFrame(b, true, 4, 4, &gen)
+  FAIL C:\work\gnlink-wt\rel-0163\apps\native_poc\src\viewer_selection_gate_test.cpp:295: g.CommitFrame(c, true, 6, 6, &gen) && gen == 6 && g.expectedGeneration.load() == 6
+  FAIL C:\work\gnlink-wt\rel-0163\apps\native_poc\src\viewer_selection_gate_test.cpp:298: g.CommitReveal()
+viewer_selection_gate_test: FAIL (6)

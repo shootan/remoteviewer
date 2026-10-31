@@ -1,0 +1,97 @@
+#pragma once
+
+// The viewer's video receive thread: reads the media socket, reassembles / gates / decodes frames
+// and publishes them to the FrameBuffer.
+//
+// Role:    Run() is the former recvThread lambda of main(): the UDP datagram loop (control tunnel
+//          tick, cursor packets, FEC assembly, sim drop) or the TCP message loop (raw BGRA / H.264),
+//          process_h264_frame (selection gate, stale / congestion / keyframe-wait gating, decode,
+//          publish, trace) and the once-a-second stats line.
+// Thread:  recv only. Owns RecvStats; writes FrameBuffer under its mutex, the remote cursor sample,
+//          the client metrics; reads the selection gate, picker visibility and present counters.
+// Input:   the media socket (ctx.session.sock), DecoderState, FrameGateState, Args.
+// Output:  FrameBuffer frames, metrics, stats/telemetry lines, keyframe requests.
+// Callers: main() (std::thread recvThread([&]{ receiver.Run(); })).
+//
+// Bodies are the lambda bodies of native_video_client_main.cpp, verbatim (viewer split refactor
+// Phase 2-1); the captured state became members with the same names so the code reads unchanged.
+
+#include "viewer_args.hpp"
+#include "viewer_common.hpp"
+#include "viewer_decoder_state.hpp"
+#include "viewer_frame_gate.hpp"
+#include "viewer_frame_gate_state.hpp"
+#include "viewer_state.hpp"
+#include "viewer_recv_stats.hpp"
+
+namespace remote60::native_poc::viewer {
+
+class VideoReceiver {
+ public:
+  // Video NACK policy of this session (Windows NACK wiring): `enabled` = the host acknowledged
+  // kUdpFeatureVideoNack (and the env did not turn it off), `holdUs` = the assembler's in-order
+  // hold while a retransmit may still repair an older AU (0 = legacy immediate delivery).
+  struct NackOptions {
+    bool enabled = false;
+    uint64_t holdUs = 0;
+    // A04 give-up rule (viewer_video_receiver.cpp maintenance): a stuck incomplete head with no
+    // complete AU behind it is given up once every repair avenue had its chance. replyAllowance =
+    // clamp(max(replyAllowanceMinUs, 2 x recent control RTT), replyAllowanceMaxUs), the minimum
+    // when the RTT is unknown or older than rttStaleUs. giveUpHardCapUs is a failure budget for
+    // an AU that keeps making (useless) progress, never less than terminalMin.
+    uint64_t replyAllowanceMinUs = 50000;
+    uint64_t replyAllowanceMaxUs = 1000000;
+    uint64_t rttStaleUs = 5000000;
+    uint64_t giveUpHardCapUs = 5000000;
+  };
+  VideoReceiver(ViewerState& ctx, const Args& args, DecoderState& dec, FrameGateState& gate,
+                uint64_t startUs, uint32_t udpSimDropPm, uint32_t udpSimDropSeed,
+                NackOptions nack = {})
+      : ctx(ctx), args(args), dec(dec), gate(gate), startUs(startUs), udpSimDropPm(udpSimDropPm),
+        udpSimDropSeed(udpSimDropSeed), nack(nack) {}
+  // Read-only view of the receive counters (the A04 give-up count among them), for the
+  // integration test: the keyframe-request limiter can hide a repeated give-up, so the test
+  // asserts on the count itself.
+  const RecvStats& stats() const { return st; }
+  // The assembler run_udp owns, while it runs (A04 saturation: the frame path reports the key it
+  // accepted back to it). Null outside run_udp and on the TCP path.
+  UdpH264FrameAssembler* activeAssembler_ = nullptr;
+  // The thread body (formerly the recvThread lambda).
+  void Run();
+
+ private:
+  // the session state (F-17), then what the monolith captured by reference; same names so the
+  // bodies read unchanged
+  ViewerState& ctx;
+  const Args& args;
+  DecoderState& dec;
+  FrameGateState& gate;
+  const uint64_t startUs;
+  const uint32_t udpSimDropPm;
+  const uint32_t udpSimDropSeed;
+  const NackOptions nack;
+  RecvStats st;
+  // what the frame gate may do to the decoder and the control path
+  struct DecoderSink : FrameGateSink {
+    DecoderSink(ViewerState& ctx, DecoderState& dec, const Args& args) : ctx(ctx), dec(dec), args(args) {}
+    void reset_decoder() override;
+    bool rebuild_decoder() override;
+    void request_keyframe(uint16_t reason) override;
+    ViewerState& ctx;
+    DecoderState& dec;
+    const Args& args;
+  };
+  DecoderSink sink{ctx, dec, args};
+  FrameGate fg{gate, st, sink};
+
+  // the helper lambdas, now members (verbatim bodies)
+  PresentCounterSnapshot load_present_counters();
+  void append_present_counter_fields(std::ostream& os);
+  void publish_metrics(uint32_t metricW, uint32_t metricH, uint64_t nowUs, uint64_t avgLatencyUs, uint64_t maxLatencyUsLocal, uint64_t avgDecodeTailUs, uint64_t maxDecodeTailUsLocal, double mbpsLocal);
+  bool process_h264_frame(const EncodedFrameHeader& h, std::vector<uint8_t>* payloadPtr, uint64_t packetNowUs);
+  void flush_stats_if_due(uint64_t nowUs, uint32_t w, uint32_t h, bool codedSize, uint32_t codedW, uint32_t codedH);
+  void run_udp();
+  void run_tcp();
+};
+
+}  // namespace remote60::native_poc::viewer

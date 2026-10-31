@@ -1,0 +1,4 @@
+﻿encoding evidence 2026-09-08 11:38:04 non-admin shell, chcp before: 활성 코드 페이지: 65001
+A) OutputEncoding=949, no chcp: exit=5 out=[PktMon ?쒕씪?대쾭? ?듭떊?섏? 紐삵뻽?듬땲??: ?≪꽭?ㅺ? 嫄곕??섏뿀?듬땲??]
+B) OutputEncoding=UTF8 + chcp 65001 (helper Run()): exit=5 out=[PktMon 드라이버와 통신하지 못했습니다.: 액세스가 거부되었습니다.]
+B denial-match: True  .etl-line: False

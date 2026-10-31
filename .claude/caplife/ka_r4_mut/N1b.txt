@@ -1,0 +1,14 @@
+PASS  login
+PASS  N1: a standby connect is reserved  "reserved"
+PASS  N1: the heartbeat hands the HOST a hostProof for the lease (32 hex), not the client token
+PASS  N1: a stranger first on the host IP (no proof, a wrong proof, a fake StandbyAck) pins nothing: the client gets nothing back, and its StandbyHello does not reach the stranger  client=0 strangerHello=0
+PASS  N1: the host's punch with the proof pins the lease: the StandbyHello reaches the host, its Ack the client
+PASS  N1: after the pin, the stranger's datagram reaches nobody
+PASS  N1: ANOTHER lease's proof pins nothing (lease 2 stays unpinned; its client gets nothing)
+PASS  N1: ...its own proof pins it
+FAIL  N1: a moved host gets a FRESH proof for each lease with that heartbeat  []
+FAIL  N1: after the move the OLD proof, replayed, pins nothing (the client's ping is not answered via the old tuple)
+TypeError: Cannot read properties of undefined (reading 'hostProof')
+    at C:\work\gnlink-wt\ka-r3\apps\directory\test\relay_standby_r4_test.js:253:54
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+runner: test exit 1; server log D:\remote\remote\.claude\caplife\ka_r4_mut$m.log

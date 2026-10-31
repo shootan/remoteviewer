@@ -1,0 +1,117 @@
+// What became of each X button's press, at the two fences of one connection. The entry side (QueueInputEvent) and
+// the send side (the control loop, right before an action leaves) keep apart records: a press refused at the entry
+// never reaches the queue, and a press dropped at sending is seen only there. Not thread-safe: its owner's lock.
+//
+// r3 (codex_apk_xfence_src_r2.md N1): the release OWED for a down the host already received is its own record
+// (owed_), apart from what became of any later press of the same button. A later down refused at the entry or dropped
+// at sending never hides it: the next up goes to release the host's button as soon as the host takes X, and the debt
+// ends only when that up was sent and answered (OnSentAction after the ACK). To a host without X it never goes.
+class ClientMouseXPressLedger {
+ public:
+  // The entry: may this event be queued? *buttons is masked (no X bit for a host without X, nor for a refused press
+  // while nothing of that button is held).
+  bool AdmitQueued(bool hostTakesX, uint16_t kind, uint32_t keyCode, uint16_t* buttons) {
+    bool ok = true;
+    const int s = Slot(keyCode);
+    if (IsMouseXButtonEdge(kind, keyCode)) {
+      if (kind == 2) {
+        if (hostTakesX) {
+          entryHeld_[s] = true;  // a new press, admitted
+          entryRefused_[s] = false;
+        } else {
+          entryRefused_[s] = true;  // refused; an admitted / sent press of the button is left as it is
+          ok = false;
+        }
+      } else {
+        // an up: it releases whatever of the button the host holds (admitted here, or sent: owed) -- only to a
+        // host that takes X; otherwise it is the up of a refused press (refused) or a stray one (by the capability)
+        if (entryHeld_[s] || owed_[s]) {
+          ok = hostTakesX;
+        } else if (entryRefused_[s]) {
+          ok = false;
+        } else {
+          ok = hostTakesX;
+        }
+        entryHeld_[s] = false;  // the button is up: every press of it is over at the entry
+        entryRefused_[s] = false;
+      }
+    }
+    bool hide[2] = {EntryHides(0), EntryHides(1)};
+    *buttons = Mask(*buttons, hostTakesX, hide);
+    return ok;
+  }
+
+  // The send side, right before an InputEvent leaves.
+  bool AdmitSend(bool hostTakesX, uint16_t kind, uint32_t keyCode, uint16_t* buttons) {
+    bool ok = true;
+    const int s = Slot(keyCode);
+    if (IsMouseXButtonEdge(kind, keyCode)) {
+      if (kind == 2) {
+        if (hostTakesX) {
+          dropped_[s] = false;  // a new press
+        } else {
+          dropped_[s] = true;  // dropped; an owed release of the button stays owed
+          ok = false;
+        }
+      } else if (owed_[s]) {
+        ok = hostTakesX;  // the host holds it: released once it takes X -- never an exception to a host without X
+        if (!ok) dropped_[s] = false;  // that up is gone; the debt stays (park / teardown)
+      } else if (dropped_[s]) {
+        dropped_[s] = false;  // the up of a press whose down never left
+        ok = false;
+      } else {
+        ok = hostTakesX;
+      }
+    }
+    bool hide[2] = {SendHides(0), SendHides(1)};
+    *buttons = Mask(*buttons, hostTakesX, hide);
+    return ok;
+  }
+  template <typename Action>
+  bool AdmitSendAction(bool hostTakesX, Action* a) {
+    using Kind = decltype(a->kind);
+    if (a->kind != Kind::InputEvent) return true;
+    return AdmitSend(hostTakesX, a->inputEvent.kind, a->inputEvent.keyCode, &a->inputEvent.buttons);
+  }
+
+  // After an action was sent AND answered: a sent X down owes its release; a sent X up pays it (and ends the button's
+  // presses on the send side).
+  template <typename Action>
+  void OnSentAction(const Action& a) {
+    using Kind = decltype(a.kind);
+    if (a.kind != Kind::InputEvent || !IsMouseXButtonEdge(a.inputEvent.kind, a.inputEvent.keyCode)) return;
+    const int s = Slot(a.inputEvent.keyCode);
+    if (a.inputEvent.kind == 2) {
+      owed_[s] = true;
+    } else {
+      owed_[s] = false;
+      dropped_[s] = false;
+    }
+  }
+
+  void Reset() {
+    for (int s = 0; s < 2; ++s) {
+      entryHeld_[s] = entryRefused_[s] = dropped_[s] = owed_[s] = false;
+    }
+  }
+
+  bool EntryRefused(uint32_t keyCode) const { return Slot(keyCode) >= 0 && entryRefused_[Slot(keyCode)]; }
+  bool SendDropped(uint32_t keyCode) const { return Slot(keyCode) >= 0 && dropped_[Slot(keyCode)]; }
+  bool SendOwed(uint32_t keyCode) const { return Slot(keyCode) >= 0 && owed_[Slot(keyCode)]; }
+
+ private:
+  static int Slot(uint32_t keyCode) { return keyCode == 5 ? 0 : keyCode == 6 ? 1 : -1; }
+  // a refused / dropped press's held bit is hidden only while nothing of that button is held on the host
+  bool EntryHides(int s) const { return entryRefused_[s] && !entryHeld_[s] && !owed_[s]; }
+  bool SendHides(int s) const { return dropped_[s] && !owed_[s]; }
+  static uint16_t Mask(uint16_t buttons, bool hostTakesX, const bool hide[2]) {
+    if (!hostTakesX) return static_cast<uint16_t>(buttons & kMouseWireLegacyMask);
+    if (hide[0]) buttons = static_cast<uint16_t>(buttons & ~kMouseWireX1);
+    if (hide[1]) buttons = static_cast<uint16_t>(buttons & ~kMouseWireX2);
+    return buttons;
+  }
+  bool entryHeld_[2] = {false, false};     // a down admitted at the entry, its up not admitted yet
+  bool entryRefused_[2] = {false, false};  // a down refused at the entry, its up not seen yet
+  bool dropped_[2] = {false, false};       // a down dropped at sending, its up not seen yet
+  bool owed_[2] = {false, false};          // a down the host received (sent + answered), its up not yet
+};

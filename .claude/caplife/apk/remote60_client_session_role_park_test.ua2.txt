@@ -1,0 +1,108 @@
+﻿RequestWindowList: role gate + park through the product ClientSessionController (prelogin r21 E2)
+
+--- S1: a list asked for before the first Pong waits for it ---
+PASS  S1: the session connects (Pongs held)
+PASS  S1: before the first Pong no window-list request is on the wire (the request is held, not refused)  listReq=0 status=window_list_request waiting for the host
+PASS  S1: the first Pong (an ordinary host) sends the held request and the list arrives  listReq=1
+
+--- S2: a host at the logon screen gets no list / monitor request ---
+PASS  S2: the session connects
+PASS  S2: list / monitor wire 0 (before and after the first Pong); the app is told 'not here'  lists=0 pings=20 monitorQueued=1 status=window list not available at the logon screen
+
+--- S3: parked -> no list / monitor request on the wire; resumed -> they go again ---
+PASS  S3: the session connects
+PASS  S3: an ordinary host: list, pause support and monitor list established  lists=2
+remote60_client_session_role_park_test.exe : [native-video-client-session] park: begin
+At line:1 char:785
++ ... rk_test') { & "$wt\build\apps\native_poc\Release\$t.exe" > "D:\remote ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([native-video-c...on] park: begin:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+PASS  S3: parked: the requests are refused and none reaches the wire after the pause  during=0 phase=4
+[native-video-client-session] park: resumed
+PASS  S3: after ResumeFromPark a new window-list request reaches the host
+
+--- S4: requests racing BeginPark ---
+PASS  S4: the session connects
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+[native-video-client-session] park: begin
+[native-video-client-session] park: collected (dropped 0, releases kept 0, released 0)
+[native-video-client-session] park: resumed
+PASS  S4: every round parked with the requests racing, none reached the wire while parked, all ended  parked 25/25, violations 0, 6473 ms, lists 2
+PASS  S4: positive control -- unparked, the same requests reach the wire  lists 2 -> 6
+PASS  S4: the session is still connected after the rounds
+
+RESULT: ALL PASS  (13 checks, 0 failed)

@@ -1,0 +1,93 @@
+﻿mode: host in --prelogin; the shared session (Android) types
+PASS  the fake directory starts
+PASS  the test's own target and decoy windows are up
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r6 V1 counter-example: with the service's old environment the worker exits at once, rc 11 (h264 refused)  11
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r6 V7: a machine record naming another server is not used (the worker stays offline)
+PASS  r6 V5: a decoy directory starts
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r6 V5: a worker given a directory in its environment reaches its configuration and says it is ignored  10-26 21:17:42.717 [native-video-host] latency-priority processAboveNormal=1 mainThreadAboveNormal=1
+
+10-26 21:17:42.734 [native-video-host][clipboard] monitor started
+
+10-26 21:17:42.734 [native-video-host] waiting client bindPort=60526 transport=udp fps=30 bitrate=8000000 seconds=150
+
+10-26 21:17:42.734 [native-video-host] wireCap=on wireCapBps=8000000 wireCapMtu=1200
+
+10-26 21:17:42.734 [native-video-host] h264 pacing=on udpPacePeakPercent=500 udpPacePeakBps=40000000 udpPacePeakFloorBps=40000000 udpKeyframePacePeakBps=100000000 fecSingleChunkStride=tight stalePreEncodeGuard=0 capturePoolBuffers=2 encoderTuneMode=low_latency abr=on abrMode=default frameGating=on staticSceneFps=8 gatingStaticPm=6 m9=off m9Mode=dry-run keyReqMinUs=120000 keyReqBucketCap=3 captureInputMinPushPerSec=10 captu
+PASS  r6 V5: ...and never talks to that directory (0 register, 0 heartbeat)  0 registrations
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r9 W2: a worker whose input desktop is a user's (not the logon desktop) leaves at once, exit 14  14
+PASS  ...it never served it and never registered
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r6 V2: the worker started EXACTLY as the service starts it (--prelogin alone, the service's environment function)
+PASS  r6 V2: ...it loaded the machine record (no directory argument exists to stand in for it)
+PASS  the host registered and collected the viewer's capability from its heartbeat
+
+--- r5 G8: the shared session the Android app drives ---
+remote60_viewer_prelogin_login_e2e_test.exe : [native-video-client-session] video receive nack=1 holdUs=120000 nonblock
+ing=1
+At D:\remote\remote\.claude\caplife\apk_runs.ps1:34 char:27
++     if ($a.Count -gt 0) { & $exe @a > "$out\$name.txt" 2>&1 } else {  ...
++                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([native-video-c...0 nonblocking=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[native-video-client-session] udp recv drop sock=672 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=30 stop=0
+PASS  the session connects, directory-authenticated  connected
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] udp recv drop sock=672 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=22 sinceDatagramMs=23 stop=0
+[native-video-client-session] udp recv drop sock=672 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=44 sinceDatagramMs=96 stop=0
+PASS  ...and sees the host at the logon screen (0x2000)
+[native-video-client-session] udp recv drop sock=672 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=64 sinceDatagramMs=28 stop=0
+[native-video-client-session] udp recv drop sock=672 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=79 sinceDatagramMs=30 stop=0
+PASS  H6: typed before the first pong (the role not known yet)  188616
+PASS  H6: ...the text and the character key DOWN were not queued (unknown = the logon screen), 2 held back  2
+PASS  lockscreen-cred: ...its key UP was queued (a release passes)
+PASS  H6: ...and after the prelogin pong no character DOWN reached the host (only that release, dropped by its filter)  1
+[native-video-client-session] udp recv drop sock=672 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=93 sinceDatagramMs=28 stop=0
+[native-video-client-session] udp recv drop sock=672 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=107 sinceDatagramMs=28 stop=0
+PASS  G8: text is not queued for a host at the logon screen
+PASS  ...nor a character key down
+PASS  lockscreen-cred: ...while its key up (a release) is
+PASS  ...and the session counted what it held back (2)  2
+PASS  ...while a navigation key and the pointer still go
+PASS  ...and no character down reached the host (the two releases only, dropped by its filter)  2
+[native-video-client-session] udp recv drop sock=672 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=125 sinceDatagramMs=88 stop=0
+[native-video-client-session] udp recv drop sock=672 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=145 sinceDatagramMs=97 stop=0
+PASS  r10: the app's window-list request made before the first pong was taken, then answered "not here"  window list not available at the logon screen
+PASS  r10: ...and asked again at the logon screen it is refused at once (not sent)
+PASS  r9: the shared session sent the pre-login host nothing outside its allowlist (the link stayed up)  esced=0 accumTotal=60 accumMax=1 holdAvgUs=134 holdMaxUs=214
+
+10-26 21:17:55.473 [native-video-host] wire seq=138 key=0 bytes=27526 chunks=29 wireIntUs=66911 targetIntUs=33333 queueWaitUs=37 sendDurUs=25671 queueDepth=0 epoch=1 clampBurst=0 burstWin2s=1271696 cap2r=2000000
+
+10-26 21:17:55.613 [native-video-host] wire seq=141 key=0 bytes=31953 chunks=33 wireIntUs=66451 targetIntUs=33333 queueWaitUs=9 sendDurUs=30442 queueDepth=0 epoch=1 clampBurst=0 burstWin2s=1271696 cap2r=2000000
+
+10-26 21:17:55.754 [native-video-host][control][sas] requestId=840673334 result=4 win32=1062 cad-not-required=0
+
+
+PASS  R5: the shared session asks Ctrl+Alt+Del of the pre-login host (0x20000) and gets its answer  id 840673334 flags 188616 outcome 4 win32 1062
+
+--- nothing kept ---
+PASS  the password is in none of the viewer's output
+PASS  ...nor in the host's
+PASS  ...nor in any file of this run (the viewer's credential store included)
+PASS  no credential file was written by the viewer
+PASS  the scratch directory is cleaned up
+
+RESULT: ALL PASS  (43 checks, 0 failed)

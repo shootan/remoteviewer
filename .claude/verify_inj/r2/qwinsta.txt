@@ -1,0 +1,4 @@
+﻿ SESSIONNAME               USERNAME                 ID  STATE   TYPE        DEVICE 
+ services                                            0  Disc                        
+>console                   shotan                    1  Active                      
+ rdp-tcp                                         65536  Listen                      

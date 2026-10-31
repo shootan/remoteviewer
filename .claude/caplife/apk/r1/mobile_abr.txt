@@ -1,0 +1,164 @@
+﻿mobile_abr_session_e2e_test scenario=sparse fps=30 bitrate=3000000 presentDuty=6:8 target=480x270 runtimeBitrate=0 session=A(decode stats, pending snapshot)
+PASS  the host could be staged
+PASS  an on-screen, invisible, click-through window is up for the host to capture
+PASS  the launched host is isolated from the user's files, input injection off
+PASS  the host started
+PASS  the relay is up (every run: it reads the reports the host receives)
+remote60_mobile_abr_session_e2e_test.exe : [native-video-client-session] video receive nack=1 holdUs=120000 nonblocking
+=1
+At D:\remote\remote\.claude\caplife\apk_runs.ps1:34 char:70
++ ...  @a > "$out\$name.txt" 2>&1 } else { & $exe > "$out\$name.txt" 2>&1 }
++                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([native-video-c...0 nonblocking=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+PASS  the shared session connected (UDP hello + tunnelled control)  connected / 
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=31 stop=0
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  frames reach the phone's sink  1 frames
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=30 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=60 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=89 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=116 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=144 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=173 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=202 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=232 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=261 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=289 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=318 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=349 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=377 sinceDatagramMs=32 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=406 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=435 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=463 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=493 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=522 sinceDatagramMs=62 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=550 sinceDatagramMs=62 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=581 sinceDatagramMs=32 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=611 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=640 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=670 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=699 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=728 sinceDatagramMs=61 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=758 sinceDatagramMs=62 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=786 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=814 sinceDatagramMs=62 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=843 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=872 sinceDatagramMs=62 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=900 sinceDatagramMs=64 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=930 sinceDatagramMs=32 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=958 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=987 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1016 sinceDatagramMs=32 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1045 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1075 sinceDatagramMs=31 stop=0
+[native-video-client-session] video delivered=901 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1104 sinceDatagramMs=62 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1131 sinceDatagramMs=64 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1160 sinceDatagramMs=63 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1190 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1220 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1250 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1280 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1308 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1339 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1367 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1397 sinceDatagramMs=91 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1428 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1458 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1487 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1516 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1543 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1573 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1603 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1633 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1662 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1693 sinceDatagramMs=60 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1721 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1751 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=568 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1781 sinceDatagramMs=31 stop=0
+PASS  the host captured the window this test paints (its hwnd, this pid)  10-26 21:20:32.652 [native-video-host] capture-window target hwnd=0x3700d2e pid=9616 process=remote60_mobile_abr_session_e2e_test.exe title=remote60 mobile abr target pid 9616 b686eb63 clientOnly=0
+PASS  the host never fell back to a screen (no fallback=monitor, no process=monitor)
+
+--- host [abr] lines (1) ---
+10-26 21:21:40.858 [native-video-host][abr] profile=mid encode=480x270 bitrate=2250000 reason=high_to_mid_severe fps=30 priority=standard clientSize=0x0 clientDecodedFps=0 clientAvgLatUs=0 clientAvgTailUs=0 clientMbps=0 evidence=stale_active metricsFresh=0 clientDecodeValid=0 clientReports=62 clientReportAgeMs=5798 clientFirstReportAgeMs=67246 clientFirstDecodeAgeMs=67246 rawDecodedFps=22.94 rawAvgLatUs=0 rawAvgTailUs=0 rawDropPm=0 cb2eAvgUs=5360 sentFrames=22 activeFps=30 staticMode=0 streamAgeMs=68005
+phone sink: 1490 frames, 34 presentation drains; relay saw 62 ControlClientMetrics
+
+--- host encoded size changes (key frames) ---
+10-26 21:20:32.876 size=480x270 bitrate=3000000 reasons=initial|first_frame
+phone sink: the last frame's size 480x270 (source 480x270)
+PASS  the host's ABR was at high when the judged span began  abrProfile=high
+PASS  the host sent a real cadence through the judged span (ABR-judged seconds)  60 of 60 s
+PASS  THE HOST'S ABR DOES NOT STEP DOWN ON A HEALTHY PHONE (sparse)  none
+PASS  ...and is still at high at the end  abrProfile=high
+PASS  55-65 reports reach the host in the 60 s span  59 reports
+PASS  no gap between reports of 3 s or more (the host's freshness gate)  max 1022 ms
+PASS  the reported decoded fps is what the sink decoded (within 15%, mean over the span)  reported 23.618305 vs sink 23.562433 (59 reports with decode fields)
+PASS  no report above 1.6 x fps (no catch-up burst, none after the reconnect)  0 reports over 48.000000
+
+17 checks, 0 failed, 0 not judged
+mobile_abr_session_e2e_test(sparse): PASS
+RESULT: PASS

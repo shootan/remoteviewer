@@ -1,0 +1,1896 @@
+'use strict';
+
+/**
+ * remote60 directory service.
+ *
+ * Lets a phone find and reach a PC without any port forwarding. Both sides connect *outbound*
+ * to this server, which is allowed through corporate firewalls, and it introduces them to each
+ * other. Media never passes through here — the server only exchanges addresses and coordinates
+ * the UDP hole punch — so it stays cheap enough for a small instance.
+ *
+ * Configuration (environment only; never commit credentials):
+ *   REMOTE60_DIR_PORT        HTTP port                       (default 8080)
+ *   REMOTE60_DIR_UDP_PORT    UDP address-observation port    (default 8081)
+ *   REMOTE60_DIR_OBSERVE_PORT  the observe port ADVERTISED to clients (default: the listen port).
+ *                              Set it when a NAT mapping or proxy presents a different one.
+ *   REMOTE60_DIR_OBSERVE_HOST  the observe host advertised to clients (default: empty, meaning
+ *                              the host the client already dialled).
+ *   REMOTE60_DIR_DATA        account/host store path         (default ./directory-data.json)
+ *   REMOTE60_DIR_TLS_KEY     PEM key  — enables HTTPS when both are set
+ *   REMOTE60_DIR_TLS_CERT    PEM cert
+ *   REMOTE60_DIR_SIGNUP_KEY  shared secret that allows account creation; unset = no signup
+ *   REMOTE60_DIR_MIN_PASSWORD  shortest password signup will accept (default 8)
+ *   REMOTE60_PUBLIC_IP       this server's own public IPv4; lets it correct the observation
+ *                            made for a peer that sits on its own LAN (default: the relay ip)
+ *
+ * Log collection (POST /api/logs; authenticated, so it is on by default):
+ *   REMOTE60_LOG_DISABLED      1 = refuse uploads
+ *   REMOTE60_LOG_DIR           where they land        (default <data dir>/logs)
+ *   REMOTE60_LOG_MAX_FILE_MB   rotate past this       (default 16)
+ *   REMOTE60_LOG_KEEP          rotated generations    (default 10; live + 10 backups per stream)
+ *   REMOTE60_LOG_RETENTION_DAYS  delete older files   (default 14)
+ *   REMOTE60_LOG_RATE_KB_PER_MIN per device budget    (default 2048)
+ *
+ * Wake (on by default; a connection often depends on it):
+ *   REMOTE60_WAKE_DISABLED     1 = do not poke the host when a connect is requested
+ *
+ * Temporary NAT diagnostics (default off; remove once the company-network question is settled):
+ *   REMOTE60_NAT_DIAG_ENABLED  1 = run the silent probe listener and offer its candidate
+ *   REMOTE60_NAT_DIAG_IP       this server's public IPv4, as the phone must dial it
+ *   REMOTE60_NAT_DIAG_PORT     port the probe listens on               (default 43000)
+ *
+ * Relay (default off; for networks where no direct path exists at all):
+ *   REMOTE60_RELAY_ENABLED     1 = offer a relay candidate and forward for it
+ *   REMOTE60_RELAY_IP          this server's public IPv4, as the phone must dial it
+ *   REMOTE60_RELAY_PORT        client-facing relay port                (default 43000)
+ *   REMOTE60_RELAY_GRACE_MS    how long a direct path gets alone       (default 2500)
+ *   REMOTE60_RELAY_ALLOW_IPS   client public IPv4s allowed to relay; "*" for any, empty = none
+ *   REMOTE60_RELAY_ALLOW_ACCOUNTS  account ids allowed to relay; "*" for any, empty = none
+ */
+
+const http = require('http');
+const https = require('https');
+const updateManifest = require('./update_manifest');
+const dgram = require('dgram');
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { hostSendTargetFor } = require('./wake_target');
+const os = require('os');
+
+const HTTP_PORT = Number(process.env.REMOTE60_DIR_PORT || 8080);
+const UDP_PORT = Number(process.env.REMOTE60_DIR_UDP_PORT || 8081);
+// What to TELL clients the observe socket is reachable on, which is not always where it listens.
+//
+// Clients used to derive it as httpPort + 1. That held only while the directory was reached
+// directly on its own two ports; behind a TLS terminator on 443 it becomes 444, which is nothing,
+// and address observation fails -- and a host whose observation fails skips its heartbeat, so it
+// never appears in the list at all. The relay cannot cover for that either: the relay address
+// arrives in the /api/connect response, and the viewer returns before it ever calls connect.
+//
+// So the server says where to go. The advertised port may differ from the listen port because a
+// NAT mapping or a proxy may present a different one, which is exactly why it is configurable
+// rather than derived from anything.
+const OBSERVE_ADVERTISE_PORT =
+  Number(process.env.REMOTE60_DIR_OBSERVE_PORT || UDP_PORT);
+// Empty means "the same host the client already dialled". Set it only when the observe socket is
+// somewhere else entirely.
+const OBSERVE_ADVERTISE_HOST = String(process.env.REMOTE60_DIR_OBSERVE_HOST || '').trim();
+const DATA_PATH = process.env.REMOTE60_DIR_DATA || path.join(__dirname, 'directory-data.json');
+const TLS_KEY = process.env.REMOTE60_DIR_TLS_KEY || '';
+const TLS_CERT = process.env.REMOTE60_DIR_TLS_CERT || '';
+// Account creation is off unless a key is configured: this server is reachable from the
+// internet, and an open signup endpoint would let anyone register on it.
+const SIGNUP_KEY = process.env.REMOTE60_DIR_SIGNUP_KEY || '';
+// Where published update manifests live: <UPDATE_DIR>/<platform>.manifest and .sig.
+// Unset means the update endpoint is off, which is the state every server is in until
+// someone deliberately publishes something -- there is no default directory to fall into.
+const UPDATE_DIR = process.env.REMOTE60_UPDATE_DIR || '';
+// The operator's call, not ours. Short passwords are genuinely weak on a server that
+// grants remote control of a PC, so the default stays at 8 and lowering it is explicit.
+const MIN_PASSWORD = Math.max(1, Number(process.env.REMOTE60_DIR_MIN_PASSWORD || 8));
+
+// ---------------------------------------------------------------- nat diagnostics (temporary)
+//
+// Two questions have to be separated before any more traversal work is worth doing: whether the
+// phone's network refuses UDP to the port the host actually listens on, and whether our own
+// signalling is simply too late. Both answers have to land in a log we can read -- Android 11
+// keeps the client's log inside Android/data, where no file manager can reach it -- so the
+// evidence is produced here and in the host log, never on the phone.
+//
+// Off unless explicitly enabled, and the probe never transmits, so with the flags unset this
+// block cannot influence a connection at all.
+const NAT_DIAG_ENABLED = process.env.REMOTE60_NAT_DIAG_ENABLED === '1';
+const NAT_DIAG_IP = String(process.env.REMOTE60_NAT_DIAG_IP || '').trim();
+const NAT_DIAG_PORT = Number(process.env.REMOTE60_NAT_DIAG_PORT || 43000);
+const NAT_DIAG_TTL_MS = 2 * 60 * 1000;
+
+// ---------------------------------------------------------------- wake
+//
+// Poking the host the instant a connect is requested, instead of leaving it to find out from its
+// next heartbeat.
+//
+// This began as a diagnostic and turned out to be load-bearing. The host learns that a peer is
+// waiting either from that heartbeat -- up to 25 seconds away -- or from the peer's own punch
+// arriving, which a restrictive NAT drops precisely when it matters. Against a client that gives
+// up on Hello in about three seconds, that leaves success to coincidence: measured at roughly one
+// attempt in six on mobile data with the wake off, and first-try every time with it on.
+//
+// So it defaults to on, and turning it off is the explicit act. It was the other way round for
+// one afternoon -- the flag was left out of a deploy and mobile connections quietly stopped
+// working, with nothing in any log to say why.
+const WAKE_ENABLED = process.env.REMOTE60_WAKE_DISABLED !== '1';
+const WAKE_PACKETS = [0, 100, 300];        // one datagram is one chance
+const WAKE_MIN_INTERVAL_MS = 1000;         // per host; a retrying client must not become a flood
+
+// The burst above is over in 300ms. A host that was asleep, or whose heartbeat has just gone out
+// and will not return for 25 seconds, can miss all three and then nothing else ever arrives --
+// the capability sits in pendingPunch until it expires and the client's first click fails.
+//
+// So the burst is followed by a resend: one datagram a second, at most ten, and it stops the
+// moment the capability is handed over. Thirteen datagrams per connect in the worst case, ten
+// seconds of them, inside the thirty-second window the capability lives in anyway.
+const WAKE_RESEND_INTERVAL_MS = 1000;
+const WAKE_RESEND_MAX = 10;
+// A ceiling on how many hosts can have one of these at once. Each is one timer and one datagram
+// a second; the cap is what keeps a burst of connects to many hosts from becoming a burst of
+// timers. One per host, not one per connect -- several connects to the same host share it.
+const WAKE_RESEND_MAX_TIMERS = 64;
+// Only ever aimed at an address a heartbeat confirmed recently. An older one is a mapping that
+// has probably closed, and firing at it is at best noise to a stranger who now holds that port.
+const WAKE_HOST_FRESH_MS = 90 * 1000;
+// hostId -> last BURST, so repeated connects for one host collapse into a single burst.
+//
+// Bursts only. The resend used to stamp this too, once a second, so a new connect arriving while
+// a resend ran was almost always refused its burst with reason=rate -- a replacing connect got
+// one datagram a second later instead of three now. The resend keeps its own time in its record
+// and still waits out WAKE_MIN_INTERVAL_MS after a burst before it sends. (RV-10)
+const wakeLastSentByHost = new Map();
+// hostId -> { connectId, generation, sent, timer }. One entry per HOST: a second connect to the
+// same host replaces the entry rather than adding a timer, and the replacement takes a new
+// generation so the old timer's next tick finds a number that is not its own and does nothing.
+const wakeResendByHost = new Map();
+let wakeResendGeneration = 0;
+const wakeStats = { sent: 0, suppressed: 0, skippedStale: 0, failed: 0,
+                    resent: 0, resendStopped: 0, resendCapped: 0, resendReplaced: 0 };
+
+// ---------------------------------------------------------------- CONNECT-DIAG
+//
+// Observation only. Nothing below changes what the server does; it records when things happened,
+// so the next intermittent failure can be settled from the logs instead of from a hypothesis.
+//
+// What was missing when PC1 could not reach PC2 on 2026-09-21: the server logged `[observe]` only
+// for a host on its own LAN, never logged a heartbeat at all, never said whether a wake datagram
+// actually left the socket, and never said when a host finally collected the capability that had
+// been waiting for it. The host's reject line said "invalid directory capability" for a capability
+// that was correct and simply had not arrived yet -- and there was no way to measure that delay.
+//
+// Every line here is bounded: per host, per token, or once per session.
+const DIAG_HOST_LINE_MIN_MS = 20000;   // under the 25 s heartbeat, so a normal cadence is not thinned
+const DIAG_RELAY_SILENT_MS = 3000;     // how long a bound session may go unanswered before saying so
+const diagHostLineAt = new Map();      // hostId  -> last heartbeat line
+const diagObserveLineAt = new Map();   // tokenId -> last observe line
+const diagObserveTuple = new Map();    // tokenId -> last tuple seen, so a move is never thinned away
+
+/** A short, stable id for a token that must not appear in a log. Never reversible to the token. */
+function diagTokenId(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex').slice(0, 8);
+}
+
+/**
+ * True at most once per `minMs` for this key -- except that `force` always passes.
+ *
+ * The exception is the point: a rate limit that also hid the moment a host's tuple moved would
+ * throw away the one line worth having. `force` is a parameter rather than a short-circuit at the
+ * call site because the timestamp has to move whenever a line is printed, by either route. Written
+ * as `force || shouldLog(...)` it did not, so the first line -- always a forced one, since a host's
+ * previous tuple is empty until it has heartbeated once -- left the limiter unprimed and the very
+ * next heartbeat printed again.
+ */
+function diagShouldLog(map, key, now, minMs, force) {
+  const last = map.get(key) || 0;
+  if (!force && now - last < minMs) return false;
+  map.set(key, now);
+  return true;
+}
+
+// Correlates a probe packet back to the connect that provoked it. Keyed by source IP rather than
+// ip:port on purpose: a mapping whose port differs from the one seen on the observe socket is
+// itself a finding (endpoint-dependent NAT), and keying on the port would hide exactly that.
+const natDiagByIp = new Map();
+
+// The observe socket, kept so the wake can be sent from the exact address the host already has a
+// NAT mapping toward. Sending from any other socket would need a mapping that does not exist.
+let observeSock = null;
+
+// ---------------------------------------------------------------- relay
+//
+// For networks that carry UDP outbound but have no path between the two peers at all. Measured
+// on one company network: the phone's punches reach this server within milliseconds while not a
+// single packet crosses between the guest Wi-Fi and the wired segment, in either direction. No
+// amount of timing or port selection fixes that, so the traffic has to go through here.
+//
+// The whole thing lives in the server. Nothing in the APK or the host knows a relay exists:
+//   - the client punches every candidate and keeps whichever answers first, so a candidate that
+//     answers is a candidate it will use
+//   - the host binds its session to whatever endpoint sent the Hello it authorised, so a Hello
+//     forwarded from the observe socket makes this server the peer
+// Both are existing behaviours, relied on rather than added.
+//
+// Two properties keep it from touching the paths that already work. The relay answers only after
+// a grace period, so a direct candidate that answers at all answers first; and the candidate is
+// offered only to explicitly listed clients, so no one else is ever handed the option.
+const RELAY_ENABLED = process.env.REMOTE60_RELAY_ENABLED === '1';
+const RELAY_IP = String(process.env.REMOTE60_RELAY_IP || '').trim();
+const RELAY_PORT = Number(process.env.REMOTE60_RELAY_PORT || 43000);
+const RELAY_GRACE_MS = Number(process.env.REMOTE60_RELAY_GRACE_MS || 2500);
+
+// Fail closed: an unset allowlist offers the relay to nobody. Getting this backwards would put
+// every session in the country through this one server, so "unset" must not mean "everyone".
+function parseAllowList(raw) {
+  const items = String(raw || '').split(',').map((s) => s.trim()).filter(Boolean);
+  return { any: items.includes('*'), set: new Set(items) };
+}
+const RELAY_ALLOW_IPS = parseAllowList(process.env.REMOTE60_RELAY_ALLOW_IPS);
+const RELAY_ALLOW_ACCOUNTS = parseAllowList(process.env.REMOTE60_RELAY_ALLOW_ACCOUNTS);
+
+// This server's own public address, used to repair observations that never crossed a NAT.
+const PUBLIC_IP = process.env.REMOTE60_PUBLIC_IP || RELAY_IP || '';
+
+function ipToInt(ip) {
+  const parts = String(ip).split('.');
+  if (parts.length !== 4) return null;
+  let v = 0;
+  for (const p of parts) {
+    const n = Number(p);
+    if (!Number.isInteger(n) || n < 0 || n > 255) return null;
+    v = ((v << 8) | n) >>> 0;
+  }
+  return v >>> 0;
+}
+
+/** The IPv4 subnets this machine is directly attached to. */
+const LOCAL_SUBNETS = (() => {
+  const out = [];
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      if (a.family !== 'IPv4' || a.internal || !a.netmask) continue;
+      const ip = ipToInt(a.address);
+      const mask = ipToInt(a.netmask);
+      if (ip === null || mask === null) continue;
+      out.push({ net: (ip & mask) >>> 0, mask: mask >>> 0 });
+    }
+  }
+  return out;
+})();
+
+/** True when `ip` is on one of the subnets this server is attached to. */
+function onServerLan(ip) {
+  const v = ipToInt(ip);
+  if (v === null) return false;
+  return LOCAL_SUBNETS.some((s) => ((v & s.mask) >>> 0) === s.net);
+}
+
+const correctionLogged = new Set();
+
+/**
+ * What to record as a peer's public address.
+ *
+ * The observation means something only when the packet crossed the peer's NAT on the way here:
+ * the source we then see is the mapping the rest of the internet would use. A peer on our own LAN
+ * never crosses it. Worse, a router doing hairpin NAT rewrites the source to its own LAN address
+ * -- measured here as 192.168.0.1 -- so what we would record is not merely local, it is a router
+ * interface that answers for nobody, and the host would advertise it as its public candidate.
+ *
+ * For those we substitute our own public address and keep the observed port. The port is the part
+ * that has to survive, and it does when the router preserves ports: 구현계획.md E2 measured that
+ * for this router (bindPort=43000 -> public=...:43000) and the hairpin probe showed it again
+ * (source port 60765 came back unchanged). Where it does not hold, the peer ends up on the relay
+ * -- which is where an unusable candidate was sending it anyway, so this cannot be worse.
+ *
+ * The substitution answers "what should others dial", which is not the same question as "where do
+ * we send". We send to `wire`, the tuple the packet actually arrived from, because that is the
+ * one our own datagrams can reach -- it is how the reply to this very OBSERVE gets home. For a
+ * peer beyond our NAT the two are identical and nothing changes.
+ */
+function observedAddressFor(rinfo) {
+  const wire = { wireIp: rinfo.address, wirePort: rinfo.port };
+  if (!PUBLIC_IP || !onServerLan(rinfo.address)) {
+    return { ip: rinfo.address, port: rinfo.port, ...wire };
+  }
+  if (!correctionLogged.has(rinfo.address)) {
+    correctionLogged.add(rinfo.address);
+    console.log(`[observe] ${rinfo.address} is on our own lan; advertising ${PUBLIC_IP} ` +
+                `(port ${rinfo.port} kept), still sending to ${rinfo.address}`);
+  }
+  return { ip: PUBLIC_IP, port: rinfo.port, ...wire };
+}
+
+// ---------------------------------------------------------------- log collection
+
+const LOG_DISABLED = process.env.REMOTE60_LOG_DISABLED === '1';
+const LOG_DIR = process.env.REMOTE60_LOG_DIR || path.join(path.dirname(DATA_PATH), 'logs');
+const LOG_MAX_FILE_BYTES = Number(process.env.REMOTE60_LOG_MAX_FILE_MB || 16) * 1024 * 1024;
+const LOG_KEEP = Number(process.env.REMOTE60_LOG_KEEP || 10);
+const LOG_RETENTION_DAYS = Number(process.env.REMOTE60_LOG_RETENTION_DAYS || 14);
+const LOG_RATE_BYTES_PER_MIN = Number(process.env.REMOTE60_LOG_RATE_KB_PER_MIN || 2048) * 1024;
+const LOG_MAX_UPLOAD_BYTES = 512 * 1024;
+
+/**
+ * One path segment, safe to join.
+ *
+ * Everything outside the allowed set becomes '_' rather than being rejected: a device that names
+ * itself badly should still get its logs stored, and the alternative is an upload that fails for
+ * a reason nobody will see until they go looking for logs that were never written.
+ */
+function logSegment(raw, fallback) {
+  const cleaned = String(raw || '').replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '').slice(0, 64);
+  return cleaned || fallback;
+}
+
+/** Per-device budget. A device that floods loses the excess, not the connection. */
+const logBudgets = new Map();
+function logBudgetAllows(key, bytes) {
+  const now = Date.now();
+  const b = logBudgets.get(key);
+  if (!b || now - b.since >= 60 * 1000) {
+    logBudgets.set(key, { since: now, used: bytes });
+    return true;
+  }
+  if (b.used + bytes > LOG_RATE_BYTES_PER_MIN) return false;
+  b.used += bytes;
+  return true;
+}
+
+/** Reads a raw body up to `cap`, rejecting anything longer rather than truncating it silently. */
+function readRawBody(req, cap) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > cap) {
+        reject(new Error('log batch too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+function rotateLogIfNeeded(file) {
+  let size = 0;
+  try {
+    size = fs.statSync(file).size;
+  } catch {
+    return;
+  }
+  if (size < LOG_MAX_FILE_BYTES) return;
+  try {
+    fs.rmSync(`${file}.${LOG_KEEP}`, { force: true });
+    for (let i = LOG_KEEP - 1; i >= 1; i--) {
+      if (fs.existsSync(`${file}.${i}`)) fs.renameSync(`${file}.${i}`, `${file}.${i + 1}`);
+    }
+    fs.renameSync(file, `${file}.1`);
+  } catch (err) {
+    console.error('[logs] rotate failed:', err.message);
+  }
+}
+
+/** Deletes anything past the retention window; cheap enough to walk on a timer. */
+function sweepLogs() {
+  const cutoff = Date.now() - LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  const walk = (dir) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(dir, e.name);
+      if (e.isDirectory()) {
+        walk(full);
+        try { fs.rmdirSync(full); } catch { /* not empty, which is fine */ }
+      } else {
+        try {
+          if (fs.statSync(full).mtimeMs < cutoff) fs.rmSync(full, { force: true });
+        } catch { /* raced with a writer */ }
+      }
+    }
+  };
+  walk(LOG_DIR);
+}
+setInterval(sweepLogs, 6 * 60 * 60 * 1000).unref();
+
+/**
+ * Accepts a batch of log lines from a host, a client or the phone.
+ *
+ * The body is raw text rather than JSON because these are already lines: wrapping them in an
+ * array would cost an escape pass on both sides for nothing. Identity comes from the same tokens
+ * everything else here uses, so no new secret has to be managed -- and without one of them the
+ * upload is refused, because an open endpoint on someone's home NAS is a disk-filling invitation.
+ */
+async function handleLogs(req, res) {
+  if (LOG_DISABLED) return sendJson(res, 503, { error: 'log collection is off' });
+
+  let accountId = '';
+  const session = sessionFor(req);
+  if (session) {
+    accountId = session.accountId;
+  } else {
+    const hostToken = String(req.headers['x-host-token'] || '');
+    const hostId = hostToken ? hostTokens.get(hashToken(hostToken)) : undefined;
+    const host = hostId ? store.hosts[hostId] : null;
+    if (!host) return sendJson(res, 401, { error: 'unknown session or host token' });
+    accountId = host.accountId;
+  }
+
+  const device = logSegment(req.headers['x-log-device'], 'unknown-device');
+  const stream = logSegment(req.headers['x-log-stream'], 'log');
+  const body = await readRawBody(req, LOG_MAX_UPLOAD_BYTES);
+  if (!body.length) return sendJson(res, 200, { ok: true, bytes: 0 });
+
+  const budgetKey = `${accountId}/${device}`;
+  if (!logBudgetAllows(budgetKey, body.length)) {
+    return sendJson(res, 429, { error: 'log rate limit' });
+  }
+
+  const dir = path.join(LOG_DIR, logSegment(accountId, 'unknown-account'), device);
+  const file = path.join(dir, `${stream}.log`);
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    rotateLogIfNeeded(file);
+    fs.appendFileSync(file, body);
+  } catch (err) {
+    console.error('[logs] write failed:', err.message);
+    return sendJson(res, 500, { error: 'could not store logs' });
+  }
+  return sendJson(res, 200, { ok: true, bytes: body.length });
+}
+
+/**
+ * Hands out the published manifest for one platform.
+ *
+ * The artifact itself is NOT served from here. This process also runs the relay and the
+ * heartbeat on the same event loop, and streaming a multi-megabyte installer through it would
+ * make every session on the box wait behind the download. The manifest says where the artifact
+ * is; something built to serve files serves it.
+ *
+ * Authentication reuses what already exists -- a client session or a host token -- because an
+ * update check is something a signed-in machine does, and inventing a third credential for it
+ * would be a third thing to get wrong. The manifest is signed either way, so this is about not
+ * publishing the fleet's update state to anyone who asks, not about trusting the transport.
+ */
+async function handleUpdateManifest(req, res) {
+  if (!UPDATE_DIR) return sendJson(res, 503, { error: 'updates are not published on this server' });
+
+  const session = sessionFor(req);
+  if (!session) {
+    const hostToken = String(req.headers['x-host-token'] || '');
+    const hostId = hostToken ? hostTokens.get(hashToken(hostToken)) : undefined;
+    if (!hostId || !store.hosts[hostId]) {
+      return sendJson(res, 401, { error: 'unknown session or host token' });
+    }
+  }
+
+  const query = new URL(req.url, 'http://localhost').searchParams;
+  const platform = String(query.get('platform') || '');
+  // Whitelisted rather than sanitised. This value becomes part of a file name, and the set of
+  // platforms is two -- there is no reason to accept anything else and then try to make it safe.
+  if (platform !== 'windows' && platform !== 'android') {
+    return sendJson(res, 400, { error: 'platform must be windows or android' });
+  }
+
+  let manifest;
+  let signature;
+  try {
+    manifest = fs.readFileSync(path.join(UPDATE_DIR, `${platform}.manifest`), 'utf8');
+    signature = fs.readFileSync(path.join(UPDATE_DIR, `${platform}.sig`), 'utf8').trim();
+  } catch {
+    // Nothing published for this platform is an ordinary answer, not a server fault.
+    return sendJson(res, 404, { error: `no manifest published for ${platform}` });
+  }
+
+  // Read back what is about to be handed out. A manifest whose signature does not check here
+  // would fail on every client instead, and the first person to find out should not be a user.
+  const trusted = String(process.env.REMOTE60_UPDATE_PUBLIC_KEY || '');
+  if (trusted) {
+    const checked = updateManifest.loadManifest(manifest, signature, trusted, platform);
+    if (checked.status !== updateManifest.Status.OK) {
+      console.error(`[update] refusing to serve ${platform}: ${checked.status} ${checked.detail}`);
+      return sendJson(res, 500, { error: 'published manifest did not verify' });
+    }
+  }
+
+  return sendJson(res, 200, { manifest, signature });
+}
+
+const RELAY_AUTH_TTL_MS = 60 * 1000;      // how long a connect stays relay-eligible
+const RELAY_IDLE_TTL_MS = 60 * 1000;      // a session with no traffic either way is finished
+const RELAY_HANDSHAKE_TTL_MS = 30 * 1000; // provisional binding waits this long for a HelloAck
+const RELAY_PUNCH_REPLIES = 3;            // one datagram is one chance; the client may miss it
+
+// The capability minted by /api/connect, kept separately from `pendingPunch`. That map is the
+// host's copy and heartbeat deletes it on read -- consuming it here would leave the host unable
+// to authorise the very session this is for.
+const relayAuthByToken = new Map();
+// The newest capability minted for each host. A phone that is restarted comes back with a new
+// token, and it has to be able to take the host from the session it just abandoned -- the old
+// session cannot be asked to release anything, because from the server's side a killed app and a
+// quiet one look identical.
+const relayLatestTokenByHost = new Map();
+// Punch carries no token (the client sends a bare packet), so the punch stage can only be gated
+// on "this address asked for a relay-eligible connect recently". Identity comes later, from the
+// token inside Hello.
+const relayEligibleByIp = new Map();
+const relaySessions = new Set();         // authoritative; the maps below are only indexes into it
+const relaySessionByClient = new Map();  // "ip:port" of the phone  -> session
+const relaySessionByHost = new Map();    // "ip:port" of the host   -> session
+const relayLeaseByHost = new Map();      // hostId -> session; one at a time, like the host itself
+let relaySock = null;
+
+const UDP_MAGIC = 0x31435052;             // kMagic, "RPC1"
+const UDP_HELLO_BYTES = 49;               // sizeof(UdpHelloPacket) under #pragma pack(1)
+const UDP_KIND_HELLO = 300;
+const UDP_KIND_HELLO_ACK = 301;
+const UDP_KIND_PUNCH = 303;
+const UDP_PROTOCOL_VERSION = 2;
+const UDP_FEATURE_VIDEO_FEC = 0x2;        // the host will not read a Hello without it
+const UDP_FEATURE_DIRECTORY_AUTH = 0x4;   // set in HelloAck only when the host authorised us
+const UDP_TOKEN_OFFSET = 16;              // char authToken[33] follows the five header words
+
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;   // 12 h
+const HOST_OFFLINE_MS = 90 * 1000;            // no heartbeat for 90 s = offline
+const PUNCH_TTL_MS = 30 * 1000;
+// How long an address observation stays usable. Overridable because "what happens when it
+// expires" is now a real branch with its own status code, and a test that had to wait five
+// minutes to reach it would not be written. The default is unchanged.
+const OBSERVE_TTL_MS = Math.max(1, Number(process.env.REMOTE60_DIR_OBSERVE_TTL_MS || 5 * 60 * 1000));
+const MAX_BODY_BYTES = 16 * 1024;
+
+// ---------------------------------------------------------------- persistence
+
+/** @type {{accounts: Object, hosts: Object}} */
+let store = { accounts: {}, hosts: {} };
+
+function loadStore() {
+  try {
+    store = JSON.parse(fs.readFileSync(DATA_PATH, 'utf8'));
+    if (!store || typeof store !== 'object' || Array.isArray(store) ||
+        !store.accounts || typeof store.accounts !== 'object' || Array.isArray(store.accounts) ||
+        !store.hosts || typeof store.hosts !== 'object' || Array.isArray(store.hosts)) {
+      throw new Error('invalid directory store schema');
+    }
+  } catch (err) {
+    if (err.code !== 'ENOENT') throw new Error('directory store unreadable; original preserved: ' + err.message);
+    store = { accounts: {}, hosts: {} };
+  }
+  indexHostTokens();
+}
+
+/**
+ * Host tokens have to survive a restart. They used to live only in memory, so every deploy or
+ * reboot invalidated them; each PC would then be told its token was unknown and would need a
+ * password typed in again, which the host app deliberately does not keep. The store holds only
+ * the hash, so a stolen store file still yields no usable credential.
+ */
+function indexHostTokens() {
+  hostTokens.clear();
+  for (const host of Object.values(store.hosts)) {
+    if (host.tokenHash) hostTokens.set(host.tokenHash, host.hostId);
+  }
+}
+
+let saveTimer = null;
+function saveStoreSoon() {
+  if (saveTimer) return;
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    const tmp = DATA_PATH + '.tmp';
+    try {
+      fs.writeFileSync(tmp, JSON.stringify(store, null, 2));
+      fs.renameSync(tmp, DATA_PATH);   // atomic: never leave a half-written store
+    } catch (err) {
+      console.error('[directory] store write failed:', err.message);
+    }
+  }, 200);
+}
+
+/** For changes where losing the last 200 ms means a manual re-sign-in on the host. */
+function saveStoreNow() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  const tmp = DATA_PATH + '.tmp';
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(store, null, 2));
+    fs.renameSync(tmp, DATA_PATH);
+  } catch (err) {
+    console.error('[directory] store write failed:', err.message);
+    throw Object.assign(new Error('directory storage unavailable'), { statusCode: 503 });
+  }
+}
+
+// ---------------------------------------------------------------- credentials
+
+function hashPassword(password, saltHex) {
+  const salt = saltHex ? Buffer.from(saltHex, 'hex') : crypto.randomBytes(16);
+  const derived = crypto.scryptSync(password, salt, 32);
+  return { salt: salt.toString('hex'), hash: derived.toString('hex') };
+}
+
+// The live request path never runs a synchronous KDF on the relay/heartbeat event loop.
+let passwordJobs = 0;
+const authInFlight = new Set();
+async function hashPasswordAsync(password, saltHex) {
+  if (passwordJobs >= 4) throw Object.assign(new Error('authentication busy; retry later'), { statusCode: 503 });
+  if (password.length > 1024) throw Object.assign(new Error('password too long'), { statusCode: 400 });
+  ++passwordJobs;
+  try {
+    const salt = saltHex ? Buffer.from(saltHex, 'hex') : crypto.randomBytes(16);
+    const derived = await new Promise((resolve, reject) =>
+      crypto.scrypt(password, salt, 32, (error, value) => error ? reject(error) : resolve(value)));
+    return { salt: salt.toString('hex'), hash: derived.toString('hex') };
+  } finally { --passwordJobs; }
+}
+
+async function authenticateAccount(id, password, res) {
+  if (id.length > 128) { sendJson(res, 400, { error: 'id too long' }); return null; }
+  const fail = loginFailures.get(id);
+  if ((fail && fail.nextAllowedAt > Date.now()) || authInFlight.has(id)) {
+    sendJson(res, 429, { error: 'too many attempts, retry later' }); return null;
+  }
+  authInFlight.add(id);
+  try {
+    const account = store.accounts[id];
+    let valid = false;
+    if (account && account.salt && account.hash) {
+      const { hash } = await hashPasswordAsync(password, account.salt);
+      const a = Buffer.from(hash, 'hex'), b = Buffer.from(account.hash, 'hex');
+      valid = a.length === b.length && crypto.timingSafeEqual(a, b);
+    }
+    if (!valid) {
+      const count = (fail ? fail.count : 0) + 1;
+      const delayMs = count <= 3 ? 0 : Math.min(30000, 500 * 2 ** Math.min(count - 3, 6));
+      loginFailures.set(id, { count, nextAllowedAt: Date.now() + delayMs });
+      sendJson(res, 401, { error: 'invalid id or password' }); return null;
+    }
+    loginFailures.delete(id);
+    return account;
+  } finally { authInFlight.delete(id); }
+}
+
+function randomToken() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function hashToken(token) {
+  return crypto.createHash('sha256').update(String(token)).digest('hex');
+}
+
+// ---------------------------------------------------------------- volatile state
+
+const sessions = new Map();      // sessionToken -> {accountId, expiresAt}
+const hostTokens = new Map();    // sha256(hostToken) -> hostId, rebuilt from the store
+const pendingPunch = new Map();  // hostId       -> [{ip, port, punchToken, expiresAt}]
+const observed = new Map();      // observeToken -> {ip, port, at}
+const loginFailures = new Map(); // accountId    -> {count, nextAllowedAt}
+
+function sweep() {
+  const now = Date.now();
+  for (const [token, s] of sessions) if (s.expiresAt <= now) sessions.delete(token);
+  for (const [hostId, list] of pendingPunch) {
+    const live = list.filter((p) => p.expiresAt > now);
+    if (live.length) pendingPunch.set(hostId, live);
+    else pendingPunch.delete(hostId);
+  }
+  // Kept for a while past expiry rather than deleted at it. An expired observation and one that
+  // was never made are different mistakes -- a client that waited too long, versus one that never
+  // sent the UDP packet at all -- and a client can only be told which if the record is still here
+  // to say so.
+  for (const [token, o] of observed) if (now - o.at > OBSERVE_TTL_MS * 2) observed.delete(token);
+}
+setInterval(sweep, 30 * 1000).unref();
+
+// ---------------------------------------------------------------- http helpers
+
+function sendJson(res, status, payload) {
+  const body = JSON.stringify(payload);
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+    'cache-control': 'no-store',
+  });
+  res.end(body);
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    let size = 0;
+    const chunks = [];
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > MAX_BODY_BYTES) {
+        reject(new Error('body too large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      if (!chunks.length) return resolve({});
+      try {
+        resolve(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      } catch (err) {
+        reject(new Error('invalid json'));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+/**
+ * The observation for a token, or why there is not one.
+ *
+ * There used to be a fallback here: no observation meant the address of the socket this HTTP
+ * request arrived on. That address is only the client's when nothing sits in between. Behind a
+ * proxy, a load balancer or any TLS terminator it is the middle box's address, and every host
+ * that heartbeats without an observation is then published at the same address as every other --
+ * so the punch packets go to the proxy, which is not listening, and the addresses of two
+ * unrelated accounts become indistinguishable.
+ *
+ * The old comment above this said the proxy header was honoured when configured. Nothing here
+ * read a header, configured or not. The fallback is gone rather than corrected: the observation
+ * is the only thing that knows the port NAT actually mapped, so a heartbeat without one has
+ * nothing to publish, and saying so is the whole answer.
+ */
+function observationFor(token, now = Date.now()) {
+  const o = observed.get(String(token || ''));
+  if (!o) return { state: 'missing' };
+  if (now - o.at > OBSERVE_TTL_MS) return { state: 'expired' };
+  return { state: 'ok', obs: o };
+}
+
+/** 409, not 401: the caller's credentials are fine, its state is not -- so it must not sign out. */
+function rejectWithoutObservation(res, observation) {
+  return sendJson(res, 409, {
+    error: observation.state === 'expired' ? 'observation_expired' : 'observation_required',
+  });
+}
+
+function bearerToken(req) {
+  const auth = req.headers['authorization'] || '';
+  return auth.startsWith('Bearer ') ? auth.slice(7) : '';
+}
+
+function sessionFor(req) {
+  const token = bearerToken(req);
+  if (!token) return null;
+  const s = sessions.get(token);
+  if (!s || s.expiresAt <= Date.now()) return null;
+  return s;
+}
+
+// ---------------------------------------------------------------- routes
+
+/**
+ * Creates an account so people can choose their own id and password instead of asking whoever
+ * runs the server to make one for them. Gated by a shared key rather than left open, and it
+ * refuses to overwrite an existing account so the key alone cannot take one over.
+ */
+async function handleSignup(req, res) {
+  if (!SIGNUP_KEY) {
+    return sendJson(res, 403, { error: 'account creation is disabled on this server' });
+  }
+  const body = await readJsonBody(req);
+  const key = String(body.signupKey || '');
+  const keyBuf = Buffer.from(key);
+  const expected = Buffer.from(SIGNUP_KEY);
+  if (keyBuf.length !== expected.length || !crypto.timingSafeEqual(keyBuf, expected)) {
+    return sendJson(res, 403, { error: 'signup key is not correct' });
+  }
+
+  const id = String(body.id || '').trim().toLowerCase();
+  const pw = String(body.pw || '');
+  if (!/^[a-z0-9._-]{3,32}$/.test(id)) {
+    return sendJson(res, 400, { error: 'id must be 3-32 characters: letters, digits, . _ -' });
+  }
+  if (pw.length < MIN_PASSWORD) {
+    return sendJson(res, 400, { error: `password must be at least ${MIN_PASSWORD} characters` });
+  }
+  if (store.accounts[id]) {
+    return sendJson(res, 409, { error: 'that id is already taken' });
+  }
+
+  const { salt, hash } = await hashPasswordAsync(pw);
+  // Another signup may have finished while the KDF was in flight.
+  if (store.accounts[id]) return sendJson(res, 409, { error: 'that id is already taken' });
+  store.accounts[id] = { id, salt, hash, createdAt: Date.now() };
+  try { saveStoreNow(); } catch (error) { delete store.accounts[id]; throw error; }
+  console.log(`[directory] account '${id}' created via signup`);
+  sendJson(res, 200, { ok: true, id });
+}
+
+async function handleLogin(req, res) {
+  const body = await readJsonBody(req);
+  const id = String(body.id || '').trim().toLowerCase();
+  const pw = String(body.pw || '');
+  if (!id || !pw) return sendJson(res, 400, { error: 'id and pw are required' });
+
+  if (!(await authenticateAccount(id, pw, res))) return;
+  const token = randomToken();
+  const expiresAt = Date.now() + SESSION_TTL_MS;
+  sessions.set(token, { accountId: id, expiresAt });
+  sendJson(res, 200, withObserve({ sessionToken: token, expiresAt }));
+}
+
+async function handleHostRegister(req, res) {
+  const body = await readJsonBody(req);
+  const id = String(body.id || '').trim().toLowerCase();
+  const pw = String(body.pw || '');
+  const hostName = String(body.hostName || '').trim().slice(0, 64) || 'PC';
+  const machineId = String(body.machineId || '').trim().slice(0, 128);
+  if (!id || !pw || !machineId) {
+    return sendJson(res, 400, { error: 'id, pw and machineId are required' });
+  }
+  if (!(await authenticateAccount(id, pw, res))) return;
+
+  // Keyed by machine so reinstalling does not pile up duplicate entries.
+  let hostId = Object.keys(store.hosts).find(
+    (h) => store.hosts[h].accountId === id && store.hosts[h].machineId === machineId,
+  );
+  if (!hostId) hostId = crypto.randomBytes(8).toString('hex');
+
+  // Re-registering issues a new token; the previous one must stop working.
+  const previous = store.hosts[hostId];
+
+  const hostToken = randomToken();
+  const tokenHash = hashToken(hostToken);
+  store.hosts[hostId] = {
+    hostId,
+    accountId: id,
+    machineId,
+    hostName,
+    tokenHash,
+    lastSeen: previous ? previous.lastSeen : 0,
+    publicIp: previous ? previous.publicIp : '',
+    publicUdpPort: previous ? previous.publicUdpPort : 0,
+    wireIp: previous ? previous.wireIp || previous.publicIp : '',
+    wirePort: previous ? previous.wirePort || previous.publicUdpPort : 0,
+    localIps: previous ? previous.localIps || [] : [],
+    localUdpPort: previous ? previous.localUdpPort || 0 : 0,
+    alternateUdpPort: previous ? previous.alternateUdpPort || 0 : 0,
+  };
+  try { saveStoreNow(); } catch (error) {
+    if (previous) store.hosts[hostId] = previous;
+    else delete store.hosts[hostId];
+    throw error;
+  }
+  // Durable state succeeded; only now revoke the old token and publish the new one.
+  if (previous && previous.tokenHash) hostTokens.delete(previous.tokenHash);
+  hostTokens.set(tokenHash, hostId);
+  sendJson(res, 200, withObserve({ hostId, hostToken, hostName }));
+}
+
+// Whatever a host reports about itself is untrusted input that ends up in another client's
+// connect list, so it is bounded and shape-checked rather than passed through.
+const MAX_LOCAL_IPS = 6;
+
+function sanitizePort(value) {
+  const port = Number(value);
+  return Number.isInteger(port) && port > 0 && port <= 65535 ? port : 0;
+}
+
+function sanitizeIpv4List(value) {
+  if (!Array.isArray(value)) return [];
+  const out = [];
+  for (const entry of value) {
+    const text = String(entry || '');
+    // Dotted quad only. Anything else would become an address some other client dials.
+    const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+    if (!m) continue;
+    if (m.slice(1).some((part) => Number(part) > 255)) continue;
+    // Loopback and link-local can never reach a peer; link-local in particular means DHCP failed.
+    if (text.startsWith('127.') || text.startsWith('169.254.') || text === '0.0.0.0') continue;
+    if (!out.includes(text)) out.push(text);
+    if (out.length >= MAX_LOCAL_IPS) break;
+  }
+  return out;
+}
+
+/**
+ * The addresses a client should try, most-preferred first.
+ *
+ * Private candidates lead because when one works the traffic never leaves the LAN -- faster, and
+ * the only route at all when the router will not hairpin. The public candidate is the observed
+ * mapping. The alternate port exists because a network that filters the first may pass the
+ * second, which is the whole reason a single address was not enough.
+ */
+function connectCandidatesFor(host, relayEligible) {
+  const out = [];
+  const add = (ip, port, kind) => {
+    if (!ip || !port) return;
+    if (out.some((c) => c.ip === ip && c.port === port)) return;
+    out.push({ ip, port, kind });
+  };
+  const lanPort = host.localUdpPort || host.publicUdpPort;
+  for (const ip of host.localIps || []) add(ip, lanPort, 'private');
+  add(host.publicIp, host.publicUdpPort, 'public');
+  if (host.alternateUdpPort && host.alternateUdpPort !== host.publicUdpPort) {
+    add(host.publicIp, host.alternateUdpPort, 'public-alt');
+  }
+  // Last, and only for a client that has been listed. A relay that is merely available would win
+  // races it should lose -- a server with no NAT in front of it answers faster than the peer we
+  // actually want -- so it is held back both in the list and in time (see relayScheduleReply).
+  if (relayEligible && RELAY_IP) {
+    add(RELAY_IP, RELAY_PORT, 'relay');
+  } else if (NAT_DIAG_ENABLED && NAT_DIAG_IP && !RELAY_ENABLED) {
+    // The diagnostic that established the relay was needed. It shares the port, so the two can
+    // never run at once; the relay supersedes it.
+    //
+    // A candidate that exists only to be punched at, never to be used: it is appended last and
+    // the listener never replies, so it cannot be nominated -- selection requires an answer, and
+    // the no-answer fallback takes the first candidate, not this one.
+    add(NAT_DIAG_IP, NAT_DIAG_PORT, 'diag-silent');
+  }
+  return out;
+}
+
+/**
+ * Whether this connect may be told about the relay.
+ *
+ * Both lists must pass. During the POC that means one account on one network, which is what makes
+ * "the relay cannot affect the direct paths" a structural claim rather than a hopeful one: nobody
+ * else is ever handed the candidate, so nobody else's race can be won by it.
+ */
+function relayEligibleFor(accountId, clientIp) {
+  if (!RELAY_ENABLED || !RELAY_IP) return false;
+  const ipOk = RELAY_ALLOW_IPS.any || RELAY_ALLOW_IPS.set.has(clientIp);
+  const accountOk = RELAY_ALLOW_ACCOUNTS.any || RELAY_ALLOW_ACCOUNTS.set.has(accountId);
+  return ipOk && accountOk;
+}
+
+/**
+ * Builds the packet the host already treats as "a peer is trying to reach you".
+ *
+ * Layout is dictated by UdpHelloPacket in poc_protocol.hpp, which sits inside a
+ * `#pragma pack(1)` region, so the 49 bytes below are exact rather than approximate. The host
+ * checks only the magic and the kind, and does not check who sent it, which is what lets the
+ * directory stand in for the peer here.
+ */
+function buildPunchPacket() {
+  const buf = Buffer.alloc(49);
+  buf.writeUInt32LE(0x31435052, 0);  // kMagic, "RPC1"
+  buf.writeUInt16LE(303, 4);         // UdpPacketKind::Punch
+  buf.writeUInt16LE(49, 6);          // size
+  buf.writeUInt32LE(2, 8);           // kUdpProtocolVersion
+  buf.writeUInt32LE(0, 12);          // features -- unread on this path
+  return buf;                         // authToken stays zeroed
+}
+
+/**
+ * Pokes the host the instant a connect is requested, instead of waiting for its next heartbeat.
+ *
+ * Sent from the observe socket because that is the one address the host has an open NAT mapping
+ * toward -- it has been sending its own observations there every heartbeat. Any other socket of
+ * ours would need a mapping that was never created.
+ *
+ * Three datagrams because one is a single chance, and the whole point is to beat a client that
+ * stops asking after about three seconds.
+ */
+function sendWakePunch(sock, host, connectId) {
+  if (!WAKE_ENABLED || !sock) return false;
+  if (!host.publicIp || !host.publicUdpPort) return false;
+  // Aim only at an address a heartbeat confirmed recently.
+  if (Date.now() - host.lastSeen > WAKE_HOST_FRESH_MS) {
+    wakeStats.skippedStale++;
+    // CONNECT-DIAG: a wake that never goes has to say so against the connect that wanted it.
+    // Counting it in wakeStats alone made a stale host and a healthy one look identical.
+    console.log(`[wake] connect=${connectId} skipped reason=stale-host ` +
+                `lastSeenMs=${Date.now() - host.lastSeen} limitMs=${WAKE_HOST_FRESH_MS}`);
+    return false;
+  }
+  // A client that retries three times in a second means one host to wake, not three bursts at it.
+  const last = wakeLastSentByHost.get(host.hostId) || 0;
+  if (Date.now() - last < WAKE_MIN_INTERVAL_MS) {
+    wakeStats.suppressed++;
+    console.log(`[wake] connect=${connectId} skipped reason=rate ` +
+                `sinceLastMs=${Date.now() - last} limitMs=${WAKE_MIN_INTERVAL_MS}`);
+    return false;
+  }
+  wakeLastSentByHost.set(host.hostId, Date.now());
+  wakeStats.sent++;
+
+  const packet = buildPunchPacket();
+  // Where this actually goes, which is not always the tuple the OBSERVE came from -- see
+  // wake_target.js. `via` is logged because "the wake was sent" and "the wake was sent somewhere
+  // the host can hear" looked identical in every log we had, for weeks.
+  const aim = hostSendTargetFor(host, onServerLan);
+  console.log(`[wake] connect=${connectId} tx host=${aim.ip}:${aim.port} via=${aim.via}` +
+              (aim.ip !== host.publicIp
+                 ? ` (advertised ${host.publicIp}:${host.publicUdpPort})` : ''));
+  const scheduledKey = endpointKey(aim.ip, aim.port);
+  for (const delay of WAKE_PACKETS) {
+    setTimeout(() => {
+      // Read the address here rather than above: a heartbeat arriving between these three
+      // datagrams moves the host's mapping, and the later ones should follow it.
+      const now = hostSendTargetFor(host, onServerLan);
+      const ip = now.ip;
+      const port = now.port;
+      if (endpointKey(ip, port) !== scheduledKey) {
+        console.log(`[wake] connect=${connectId} tx moved to ${ip}:${port} (+${delay}ms)`);
+      }
+      // CONNECT-DIAG: per datagram, and on the way out rather than on the way in. "The wake was
+      // sent" was one line covering three datagrams, so a partial send and a complete one read the
+      // same -- and a send that failed silently read the same as one that left.
+      const txAt = Date.now();
+      sock.send(packet, port, ip, (err) => {
+        if (err) {
+          wakeStats.failed++;
+          console.error(`[wake] connect=${connectId} tx[${delay}] failed to ${ip}:${port}: ${err.message}`);
+          return;
+        }
+        console.log(`[wake] connect=${connectId} tx[${delay}] sent ${ip}:${port} via=${now.via} ` +
+                    `queuedMs=${Date.now() - txAt}`);
+      });
+    }, delay).unref();
+  }
+  return true;
+}
+
+/**
+ * Stops the resend for a host, if one is running, and says why.
+ *
+ * Idempotent: called from the heartbeat that collects the capability, from a replacement, and
+ * from the tick itself when it finds nothing left to wake anyone about.
+ */
+function stopWakeResend(hostId, reason) {
+  const record = wakeResendByHost.get(hostId);
+  if (!record) return false;
+  clearTimeout(record.timer);
+  wakeResendByHost.delete(hostId);
+  wakeStats.resendStopped++;
+  console.log(`[wake] connect=${record.connectId} resend stopped after ${record.sent} ` +
+              `reason=${reason}`);
+  return true;
+}
+
+/** Whether this host still has a capability waiting to be collected. */
+function hasLiveCapability(hostId) {
+  const list = pendingPunch.get(hostId);
+  if (!list || !list.length) return false;
+  const now = Date.now();
+  return list.some((p) => p.expiresAt > now);
+}
+
+/**
+ * Keeps waking the host, once a second, until it takes the capability.
+ *
+ * The three-packet burst is a separate thing and is not re-entered from here -- calling it again
+ * would restart its own rate limiter and turn one resend into another burst. This sends single
+ * datagrams, and everything that could make sending wrong is re-checked on every tick rather
+ * than captured when the timer was armed:
+ *
+ *   - the generation, so a timer belonging to a replaced connect does nothing
+ *   - whether a capability is still waiting, which covers collected, expired and never-there
+ *   - the host's freshness, so a host that stopped heartbeating stops being poked
+ *   - the target address, recomputed each time, because a heartbeat in between moves it and the
+ *     old tuple is then somewhere the host cannot hear
+ *
+ * Nothing here is triggered by anything the host sends: the server does not receive the host's
+ * punches at all, so the host answering a punch (which it now does) cannot feed back into this.
+ */
+function startWakeResend(sock, host, connectId) {
+  if (!WAKE_ENABLED || !sock) return false;
+  const existing = wakeResendByHost.get(host.hostId);
+  if (!existing && wakeResendByHost.size >= WAKE_RESEND_MAX_TIMERS) {
+    wakeStats.resendCapped++;
+    console.log(`[wake] connect=${connectId} resend skipped reason=timer-cap ` +
+                `timers=${wakeResendByHost.size} limit=${WAKE_RESEND_MAX_TIMERS}`);
+    return false;
+  }
+  // The replaced timer is cancelled, and that -- not the generation below -- is what actually
+  // stops a stale tick: clearTimeout on a timer that has not run yet prevents it, and one that
+  // is mid-flight finds its record already replaced.
+  //
+  // The generation is kept as a second answer for a tick that slips through anyway. Worth being
+  // straight about what it is worth: with the replaced timer cancelled, the record single per
+  // host, and WAKE_MIN_INTERVAL_MS refusing a second datagram inside a second, a stale tick that
+  // did run could not send anything extra. So removing this line changes nothing observable, and
+  // no test here catches it -- it is not proven, it is structurally unnecessary, and it stays
+  // because the alternative is relying on three separate things all continuing to be true.
+  if (existing) {
+    clearTimeout(existing.timer);
+    // Said and counted, because it changes which connect the datagrams belong to. (RV-10)
+    wakeStats.resendReplaced++;
+    console.log(`[wake] connect=${connectId} resend replaced connect=${existing.connectId} ` +
+                `after ${existing.sent}`);
+  }
+
+  const generation = ++wakeResendGeneration;
+  // A newer connect gets its own allowance of ten. It is a new request from a real user, and the
+  // rate is bounded by the interval and by WAKE_MIN_INTERVAL_MS regardless of how the count is
+  // carried; what must not happen is two timers for one host, and there is still only one.
+  const record = { connectId, generation, sent: 0, timer: null, lastSentAt: 0 };
+  wakeResendByHost.set(host.hostId, record);
+
+  const tick = () => {
+    // Wrapped, because this runs detached from any request: an exception here has nothing to
+    // catch it and takes the process with it. One connect must not be able to do that.
+    try {
+      tickOnce();
+    } catch (err) {
+      console.error(`[wake] connect=${connectId} resend tick failed: ${err && err.message}`);
+      stopWakeResend(host.hostId, 'tick-error');
+    }
+  };
+
+  const tickOnce = () => {
+    const current = wakeResendByHost.get(host.hostId);
+    // A timer from a replaced connect, or from one that was stopped and whose timeout had
+    // already fired. Either way this is not the live resend and it does nothing.
+    if (!current || current.generation !== generation) return;
+    // store.hosts is a plain object, not a Map. Written as `hosts.has(...)` first, which is a
+    // ReferenceError -- inside a setTimeout, so it took the whole server down rather than
+    // failing this one tick. relay_test found it as "observe timeout" three tests later.
+    if (!store.hosts || !store.hosts[host.hostId]) {
+      stopWakeResend(host.hostId, 'host-gone');
+      return;
+    }
+    // The host as it is NOW. The one captured when this was armed is a stale object once the
+    // host re-registers -- registration replaces store.hosts[hostId] with a new object -- and its
+    // lastSeen and address stop moving. Read first, before anything is decided from it. (RV-10)
+    const live = store.hosts[host.hostId];
+    if (!hasLiveCapability(host.hostId)) {
+      // Collected or expired. The heartbeat path says "collected" itself and gets here first;
+      // this covers expiry, and a connect whose capability was never queued.
+      stopWakeResend(host.hostId, 'no-capability');
+      return;
+    }
+    if (Date.now() - live.lastSeen > WAKE_HOST_FRESH_MS) {
+      stopWakeResend(host.hostId, 'stale-host');
+      return;
+    }
+    if (current.sent >= WAKE_RESEND_MAX) {
+      stopWakeResend(host.hostId, 'budget');
+      return;
+    }
+    // After a burst (any connect's) or this resend's own last datagram, whichever is later.
+    const since = Date.now() - Math.max(wakeLastSentByHost.get(host.hostId) || 0, current.lastSentAt);
+    if (since < WAKE_MIN_INTERVAL_MS) {
+      // Not a failure: the burst, or another connect, has just sent one. Wait out the floor and
+      // try again rather than sending a second datagram inside the same interval.
+      current.timer = setTimeout(tick, WAKE_MIN_INTERVAL_MS - since);
+      current.timer.unref();
+      return;
+    }
+
+    const aim = hostSendTargetFor(live, onServerLan);
+    current.lastSentAt = Date.now();
+    current.sent++;
+    wakeStats.resent++;
+    const packet = buildPunchPacket();
+    const n = current.sent;
+    const txAt = Date.now();
+    sock.send(packet, aim.port, aim.ip, (err) => {
+      if (err) {
+        wakeStats.failed++;
+        console.error(`[wake] connect=${current.connectId} resend[${n}/${WAKE_RESEND_MAX}] ` +
+                      `failed to ${aim.ip}:${aim.port}: ${err.message}`);
+        return;
+      }
+      console.log(`[wake] connect=${current.connectId} resend[${n}/${WAKE_RESEND_MAX}] sent ` +
+                  `${aim.ip}:${aim.port} via=${aim.via} queuedMs=${Date.now() - txAt}`);
+    });
+    current.timer = setTimeout(tick, WAKE_RESEND_INTERVAL_MS);
+    current.timer.unref();
+  };
+
+  // The first resend is one interval after the burst, not immediately: the burst's last datagram
+  // has just gone out and WAKE_MIN_INTERVAL_MS would refuse this one anyway.
+  record.timer = setTimeout(tick, WAKE_RESEND_INTERVAL_MS);
+  record.timer.unref();
+  console.log(`[wake] connect=${connectId} resend armed every ${WAKE_RESEND_INTERVAL_MS}ms ` +
+              `max=${WAKE_RESEND_MAX} timers=${wakeResendByHost.size}`);
+  return true;
+}
+
+// Cheap enough to keep forever, and the only way to notice the wake quietly stopping. Silence
+// here is how one afternoon's mobile connections were lost without a single error line.
+function logWakeStats() {
+  if (!WAKE_ENABLED || wakeStats.sent === 0) return;
+  console.log(`[wake] sent=${wakeStats.sent} resent=${wakeStats.resent} ` +
+              `resendStopped=${wakeStats.resendStopped} resendCapped=${wakeStats.resendCapped} ` +
+              `resendReplaced=${wakeStats.resendReplaced} ` +
+              `suppressed=${wakeStats.suppressed} ` +
+              `skippedStale=${wakeStats.skippedStale} failed=${wakeStats.failed}`);
+}
+
+// ---------------------------------------------------------------- relay engine
+
+const endpointKey = (ip, port) => `${ip}:${port}`;
+
+/**
+ * Reads the header of a packet that claims to be one of ours.
+ *
+ * Only the fixed 49-byte Hello/Punch shape is parsed, and only before a session exists. Once one
+ * does, packets are forwarded as opaque bytes -- the relay has no business understanding video.
+ */
+function parseHandshakePacket(msg) {
+  if (msg.length !== UDP_HELLO_BYTES) return null;
+  if (msg.readUInt32LE(0) !== UDP_MAGIC) return null;
+  // The same fields the host checks before it will treat this as a handshake. Accepting a shape
+  // the host would reject only lets a malformed packet take a lease and then strand it.
+  if (msg.readUInt16LE(6) !== UDP_HELLO_BYTES) return null;
+  if (msg.readUInt32LE(8) !== UDP_PROTOCOL_VERSION) return null;
+  const kind = msg.readUInt16LE(4);
+  const features = msg.readUInt32LE(12);
+  // Both ends require FEC on both halves of the handshake, so requiring it here keeps the relay's
+  // idea of the session identical to theirs rather than merely compatible with it.
+  if (kind === UDP_KIND_HELLO_ACK && (features & UDP_FEATURE_VIDEO_FEC) === 0) return null;
+  let token = '';
+  if (kind === UDP_KIND_HELLO) {
+    if ((features & UDP_FEATURE_VIDEO_FEC) === 0) return null;
+    const end = msg.indexOf(0, UDP_TOKEN_OFFSET);
+    const stop = end < 0 ? msg.length : Math.min(end, UDP_TOKEN_OFFSET + 32);
+    token = msg.toString('latin1', UDP_TOKEN_OFFSET, stop);
+    if (!/^[0-9a-f]{32}$/.test(token)) token = '';
+  }
+  return { kind, features, token };
+}
+
+// Indexes are removed only when they still point at this session. Two sessions can briefly share
+// an endpoint -- a phone that reconnects to a different host reuses its address -- and an
+// unconditional delete would then evict whichever one arrived second.
+function relayUnindex(map, key, session) {
+  if (map.get(key) === session) map.delete(key);
+}
+
+function relayDropSession(session, reason) {
+  if (!session || session.dropped) return;
+  session.dropped = true;
+  relaySessions.delete(session);
+  relayUnindex(relaySessionByClient, endpointKey(session.clientIp, session.clientPort), session);
+  relayUnindex(relaySessionByHost, endpointKey(session.hostIp, session.hostPort), session);
+  relayUnindex(relayLeaseByHost, session.hostId, session);
+  console.log(`[relay] connect=${session.connectId} closed reason=${reason} ` +
+              `state=${session.state} c2h=${session.pktC2H}/${session.bytesC2H}B ` +
+              `h2c=${session.pktH2C}/${session.bytesH2C}B ` +
+              `ackMs=${session.ackMs === null ? 'never' : session.ackMs}`);
+}
+
+/**
+ * Keeps an active relay session pointed at the host after a heartbeat moved its wire tuple.
+ *
+ * The session captured the host's address when it was bound, and the inbound index is keyed by
+ * that same address. Updating only the outbound side would leave the host's replies unmatched --
+ * they would arrive from the new tuple and find nothing under it, so h2c would sit at zero while
+ * c2h kept flowing. The heartbeat is authenticated by the host's own token, which is what makes it
+ * safe to re-key the session on its word rather than on whatever packet shows up next.
+ */
+function relayFollowHostWire(host, previousWire, aim) {
+  const session = relayLeaseByHost.get(host.hostId);
+  if (!session || session.dropped) return;
+  if (session.hostIp === aim.ip && session.hostPort === aim.port) return;
+  const newKey = endpointKey(aim.ip, aim.port);
+  const squatter = relaySessionByHost.get(newKey);
+  if (squatter && squatter !== session && !squatter.dropped) {
+    relayDropSession(squatter, 'host moved onto its endpoint');
+  }
+  relayUnindex(relaySessionByHost, endpointKey(session.hostIp, session.hostPort), session);
+  console.log(`[relay] connect=${session.connectId} host moved ${session.hostIp}:${session.hostPort}` +
+              ` -> ${aim.ip}:${aim.port} via=${aim.via}` +
+              (previousWire.ip ? '' : ' (first heartbeat)'));
+  session.hostIp = aim.ip;
+  session.hostPort = aim.port;
+  relaySessionByHost.set(newKey, session);
+}
+
+// One sweep for every expiring thing here. Called on a timer rather than per packet so the hot
+// path stays a Map lookup and a send.
+function relaySweep() {
+  const now = Date.now();
+  for (const [token, rec] of relayAuthByToken) {
+    if (now > rec.expiresAt) relayAuthByToken.delete(token);
+  }
+  for (const [ip, rec] of relayEligibleByIp) {
+    if (now > rec.expiresAt) relayEligibleByIp.delete(ip);
+  }
+  for (const session of [...relaySessions]) {
+    // CONNECT-DIAG: said once, while the session is still open, so the silence is visible before
+    // the close line rather than only in the post-mortem it produces.
+    if (!session.dropped && !session.silentReported && session.pktH2C === 0 &&
+        now - session.createdAt > DIAG_RELAY_SILENT_MS) {
+      session.silentReported = true;
+      console.log(`[relay] connect=${session.connectId} host silent h2c=0 c2h=${session.pktC2H} ` +
+                  `host=${session.hostIp}:${session.hostPort} afterBindMs=${now - session.createdAt}`);
+    }
+    if (session.state === 'provisional' && now - session.createdAt > RELAY_HANDSHAKE_TTL_MS) {
+      relayDropSession(session, 'no HelloAck');
+    } else if (now - session.lastClientAt > RELAY_IDLE_TTL_MS) {
+      // Deliberately the client's silence, not the session's. A host goes on sending video to the
+      // endpoint it last knew about, so counting that as activity would keep a session alive long
+      // after the phone that owned it stopped existing -- and while it lived, the phone's next
+      // attempt would find the host already leased. The client pings every 1s (10s at the
+      // outside), so a minute of nothing means it is gone.
+      relayDropSession(session, 'client silent');
+    }
+  }
+}
+
+/**
+ * Answers a punch, but only once the direct candidates have had the field to themselves.
+ *
+ * The client keeps whichever candidate answers first, not whichever is best, so the only way to
+ * express "prefer direct" is to be slower than direct. The grace has to sit inside the client's
+ * punch budget (4s) with enough room for the Hello that follows, and comfortably above the round
+ * trip a working direct path takes.
+ */
+function relayScheduleReply(clientIp, clientPort, eligible) {
+  const key = endpointKey(clientIp, clientPort);
+  if (eligible.replied.has(key)) return;
+  eligible.replied.add(key);
+  const packet = buildPunchPacket();
+  for (let i = 0; i < RELAY_PUNCH_REPLIES; ++i) {
+    setTimeout(() => {
+      if (!relaySock) return;
+      relaySock.send(packet, clientPort, clientIp, (err) => {
+        if (err) console.error(`[relay] punch reply failed: ${err.message}`);
+      });
+    }, RELAY_GRACE_MS + i * 120).unref();
+  }
+  console.log(`[relay] connect=${eligible.connectId} punch from ${key}; ` +
+              `answering in ${RELAY_GRACE_MS}ms x${RELAY_PUNCH_REPLIES}`);
+}
+
+/**
+ * A Hello with a valid capability is what actually creates a session.
+ *
+ * Punch cannot do this: it carries no token, and a company NAT puts every phone on one address,
+ * so the source address alone identifies nothing. The token does -- it is 128 bits, minted for
+ * this one connect, and the host holds its own copy.
+ */
+function relayBindSession(rinfo, parsed) {
+  const auth = relayAuthByToken.get(parsed.token);
+  if (!auth || Date.now() > auth.expiresAt) return null;
+  if (auth.clientIp !== rinfo.address) return null;
+  // Only the newest capability for a host may take it. Without this, a token that lost the host
+  // could win it back the moment its owner retransmitted an old Hello.
+  if (relayLatestTokenByHost.get(auth.hostId) !== parsed.token) return null;
+  const host = store.hosts[auth.hostId];
+  if (!host || !host.publicIp || !host.publicUdpPort) return null;
+
+  // The newest connect wins. The alternative -- first session keeps the host -- reads as fair but
+  // means a phone whose app was killed cannot come back: nobody is left to release the lease, and
+  // the server cannot tell a dead session from a quiet one until its client falls silent.
+  const existingLease = relayLeaseByHost.get(auth.hostId);
+  if (existingLease && !existingLease.dropped) relayDropSession(existingLease, 'newer connect');
+  // The phone's address is just as exclusive: reusing it for a second host would leave the first
+  // session indexed under a key that no longer finds it.
+  const clientKey = endpointKey(rinfo.address, rinfo.port);
+  const existingClient = relaySessionByClient.get(clientKey);
+  if (existingClient && !existingClient.dropped) relayDropSession(existingClient, 'client moved');
+
+  const now = Date.now();
+  const relayBindAim = hostSendTargetFor(host, onServerLan);
+  const session = {
+    connectId: auth.connectId,
+    token: parsed.token,
+    hostId: auth.hostId,
+    clientIp: rinfo.address,
+    clientPort: rinfo.port,
+    // The same answer the wake uses: for a host on our own LAN the wire tuple is the router's
+    // hairpin address, which relays to nobody. Bound here, the whole session inherits it --
+    // relaySessionByHost is keyed on it and observeSock.send reads it back.
+    hostIp: relayBindAim.ip,
+    hostPort: relayBindAim.port,
+    state: 'provisional',
+    createdAt: now,
+    lastClientAt: now,
+    lastHostAt: now,
+    ackMs: null,
+    pktC2H: 0, pktH2C: 0, bytesC2H: 0, bytesH2C: 0,
+    dropped: false,
+    // CONNECT-DIAG: one line each, the first time they happen. `closed reason=no HelloAck
+    // h2c=0/0B` said the host never answered and nothing said whether it was ever reached.
+    firstC2HAt: 0, firstH2CAt: 0, silentReported: false,
+  };
+  relaySessions.add(session);
+  relaySessionByClient.set(clientKey, session);
+  relaySessionByHost.set(endpointKey(session.hostIp, session.hostPort), session);
+  relayLeaseByHost.set(session.hostId, session);
+  console.log(`[relay] connect=${session.connectId} bound client=${session.clientIp}:` +
+              `${session.clientPort} host=${session.hostIp}:${session.hostPort}`);
+  return session;
+}
+
+// Forwards one client packet to the host and counts it.
+function relayForwardToHost(session, msg) {
+  session.lastClientAt = Date.now();
+  session.pktC2H++;
+  session.bytesC2H += msg.length;
+  // CONNECT-DIAG: the first hop towards the host, once per session.
+  if (!session.firstC2HAt) {
+    session.firstC2HAt = Date.now();
+    const packet = parseHandshakePacket(msg);
+    console.log(`[relay] connect=${session.connectId} first c2h -> ${session.hostIp}:` +
+                `${session.hostPort} kind=${packet ? packet.kind : 'media'} ` +
+                `afterBindMs=${session.firstC2HAt - session.createdAt}`);
+  }
+  if (observeSock) observeSock.send(msg, session.hostPort, session.hostIp);
+}
+
+/**
+ * Client-facing listener. Also the diagnostic probe when the relay is off, because they share a
+ * port and the diagnostic is what proved this port reaches the phone's network.
+ */
+function startRelayListener() {
+  if (!RELAY_ENABLED && !NAT_DIAG_ENABLED) return null;
+  const port = RELAY_ENABLED ? RELAY_PORT : NAT_DIAG_PORT;
+  const sock = dgram.createSocket('udp4');
+
+  sock.on('message', (msg, rinfo) => {
+    if (RELAY_ENABLED) {
+      const session = relaySessionByClient.get(endpointKey(rinfo.address, rinfo.port));
+      // Hello is read before the established-session path, not after. A phone that restarts often
+      // comes back on the same address with a new capability, and treating that Hello as ordinary
+      // media would forward it under the old session's identity -- the connection might even
+      // survive, while every counter and log line here described the session it replaced.
+      const parsed = parseHandshakePacket(msg);
+      if (parsed && parsed.kind === UDP_KIND_HELLO) {
+        // Dropped here rather than left to fall through: a Hello whose capability we cannot read
+        // is not media, and forwarding it under an existing session would attribute one client's
+        // handshake to another's.
+        if (!parsed.token) return;
+        if (session && !session.dropped && session.token === parsed.token) {
+          relayForwardToHost(session, msg);   // a retransmission, not a new session
+          return;
+        }
+        const bound = relayBindSession(rinfo, parsed);
+        if (bound) relayForwardToHost(bound, msg);
+        return;
+      }
+      if (session && !session.dropped) {
+        // Established: opaque bytes, host leg, no inspection. The observe socket is not a choice
+        // here -- it is the only address the host has a NAT mapping toward.
+        relayForwardToHost(session, msg);
+        return;
+      }
+      if (parsed && parsed.kind === UDP_KIND_PUNCH) {
+        const eligible = relayEligibleByIp.get(rinfo.address);
+        if (eligible && Date.now() <= eligible.expiresAt) {
+          relayScheduleReply(rinfo.address, rinfo.port, eligible);
+        }
+        return;
+      }
+      return;  // anything else opens nothing
+    }
+
+    // Diagnostic mode: record and answer nothing. Silence is the safety property -- a reply would
+    // make this endpoint eligible to win the client's candidate race.
+    const rec = natDiagByIp.get(rinfo.address);
+    const age = rec ? Date.now() - rec.at : -1;
+    const connectId = rec ? rec.connectId : 'unknown';
+    const samePort = rec ? String(rinfo.port === rec.observedPort) : 'unknown';
+    console.log(`[natdiag] connect=${connectId} rx dport=${port} ` +
+                `src=${rinfo.address}:${rinfo.port} observedPort=${rec ? rec.observedPort : '?'} ` +
+                `samePort=${samePort} ageMs=${age} bytes=${msg.length}`);
+  });
+
+  sock.on('error', (err) => console.error('[relay] listener error:', err.message));
+  sock.bind(port, () => {
+    if (RELAY_ENABLED) {
+      // A keyframe is a burst of a hundred-odd datagrams; the default receive buffer loses the
+      // tail of one and the client spends the next second asking for another.
+      try { sock.setRecvBufferSize(4 * 1024 * 1024); } catch { /* best effort */ }
+      try { sock.setSendBufferSize(4 * 1024 * 1024); } catch { /* best effort */ }
+      console.log(`[relay] listening on udp ${port}; grace=${RELAY_GRACE_MS}ms`);
+    } else {
+      console.log(`[natdiag] silent probe listening on udp ${port}; never replies`);
+    }
+  });
+  return sock;
+}
+
+/**
+ * The host side of an established relay session, arriving on the observe socket.
+ *
+ * Returns true when the packet was relay traffic. The caller checks OBSERVE first: a host in an
+ * active session keeps sending those from the very same tuple, and reading them as media would
+ * drop it out of the directory.
+ */
+function relayHandleHostPacket(msg, rinfo) {
+  if (!RELAY_ENABLED) return false;
+  const session = relaySessionByHost.get(endpointKey(rinfo.address, rinfo.port));
+  if (!session || session.dropped) return false;
+  session.lastHostAt = Date.now();
+  session.pktH2C++;
+  session.bytesH2C += msg.length;
+  // CONNECT-DIAG: the first sign of life from the host, once per session. The gap from the first
+  // c2h is what separates "the host never heard us" from "the host heard us and refused".
+  if (!session.firstH2CAt) {
+    session.firstH2CAt = Date.now();
+    console.log(`[relay] connect=${session.connectId} first h2c <- ${rinfo.address}:${rinfo.port} ` +
+                `afterBindMs=${session.firstH2CAt - session.createdAt} ` +
+                `afterFirstC2HMs=${session.firstC2HAt ? session.firstH2CAt - session.firstC2HAt : -1}`);
+  }
+  if (session.state === 'provisional') {
+    const ack = parseHandshakePacket(msg);
+    // The host sets this bit only after authorising the capability, and the client refuses an Ack
+    // without it. So this one bit is the proof that both ends accepted the relayed handshake.
+    if (ack && ack.kind === UDP_KIND_HELLO_ACK &&
+        (ack.features & UDP_FEATURE_DIRECTORY_AUTH) !== 0) {
+      session.state = 'active';
+      session.ackMs = Date.now() - session.createdAt;
+      console.log(`[relay] connect=${session.connectId} active; helloAck in ${session.ackMs}ms`);
+    }
+  }
+  if (relaySock) relaySock.send(msg, session.clientPort, session.clientIp);
+  return true;
+}
+
+async function handleHostHeartbeat(req, res) {
+  const body = await readJsonBody(req);
+  const hostToken = String(body.hostToken || '');
+  const hostId = hostToken ? hostTokens.get(hashToken(hostToken)) : undefined;
+  const host = hostId ? store.hosts[hostId] : null;
+  if (!host) return sendJson(res, 401, { error: 'unknown host token' });
+
+  // The observation token ties this heartbeat to the UDP packet that came from the very
+  // socket the host will stream on, so the port we hand out is the one NAT actually mapped.
+  //
+  // Checked before anything is written. A rejected heartbeat must leave this host exactly as it
+  // was -- including lastSeen, because refreshing it would keep a host listed as online while
+  // publishing an address nobody can reach, and would consume the pending punch below on the way
+  // past. The client retries; nothing here has changed under it.
+  const observation = observationFor(body.observeToken);
+  if (observation.state !== 'ok') return rejectWithoutObservation(res, observation);
+  const obs = observation.obs;
+
+  const previousWire = { ip: host.wireIp, port: host.wirePort };
+  host.publicIp = obs.ip;
+  host.publicUdpPort = obs.port;
+  // Where our own datagrams go. Same as the advertised pair unless the host is on our own LAN,
+  // in which case the advertised one is the router's WAN address and cannot be sent to from here.
+  host.wireIp = obs.wireIp || host.publicIp;
+  host.wirePort = obs.wirePort || host.publicUdpPort;
+  host.hostName = String(body.hostName || host.hostName).slice(0, 64);
+  // Where else this host can be reached. The public address is ours to determine -- we see the
+  // mapping NAT actually made -- but a LAN address and a second listening port are only knowable
+  // at the host, and one published address cannot serve two networks whose filtering points in
+  // opposite directions.
+  host.localIps = sanitizeIpv4List(body.localIps);
+  host.alternateUdpPort = sanitizePort(body.alternateUdpPort);
+  host.localUdpPort = sanitizePort(body.localUdpPort);
+  // After the fields above, not before. The send target is chosen from what this host has just
+  // published, and re-keying first would decide on the previous heartbeat's addresses -- or, on the
+  // very first one, on no addresses at all, which is how a session lands on the router and stays
+  // there. relayFollowHostWire takes the aim as an argument so this order cannot be lost again.
+  relayFollowHostWire(host, previousWire, hostSendTargetFor(host, onServerLan));
+  // CONNECT-DIAG: that a host is heartbeating at all, and from where. The server logged this
+  // for a host on its own LAN and for nobody else, so an off-LAN host's arrival -- the one case
+  // the 2026-09-21 failure turned on -- left no trace whatever. Rate limited per host, except
+  // that a moved tuple and a heartbeat carrying capabilities always print.
+  {
+    const nowMs = Date.now();
+    const moved = previousWire.ip !== host.wireIp || previousWire.port !== host.wirePort;
+    if (diagShouldLog(diagHostLineAt, hostId, nowMs, DIAG_HOST_LINE_MIN_MS, moved)) {
+      const aim = hostSendTargetFor(host, onServerLan);
+      console.log(`[host-hb] host=${hostId.slice(0, 8)} wire=${host.wireIp}:${host.wirePort} ` +
+                  `public=${host.publicIp}:${host.publicUdpPort} aim=${aim.ip}:${aim.port} ` +
+                  `via=${aim.via} localIps=${(host.localIps || []).length} ` +
+                  `sinceLastMs=${host.lastSeen ? nowMs - host.lastSeen : -1}` +
+                  (moved ? ` moved-from=${previousWire.ip || '-'}:${previousWire.port || 0}` : ''));
+    }
+  }
+  host.lastSeen = Date.now();
+  saveStoreSoon();
+
+  const punches = pendingPunch.get(hostId) || [];
+  pendingPunch.delete(hostId);
+  // CONNECT-DIAG: the moment the host takes what was waiting for it, and how long each one waited.
+  // This is the number the whole investigation was missing -- "the capability was correct and had
+  // not arrived yet" was a guess until mint-to-collect could be read off one line.
+  if (punches.length) {
+    const waited = punches.map((p) => `${p.connectId || '?'}:${Date.now() - (p.mintedAt || Date.now())}ms`);
+    // `collected` means it is going out in THIS response. It is not an acknowledgement from the
+    // host that the capability arrived or was applied -- the host sends nothing back for it, and
+    // this line has been read as if it did. The qualifier is appended so the existing fields and
+    // their order are untouched.
+    console.log(`[capability] collected host=${hostId.slice(0, 8)} count=${punches.length} ` +
+                `waited=${waited.join(',')} meaning=handed-to-response`);
+    // Nothing left to wake anyone about. The tick would notice on its own within a second; this
+    // stops it at the moment the reason disappears, and gives the log one line saying why.
+    stopWakeResend(hostId, 'collected');
+  }
+  sendJson(res, 200, {
+    ok: true,
+    observedIp: host.publicIp,
+    observedPort: host.publicUdpPort,
+    pendingPunch: punches.map((p) => ({ ip: p.ip, port: p.port, punchToken: p.punchToken })),
+  });
+}
+
+function handleHosts(req, res) {
+  const session = sessionFor(req);
+  if (!session) return sendJson(res, 401, { error: 'login required' });
+  const now = Date.now();
+  const list = Object.values(store.hosts)
+    .filter((h) => h.accountId === session.accountId)
+    .map((h) => ({
+      hostId: h.hostId,
+      hostName: h.hostName,
+      online: now - h.lastSeen < HOST_OFFLINE_MS,
+      lastSeen: h.lastSeen,
+    }))
+    .sort((a, b) => Number(b.online) - Number(a.online) || a.hostName.localeCompare(b.hostName));
+  sendJson(res, 200, { hosts: list });
+}
+
+async function handleConnect(req, res) {
+  const session = sessionFor(req);
+  if (!session) return sendJson(res, 401, { error: 'login required' });
+  const body = await readJsonBody(req);
+  const host = store.hosts[String(body.hostId || '')];
+  if (!host || host.accountId !== session.accountId) {
+    return sendJson(res, 404, { error: 'host not found' });
+  }
+  if (Date.now() - host.lastSeen >= HOST_OFFLINE_MS) {
+    return sendJson(res, 409, { error: 'host is offline' });
+  }
+
+  // Same rule as the heartbeat, and for the same reason: without an observation the only address
+  // available is this HTTP socket's, which behind a proxy is the proxy's. A punch aimed there
+  // reaches nothing, and relay eligibility keyed on it would put unrelated clients in one bucket.
+  // Nothing has been written at this point -- pendingPunch is set below -- so the refusal costs
+  // the caller nothing but a retry.
+  const observation = observationFor(body.observeToken);
+  if (observation.state !== 'ok') return rejectWithoutObservation(res, observation);
+  const clientIp = observation.obs.ip;
+  const clientPort = observation.obs.port;
+  if (!clientPort) return sendJson(res, 400, { error: 'client udp port unknown' });
+
+  // One short id ties together the places this attempt shows up: here, the listener, the relay,
+  // and the host log. Without it, concurrent attempts are indistinguishable.
+  const connectId = crypto.randomBytes(4).toString('hex');
+
+  const punchToken = crypto.randomBytes(16).toString('hex');
+  const list = pendingPunch.get(host.hostId) || [];
+  // CONNECT-DIAG: connectId and mintedAt ride along so the heartbeat that finally collects this
+  // capability can say which attempt it belonged to and how long it waited. Neither is sent to
+  // the host; the response below still maps only ip/port/punchToken.
+  list.push({ ip: clientIp, port: clientPort, punchToken, expiresAt: Date.now() + PUNCH_TTL_MS,
+              connectId, mintedAt: Date.now() });
+  pendingPunch.set(host.hostId, list);
+  console.log(`[capability] connect=${connectId} minted host=${host.hostId.slice(0, 8)} ` +
+              `queued=${list.length} ttlMs=${PUNCH_TTL_MS}`);
+  const relayEligible = relayEligibleFor(session.accountId, clientIp);
+
+  if (NAT_DIAG_ENABLED) {
+    natDiagByIp.set(clientIp, { connectId, observedPort: clientPort, at: Date.now() });
+    for (const [ip, rec] of natDiagByIp) {
+      if (Date.now() - rec.at > NAT_DIAG_TTL_MS) natDiagByIp.delete(ip);
+    }
+    console.log(`[natdiag] connect=${connectId} host=${host.hostName} ` +
+                `hostPublic=${host.publicIp}:${host.publicUdpPort} ` +
+                `clientObserved=${clientIp}:${clientPort} ` +
+                `diag=${NAT_DIAG_IP || '(unset)'}:${NAT_DIAG_PORT}`);
+  }
+
+  if (relayEligible) {
+    const expiresAt = Date.now() + RELAY_AUTH_TTL_MS;
+    // The host's copy of this capability lives in `pendingPunch` and heartbeat deletes it on
+    // read. This is a separate copy for the same token, so verifying a relayed Hello never costs
+    // the host the authorisation it needs to accept that same Hello.
+    relayAuthByToken.set(punchToken, { hostId: host.hostId, clientIp, connectId, expiresAt });
+    // Newest wins, so the previous capability for this host stops being able to claim it. A phone
+    // that was killed mid-session is the ordinary case, and its old token must not outrank the
+    // one the user is holding now.
+    const previous = relayLatestTokenByHost.get(host.hostId);
+    if (previous && previous !== punchToken) relayAuthByToken.delete(previous);
+    relayLatestTokenByHost.set(host.hostId, punchToken);
+    relayEligibleByIp.set(clientIp, { connectId, expiresAt, replied: new Set() });
+    console.log(`[relay] connect=${connectId} eligible client=${clientIp}:${clientPort} ` +
+                `host=${host.hostName}@${host.publicIp}:${host.publicUdpPort}`);
+  }
+
+  // Every connect, not just the relayed ones. On the relay the host would otherwise never hear
+  // that anyone was waiting -- the relay answers punches rather than forwarding them -- and on the
+  // direct path the peer's own punch is dropped by exactly the restrictive NATs where it matters.
+  sendWakePunch(observeSock, host, connectId);
+  // And keep going until the host takes it. Separate from the burst on purpose: see the note on
+  // startWakeResend about why the burst is not simply repeated.
+  startWakeResend(observeSock, host, connectId);
+
+  sendJson(res, 200, {
+    // Kept for clients that predate candidates; they dial this one and behave as before.
+    hostPublicIp: host.publicIp,
+    hostPublicUdpPort: host.publicUdpPort,
+    candidates: connectCandidatesFor(host, relayEligible),
+    punchToken,
+    // pc2-connect-diag: the id that already ties the server's own lines together, handed to
+    // the caller so its logs join the same thread. Additive -- a client that does not know
+    // the field ignores it -- and it is a random 4-byte label, not a credential.
+    connectId,
+  });
+}
+
+/**
+ * What to tell a client about the observe endpoint, or null when there is nothing sound to say.
+ *
+ * Returned as optional metadata on responses the client already reads, so an older client that
+ * does not look for it is unaffected and no new route exists to version.
+ *
+ * A port outside 1..65535 is not advertised at all. Sending a wrong one would be worse than
+ * sending none: none leaves the client on its documented fallback, wrong sends it somewhere that
+ * will never answer and looks like a network fault.
+ */
+function observeAdvertisement() {
+  if (!Number.isInteger(OBSERVE_ADVERTISE_PORT)) return null;
+  if (OBSERVE_ADVERTISE_PORT < 1 || OBSERVE_ADVERTISE_PORT > 65535) return null;
+  const out = { port: OBSERVE_ADVERTISE_PORT };
+  if (OBSERVE_ADVERTISE_HOST) out.host = OBSERVE_ADVERTISE_HOST;
+  return out;
+}
+
+/** Adds the observe metadata to a response body, when there is any. */
+function withObserve(body) {
+  const observe = observeAdvertisement();
+  return observe ? { ...body, observe } : body;
+}
+
+const routes = {
+  'POST /api/signup': handleSignup,
+  'POST /api/login': handleLogin,
+  'POST /api/host/register': handleHostRegister,
+  'POST /api/host/heartbeat': handleHostHeartbeat,
+  'GET /api/hosts': handleHosts,
+  'POST /api/connect': handleConnect,
+  'POST /api/logs': handleLogs,
+  'GET /api/update/manifest': handleUpdateManifest,
+};
+
+async function onRequest(req, res) {
+  const url = (req.url || '').split('?')[0];
+  // The health probe carries it too, so a client can learn the endpoint without holding a
+  // session -- and so an operator can see what this server is advertising without logging in.
+  // Nothing here is sensitive: it is a port number that has to be reachable to be useful.
+  if (url === '/healthz') return sendJson(res, 200, withObserve({ ok: true }));
+  const handler = routes[`${req.method} ${url}`];
+  if (!handler) return sendJson(res, 404, { error: 'not found' });
+  try {
+    await handler(req, res);
+  } catch (err) {
+    sendJson(res, err.statusCode || 400, { error: err.message || 'bad request' });
+  }
+}
+
+// ---------------------------------------------------------------- udp observation
+
+/**
+ * Minimal STUN-like endpoint. A peer sends "OBSERVE <token>" from the same socket it will
+ * stream on; we reply with the source address we saw, which is the address its NAT presents
+ * to the outside world and therefore the one the other peer must punch towards.
+ */
+function startUdp() {
+  const sock = dgram.createSocket('udp4');
+  sock.on('message', (msg, rinfo) => {
+    // OBSERVE is tested first and by shape. A host in a relay session sends both kinds from the
+    // same tuple, and reading its observations as media would drop it out of the directory --
+    // while a 49-byte binary packet can never be mistaken for this prefix.
+    if (msg.length <= 128 && msg[0] === 0x4f /* 'O' */) {
+      const text = msg.toString('utf8').trim();
+      if (text.startsWith('OBSERVE ')) {
+        const token = text.slice(8).trim().slice(0, 64);
+        if (!token) return;
+        const seen = observedAddressFor(rinfo);
+        observed.set(token, {
+          ip: seen.ip, port: seen.port,
+          wireIp: seen.wireIp, wirePort: seen.wirePort,
+          at: Date.now(),
+        });
+        // CONNECT-DIAG: an OBSERVE arriving, for every peer rather than only one on our own LAN.
+        // The token is never printed -- it is a lookup key a stranger could reuse -- but a short
+        // digest of it is, because that is what ties this line to the heartbeat that follows it.
+        {
+          const tokenId = diagTokenId(token);
+          const tuple = `${rinfo.address}:${rinfo.port}`;
+          const moved = diagObserveTuple.get(tokenId) !== tuple;
+          diagObserveTuple.set(tokenId, tuple);
+          if (diagShouldLog(diagObserveLineAt, tokenId, Date.now(), DIAG_HOST_LINE_MIN_MS, moved)) {
+            console.log(`[observe-rx] token=${tokenId} from=${tuple} ` +
+                        `advertised=${seen.ip}:${seen.port}` + (moved ? ' moved' : ''));
+          }
+        }
+        // The reply goes back to where the packet actually came from; only its contents are
+        // corrected, because that is what the peer will advertise about itself.
+        const reply = Buffer.from(JSON.stringify({ ip: seen.ip, port: seen.port }));
+        sock.send(reply, rinfo.port, rinfo.address);
+        return;
+      }
+    }
+    // Only a tuple already bound to a session is forwarded; an unknown sender opens nothing.
+    relayHandleHostPacket(msg, rinfo);
+  });
+  sock.on('error', (err) => console.error('[directory] udp error:', err.message));
+  sock.bind(UDP_PORT, () => {
+    if (RELAY_ENABLED) {
+      try { sock.setRecvBufferSize(4 * 1024 * 1024); } catch { /* best effort */ }
+      try { sock.setSendBufferSize(4 * 1024 * 1024); } catch { /* best effort */ }
+    }
+    console.log(`[directory] udp observe on ${UDP_PORT}` +
+                (PUBLIC_IP ? `; own-lan observations reported as ${PUBLIC_IP}` : ''));
+  });
+  return sock;
+}
+
+// ---------------------------------------------------------------- account admin
+
+function addAccountFromCli() {
+  const args = process.argv.slice(2);
+  const i = args.indexOf('--add-account');
+  if (i < 0) return false;
+  const id = String(args[i + 1] || '').trim().toLowerCase();
+  const pw = String(args[i + 2] || '');
+  if (!id || !pw) {
+    console.error('usage: node server.js --add-account <id> <password>');
+    process.exit(2);
+  }
+  loadStore();
+  const { salt, hash } = hashPassword(pw);
+  store.accounts[id] = { id, salt, hash, createdAt: Date.now() };
+  fs.writeFileSync(DATA_PATH, JSON.stringify(store, null, 2));
+  console.log(`[directory] account '${id}' saved to ${DATA_PATH}`);
+  return true;
+}
+
+// ---------------------------------------------------------------- boot
+
+if (!addAccountFromCli()) {
+  loadStore();
+  const useTls = TLS_KEY && TLS_CERT;
+  const server = useTls
+    ? https.createServer({ key: fs.readFileSync(TLS_KEY), cert: fs.readFileSync(TLS_CERT) }, onRequest)
+    : http.createServer(onRequest);
+  server.listen(HTTP_PORT, () => {
+    console.log(`[directory] ${useTls ? 'https' : 'http'} on ${HTTP_PORT}`);
+    console.log(LOG_DISABLED
+      ? '[logs] collection off'
+      : `[logs] collecting into ${LOG_DIR}; ${LOG_RATE_BYTES_PER_MIN / 1024}KB/min per device, ` +
+        `rotate at ${LOG_MAX_FILE_BYTES / 1024 / 1024}MB x${LOG_KEEP}, keep ${LOG_RETENTION_DAYS}d`);
+    if (!useTls) {
+      console.warn('[directory] TLS is off — tokens travel in clear. Set REMOTE60_DIR_TLS_KEY/CERT for anything but local testing.');
+    }
+    console.log(UPDATE_DIR
+      ? `[update] serving manifests from ${UPDATE_DIR}`
+      : '[update] off (REMOTE60_UPDATE_DIR unset)');
+  });
+  observeSock = startUdp();
+  relaySock = startRelayListener();
+  if (RELAY_ENABLED) {
+    const ips = RELAY_ALLOW_IPS.any ? '*' : ([...RELAY_ALLOW_IPS.set].join(',') || '(none)');
+    const accounts = RELAY_ALLOW_ACCOUNTS.any
+      ? '*' : ([...RELAY_ALLOW_ACCOUNTS.set].join(',') || '(none)');
+    console.log(`[relay] ENABLED ip=${RELAY_IP || '(unset -- candidate NOT offered)'} ` +
+                `port=${RELAY_PORT} grace=${RELAY_GRACE_MS}ms allowIps=${ips} ` +
+                `allowAccounts=${accounts}`);
+    if (!RELAY_IP || ips === '(none)' || accounts === '(none)') {
+      console.warn('[relay] no client can be offered the relay until IP and account are listed');
+    }
+    setInterval(relaySweep, 5000).unref();
+  }
+  // Said at boot whichever way it is set, because the failure mode of the wake being off is
+  // silent: connections simply stop working on the networks that need it.
+  console.log(`[wake] ${WAKE_ENABLED ? 'on' : 'OFF (REMOTE60_WAKE_DISABLED=1)'}`);
+  if (WAKE_ENABLED) setInterval(logWakeStats, 5 * 60 * 1000).unref();
+  if (NAT_DIAG_ENABLED) {
+    console.log(`[natdiag] ENABLED ip=${NAT_DIAG_IP || '(unset -- candidate NOT offered)'} ` +
+                `port=${NAT_DIAG_PORT}` +
+                `${RELAY_ENABLED ? ' (probe superseded by relay)' : ''}`);
+  }
+}

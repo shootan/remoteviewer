@@ -1,0 +1,30 @@
+# task keepalive-multi / r1 — 여러 PC 의 연결을 동시에 유지 (A↔B 왕복) (검증용 remote#pvbntb3z, 2026-10-16)
+
+담당 작업용2. 새 task. 보고는 검증용 remote#pvbntb3z pin.
+계약: **`D:/remote/remote/.claude/codex_keepalive_multi_r1.md`(전부 읽기, 이 지시서보다 우선)**. 배경 제안 `keepalive_multi_proposal_2026-10-16.md`. 이전 keepalive 기록은 `C:/work/gnlink-archive/feat-keepalive-2026-10-16/.claude/`(codex_keepalive_r1~85cb88e, report r1~r5).
+
+## 사용자 요구 (2026-10-16)
+> "B 연결하고 나가면 B 유지되다가 A 연결하면 B 가 끊기는데, 그게 아니라 B 를 계속 유지해야지. A 랑 B 랑 왔다갔다 하기 편하도록."
+- 0.2.30 은 단일 park(`SessionPark.kt:13` "One parked connection at most", 다른 host 선택 시 종료). 이전 설계의 '다른 host 시 종료'는 **이번 계약으로 대체**.
+
+## 정책 값 (정책 객체로 — 값만 바꿀 수 있게)
+- 최대 유지 PC **3 대(active 포함)**, PC 별 park TTL **5 분**(BeginPark 단조시각부터, 목록 갱신·heartbeat·다른 PC 사용으로 연장 금지, 실제 재활성화 후 다시 떠날 때만 새 기한), 초과 시 **parked 중 마지막 실제 사용이 가장 오래된 것만** LRU 종료(한도 3 이면 4 번째 PC 연결 때). **사용자 답 전 제안값** — 바뀌면 검증용이 알림, 테스트 기대값도 함께 바꿈.
+
+## 할 일 (계약 §1~§8)
+1. **세션 테이블(native)**: 논리 키 = canonical directory origin + account stable ID + hostId(표시명/IP/token 금지). 별도 **프로세스 유일 entry handle/incarnation**. JNI 비동기 요청·응답은 handle + entry connection generation + operation + 전역 lifecycle epoch 를 지님(hostId 만 받는 API 금지). 각 entry 가 controller·rendezvous·socket/stop·후보/error·connect/adopt/close gate·park deadline/episode·설정/selection snapshot 을 소유 — 지금 전역(`g_session_controller`·`g_rendezvous`·`g_connect_gate`·`g_chosen_candidate`·`g_rendezvous_error` 등) **자원표를 먼저 작성**해 누락 없이 이전. token 로그 금지.
+2. **소유권**: op 번호는 프로세스 유일 유지, **취소 범위는 entry 별**(B connect 가 parked A 의 gate 를 무효화하지 않음). 전역 lifecycle epoch 는 sign-out/account/server/background/network 종료에만. S1 compare-and-close·S2 pending fallback·T1 Adopt/CloseExplicit/CloseIfOwn 직렬화·Observe socket 회수가 entry 마다 성립. 수동 IP 연결은 다중 park 대상 제외, 단 전환/종료 수명은 같은 관리자 경유(전역 우회 금지).
+3. **전환 트랜잭션(A→B)**: 하나의 전환 소유자로 직렬화. A 입력·clipboard·preview inhibit → held input release ACK → pause → 새 Pong fence → A parked → 그 뒤 B 만 active 채택·Surface·resume. B 네트워크 준비는 병행 가능, A 가 정상 스트리밍 중에 B 영상/입력 활성 금지. 확인 중 B 탭은 intent 로 보관, 빠른 A/B/C 탭은 최신 intent 하나, stale connect/fallback 은 자기 entry 만 정리. 재사용 불가(거절/만료) 시 그 탭만 새 연결 fallback 최대 1 회. 실패한 B 가 parked A/C 를 닫거나 자동 재접속 금지. pause 실패 entry 만 fail-closed 종료. **capacity 예약 원자적**(비동기 connect 둘이 한도 초과 금지), LRU 는 active/활성화 대상 제외, 실패만으로 연쇄 eviction 금지, eviction 사유 UI/로그 명시.
+4. **디코더/Surface 단일 + entry 별 sink adapter + active binding token**(entry handle + connection gen + activation/binding gen + Surface gen). OnEncodedH264Frame 뿐 아니라 OnVideoStreamReset/Discontinuity·OnDecodeEpisodeStart·selection result/tag·key-request/owed-key·DecodeGeneration·decode/presentation stats **모든 방향**을 울타리 안에. owner 검사와 decoder mutation 은 같은 동기화 경계(TOCTOU 금지). join/codec stop 을 테이블 락이나 그 callback 이 필요한 잠금 아래에서 하지 않음. entry 는 참조 수명으로 잡아 표에서 지워져도 호출 중 파괴 금지, closing entry 새 작업 거절. CloseAll = epoch/entry 무효화 → map 분리 → 락 밖 cancel/join/close. 새 active binding 은 decoder reset·D1 첫 IDR·selection ACK·R1 gesture 취소·mobile-abr grace 를 자기 entry 에만. A 의 디코드 수/크기/통계가 B 보고에 섞이지 않음. **B 를 닫는 늦은 callback 이 A 의 새 Surface 를 해제하는 반례 필수.**
+5. **parked 자원·액션**: paused 세션은 control heartbeat/UDP keepalive 만, decoder/Surface/미리보기 없음. pause fence 전 in-flight tail 은 유한 소모/드롭(수신 0 약속 금지) — **안정 park 구간에서 host 영상 송신/encoder/capture 정지, parked AU 의 active decoder 전달/표시 0** 검증. unsolicited parked traffic 지속 시 진단·기존 실패 정책. park 중 입력/clipboard push·pull/preview/원격 privileged 액션 차단, incoming clipboard 는 활성 전환 때 버리고 baseline 재설정. 설정·UI 스냅샷도 대상 태그 — "active 조회 → 나중에 전역 active 로 전송" 금지(전환 뒤 B 의 키·클립보드·화질 요청이 A 로 가면 안 됨). 구 host pause 미지원이면 그 entry 는 park 대신 종료·유지 불가 표시. 다른 기기 탈취는 기존 정책, parked peer-lost 자동 재접속 금지.
+6. **종료 사유**: 전부 종료 = sign-out·실제 account/directory 변경·onStop(기존 configuration 예외 유지)·확인된 network path 변화·명시적 모두 끊기(이전 entry 의 pending connect/fallback/HTTP 결과 영구 무효). 개별 종료 = 그 PC 끊기·peer-lost·session_refused/권한 철회·TTL/LRU·연결 교체·pause 실패. **현재 PC 끊기가 parked 다른 PC 를 끊지 않음. 디렉터리 목록의 일시 누락/갱신 실패만으로 정상 연결 종료 금지**(현재 `host_gone` 경로 재검토, 명시적 삭제/철회 응답만 개별 종료). 401 은 계정 전체 vs 세션 거절을 기존 계약대로 구분.
+7. **UI**: HOSTS 목록 PC 별 상태(연결 유지/확인 중/만료/종료)·남은 시간·PC 별 끊기. '모두 끊기'는 선택(범위 지연 금지). 한도로 종료된 PC 는 다음 탭에서 정상 새 연결, 재사용 성공으로 표시 금지.
+8. **검증(한 묶음)**: 서로 다른 hostId/인증의 fail-closed 격리 host **2 대**(고유 화면·입력 trace·카운터)로 실제 APK UI: A→목록→B→목록→A→B, 매 복귀 새 directory connect/observe/punch/Hello 0·상대 parked control 생존·active decoder owner·새 선택 IDR/첫 화면, 시간은 새 연결 기준선과 재사용 각각. 반례: A 의 pending connect/close/reset/selection/decoder stats 지연 → B 채택 → 옛 callback 해제 후 A 재생성(B teardown/reset/입력·클립보드 오염 0) / 빠른 A/B 탭·known refused·fallback 1·sign-out/stop 뒤 지연 connect 0·active A 종료가 parked B 보존 / PC 별 독립 만료·재활성화 갱신·N+1 번째에서 parked LRU 만 종료·활성화 실패 시 연쇄 eviction 0 / 안정 park 의 영상·인코딩·decoder 0, held input 0, 클립보드·미리보기 0, 통계 분리(tail·control bytes 따로) / direct·relay 각각 다른 기기 대체 뒤 자동 재탈취 0, 구 host pause 미지원, 선명도 crop·크게보기·6M 저장이 전환 뒤 대상 유지. 결정적 interleave 단위/native 시험 + 출하 seam 부재(build gate 는 **실제 게시 산출물 assembleDebug 기준 + 기전 기준**, 작업목록 GA). 비용: active1+parked1 과 한도 N 에서 control bytes/s·스레드·메모리·안정 park decoder 0(실폰 배터리는 미검증으로).
+
+## 작업 공간·규칙
+- 새 worktree `C:/work/gnlink-wt/feat-keepalive-multi`, branch `feat/keepalive-multi` ← main `eedd207`(origin/main, 0.2.30 게시본 b4fd204 + 문서). `third_party\webview2` junction 은 main repo 에서 연결, `Remove-Item -Recurse`·`git worktree remove --force` 전에 재귀 없이 먼저 끊기.
+- 시험 fixture·스크립트는 보관본(`C:/work/gnlink-archive/feat-viewer-sharpness-2026-10-16/.claude/e2e`, `int-apk-0230-2026-10-16`)을 복사해 2-host 로 확장. fail-closed 시험 host 만, 사용자 화면·사용자 host·사용자 폰·실제 마우스 미접촉.
+- **측정 슬롯**: GNLinkStream/AVD/gradle 같은 무거운 작업 전 `C:\work\gnlink-wt\SLOT_REQUEST.txt` 를 CreateNew 로 먼저 요청(작업용1 러너는 회차 사이 1 초 안에 다음 회차를 시작하므로 빈틈을 기다리지 말 것) → 작업용1 현재 회차 `end` 확인 → 실행 → 삭제.
+- main 머지·push·게시·버전 변경 금지. 여러 작업용이 같은 브리지/관리자를 병렬 수정하지 않음. Git MCP 커밋(worktree 경로 사본), 메시지 끝 "제품/테스트/문서" 한 줄.
+
+## 보고 (1회)
+`C:/work/gnlink-wt/feat-keepalive-multi/.claude/report_keepalive_multi_r1.md`: HEAD·해시, 자원표, 소유권·전환·binding 설계 요약, 반례 FAIL→PASS(종료 코드), 2-host AVD 단계별 결과(카운터·시간·host 로그), 비용 수치, build gate, 남은 미검증. 검증용에 1~3줄 pin. ACK·중간 보고 불필요. 범위가 계약보다 커지거나 wire/host 변경이 필요해지면 구현 전에 멈추고 보고.

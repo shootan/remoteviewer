@@ -1,0 +1,565 @@
+// Host startup 2/5: the client connection -- TCP listen/accept, or UDP bind (port candidates, LAN
+// direct-dial listener, directory agent) + the Hello handshake; secure-input broker; socket buffers.
+//
+// Host split refactor Phase 2-12: moved verbatim out of main() (native_video_host_main.cpp); see
+// host_startup.hpp for the call order and HostContext (host_main_loop.hpp) for the shared state.
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <mfapi.h>
+#include <windows.graphics.capture.interop.h>
+#include <windows.graphics.directx.direct3d11.interop.h>
+#include <wrl/client.h>
+
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Capture.h>
+#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#include <winrt/base.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cctype>
+#include <cstdio>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <cwctype>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <unordered_set>
+#include <vector>
+
+#include "host_clip_image.hpp"
+#include "host_file_copy.hpp"
+#include "mf_h264_codec.hpp"
+#include "bind_port_candidates.hpp"
+#include "capture_cadence_gate.hpp"
+#include "d3d_capture_readback.hpp"
+#include "directory_client.hpp"
+#include "encode_resolution_ladder.hpp"
+#include "gdi_capture_process.hpp"
+#include "json_profile.hpp"
+#include "native_video_transport.hpp"
+#include "poc_protocol.hpp"
+#include "secure_input_broker.hpp"
+#include "time_utils.hpp"
+#include "udp_control_channel.hpp"
+#include "capture_backend_dxgi.hpp"
+#include "host_string_util.hpp"
+#include "host_log.hpp"
+#include "host_args.hpp"
+#include "host_bgra_scale.hpp"
+#include "host_bottleneck.hpp"
+#include "host_frame_state.hpp"
+#include "host_gpu_scaler.hpp"
+#include "host_window_enum.hpp"
+#include "host_capture_device.hpp"
+#include "host_net_io.hpp"
+#include "host_input_inject.hpp"
+#include "host_frame_gate.hpp"
+#include "host_abr.hpp"
+#include "host_kick.hpp"
+#include "host_client_metrics.hpp"
+#include "host_backend_policy.hpp"
+#include "host_watchdog.hpp"
+#include "host_input_router.hpp"
+#include "host_encoded_sender.hpp"
+#include "host_session.hpp"
+#include "prelogin_admin_pipe.hpp"
+#include "prelogin_ingress_policy.hpp"
+#include "prelogin_machine_record.hpp"
+#include "prelogin_machine_store.hpp"
+#include "prelogin_owner_floor.hpp"
+#include "prelogin_worker_binding.hpp"
+#include "host_encoder_manager.hpp"
+#include "host_stats.hpp"
+#include "host_capture_session.hpp"
+#include "host_control_session.hpp"
+#include "host_main_loop.hpp"
+#include "control_resume.hpp"
+#include "host_startup.hpp"
+
+#ifndef REMOTE60_NATIVE_ENCODED_EXPERIMENT
+#define REMOTE60_NATIVE_ENCODED_EXPERIMENT 0
+#endif
+
+using namespace winrt::Windows::Graphics::Capture;
+using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
+using remote60::host::DesktopCaptureBackend;
+using remote60::host::DxgiDesktopCaptureConfig;
+using remote60::host::DxgiDesktopCaptureSession;
+
+namespace remote60::native_poc {
+
+int startup_connect_client(HostContext& hx) {
+  auto& args = hx.args;
+  auto& transport = hx.transport;
+  auto& inputRouter = hx.inputRouter;
+  auto& sender = hx.sender;
+  auto& clientSession = hx.clientSession;
+  // After a backlog drop every delta references frames that never went out; shipping them
+  // paints macroblock corruption on the client until the next IDR. They are held back here
+  // until the requested keyframe actually passes through.
+  // Session media barrier. Bumped (under sender.mu) by the rollover transaction in pump_udp_hello;
+  // read by the sender at dequeue to fence any item stamped for a previous session. Every item is
+  // stamped with this value when enqueued. Starts at 1 to match clientSession.epoch.
+  // Set by the sender thread when a same-epoch transport error re-armed the barrier. The main loop
+  // consumes it at its top -> encoder.forceKeyNext + arm_trailing_kick, because sender.requestKey is only
+  // consumed after a real frame is popped: on a static desktop no new frame arrives to carry it, so
+  // the recovery IDR would never be produced. This is the only barrier-recovery signal that works
+  // when the screen is not changing. encoder.forceKeyNext must never be written from the sender thread.
+  // IDR telemetry written by the sender thread (per current media epoch): when the first key AU of
+  // this session hit the wire, and the size/chunk count of the last key AU sent. Reset by the
+  // rollover transaction so they describe the current session, not the previous one. Diagnostic
+  // only -- never wired into ABR evidence.
+  // The reader thread owns the peer address; the render loop picks up changes through these.
+  if (transport == VideoTransport::Tcp) {
+    clientSession.listenSock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (clientSession.listenSock == INVALID_SOCKET) {
+      std::cerr << "[native-video-host] listen socket create failed\n";
+      return 2;
+    }
+
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_port = htons(args.bindPort);
+    local.sin_addr.s_addr = resolve_bind_address(args.bindAddress);
+    if (bind(clientSession.listenSock, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) != 0) {
+      std::cerr << "[native-video-host] bind failed port=" << args.bindPort << "\n";
+      return 3;
+    }
+    if (listen(clientSession.listenSock, 1) != 0) {
+      std::cerr << "[native-video-host] listen failed\n";
+      return 4;
+    }
+
+    sockaddr_in peer{};
+    int peerLen = sizeof(peer);
+    hx.watchdog.EnterMainPhase(MainLoopPhase::WaitingForClient);
+    clientSession.clientSock = accept(clientSession.listenSock, reinterpret_cast<sockaddr*>(&peer), &peerLen);
+    hx.watchdog.MarkMainProgress(MainLoopPhase::Startup);
+    if (clientSession.clientSock == INVALID_SOCKET) {
+      std::cerr << "[native-video-host] accept failed\n";
+      return 5;
+    }
+
+    int noDelay = 1;
+    setsockopt(clientSession.clientSock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+  } else {
+    clientSession.clientSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (clientSession.clientSock == INVALID_SOCKET) {
+      std::cerr << "[native-video-host] udp socket create failed\n";
+      return 2;
+    }
+    sockaddr_in local{};
+    local.sin_family = AF_INET;
+    local.sin_addr.s_addr = resolve_bind_address(args.bindAddress);
+    // Walk the candidates in order and keep the first that binds. A failed bind leaves the
+    // socket unbound, so the next attempt can reuse it.
+    std::vector<uint16_t> portCandidates = args.bindPortCandidates;
+    if (portCandidates.empty()) portCandidates.push_back(args.bindPort);
+    bool udpBound = false;
+    for (const uint16_t candidate : portCandidates) {
+      local.sin_port = htons(candidate);
+      if (bind(clientSession.clientSock, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == 0) {
+        clientSession.mediaBindPort = candidate;
+        udpBound = true;
+        break;
+      }
+      std::cerr << "[native-video-host] udp bind failed port=" << candidate << "; trying next\n";
+    }
+    if (!udpBound) {
+      std::cerr << "[native-video-host] udp bind failed on every candidate port\n";
+      return 3;
+    }
+    std::cout << "[native-video-host] udp bound port=" << clientSession.mediaBindPort << "\n";
+    // pc2-connect-diag: which process holds this port, and on which address.
+    //
+    // One of the standing hypotheses for a wake that never arrives is that the tuple the
+    // directory aims at is owned, at that moment, by a different socket or a different
+    // process -- a previous run that has not exited, or a second instance. Said once at
+    // startup, this is what makes that checkable against the server's aim instead of
+    // argued about.
+    {
+      sockaddr_in bound{};
+      int boundLen = sizeof(bound);
+      char boundIp[INET_ADDRSTRLEN] = {};
+      if (getsockname(clientSession.clientSock, reinterpret_cast<sockaddr*>(&bound),
+                      &boundLen) == 0) {
+        inet_ntop(AF_INET, &bound.sin_addr, boundIp, sizeof(boundIp));
+      }
+      std::cout << "[native-video-host][dir-socket] media bind=" << boundIp << ":"
+                << ntohs(bound.sin_port) << " pid=" << GetCurrentProcessId() << "\n";
+    }
+
+    // Keep the last candidate listening as well, so dialling this PC by address still works.
+    //
+    // The candidate list exists to move the host onto a port restrictive networks allow, and
+    // moving it is exactly what breaks the other way in: both clients default to the legacy port
+    // when someone types an address by hand. The directory path is unaffected -- it dials
+    // hostPublicUdpPort, which follows whatever the primary socket was given -- but a LAN user
+    // has nothing telling them the port changed.
+    //
+    // Only the handshake watches both. Whichever socket the Hello arrives on becomes the media
+    // socket and everything downstream is unchanged, so a session that never uses this listener
+    // behaves exactly as it did before.
+    // r6 G2: no LAN direct-dial fallback in prelogin -- a directory failure/absence means OFFLINE, not a
+    // second, unauthenticated ingress. The only prelogin ingress is the authenticated directory session.
+    const uint16_t lanPort =
+        (portCandidates.size() > 1 && remote60::native_poc::prelogin::PreloginAllowsSideChannel(args.preloginMode))
+            ? portCandidates.back()
+            : 0;
+    if (lanPort != 0 && lanPort != clientSession.mediaBindPort) {
+      clientSession.lanSock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+      if (clientSession.lanSock != INVALID_SOCKET) {
+        sockaddr_in lanAddr{};
+        lanAddr.sin_family = AF_INET;
+        lanAddr.sin_port = htons(lanPort);
+        lanAddr.sin_addr.s_addr = resolve_bind_address(args.bindAddress);
+        if (bind(clientSession.lanSock, reinterpret_cast<const sockaddr*>(&lanAddr), sizeof(lanAddr)) == 0) {
+          std::cout << "[native-video-host] lan direct-dial listener port=" << lanPort << "\n";
+        } else {
+          // Not fatal: the primary socket is the one that matters, and the usual reason this
+          // fails is another GNLink host already holding the legacy port.
+          std::cout << "[native-video-host] lan direct-dial listener unavailable port=" << lanPort
+                    << "\n";
+          closesocket(clientSession.lanSock);
+          clientSession.lanSock = INVALID_SOCKET;
+        }
+      }
+    }
+
+    // The directory agent shares this socket on purpose: the public address it publishes has
+    // to be the one NAT maps for the media stream, and that is a property of this socket.
+    // Prelogin (r4 #3): the SYSTEM worker has no per-user host.json, so load the directory credential
+    // from the DPAPI-sealed machine record and register/heartbeat as the machine -- this is what makes
+    // the box visible in the client list at the login screen. No record (or disabled) -> stays offline.
+    std::string preloadHostId, preloadHostToken;
+    if (args.preloginMode) {
+      // r6 V5: in --prelogin the machine record is the ONLY credential -- directory arguments and
+      // REMOTE60_DIRECTORY_* were cleared at config time, so nothing can stand in for it.
+      std::wstring recPath;
+      remote60::native_poc::prelogin::MachineRecord rec;
+      uint32_t w = 0;
+      auto readStatus = remote60::native_poc::prelogin::MachineStoreStatus::Read;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+      // TEST BUILD ONLY (GNLinkStreamMigrationTest): the record a test sealed (machine-scope DPAPI, the
+      // product's format) in its own root, named by GNLINK_STREAM_TEST_MACHINE_RECORD. The G5 owner check
+      // on the folder is NOT applied (a non-elevated test cannot make a SYSTEM-owned folder); the
+      // unseal, the binding (machine id + floor) and everything after are the product's.
+      readStatus = remote60::native_poc::prelogin::ReadAndOpenMachineRecordForTest(&recPath, &rec, &w);
+#else
+      wchar_t programData[MAX_PATH] = {};
+      if (GetEnvironmentVariableW(L"ProgramData", programData, MAX_PATH) != 0) {
+        recPath = std::wstring(programData) + L"\\GNLink\\credential\\machine.cred";
+        readStatus = remote60::native_poc::prelogin::ReadAndOpenMachineRecord(recPath, &rec, &w);
+      }
+#endif
+      {
+        if (readStatus == remote60::native_poc::prelogin::MachineStoreStatus::Ok) {
+          // r6 G6: adopt ONLY a record that is Usable under the SAME binding the service gate uses --
+          // current machine id + the durable owner floor. A server-revoke/floor-raise, a copied blob, a
+          // wrong-machine record, or a floor that cannot be read all keep the worker OFFLINE, rather than
+          // the old `enabled && Unpack` that ignored the revoke.
+          uint64_t floor = 0;
+          const bool floorKnown = remote60::native_poc::prelogin::ReadPreloginOwnerFloor(&floor);
+          remote60::native_poc::prelogin::DirectoryCredential dc;
+          // r6 V7: and only for the product's own server -- a record naming any other address is not
+          // used, whoever wrote it.
+          const bool ownServer = remote60::native_poc::directory::directory_origin_key(rec.directoryOrigin) ==
+                                 remote60::native_poc::directory::directory_origin_key(
+                                     remote60::native_poc::prelogin::PreloginAllowedDirectoryUrl());
+          // r9 R1/R2: a revoke still owed (sign-out / uninstall), or a mark that cannot be read: offline.
+          const bool revokeOwed = remote60::native_poc::prelogin::ReadPreloginRevokePending() != 0;
+          if (revokeOwed) {
+            std::cout << "[native-video-host][prelogin] pre-login access is being withdrawn -> staying offline\n";
+          } else if (!ownServer) {
+            std::cout << "[native-video-host][prelogin] machine credential names another server -> staying offline\n";
+          } else if (remote60::native_poc::prelogin::PreloginWorkerAdopts(
+                         rec, remote60::native_poc::directory::machine_id(), floorKnown, floor) &&
+                     remote60::native_poc::prelogin::UnpackDirectoryCredential(rec.credential, &dc)) {
+            clientSession.directoryUrl = rec.directoryOrigin;
+            clientSession.directoryId = dc.accountId;
+            preloadHostId = dc.hostId;
+            preloadHostToken = dc.hostToken;
+            std::cout << "[native-video-host][prelogin] machine credential loaded hostId=" << dc.hostId << "\n";
+          } else {
+            std::cout << "[native-video-host][prelogin] machine credential revoked/unbound -> staying offline\n";
+          }
+        } else {
+          // Distinguish a genuinely un-enrolled box (no file) from a read/validation error.
+          std::cout << "[native-video-host][prelogin] "
+                    << (readStatus == remote60::native_poc::prelogin::MachineStoreStatus::Read
+                            ? "no machine credential enrolled"
+                            : "machine credential unreadable")
+                    << " -> staying offline\n";
+        }
+      }
+    }
+    if (!clientSession.directoryUrl.empty()) {
+      remote60::native_poc::directory::HostAgentConfig dirCfg;
+      dirCfg.url = clientSession.directoryUrl;
+      dirCfg.accountId = clientSession.directoryId;
+      dirCfg.password = clientSession.directoryPw;
+      dirCfg.preloadedHostId = preloadHostId;
+      dirCfg.preloadedHostToken = preloadHostToken;
+      dirCfg.hostName = args.directoryHostName;
+      dirCfg.observeUdpPort = args.directoryObservePort;
+      dirCfg.localUdpPort = clientSession.mediaBindPort;
+      // The legacy/alternate listener from N6. Publishing it is what lets a client whose network
+      // filters the primary port have something else to dial.
+      dirCfg.alternateUdpPort = lanPort;
+      dirCfg.heartbeatSeconds = env_u32_clamped("REMOTE60_DIRECTORY_HEARTBEAT_SEC", 25, 5, 300);
+      // Former names of the product's server, and only when that is the server this host was
+      // started against. Decided by the address, not by an argument: there is none for it.
+      dirCfg.migratableOrigins =
+          remote60::native_poc::directory::product_migratable_origins_for(dirCfg.url);
+      // Resolved here rather than left for the agent, so the path it will actually write can be
+      // said out loud BEFORE registration -- which is what lets a test confirm it is not the
+      // user's real file. (RV-00)
+      dirCfg.cachePath = args.directoryCachePath.empty()
+                             ? remote60::native_poc::directory::default_host_cache_path()
+                             : args.directoryCachePath;
+      std::cout << "[native-video-host] directory cache path=" << dirCfg.cachePath
+                << (args.directoryCachePath.empty() ? " (default)" : " (--directory-cache)")
+                << "\n" << std::flush;
+      std::string dirError;
+      const bool started = clientSession.directoryAgent.Start(
+          dirCfg,
+          [clientSock = clientSession.clientSock](const void* data, size_t len, const sockaddr_in& to) {
+            (void)sendto(clientSock, static_cast<const char*>(data), static_cast<int>(len), 0,
+                         reinterpret_cast<const sockaddr*>(&to), sizeof(to));
+          },
+          &dirError);
+      if (!started) {
+        // Not fatal: direct LAN connections still work, so say why and carry on.
+        std::cerr << "[native-video-host] directory disabled: " << dirError << "\n";
+      } else {
+        std::cout << "[native-video-host] directory agent started url=" << clientSession.directoryUrl << "\n";
+        // r4 #7: this user Host reached its ready point (directory-registered + about to serve). Tell the
+        // prelogin service so it completes the prelogin->user handoff on a real signal, not process life.
+        // The prelogin worker is not a handoff target and does not signal.
+        // prelogin-ui r2 (item 7): ready goes to the service over its admin pipe, where it is tied to
+        // this process's session and start time (the named event any admin process could set is gone).
+        if (!args.preloginMode) {
+          // r12 L1: on the session's own notifier -- stopped (and joined) before the directory agent it
+          // reads, at shutdown and at any earlier unwind (host_session.hpp, host_shutdown.cpp).
+          remote60::native_poc::prelogin::UserHostReadyNotifier::Options readyOptions;
+          // r11 U4: and again for as long as this host runs -- a service that starts or restarts after it
+          // adopts its GNLinkHost and needs this ready to hand over.
+          readyOptions.refreshMs = remote60::native_poc::prelogin::kUserHostReadyRefreshMs;
+          clientSession.readyNotifier.Start(
+              // "online" is set by a successful heartbeat; "punching" only right after one (it carried
+              // capabilities) -- either says the directory accepted this host.
+              [&agent = clientSession.directoryAgent] {
+                const std::string s = agent.StatusLine();
+                return s.rfind("online", 0) == 0 || s.rfind("punching", 0) == 0;
+              },
+              readyOptions);
+        }
+      }
+    }
+
+    for (;;) {
+      hx.watchdog.EnterMainPhase(MainLoopPhase::WaitingForClient);
+      // Wait on the primary and, when present, the legacy direct-dial listener. Reading only the
+      // primary would leave a LAN client's Hello sitting unanswered forever.
+      SOCKET readySock = clientSession.clientSock;
+      if (clientSession.lanSock != INVALID_SOCKET) {
+        fd_set readSet;
+        FD_ZERO(&readSet);
+        FD_SET(clientSession.clientSock, &readSet);
+        FD_SET(clientSession.lanSock, &readSet);
+        timeval wait{};
+        wait.tv_sec = 1;
+        const int ready = select(0, &readSet, nullptr, nullptr, &wait);
+        if (ready == 0) continue;
+        if (ready == SOCKET_ERROR) {
+          std::cerr << "[native-video-host] udp handshake select failed err=" << WSAGetLastError()
+                    << "\n";
+              return 5;
+        }
+        // The primary wins a tie: it is the one the directory published.
+        readySock = FD_ISSET(clientSession.clientSock, &readSet) ? clientSession.clientSock : clientSession.lanSock;
+      }
+
+      // Big enough for the directory's observation reply; a datagram larger than the buffer
+      // would be dropped with WSAEMSGSIZE and taken for a handshake failure.
+      uint8_t rx[kUdpReceiveBufferBytes];
+      sockaddr_in peer{};
+      int peerLen = sizeof(peer);
+      const int n = recvfrom(readySock, reinterpret_cast<char*>(rx), sizeof(rx), 0,
+                             reinterpret_cast<sockaddr*>(&peer), &peerLen);
+      // Zero-length datagrams are legal (NAT keepalives, scanners) and must not end the
+      // process while it waits for a real client.
+      if (n == 0) continue;
+      if (n < 0) {
+        const int err = WSAGetLastError();
+        if (err == WSAEMSGSIZE || err == WSAECONNRESET) continue;
+        std::cerr << "[native-video-host] udp handshake recv failed err=" << err << "\n";
+          return 5;
+      }
+      hx.watchdog.MarkMainProgress(MainLoopPhase::Startup);
+      UdpHelloPacket hello{};
+      bool isHello = n >= static_cast<int>(sizeof(UdpHelloPacket));
+      if (isHello) {
+        std::memcpy(&hello, rx, sizeof(hello));
+        isHello = hello.magic == remote60::native_poc::kMagic &&
+                  hello.kind == static_cast<uint16_t>(UdpPacketKind::Hello) &&
+                  hello.version == remote60::native_poc::kUdpProtocolVersion &&
+                  (hello.features & remote60::native_poc::kUdpFeatureVideoFec) != 0;
+      }
+      if (!isHello) {
+        // Only the primary socket carries directory traffic; the legacy listener never had a
+        // punch or an observation sent to it, and feeding it in would let unrelated LAN noise
+        // interrupt the heartbeat.
+        if (readySock == clientSession.clientSock) {
+          (void)clientSession.directoryAgent.ConsumeUdpPacket(rx, static_cast<size_t>(n), peer);
+        }
+        continue;
+      }
+
+      sender.fecInterleaved.store(
+          (hello.features & remote60::native_poc::kUdpFeatureVideoFecInterleaved) != 0,
+          std::memory_order_relaxed);
+
+      UdpHelloPacket ack{};
+      ack.kind = static_cast<uint16_t>(UdpPacketKind::HelloAck);
+      ack.features = remote60::native_poc::kUdpFeatureVideoFec |
+                     (hello.features & remote60::native_poc::kUdpFeatureVideoFecInterleaved);
+      // Video NACK: advertise host support; serve retransmits only if the client asked. (video NACK.)
+      ack.features |= remote60::native_poc::kUdpFeatureVideoNack;
+      sender.nackEnabled.store((hello.features & remote60::native_poc::kUdpFeatureVideoNack) != 0,
+                               std::memory_order_relaxed);
+      // Control resume (item 8). Advertised here as well as on the reader thread's Hello path
+      // -- and this is the one that matters, because it is the handshake EVERY session makes.
+      // The reader's copy (host_startup_control.cpp) only ever sees a later Hello, which is a
+      // client arriving on a host that already has one; a first connection never reached it,
+      // so the bit was never offered and controlResumeNegotiated was never set. The feature
+      // could not negotiate at all, which is what the end-to-end run found and what neither
+      // side's unit tests could: each half was correct about a handshake that never happened.
+      ack.features |= remote60::native_poc::kUdpFeatureControlResume;
+      clientSession.controlResumeNegotiated.store(
+          remote60::native_poc::host_resume_negotiated(hello.features),
+          std::memory_order_release);
+      // C0 stage 1: advertised on this path too, for the reason given just above -- this is the
+      // handshake every session makes. Found the same way: the observation e2e saw features=0x3A.
+      ack.features |= remote60::native_poc::kUdpFeatureBandwidthObserve;
+      // Clipboard image v1: this path too, for the same reason -- the handshake every session makes.
+      // The reader thread's copy alone never saw a first connection, so the bulk channel could not
+      // negotiate (found by the harness against the real host: "the host acknowledged the bulk
+      // channel" FAILED). "Available", not "running": the service starts after this answer.
+      const bool bulkOffered = (hello.features & remote60::native_poc::kUdpFeatureBulkChannel) != 0 &&
+                               ((clientSession.clipImage && clientSession.clipImage->Available()) ||
+                                (clientSession.fileCopy && clientSession.fileCopy->Advertised()));
+      if (bulkOffered) ack.features |= remote60::native_poc::kUdpFeatureBulkChannel;
+      size_t tokenLen = 0;
+      while (tokenLen < sizeof(hello.authToken) && hello.authToken[tokenLen] != '\0') ++tokenLen;
+      bool helloAuthenticated = false;
+      if (tokenLen > 0) {
+        const std::string authToken(hello.authToken, hello.authToken + tokenLen);
+        if (!clientSession.AuthorizeDirectorySession(authToken, peer)) {
+          std::cerr << "[native-video-host] rejected udp hello with invalid directory capability\n";
+          continue;
+        }
+        // r9 R3: the first session, admitted by the capability: its epoch's standing, then the flag.
+        (void)clientSession.AdmitHello(/*directoryAuth=*/true, /*startsSession=*/false);
+        ack.features |= remote60::native_poc::kUdpFeatureDirectoryAuth;
+        helloAuthenticated = true;
+      }
+      // r6 G2: in prelogin the login screen is exposed, so a token-less FIRST Hello must be refused
+      // BEFORE any peer/media state is adopted -- not only subsequent Hellos. Only an authenticated
+      // directory capability may open a prelogin session.
+      if (!remote60::native_poc::prelogin::PreloginAdmitFirstHello(args.preloginMode, helloAuthenticated)) {
+        std::cerr << "[native-video-host][prelogin] refusing token-less hello (authentication required)\n";
+        continue;
+      }
+      // Accepted: whether this client asked for bandwidth observation is its to decide.
+      clientSession.bandwidthObserveNegotiated.store(
+          (hello.features & remote60::native_poc::kUdpFeatureBandwidthObserve) != 0,
+          std::memory_order_release);
+      if (clientSession.clipImage) clientSession.clipImage->SetBulkNegotiated(bulkOffered);
+      (void)sendto(readySock, reinterpret_cast<const char*>(&ack), sizeof(ack), 0,
+                   reinterpret_cast<const sockaddr*>(&peer), peerLen);
+
+      // The socket that answered becomes the media socket for the rest of the session, so
+      // everything downstream keeps using clientSession.clientSock exactly as before.
+      if (readySock != clientSession.clientSock) {
+        std::cout << "[native-video-host] client arrived on the lan direct-dial listener; "
+                     "media moves to port "
+                  << lanPort << "\n";
+        // The directory agent captured the primary socket and must keep heartbeating on it, so
+        // it is retired rather than closed -- otherwise the host drops off the directory the
+        // moment someone connects over the LAN.
+        clientSession.retiredSock = clientSession.clientSock;
+        clientSession.clientSock = clientSession.lanSock;
+        clientSession.lanSock = INVALID_SOCKET;
+      } else if (clientSession.lanSock != INVALID_SOCKET) {
+        closesocket(clientSession.lanSock);
+        clientSession.lanSock = INVALID_SOCKET;
+      }
+
+      sender.udpPeer = peer;
+      sender.udpPeerReady = true;
+      {
+        std::lock_guard<std::mutex> lk(sender.mu);
+        sender.peer = peer;
+        sender.peerReady = true;
+      }
+      sender.udpPeerIpNet.store(peer.sin_addr.s_addr, std::memory_order_release);
+      sender.udpPeerPortNet.store(peer.sin_port, std::memory_order_release);
+      break;
+    }
+    // Stays blocking: a dedicated reader thread now owns receives, and control messages must
+    // not wait for the next render-loop iteration. The timeout only exists so that thread can
+    // notice shutdown.
+    (void)remote60::native_poc::set_recv_timeout(clientSession.clientSock, 200);
+  }
+
+  if (clientSession.directoryAuthenticated.load(std::memory_order_acquire)) {
+    std::string secureInputStatus;
+    const std::wstring servicePath = remote60::native_poc::sibling_executable_path(
+        L"GNLinkInputService.exe");
+    const bool secureInputReady =
+        inputRouter.broker.EnsureInstalledAndConnected(servicePath, &secureInputStatus);
+    std::cout << "[native-video-host] secure-input ready=" << (secureInputReady ? 1 : 0)
+              << " status=" << secureInputStatus << "\n";
+  }
+
+  if (transport == VideoTransport::Udp && args.tcpSendBufKb == 0) {
+    const int sendBuf = 1024 * 1024;
+    (void)setsockopt(clientSession.clientSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
+  }
+  if (args.tcpSendBufKb > 0) {
+    const int sendBuf = static_cast<int>(args.tcpSendBufKb * 1024u);
+    setsockopt(clientSession.clientSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
+  }
+  int effectiveSendBuf = 0;
+  int effectiveSendBufLen = sizeof(effectiveSendBuf);
+  (void)getsockopt(clientSession.clientSock, SOL_SOCKET, SO_SNDBUF,
+                   reinterpret_cast<char*>(&effectiveSendBuf), &effectiveSendBufLen);
+  std::cout << "[native-video-host] client connected transport=" << video_transport_name(transport) << "\n";
+  std::cout << "[native-video-host] socket sndbuf=" << effectiveSendBuf << " bytes\n";
+  return 0;
+}
+
+}  // namespace remote60::native_poc

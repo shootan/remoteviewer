@@ -1,0 +1,1 @@
+{"repo_path": "C:/work/gnlink-wt/ka-r3", "message": "docs(test): the punch test's top comment says what is known of the old deletes, as the report does (keepalive-r2 FINDING r4 note)\n\nThe test never made that file; whether one was there before and what each delete returned was\nnot recorded.\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"}

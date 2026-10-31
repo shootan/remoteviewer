@@ -1,0 +1,17 @@
+{
+  "accounts": {
+    "tester": {
+      "id": "tester",
+      "salt": "08525cda8864e66aec73e8b99857139d",
+      "hash": "d959a9cc2d9b88dfd5efb887717de1966fa0a1c8b2c436a88fdc23254e71ed1d",
+      "status": "active",
+      "createdAt": 1793124966841,
+      "updatedAt": 1793124966841,
+      "approvedAt": 1793124966841,
+      "memo": "",
+      "lastLoginAt": 1793124968486
+    }
+  },
+  "hosts": {},
+  "devices": {}
+}

@@ -1,0 +1,380 @@
+diff --git a/apps/native_poc/CMakeLists.txt b/apps/native_poc/CMakeLists.txt
+index 25e9f7c..b37d8f7 100644
+--- a/apps/native_poc/CMakeLists.txt
++++ b/apps/native_poc/CMakeLists.txt
+@@ -1,5 +1,10 @@
+ # The WebView2 SDK is a NuGet package of headers and a static loader, fetched into third_party
+ add_executable(remote60_recovery_process_test src/recovery_process_test.cpp src/udp_control_channel.cpp)
++# old-ref r1: the control channel's test-only ACK / head record (REMOTE60_CONTROL_CLOSE_DIAG) -- peer-lost and normal
++add_executable(remote60_udp_control_close_diag_test src/udp_control_close_diag_test.cpp src/udp_control_channel.cpp)
++target_include_directories(remote60_udp_control_close_diag_test PRIVATE src)
++target_compile_definitions(remote60_udp_control_close_diag_test PRIVATE REMOTE60_CONTROL_CLOSE_DIAG=1)
++target_link_libraries(remote60_udp_control_close_diag_test PRIVATE ws2_32)
+ target_include_directories(remote60_recovery_process_test PRIVATE src)
+ target_link_libraries(remote60_recovery_process_test PRIVATE ws2_32)
+ add_executable(remote60_winhttp_recovery_test src/winhttp_recovery_test.cpp src/winhttp_transport.cpp)
+@@ -202,6 +207,7 @@ set_target_properties(remote60_native_video_host_pinned_select PROPERTIES
+ target_include_directories(remote60_native_video_host_pinned_select PRIVATE src)
+ target_compile_definitions(remote60_native_video_host_pinned_select PRIVATE
+   REMOTE60_PINNED_SELECT_TEST_SEAM=1
++  REMOTE60_CONTROL_CLOSE_DIAG=1
+   REMOTE60_NATIVE_ENCODED_EXPERIMENT=${_native_encoded_compile_value}
+ )
+ target_link_libraries(remote60_native_video_host_pinned_select PRIVATE
+diff --git a/apps/native_poc/src/host_startup_control.cpp b/apps/native_poc/src/host_startup_control.cpp
+index 9d5d159..24eeec6 100644
+--- a/apps/native_poc/src/host_startup_control.cpp
++++ b/apps/native_poc/src/host_startup_control.cpp
+@@ -947,6 +947,9 @@ void startup_start_control_threads(HostContext& hx, ControlSessionServer& contro
+         std::cout << "[native-video-host][control] udp control session ended epoch=" << servedEpoch
+                   << " resumed=" << (resuming ? 1 : 0)
+                   << " reason=" << remote60::native_poc::to_string(clientSession.udpControlChannel.CloseReason())
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++                  << " " << clientSession.udpControlChannel.CloseDiagLine()  // old-ref r1 (test build only)
++#endif
+                   << "\n";
+       }
+     });
+diff --git a/apps/native_poc/src/udp_control_channel.cpp b/apps/native_poc/src/udp_control_channel.cpp
+index 31c71ab..c2753eb 100644
+--- a/apps/native_poc/src/udp_control_channel.cpp
++++ b/apps/native_poc/src/udp_control_channel.cpp
+@@ -74,6 +74,9 @@ void UdpControlChannel::Reset() {
+   // Without this the next client's first message looks like one already delivered, and
+   // HandleData answers it with an ack while dropping the data -- alive on the wire, deaf above.
+   rxDeliveredSeq_ = 0;
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++  diag_ = CloseDiag{};
++#endif
+   closeReason_.store(ControlCloseReason::None, std::memory_order_relaxed);
+   shutdown_.store(false, std::memory_order_relaxed);  // Reset is a new session, as it always was
+   closed_.store(false, std::memory_order_relaxed);
+@@ -148,6 +151,50 @@ void UdpControlChannel::StartProbe(uint32_t maxAttempts, uint64_t intervalUs) {
+   SendProbeChunk();
+ }
+ 
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++int UdpControlChannel::HeaderType(const std::vector<uint8_t>& payload) {
++  if (payload.size() < sizeof(MessageHeader)) return -1;
++  MessageHeader h{};
++  std::memcpy(&h, payload.data(), sizeof(h));  // the header only: magic, type, size
++  return h.magic == kMagic ? static_cast<int>(h.type) : -1;
++}
++
++std::string UdpControlChannel::CloseDiagLine() const {
++  std::lock_guard<std::mutex> lock(mu_);
++  const uint64_t now = now_us();
++  auto ago = [now](uint64_t t) { return t == 0 ? std::string("-") : std::to_string((now - t) / 1000); };
++  std::string line = "diag{ack seen=" + std::to_string(diag_.acksSeen) +
++                     " wrongStream=" + std::to_string(diag_.acksWrongStream) +
++                     " accepted=" + std::to_string(diag_.acksAccepted) + " stale=" + std::to_string(diag_.acksStale) +
++                     " probe=" + std::to_string(diag_.probeAcks) + " nack=" + std::to_string(diag_.nacks) +
++                     " afterClose=" + std::to_string(diag_.acksAfterClose) +
++                     " lastSeenSeq=" + std::to_string(diag_.lastSeenSeq) + " lastSeenAgoMs=" + ago(diag_.lastSeenUs) +
++                     " lastAcceptedAgoMs=" + ago(diag_.lastAcceptedUs) +
++                     " lastAckedTxSeq=" + std::to_string(lastAckedTxSeq_) + "}";
++  if (txQueue_.empty()) {
++    line += " head{none}";
++  } else {
++    const Outbound& h = txQueue_.front();
++    line += " head{seq=" + std::to_string(h.seq) + " type=" + std::to_string(HeaderType(h.payload)) +
++            " attempts=" + std::to_string(h.attempts) + " frags=" + std::to_string(h.fragCount) +
++            " queue=" + std::to_string(txQueue_.size()) + " firstSendAgoMs=" + ago(h.firstSendUs) +
++            " lastSendAgoMs=" + ago(h.lastSendUs) + "}";
++  }
++  if (diag_.lost) {
++    line += " lost{seq=" + std::to_string(diag_.lostSeq) + " type=" + std::to_string(diag_.lostType) +
++            " attempts=" + std::to_string(diag_.lostAttempts) + " frags=" + std::to_string(diag_.lostFrags) +
++            " queue=" + std::to_string(diag_.lostQueue) + " waitedMs=" +
++            (diag_.lostFirstSendUs ? std::to_string((diag_.lostAtUs - diag_.lostFirstSendUs) / 1000) : std::string("-")) +
++            " agoMs=" + ago(diag_.lostAtUs) + "}";
++  } else {
++    line += " lost{none}";
++  }
++  line += " rx{deliveredSeq=" + std::to_string(rxDeliveredSeq_) + " pending=" + std::to_string(rxPending_.size()) +
++          " ready=" + std::to_string(rxReady_.size()) + "}";
++  return line;
++}
++#endif
++
+ const char* to_string(ControlCloseReason reason) {
+   switch (reason) {
+     case ControlCloseReason::PeerLost: return "peer-lost";
+@@ -235,6 +282,9 @@ bool UdpControlChannel::Send(const void* data, size_t len) {
+   msg.fragCount = static_cast<uint16_t>((len + fragBytes_ - 1) / fragBytes_);
+   msg.lastSendUs = now_us();
+   msg.attempts = 1;
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++  msg.firstSendUs = txQueue_.empty() ? msg.lastSendUs : 0;  // a queued one starts when it becomes the head
++#endif
+   txQueue_.push_back(std::move(msg));
+   ++stats_.messagesSent;
+ 
+@@ -324,11 +374,22 @@ void UdpControlChannel::HandleAck(const UdpControlAckPacket& packet) {
+       packet.kind == static_cast<uint16_t>(UdpPacketKind::ControlAck)) {
+     probeState_ = ControlProbeState::Alive;
+     probeDecidedUs_ = now_us();
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++    ++diag_.probeAcks;
++#endif
++    return;
++  }
++  if (txQueue_.empty() || txQueue_.front().seq != packet.messageSeq) {
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++    ++diag_.acksStale;
++#endif
+     return;
+   }
+-  if (txQueue_.empty() || txQueue_.front().seq != packet.messageSeq) return;
+ 
+   if (packet.kind == static_cast<uint16_t>(UdpPacketKind::ControlNack)) {
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++    ++diag_.nacks;
++#endif
+     std::vector<uint16_t> missing(packet.missing, packet.missing + packet.missingCount);
+     if (!missing.empty()) SendFragments(txQueue_.front(), &missing);
+     txQueue_.front().lastSendUs = now_us();
+@@ -337,6 +398,11 @@ void UdpControlChannel::HandleAck(const UdpControlAckPacket& packet) {
+ 
+   lastAckedTxSeq_ = packet.messageSeq;
+   txQueue_.pop_front();
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++  ++diag_.acksAccepted;
++  diag_.lastAcceptedUs = now_us();
++  if (!txQueue_.empty()) txQueue_.front().firstSendUs = diag_.lastAcceptedUs;
++#endif
+   if (!txQueue_.empty()) {
+     txQueue_.front().lastSendUs = now_us();
+     txQueue_.front().attempts = 1;
+@@ -383,6 +449,11 @@ bool UdpControlChannel::OnPacket(const void* data, size_t len) {
+   if (!mine) return false;
+ 
+   std::lock_guard<std::mutex> lock(mu_);
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++  if (closed_.load(std::memory_order_relaxed) && kind != static_cast<uint16_t>(UdpPacketKind::ControlData)) {
++    ++diag_.acksAfterClose;
++  }
++#endif
+   if (closed_.load(std::memory_order_relaxed)) return true;
+   if (kind == static_cast<uint16_t>(UdpPacketKind::ControlData)) {
+     if (len < sizeof(UdpControlChunkHeader)) return true;
+@@ -399,6 +470,12 @@ bool UdpControlChannel::OnPacket(const void* data, size_t len) {
+     if (len < sizeof(UdpControlAckPacket)) return true;
+     UdpControlAckPacket packet{};
+     std::memcpy(&packet, bytes, sizeof(packet));
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++    ++diag_.acksSeen;
++    diag_.lastSeenSeq = packet.messageSeq;
++    diag_.lastSeenUs = now_us();
++    if (packet.streamId != txStreamId_) ++diag_.acksWrongStream;
++#endif
+     // Acks refer to the stream we transmit on.
+     if (packet.streamId != txStreamId_) return true;
+     if (packet.missingCount > kUdpControlMaxMissingPerNack) return true;
+@@ -432,6 +509,17 @@ void UdpControlChannel::Tick() {
+     Outbound& head = txQueue_.front();
+     if (now - head.lastSendUs >= timings_.retransmitIntervalUs) {
+       if (++head.attempts > timings_.maxAttempts) {
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++        diag_.lost = true;
++        diag_.lostSeq = head.seq;
++        diag_.lostAttempts = head.attempts;
++        diag_.lostFrags = head.fragCount;
++        diag_.lostQueue = txQueue_.size();
++        diag_.lostFirstSendUs = head.firstSendUs;
++        diag_.lostLastSendUs = head.lastSendUs;
++        diag_.lostAtUs = now;
++        diag_.lostType = HeaderType(head.payload);
++#endif
+         auto expected = ControlCloseReason::None;
+         closeReason_.compare_exchange_strong(expected, ControlCloseReason::PeerLost,
+                                              std::memory_order_relaxed);
+diff --git a/apps/native_poc/src/udp_control_channel.hpp b/apps/native_poc/src/udp_control_channel.hpp
+index 25f69c5..af36197 100644
+--- a/apps/native_poc/src/udp_control_channel.hpp
++++ b/apps/native_poc/src/udp_control_channel.hpp
+@@ -19,6 +19,9 @@
+ #include <map>
+ #include <mutex>
+ #include <vector>
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++#include <string>
++#endif
+ 
+ #include "native_socket.hpp"
+ #include "poc_protocol.hpp"
+@@ -208,6 +211,11 @@ class UdpControlChannel {
+     return closeReason_.load(std::memory_order_relaxed);
+   }
+ 
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++  // TEST BUILD ONLY (old-ref r1): the channel's ACK / head record, one line (header fields only, no payload).
++  std::string CloseDiagLine() const;
++#endif
++
+   struct Stats {
+     uint64_t messagesSent = 0;
+     uint64_t messagesReceived = 0;
+@@ -226,6 +234,9 @@ class UdpControlChannel {
+     uint16_t fragCount = 0;
+     uint64_t lastSendUs = 0;
+     uint32_t attempts = 0;
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++    uint64_t firstSendUs = 0;  // when it first went out as the head
++#endif
+   };
+ 
+   struct Inbound {
+@@ -277,6 +288,26 @@ class UdpControlChannel {
+   std::deque<std::vector<uint8_t>> rxReady_;
+ 
+   Stats stats_;
++#ifdef REMOTE60_CONTROL_CLOSE_DIAG
++  struct CloseDiag {
++    uint64_t acksSeen = 0;          // ControlAck / ControlNack datagrams that reached OnPacket while open
++    uint64_t acksWrongStream = 0;   //   of them: for another stream (ignored)
++    uint64_t acksAfterClose = 0;    // ... and those that came after this channel had closed (dropped)
++    uint64_t acksAccepted = 0;      // the head's ACK: the head popped
++    uint64_t acksStale = 0;         // an ACK for no head / not the head's seq
++    uint64_t probeAcks = 0;         // the liveness probe's answer
++    uint64_t nacks = 0;             // a NACK for the head (fragments resent)
++    uint32_t lastSeenSeq = 0;       // the seq of the last ACK / NACK seen
++    uint64_t lastSeenUs = 0;
++    uint64_t lastAcceptedUs = 0;
++    bool lost = false;              // the head as it stood when retransmits ran out (peer-lost)
++    uint32_t lostSeq = 0, lostAttempts = 0, lostFrags = 0;
++    uint64_t lostQueue = 0, lostFirstSendUs = 0, lostLastSendUs = 0, lostAtUs = 0;
++    int lostType = -1;
++  };
++  CloseDiag diag_;
++  static int HeaderType(const std::vector<uint8_t>& payload);  // the MessageHeader type field, or -1
++#endif
+ };
+ 
+ /**
+diff --git a/apps/native_poc/src/udp_control_close_diag_test.cpp b/apps/native_poc/src/udp_control_close_diag_test.cpp
+new file mode 100644
+index 0000000..4ec1188
+--- /dev/null
++++ b/apps/native_poc/src/udp_control_close_diag_test.cpp
+@@ -0,0 +1,120 @@
++// old-ref r1 (Codex codex_old_apk_lane_peer_lost_decision_r1.md): UdpControlChannel's TEST-ONLY ACK / head record
++// (REMOTE60_CONTROL_CLOSE_DIAG) -- the line the PinnedSelectTest host appends to "udp control session ended". Two real
++// channels wired to each other in memory:
++//   * a peer that never ACKs -> peer-lost; the line names the head that ran out (seq, its control TYPE from the
++//     MessageHeader, attempts = maxAttempts + 1), ACKs accepted 0;
++//   * a normal exchange -> ACKs accepted, no head left, no peer-lost;
++//   * ACKs that arrive only after the channel closed are counted (afterClose), not accepted;
++//   * nothing of the payload past its header is ever in the line.
++// Tag: pure-logic (no socket).
++//
++//   remote60_udp_control_close_diag_test
++
++#include <chrono>
++#include <cstdio>
++#include <cstring>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include "udp_control_channel.hpp"
++
++using namespace remote60::native_poc;
++
++namespace {
++int gFailures = 0, gChecks = 0;
++void check(const std::string& name, bool cond, const std::string& detail = {}) {
++  ++gChecks;
++  std::printf("%s  %s%s%s\n", cond ? "PASS" : "FAIL", name.c_str(), detail.empty() ? "" : "  ", detail.c_str());
++  std::fflush(stdout);
++  if (!cond) ++gFailures;
++}
++// a control message as the host sends one: its MessageHeader, then a body that must never be logged
++std::vector<uint8_t> message(uint16_t type) {
++  const char body[] = "NEVER-LOGGED-BODY-0123456789";
++  std::vector<uint8_t> m(sizeof(MessageHeader) + sizeof(body));
++  MessageHeader h{};
++  h.type = type;
++  h.size = static_cast<uint16_t>(m.size());
++  std::memcpy(m.data(), &h, sizeof(h));
++  std::memcpy(m.data() + sizeof(h), body, sizeof(body));
++  return m;
++}
++struct Pair {
++  UdpControlChannel a, b;
++  std::vector<std::vector<uint8_t>> aOut, bOut;  // datagrams each side sent, not yet delivered
++  std::vector<std::vector<uint8_t>> bDropped;    // B's datagrams that never reached A (its ACKs)
++  Pair() {
++    a.Configure([this](const void* d, size_t n) { aOut.emplace_back((const uint8_t*)d, (const uint8_t*)d + n); return true; },
++                11, 22, 1200);
++    b.Configure([this](const void* d, size_t n) { bOut.emplace_back((const uint8_t*)d, (const uint8_t*)d + n); return true; },
++                22, 11, 1200);
++    UdpControlChannel::Timings t;
++    t.retransmitIntervalUs = 2000;
++    t.maxAttempts = 3;
++    a.SetTimings(t);
++    b.SetTimings(t);
++  }
++  // deliver what each side sent; dropBA: B's datagrams (its ACKs) never reach A
++  void pump(bool dropBA) {
++    auto ao = std::move(aOut); aOut.clear();
++    auto bo = std::move(bOut); bOut.clear();
++    for (auto& d : ao) b.OnPacket(d.data(), d.size());
++    if (!dropBA) for (auto& d : bo) a.OnPacket(d.data(), d.size());
++    else for (auto& d : bo) bDropped.push_back(d);
++  }
++};
++}  // namespace
++
++int main() {
++  std::printf("udp_control_close_diag_test (old-ref r1)\n");
++  {
++    Pair p;
++    const auto m = message(37);
++    p.a.Send(m.data(), m.size());
++    for (int i = 0; i < 200 && !p.a.IsClosed(); ++i) {
++      p.pump(true);
++      std::this_thread::sleep_for(std::chrono::milliseconds(3));
++      p.a.Tick();
++      p.b.Tick();
++    }
++    const std::string line = p.a.CloseDiagLine();
++    check("a peer that never ACKs: peer-lost", p.a.IsClosed() && p.a.CloseReason() == ControlCloseReason::PeerLost,
++          to_string(p.a.CloseReason()));
++    check("the line names the head that ran out: seq 1, its MessageHeader type 37, attempts maxAttempts + 1 (4)",
++          line.find("lost{seq=1 type=37 attempts=4 ") != std::string::npos, line);
++    check("... and that no ACK was accepted", line.find(" accepted=0 ") != std::string::npos);
++    check("nothing of the payload past its header is in the line", line.find("NEVER-LOGGED") == std::string::npos);
++    // the ACKs the peer did send, arriving only now: counted after the close, not accepted
++    // B acknowledged every copy it got; those ACK datagrams were dropped on the way -- delivered only now
++    size_t replayed = 0;
++    for (auto& d : p.bDropped) { p.a.OnPacket(d.data(), d.size()); ++replayed; }
++    const std::string after = p.a.CloseDiagLine();
++    check("ACKs arriving after the close: counted (afterClose), still none accepted",
++          replayed > 0 && after.find(" afterClose=0 ") == std::string::npos && after.find(" accepted=0 ") != std::string::npos,
++          "replayed=" + std::to_string(replayed) + " " + after.substr(0, 160));
++  }
++  {
++    Pair p;
++    for (uint16_t t = 40; t < 43; ++t) {
++      const auto m = message(t);
++      p.a.Send(m.data(), m.size());
++    }
++    std::vector<uint8_t> got;
++    int delivered = 0;
++    for (int i = 0; i < 200 && delivered < 3; ++i) {
++      p.pump(false);
++      p.a.Tick();
++      p.b.Tick();
++      while (p.b.Receive(&got, 0)) ++delivered;
++    }
++    for (int i = 0; i < 5; ++i) p.pump(false);
++    const std::string line = p.a.CloseDiagLine();
++    check("a normal exchange: all three delivered, three ACKs accepted, no head left, no peer-lost",
++          delivered == 3 && line.find(" accepted=3 ") != std::string::npos && line.find("head{none}") != std::string::npos &&
++              line.find("lost{none}") != std::string::npos && !p.a.IsClosed(), line);
++  }
++  std::printf("\nudp_control_close_diag_test: %d checks, %d failed\nRESULT: %s\n", gChecks, gFailures,
++              gFailures == 0 ? "PASS" : "FAIL");
++  return gFailures == 0 ? 0 : 1;
++}

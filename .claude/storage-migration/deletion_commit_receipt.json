@@ -1,0 +1,14 @@
+{
+  "commit": "25c9d4c85499b01634ff9b8130b26c72b3b7c6ea",
+  "files": [
+    "docs/history.md",
+    "docs/구현계획.md"
+  ],
+  "method": "current C-connected Git MCP",
+  "D_remote_exists": false,
+  "old_D_path_processes_at_final_check": 0,
+  "tracked_worktree_and_index": "clean",
+  "product_work_still_stopped": true,
+  "push_executed": false,
+  "user_next_action": "none"
+}

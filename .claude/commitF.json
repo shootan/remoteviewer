@@ -1,0 +1,4 @@
+{
+  "repo_path": "D:/remote/remote",
+  "message": "docs(comments): three numbers that were being read as more than they are\n\nComments only; no behaviour changes.\n\n- The observe-fetch cooldown is 2, 4, 6 CYCLES of the host loop, not seconds. At\n  the default 25 s heartbeat that is off by more than an order of magnitude if\n  read as seconds, and it was written without the unit.\n- After the attempt budget is spent, the asking stops for the rest of the\n  process's life. A directory given an observe port later is not picked up and\n  the host has to be restarted. That is the intended bound, but it is not\n  permanent self-recovery and the comment now says so instead of implying it.\n- The 5,997 ms shutdown figure is what one fixture measured against a loopback\n  server that accepts and never answers. It is a point on the stated bound, not a\n  ceiling for every https destination.\n\nRaised by Codex in the 0.2.109 review."
+}

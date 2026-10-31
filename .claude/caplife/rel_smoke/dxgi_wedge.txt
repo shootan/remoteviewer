@@ -1,0 +1,79 @@
+﻿PASS the fixture directory is up http://127.0.0.1:51898
+PASS the host window of process 25396 is on screen
+      (Text     id=1014  enabled=True  name='GNLink Host')
+      (Text     id=1007  enabled=True  name='Sign in once. This PC then appears in the phone app wherever you are.')
+      (Text     id=1016  enabled=True  name='ID')
+      (Edit     id=1002  enabled=True  name='ID')
+      (Text     id=1017  enabled=True  name='Password')
+      (Edit     id=1003  enabled=True  name='Password')
+      (Text     id=1018  enabled=True  name='This PC's name')
+      (Edit     id=1004  enabled=True  name='This PC's name')
+      (CheckBox id=1009  enabled=True  name='I don't have an account yet - create one')
+      (Button   id=1005  enabled=True  name='Sign in')
+      (Text     id=1006  enabled=True  name='Sign in to make this PC reachable.')
+      (Text     id=1024  enabled=True  name='v0.2.163')
+      (input fields shown: ID|Password|This PC's name)
+PASS the sign-in form shows ID, Password and the PC name, and no other input field
+PASS nothing shown on the sign-in form names a server or an advanced setting
+PASS the sign-in form is photographed: C:\work\gnlink-wt\rel-0163\.claude\test-tmp\dxgi-wedge-p17o9J\shots\0-host-signin.png
+PASS ID, Password and the Sign in button are all present
+PASS both fields accept input, and the password field hides what is typed
+PASS the ID field holds what was typed
+PASS the Sign in button is enabled and lies inside the window
+PASS nothing lies over the Sign in button
+      (Text     id=1014  enabled=True  name='GNLink Host')
+      (Text     id=1020  enabled=True  name='Account:  chain-user')
+      (Text     id=1021  enabled=True  name='This PC:  SHOTAN')
+      (Text     id=1022  enabled=True  name='STARTING')
+      (CheckBox id=1008  enabled=True  name='Start automatically when I sign in to Windows')
+      (CheckBox id=1025  enabled=False name='로그인 전에도 원격 접속 허용')
+      (Text     id=1026  enabled=True  name='재부팅 직후 Windows 로그인 화면에서도 이 PC에 접속합니다. 로그인 화면 입력은 관리자 계정·PC 뷰어로 가능하고(v1), 휴대폰에서의 로그인 입력은 다음 버전부터입니다.')
+      (Text     id=1027  enabled=True  name='')
+      (Button   id=1013  enabled=True  name='Change account')
+      (Button   id=1012  enabled=True  name='Sign out')
+      (Button   id=1023  enabled=True  name='Open log')
+      (Text     id=1006  enabled=True  name='The streaming host is starting...')
+      (Text     id=1024  enabled=True  name='v0.2.163')
+PASS the status card is shown
+      (status card: Account:  chain-user)
+PASS the card names the account that signed in: chain-user
+PASS no input field is shown once signed in
+PASS Sign out is offered
+PASS the status card is photographed: C:\work\gnlink-wt\rel-0163\.claude\test-tmp\dxgi-wedge-p17o9J\shots\0-host-signedin.png
+host_login_uia: ALL PASS
+PASS the supervised streaming child is online at the fixture directory
+      (scenario: desktop)
+PASS [   0.0s] the product shell's WebView starts
+PASS [   0.6s] the sign-in form is up
+PASS [   0.9s] signed in to the fixture directory: the PC list is shown
+PASS [   0.9s] the test host is listed and can be pressed
+PASS [   1.0s] the shell started the real GNLinkViewer  pid=0
+PASS [   1.8s] the viewer connected through the directory and painted its picker
+PASS [   1.8s] the viewer window is found by its process
+PASS [   2.8s] screenshot 1: the picker (before any pick)  pickerBg=24.6% colors=4771
+PASS [   3.4s] the desktop card pressed: confirmed by the host, its frame PRESENTED, reported to the shell
+      (reported: desktop)
+PASS [   5.0s] screenshot 2: session 1 shows the stream, not the picker (negative control: screenshot 1 is the picker)  picker: pickerBg=24.6% colors=4771 / stream: pickerBg=0.0% colors=5000
+      (wedge file created at 5.0s)
+PASS [  22.6s] the viewer's session died and the shell scheduled the reconnect
+      (viewer exit operation=1 code=43 ranMs=21562 reconnect=scheduled attempt=1 delayMs=1000 host=fb8129a32749c38d restore=desktop
+)
+PASS [  22.6s] the reconnect carries the reported target (restore=desktop)
+PASS [  23.6s] the shell started a NEW viewer on its own  pid=0
+PASS [  25.0s] the new viewer was started to restore exactly that target
+PASS [  25.0s] the new viewer went back to it without a pick ([restore] result=restored)
+PASS [  25.0s] ...no picker click in the new viewer
+PASS [  26.7s] screenshot 4: the reconnected window shows the stream, not the picker  pickerBg=0.0% colors=5000
+PASS [  29.7s] ...and frames keep arriving and decoding after the restore
+
+      timeline: wedge 5.0s -> viewer exit seen 22.6s (+17.6) -> new viewer 23.6s (+1.0) -> restored 25.0s (+1.4); wedge -> restored 20.0 s
+client_reconnect_restore_e2e: ALL PASS
+PASS the product watchdog named the wedge (phase=frame_handler)
+PASS the supervisor observed exit 44
+PASS the relaunched child runs WGC (quarantine for this run)
+PASS the supervisor tried to record the wedge: capture-quarantine] not recorded key=612561e68f454fd9 reason=folder-unresolved err=3
+      host log: C:\work\gnlink-wt\rel-0163\.claude\test-tmp\dxgi-wedge-p17o9J\host-appdata\GNLink\host_app.log
+      client log dir: C:\work\gnlink-wt\rel-0163\.claude\test-tmp\dxgi-wedge-p17o9J\client-appdata\GNLink
+      screenshots: C:\work\gnlink-wt\rel-0163\.claude\test-tmp\dxgi-wedge-p17o9J\shots
+dxgi_wedge_reconnect_runner: ALL PASS
+      (fixture kept for inspection: C:\work\gnlink-wt\rel-0163\.claude\test-tmp\dxgi-wedge-p17o9J)

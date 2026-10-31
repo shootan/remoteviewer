@@ -1,0 +1,344 @@
+﻿diff --git a/automation/old_apk_lane/oa_avd.py b/automation/old_apk_lane/oa_avd.py
+index 9b3d716..0a67baf 100644
+--- a/automation/old_apk_lane/oa_avd.py
++++ b/automation/old_apk_lane/oa_avd.py
+@@ -136,6 +136,83 @@ def host_log():
+         return ''
+ 
+ 
++def ime_state():
++    """r7d: the soft keyboard, from `dumpsys input_method` -- ('shown' | 'hidden' | 'unknown', the flags read). Any of
++    mInputShown / mWindowVisible / mDecorViewVisible / mIsInputViewShown true = shown; mInputShown false and none true =
++    hidden; anything else = unknown (judged as not safe: no tap)."""
++    out = adb('shell', 'dumpsys', 'input_method')
++    flags = re.findall(r'(mInputShown|mWindowVisible|mDecorViewVisible|mIsInputViewShown|isInputViewShown)=(true|false)', out)
++    trues = sorted({k for k, v in flags if v == 'true'})
++    if trues:
++        return 'shown', trues
++    if any(k == 'mInputShown' for k, _ in flags):
++        return 'hidden', []
++    return 'unknown', []
++
++
++PICK_MARK = []  # [app log cursor, host log length, pinned id] at the last successful pick
++
++
++def same_viewer():
++    """r8 (Codex codex_old_apk_lane_ime_status_r8.md): still the viewer and the connection of the last pick -- since the
++    pick the app logged no scene other than VIEWER, no `[status]` that is not connected, no new select_request; the
++    host logged no `udp control session ended` / new `client connected`. -> (ok, detail)."""
++    if not PICK_MARK:
++        return False, 'no pick to compare with'
++    app = since(PICK_MARK[0])
++    hl = host_log()[PICK_MARK[1]:]
++    scenes = re.findall(r'\[scene\] (\S+)', app)
++    status = [st for st in re.findall(r'\[status\] ([^\n]*)', app) if not st.startswith('connected')]
++    picks = re.findall(r'\[select_request\][^\n]*', app)
++    ended = re.findall(r'udp control session ended[^\n]*', hl)
++    connected = re.findall(r'client connected[^\n]*', hl)
++    ok = all(sc == 'VIEWER' for sc in scenes) and not status and not picks and not ended and not connected
++    return ok, (f'since the pick: scenes={scenes[:3]} status={[x[:30] for x in status[:2]]} picks={len(picks)} '
++                f'host ended={[x[:60] for x in ended[:1]]} host new clients={len(connected)}')
++
++
++def viewer_tap_point():
++    """r7d: where a tap on the picture may land -- the centre of the video view (videoTextureView, b554e76
++    activity_main.xml) as the UI dump shows it, and only with no soft keyboard up (the r7c run: the sign-in keyboard
++    covered the lower 2/3 and the fixed 1200,540 went into it). -> ((x, y), detail) or (None, why): no tap then."""
++    same, swhy = same_viewer()
++    if not same:
++        return None, f'not the same viewer / connection: {swhy}'
++    st, why = ime_state()
++    if st != 'hidden':
++        return None, f'soft keyboard {st} {why}'
++    views = [n for n in ka.dump() if n['id'] == 'videoTextureView' and n['bounds'][2] > n['bounds'][0]
++             and n['bounds'][3] > n['bounds'][1]]
++    if len(views) != 1:
++        return None, f'video view on screen: {len(views)}'
++    x1, y1, x2, y2 = views[0]['bounds']
++    return ((x1 + x2) // 2, (y1 + y2) // 2), f'video view {views[0]["bounds"]}, keyboard hidden'
++
++
++def hide_ime_on_hosts(tag):
++    """r7d: the sign-in leaves its keyboard up (the r7c run: onStartInput inputType=0x81, still up in the viewer). It is
++    put away HERE, on the PC list, before anything is picked: BACK while it is shown goes to the keyboard. If BACK reached
++    the app instead, on this scene it only opens the exit question (b554e76 MainActivity.kt handleSystemBack: HOSTS ->
++    showExitConfirmDialog) -- seen and judged; in the viewer it would leave the viewer (handleViewerBack), so BACK is
++    never sent there."""
++    st, why = ime_state()
++    step(f'  {tag}: soft keyboard {st} {why}')
++    if st == 'hidden':
++        return True
++    if st == 'unknown':
++        verdict(f'{tag}: the soft keyboard state is known (dumpsys input_method)', False)
++        return False
++    ka.adb('shell', 'input', 'keyevent', '4')
++    time.sleep(1.0)
++    st2, why2 = ime_state()
++    listed = ka.wait('card:' + HOST, 5) is not None
++    dialog = ka.wait('android:id/button1', 1) is not None
++    ok = st2 == 'hidden' and listed and not dialog
++    verdict(f'{tag}: the sign-in keyboard put away on the PC list (BACK while it was shown); the list still there, no '
++            'dialog', ok, f'after: keyboard {st2} {why2} listed={listed} dialog={dialog}')
++    return ok
++
++
+ def menu(button):
+     """The viewer menu's [button] (0.2.32 ids): controls woken, the menu opened, the button tapped -- up to three times."""
+     for attempt in range(3):
+@@ -145,7 +222,11 @@ def menu(button):
+         for _ in range(3):
+             if ka.wait('viewerMenuButton', 2):
+                 break
+-            ka.adb('shell', 'input', 'tap', '1200', '540')
++            pt, why = viewer_tap_point()  # r7d: the controls woken on the picture, never through a keyboard
++            if pt is None:
++                step(f'  menu: no wake tap ({why})')
++                break
++            ka.adb('shell', 'input', 'tap', str(pt[0]), str(pt[1]))
+             time.sleep(1.0)
+         if ka.wait('viewerMenuButton', 2):
+             tap('viewerMenuButton')
+@@ -315,6 +396,7 @@ def pick_pinned(tag):
+     time.sleep(0.5)
+     digest = shot(tag.split()[0] + '_window_first_frame')
+     vd = re.findall(r'\[video_debug\][^\n]* out=(\d+)', since(n0))
++    PICK_MARK[:] = [cursor(), len(host_log()), pinned]  # r8: what "the same viewer, the same connection" is measured from
+     verdict(f'{tag}: the pinned window picked (id {pinned}, Windows tab) -> first frame', True,
+             f'{tab_note} {detail[:300]} (wall {time.time() - t0:.1f} s) screenshot={digest[:16]} video_debug out={vd[-1] if vd else "?"}')
+     return digest
+@@ -323,9 +405,14 @@ def pick_pinned(tag):
+ def input_check():
+     """r7 (4): one tap on the window's picture; judged by judge_input on the host's lines after it."""
+     hl = host_log()
+-    h0 = len(hl)
+-    ka.adb('shell', 'input', 'tap', '1200', '540')
+-    step('  one tap on the window picture at 1200,540')
++    pt, why = viewer_tap_point()
++    if pt is None:
++        verdict('4 the tap on the window reaches the host as its own button down -> up, one position, inside the window',
++                False, f'NO tap: {why}')
++        return False
++    h0 = len(host_log())
++    ka.adb('shell', 'input', 'tap', str(pt[0]), str(pt[1]))
++    step(f'  one tap on the window picture at {pt[0]},{pt[1]} ({why})')
+     time.sleep(3)
+     size = window_size(hl)
+     ok, detail = judge_input(host_log()[h0:], size, (size[0] // 2, size[1] // 2) if size else None)
+@@ -410,8 +497,12 @@ def p_disconnect():
+     h0 = len(re.findall(r'\[control\] tcp client disconnected', host_log()))
+     shown = False
+     if ka.wait('viewerMenuButton', 2) is None:
+-        ka.adb('shell', 'input', 'tap', '1200', '540')
+-        time.sleep(1.0)
++        pt, why = viewer_tap_point()  # r7d
++        if pt is not None:
++            ka.adb('shell', 'input', 'tap', str(pt[0]), str(pt[1]))
++            time.sleep(1.0)
++        else:
++            step(f'  5d: no wake tap ({why})')
+     hosts_offered = False
+     if ka.wait('viewerMenuButton', 5):
+         tap('viewerMenuButton')
+@@ -535,6 +626,8 @@ def main():
+                     ' | '.join(re.findall(r'\[(?:login_attempt|login_failed|hosts_failed)\][^\n]*', since(n0)))[:200])
+             if not listed:
+                 return 1
++            if not hide_ime_on_hosts('1b the sign-in keyboard'):  # r7d
++                return 1
+             n0 = cursor()
+             hs0 = len(host_log())
+             tap('card:' + HOST)
+@@ -560,7 +653,9 @@ def main():
+             return 1
+ 
+         # 4: one tap on the window's picture -> its own down/up on the host (injection none: logged, not injected)
+-        input_check()
++        # r8: a FAIL here ends the arm -- no menu wake tap, no 5 / 6 / P-5d (they are NOT RUN)
++        if not input_check():
++            return 1
+ 
+         # 5 + 6
+         if ARM == 'S':
+diff --git a/automation/old_apk_lane/oa_pick_test.py b/automation/old_apk_lane/oa_pick_test.py
+index 37df753..68471a9 100644
+--- a/automation/old_apk_lane/oa_pick_test.py
++++ b/automation/old_apk_lane/oa_pick_test.py
+@@ -35,7 +35,7 @@ def check(what, ok, detail=''):
+     print(f'{"PASS" if ok else "FAIL"}  {what}' + (f'  {detail}' if detail else ''), flush=True)
+ 
+ 
+-def case(tag, variant, listed_id=PINNED, input_mode='pair'):
++def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novideo=False, back='ime', scene=None):
+     """A fresh run folder, the fake's state, and oa_avd loaded anew against it. -> (module, paths)"""
+     run_id = f'{tag}-{time.strftime("%Y%m%d%H%M%S")}-{os.getpid()}'
+     root = os.path.join(RUNS, run_id)
+@@ -51,11 +51,12 @@ def case(tag, variant, listed_id=PINNED, input_mode='pair'):
+     with open(applog, 'w', encoding='utf-8') as f:
+         f.write('2026-10-30 00:00:00.000 [targets_ready] origin=connect ms=1 items=1\n')
+     st = os.path.join(root, 'ui_state.json')
+-    json.dump({'tab': 'desktop'}, open(st, 'w', encoding='utf-8'))
++    json.dump({'tab': 'desktop', **({'scene': scene} if scene else {})}, open(st, 'w', encoding='utf-8'))
+     calls = os.path.join(root, 'adb_calls.txt')
+     open(calls, 'w').close()
+     os.environ.update({'OA_FAKE_ADB_LOG': calls, 'OA_FAKE_UI_STATE': st, 'OA_FAKE_APPLOG': applog,
+-                       'OA_FAKE_HOSTLOG': host_log, 'OA_FAKE_UI_VARIANT': variant, 'OA_FAKE_INPUT': input_mode})
++                       'OA_FAKE_HOSTLOG': host_log, 'OA_FAKE_UI_VARIANT': variant, 'OA_FAKE_INPUT': input_mode,
++                       'OA_FAKE_IME': ime, 'OA_FAKE_NOVIDEO': '1' if novideo else '0', 'OA_FAKE_BACK': back})
+     sys.argv = ['oa_avd.py', root, 'S', os.path.join(root, 'none.apk'), os.path.join(root, 'avd')]
+     spec = importlib.util.spec_from_file_location(f'oa_avd_{tag.replace("-", "_")}', os.path.join(E, 'oa_avd.py'))
+     m = importlib.util.module_from_spec(spec)
+@@ -142,6 +143,70 @@ def main():
+         check(f'NEGATIVE 4 {mode}: {what} -> FAIL', not ok4 and r[1] is False and r[0].startswith('4 ') and before,
+               r[2][:200] + ('' if mode != 'pretap' else f' | pair logged before the tap: {before}'))
+ 
++    # r7d (verifier oa-s-20261030025800: the sign-in keyboard stayed up over the viewer; 4's fixed 1200,540 went into it)
++    def keys(paths):
++        return [l.strip() for l in open(paths['calls'], encoding='utf-8') if l.startswith('shell input keyevent')]
++
++    for ime, novideo, what in (('shown', False, 'a soft keyboard is up'), ('unknown', False, 'the keyboard state cannot be read'),
++                               ('hidden', True, 'no video view on screen')):
++        m, p = case(f'input-ime-{ime}{"-novideo" if novideo else ""}', 'ok', ime=ime, novideo=novideo)
++        m.pick_pinned('3 the pinned window picked')
++        n_taps = len(taps(p))
++        ok4 = m.input_check()
++        r = last(m)
++        check(f'NEGATIVE 4 r7d: {what} -> FAIL with NO tap on the picture', not ok4 and r[1] is False and
++              'NO tap' in r[2] and len(taps(p)) == n_taps, f'taps after the pick={len(taps(p)) - n_taps} {r[2][:160]}')
++    m, p = case('input-video-centre', 'ok')
++    m.pick_pinned('3 the pinned window picked')
++    n_taps = len(taps(p))
++    ok4 = m.input_check()
++    t4 = taps(p)[n_taps:]
++    check('control 4 r7d: keyboard hidden, the ONE tap lands at the video view centre (from the UI dump) -> PASS',
++          ok4 and t4 == [['540', '1268']], f'taps={t4}')
++    m, p = case('menu-ime-shown', 'ok', ime='shown')
++    m.pick_pinned('3 the pinned window picked')
++    n_taps = len(taps(p))
++    try:
++        m.menu('viewerMenuHostsButton')
++        raised = False
++    except RuntimeError:
++        raised = True
++    check('NEGATIVE menu r7d: a keyboard up -> no wake tap on the picture (the menu is not reached; nothing typed)',
++          raised and len(taps(p)) == n_taps and not keys(p), f'taps={len(taps(p)) - n_taps} keys={keys(p)}')
++
++    # r8: the tap only in the SAME viewer and connection as the pick
++    for what, app_line, host_line in (('the app left the viewer (scene HOSTS, status error)',
++                                       '2026-10-30 00:00:01.000 [scene] HOSTS\n2026-10-30 00:00:01.001 [status] error\n', ''),
++                                      ('the host ended the session',
++                                       '', '10-30 00:00:01.000 [native-video-host][control] udp control session ended epoch=1 resumed=0 reason=none\n')):
++        m, p = case('input-not-same', 'ok')
++        m.pick_pinned('3 the pinned window picked')
++        if app_line:
++            open(p['app'], 'a', encoding='utf-8').write(app_line)
++        if host_line:
++            open(p['host'], 'a', encoding='utf-8').write(host_line)
++        n_taps = len(taps(p))
++        ok4 = m.input_check()
++        r = last(m)
++        check(f'NEGATIVE 4 r8: {what} after the pick -> FAIL with NO tap', not ok4 and r[1] is False and
++              'not the same viewer' in r[2] and len(taps(p)) == n_taps, r[2][:200])
++    src = open(os.path.join(E, 'oa_avd.py'), encoding='utf-8').read()
++    check('r8 (source): a 4 FAIL ends the arm before the menu / 5 / 6 / P-5d',
++          'if not input_check():\n            return 1' in src.replace('\r\n', '\n'))
++    m, p = case('hosts-ime-hide', 'ok', ime='shown', scene='hosts')
++    ok = m.hide_ime_on_hosts('1b the sign-in keyboard')
++    check('control 1b r7d: on the PC list a keyboard up is put away with BACK (it takes it); the list stays, no dialog',
++          ok and last(m)[1] is True and keys(p) == ['shell input keyevent 4'], last(m)[2][:160])
++    m, p = case('hosts-ime-leak', 'ok', ime='shown', back='leak', scene='hosts')
++    ok = m.hide_ime_on_hosts('1b the sign-in keyboard')
++    check('NEGATIVE 1b r7d: BACK reaches the app instead (the exit question appears) -> FAIL', not ok and
++          last(m)[1] is False, last(m)[2][:160])
++    m, p = case('hosts-ime-unknown', 'ok', ime='unknown', scene='hosts')
++    ok = m.hide_ime_on_hosts('1b the sign-in keyboard')
++    check('NEGATIVE 1b r7d: the keyboard state unreadable -> FAIL, no key sent', not ok and not keys(p), f'keys={keys(p)}')
++    m, p = case('hosts-ime-hidden', 'ok', ime='hidden', scene='hosts')
++    check('1b r7d: no keyboard up -> nothing sent, goes on', m.hide_ime_on_hosts('1b the sign-in keyboard') and not keys(p))
++
+     print(f'\n{checks} checks, {fails} failed\nRESULT: {"PASS" if fails == 0 else "FAIL"}')
+     return 0 if fails == 0 else 1
+ 
+diff --git a/automation/old_apk_lane/stubs/fake_ui_adb.py b/automation/old_apk_lane/stubs/fake_ui_adb.py
+index e6f97cd..1c6b7d5 100644
+--- a/automation/old_apk_lane/stubs/fake_ui_adb.py
++++ b/automation/old_apk_lane/stubs/fake_ui_adb.py
+@@ -15,6 +15,12 @@ the PinnedSelectTest host log when a card / the picture is tapped. Every call is
+   OA_FAKE_INPUT       what the host logs for a tap on the picture (1200,540):
+                       pair (move, down, up inside 480x270) | none | uponly (an up alone) | outside (down/up at 900,700)
+                       | moveonly | downonly (no up) | moved (up elsewhere) | pretap (a pair logged at the pick, none after)
++  r7d: OA_FAKE_IME        the soft keyboard as `dumpsys input_method` says it: hidden | shown | unknown (the ui state's
++                          "ime" overrides it once set)
++       OA_FAKE_NOVIDEO=1  the viewer shows no video view (videoTextureView)
++       OA_FAKE_BACK       what BACK does on the PC list with the keyboard up: ime (the keyboard takes it and hides) |
++                          leak (the app takes it: the exit question, android:id/button1; the keyboard stays)
++  The ui state's "scene": "hosts" (the PC list: hostCardName oa-pc-a), "targets" (default) or "viewer" (set by a pick).
+ """
+ import json
+ import os
+@@ -26,6 +32,9 @@ TITLE = 'remote60 mobile abr target pid 43948 92abc8fe'
+ PKG = 'com.remote60.androiddirect'
+ TABS = {'listWindowsButton': (0, 380, 400, 430, 'Windows'), 'listDevicesButton': (420, 380, 660, 430, 'Desktop')}
+ CARD = (100, 1000, 470, 1100)
++HOSTCARD = (40, 400, 1040, 560)
++VIDEO = (0, 136, 1080, 2400)
++DIALOG_OK = (700, 1300, 1000, 1400)
+ 
+ args = sys.argv[1:]
+ if args[:1] == ['-s']:
+@@ -54,17 +63,29 @@ def card_text():
+ 
+ 
+ def nodes():
++    if state.get('scene') == 'hosts':
++        out = [('hostCardName', HOSTCARD, 'oa-pc-a')]
++        if state.get('dialog'):
++            out.append(('android:id/button1', DIALOG_OK, 'OK'))
++        return out
+     out = [(k, v[:4], v[4]) for k, v in TABS.items()]
+     if state.get('scene') != 'viewer':
+         out.append(('targetCardTitle', CARD, card_text()))
++    elif os.environ.get('OA_FAKE_NOVIDEO') != '1':
++        out.append(('videoTextureView', VIDEO, ''))
+     return out
+ 
+ 
+ def node_xml(rid, b, text):
+-    return (f'<node resource-id="{PKG}:id/{rid}" text="{text}" content-desc="" enabled="true" clickable="true" '
++    full = rid if ':' in rid else f'{PKG}:id/{rid}'
++    return (f'<node resource-id="{full}" text="{text}" content-desc="" enabled="true" clickable="true" '
+             f'bounds="[{b[0]},{b[1]}][{b[2]},{b[3]}]" />')
+ 
+ 
++def ime():
++    return state.get('ime', os.environ.get('OA_FAKE_IME', 'hidden'))
++
++
+ def picture_tap():
+     mode = os.environ.get('OA_FAKE_INPUT', 'pair')
+     seq = state.get('inseq', 0)
+@@ -118,9 +139,23 @@ elif cmd.startswith('shell input tap'):
+         else:
+             host(f'window-select seq=1 requestedId={tid} applied=0 reason=pinned_test_seam_refused')
+             app(f'[select_failed] targetId={tid} gen=1 seq=1 status=window_select_failed: pinned_test_only')
+-    elif state.get('scene') == 'viewer' and (x, y) == (1200, 540):
++    elif rid == 'videoTextureView':
+         picture_tap()
+     json.dump(state, open(state_path, 'w', encoding='utf-8'))
++elif cmd.startswith('shell dumpsys input_method'):
++    st = ime()
++    if st == 'shown':
++        print('  mInputShown=true mVisibleBound=true\n  mWindowVisible=true mDecorViewVisible=true')
++    elif st == 'hidden':
++        print('  mInputShown=false mVisibleBound=false\n  mWindowVisible=false mDecorViewVisible=false')
++    else:
++        print('  (no state lines this build prints)')
++elif cmd == 'shell input keyevent 4':
++    if ime() == 'shown' and os.environ.get('OA_FAKE_BACK', 'ime') == 'ime':
++        state['ime'] = 'hidden'
++    elif state.get('scene') == 'hosts':
++        state['dialog'] = True
++    json.dump(state, open(state_path, 'w', encoding='utf-8'))
+ elif args[:1] == ['pull']:
+     shutil.copyfile(os.environ['OA_FAKE_APPLOG'], args[2])
+ elif cmd.startswith('exec-out screencap'):

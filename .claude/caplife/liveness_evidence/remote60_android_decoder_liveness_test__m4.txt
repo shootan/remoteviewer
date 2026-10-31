@@ -1,0 +1,161 @@
+﻿exe=C:\work\gnlink-wt\apk-decoder-liveness\build-neg-m4\apps\native_poc\Release\remote60_android_decoder_liveness_test.exe
+exe_sha256=22C4C033A5AF27FBBF27BB7F538AA1F42F198374454D8E9FDC94A1CFD9B3FE54
+exit=1
+android_decoder_liveness_test  hold=8000 ms  bound=50 ms
+
+--- [0] healthy: no hold -- the baseline of the same calls
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=0 remoteUs=1000000 localUs=621616466741 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=24 key=1 ptsUs=621616550073
+      [decoder I] queued h264 frame count=31 bytes=24 key=1 ptsUs=621617550063
+PASS  [0] baseline: RX / control / UI calls all return within the bound  rx max=0ms n=90 control max=0ms n=444 ui max=0ms n=120
+PASS  [0] baseline: frames reach the codec
+      [decoder I] video surface cleared
+
+--- [1] the codec's CREATE held longer than the retransmit budget, while RX / control / UI go on
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] decoder inbox full: oldest frame dropped drops=1
+      [decoder I] decoder inbox full: oldest frame dropped drops=31
+      [decoder I] decoder inbox full: oldest frame dropped drops=61
+      [decoder I] decoder inbox full: oldest frame dropped drops=91
+      [decoder I] decoder inbox full: oldest frame dropped drops=121
+      [decoder I] decoder inbox full: oldest frame dropped drops=151
+      [decoder I] decoder inbox full: oldest frame dropped drops=181
+      [decoder I] decoder inbox full: oldest frame dropped drops=211
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=0 remoteUs=2499985 localUs=621626041177 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=24 key=1 ptsUs=621626124509
+      [decoder I] queued h264 frame count=31 bytes=7 key=0 ptsUs=621627091173
+PASS  [1] the create was really held, for at least the hold  held 8050 ms
+PASS  [1] RX: every frame hand-over and key-request call returned within the bound  max=0ms n=554
+PASS  [1] control: every hook returned within the bound  max=0ms n=2706
+PASS  [1] UI: every query returned within the bound  max=0ms n=732
+PASS  [1] the frame inbox stayed bounded (<= 8) while the codec was held  inbox max=8
+PASS  [1] after the hold: frames reach the codec again  queued after=38
+PASS  [1] ...and the codec's FIRST input is an IDR, into the codec on surface A  tag=129
+PASS  [1] no RX / control / UI / test thread ever called the codec  codec threads=2
+      [decoder I] video surface cleared
+
+--- [2] the surface REPLACED while its codec is being created: the old one's codec is never used
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] codec made after a reset was asked for: discarded
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=0 remoteUs=11766559 localUs=621627267167 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=24 key=1 ptsUs=621627350499
+PASS  [2] the create for A was really held
+PASS  [2] the UI's move to B returned within the bound (it does not wait for A's codec)  max=0ms n=1
+PASS  [2] RX returned within the bound  max=0ms n=2
+PASS  [2] nothing was fed to a codec on surface A after the move; frames go to B  queued=1
+      [decoder I] video surface cleared
+
+--- [3] DETACH while the codec is being created (r3 D1): bounded for the UI, none for RX / control
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] video surface cleared
+      [decoder I] decoder inbox full: oldest frame dropped drops=1
+      [decoder I] decoder inbox full: oldest frame dropped drops=31
+      [decoder I] decoder inbox full: oldest frame dropped drops=61
+      [decoder I] decoder inbox full: oldest frame dropped drops=91
+      [decoder I] decoder inbox full: oldest frame dropped drops=121
+      [decoder I] decoder inbox full: oldest frame dropped drops=151
+      [decoder I] decoder inbox full: oldest frame dropped drops=181
+      [decoder I] decoder inbox full: oldest frame dropped drops=211
+      [decoder I] decoder inbox full: oldest frame dropped drops=241
+      [decoder I] decoder inbox full: oldest frame dropped drops=271
+      [decoder I] decoder inbox full: oldest frame dropped drops=301
+      [decoder I] decoder inbox full: oldest frame dropped drops=331
+      [decoder I] codec made after a reset was asked for: discarded
+      [decoder I] video surface detach done seq=2 waited ms=11997 (the UI only)
+      [decoder I] video surface cleared
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=0 remoteUs=23833105 localUs=621639492258 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=24 key=1 ptsUs=621639575590
+PASS  [3] the create was really held
+FAIL  [3] the UI's detach came back within its deadline (<= 2.5 s) while the codec was held, as NOT done  detach took 11997 ms result=2
+PASS  [3] meanwhile RX and control returned within the bound  rx max=0ms n=738 control max=0ms n=3588
+FAIL  [3] a second detach while the first is pending is not waited for again  took 0 ms result=3
+FAIL  [3] a new surface while the detach is pending is refused (0), its window given back at once  result=4
+FAIL  [3] not reported done while the codec is still held  released=3 want=3
+PASS  [3] the late completion is reported (released seq reaches the detach) once the codec lets go  released=4
+FAIL  [3] the late completion connects nothing: no codec alive, nothing fed, nothing configured on B  created=6 started=6 deleted=5
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+PASS  [3] once done, the next surface is taken and the next IDR goes into a codec on it  result=5
+      [decoder I] video surface cleared
+
+--- [4] the OWNER changes while its codec is being created: the old owner's frames never reach a codec
+      [decoder I] decoder bound binding=11
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] decoder bound binding=12
+      [decoder I] codec made after a reset was asked for: discarded
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=0 remoteUs=24233101 localUs=621639822250 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=24 key=1 ptsUs=621639905582
+PASS  [4] the create was really held
+PASS  [4] Bind returned within the bound  max=0ms n=1
+PASS  [4] nothing of PC 11 reached a codec; PC 12's IDR then delta did  queued=2
+      [decoder I] video surface cleared
+
+--- [5] a NEWER selection while the old one's codec is being created: never 'ready' on an old picture
+      [decoder I] selection prepare localGen=9
+      [decoder I] selection ack localGen=9 streamGen=30 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] selection prepare localGen=10
+      [decoder I] codec made after a reset was asked for: discarded
+PASS  [5] the create was really held
+PASS  [5] the newer Prepare returned within the bound  max=0ms n=1
+PASS  [5] the newer selection is not made ready by the old selection's codec / picture  ready=0
+      [decoder I] video surface cleared
+
+--- [6] the inbox SATURATES while the codec is held: bounded, the lost IDR owed and asked for
+      [decoder I] selection prepare localGen=41
+      [decoder I] selection ack localGen=41 streamGen=40 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] decoder inbox full: oldest frame dropped drops=1
+      [decoder I] decoder inbox full: oldest frame dropped drops=31
+      [decoder I] decoder inbox full: oldest frame dropped drops=61
+      [decoder I] decoder inbox full: oldest frame dropped drops=91
+      [decoder I] decoder inbox full: oldest frame dropped drops=121
+      [decoder I] decoder inbox full: oldest frame dropped drops=151
+      [decoder I] decoder inbox full: oldest frame dropped drops=181
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=40 remoteUs=24333100 localUs=621640536670 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=24 key=1 ptsUs=621640620002
+      [decoder I] bootstrap replay queued localGen=41 streamGen=40 replay=1
+PASS  [6] the create was really held
+PASS  [6] RX never waited while flooding  max=0ms n=201
+PASS  [6] the inbox held at most 8 frames; the rest were dropped and counted  inbox=8 drops=193
+PASS  [6] the IDR that was dropped is owed again, and a key is asked for
+PASS  [6] after the hold no delta of the gap is fed before the next IDR; that IDR pays the debt  queued=4
+      [decoder I] video surface cleared
+
+--- [7] the codec FAILS to be created: reported, the calls go on, then it comes back
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder E] AMediaCodec_createDecoderByType(video/avc) failed
+PASS  [7] a failed create is reported (codecState=failed, codecFail >= 1)   codec=off size=1280x720 output=0x0 csd=1/1 in=0 out=0 sel=0 readySel=0 expectGen=0 inGen=0 outGen=0 stale=0 oversize=0 ptsGen=0 ptsBaseRemote=0 ptsBaseLocal=0 lastInPtsUs=0 lastRemoteUs=0 playoutStepUs=33333 playoutLeadUs=83332 ptsReanchor=0 ptsClamp=0 ptsFallback=0 pending=0 gateQueueDrops=0 pendingRetry=0 bootstrapReplay=0 lastOutUs=0 awaitingAck=0 localSel=0 codecs=0 inDeq=0 outDeq=0 outDequeued=0 fmt=0 held=0 awaitsKey=0 coded=0x0 cropSrc=none crop=0,0,0,0 deltaBeforeKey=0 codecState=failed codecFail=1 codecVoid=0 inbox=0 inboxDrops=0 gapDrops=0 resetPending=0
+PASS  [7] RX returned within the bound  max=0ms n=1
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=0 remoteUs=31166365 localUs=621641037751 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=24 key=1 ptsUs=621641121083
+PASS  [7] the next IDR makes a codec and is queued
+      [decoder I] video surface cleared
+
+--- [8] TEARDOWN while the codec is being created: it ends once the codec lets go, nothing leaks
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] codec made after a reset was asked for: discarded
+PASS  [8] the create was really held
+PASS  [8] teardown waits for the held codec, then ends
+PASS  [8] every codec made was deleted; every window taken was let go  created=1 deleted=1 windows 1/1
+
+android_decoder_liveness_test: 40 checks, 5 failed
+RESULT: FAIL
+

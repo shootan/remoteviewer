@@ -1,0 +1,8505 @@
+{
+  "head": "8bc9d1c2e5b5ae6f617e6ede93cb384993367753",
+  "files": [
+    {
+      "path": "apps/directory/package.json",
+      "sha256": "ceafbdf2a1d14a4fab07701427cb760aee7e9f1cdc2e373211f741fe0da40680",
+      "lines": 11,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/directory/server.js",
+      "sha256": "e32510c3c6a7d76a6b5cb36f59a06737c6f0e7b1a5290287a595a48d8b1f7ca5",
+      "lines": 1540,
+      "hits": {
+        "thread": [
+          78,
+          246,
+          328,
+          376,
+          377,
+          425,
+          426,
+          1520,
+          1522
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          123,
+          455,
+          507,
+          723,
+          984,
+          1153,
+          1321
+        ],
+        "failure": [
+          204,
+          274,
+          312,
+          382,
+          499,
+          528,
+          544,
+          558,
+          626,
+          865,
+          900,
+          901,
+          905,
+          911,
+          1221,
+          1223,
+          1425,
+          1481
+        ]
+      }
+    },
+    {
+      "path": "apps/directory/test/directory_test.js",
+      "sha256": "4f984550f1cb305e98ab87137550740974b2801b47d1e389876a4e3cde608d48",
+      "lines": 210,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          210
+        ]
+      }
+    },
+    {
+      "path": "apps/directory/test/logs_test.js",
+      "sha256": "dc4780e1425b8f838207fa86c7e49f0e5b6ad84b0f441e8d8898586baee5b770",
+      "lines": 156,
+      "hits": {
+        "thread": [
+          72,
+          91,
+          124
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          144
+        ],
+        "failure": [
+          153
+        ]
+      }
+    },
+    {
+      "path": "apps/directory/test/nat_diag_test.js",
+      "sha256": "54695f59d2bb8b5fbdeb8b6e47a54b9bb548a7a70171b7e4bf864d5b159543c9",
+      "lines": 130,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          130
+        ]
+      }
+    },
+    {
+      "path": "apps/directory/test/observe_contract_test.js",
+      "sha256": "8ca78cfc81d6e8107aa1dee44bc6baf9e2ab5b7411b4414777d9fdf36446e4bf",
+      "lines": 182,
+      "hits": {
+        "thread": [
+          74,
+          76,
+          94,
+          108,
+          115
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          174
+        ]
+      }
+    },
+    {
+      "path": "apps/directory/test/observe_correction_test.js",
+      "sha256": "df61465e2c7601785a55b18f78eca03cd5e16d12244e7c1883e59cb37fbb7dfc",
+      "lines": 87,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          51,
+          84
+        ]
+      }
+    },
+    {
+      "path": "apps/directory/test/proxy_contamination_test.js",
+      "sha256": "e1b293866e5af4774460d2789641a3c5506c8ab79f1c6e8e4039dd1b52f020d8",
+      "lines": 257,
+      "hits": {
+        "thread": [
+          117,
+          118,
+          183
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          222
+        ],
+        "failure": [
+          247
+        ]
+      }
+    },
+    {
+      "path": "apps/directory/test/relay_test.js",
+      "sha256": "3084a00fa92331e1b23eab1c76aa606a46869133700fb1d758a66dd7782a4c58",
+      "lines": 336,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          256,
+          269,
+          291
+        ],
+        "failure": [
+          328,
+          336
+        ]
+      }
+    },
+    {
+      "path": "apps/directory/test/restart_test.js",
+      "sha256": "64e22d4cce4fe42ff546adc14ea2097f25437512ea70ae9e7f1f3ca26b5e3284",
+      "lines": 125,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          1,
+          6,
+          8,
+          55,
+          57,
+          62,
+          65,
+          84,
+          85,
+          87,
+          99,
+          114,
+          123,
+          125
+        ],
+        "failure": [
+          125
+        ]
+      }
+    },
+    {
+      "path": "apps/directory/test/run.js",
+      "sha256": "6f8ee9f96a46109d453db26e7e15abeadf32b63891a1f9c157aa886b8b8d8bdd",
+      "lines": 273,
+      "hits": {
+        "thread": [
+          8,
+          9,
+          28,
+          145,
+          170,
+          189,
+          204,
+          210,
+          226,
+          232,
+          233,
+          234,
+          241,
+          264
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          2,
+          114,
+          115,
+          119,
+          127
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/directory/test/same_lan_test.js",
+      "sha256": "f347a765f71f1455676652f3f7b14fa4dd46142ba3f9d6df2a001efa6a137e3b",
+      "lines": 240,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          237
+        ]
+      }
+    },
+    {
+      "path": "apps/directory/test/update_manifest_test.js",
+      "sha256": "fb93733680ddc1027a0550ff5a3ec62d3b8971ea8ce5fcc253f4498d9827178f",
+      "lines": 236,
+      "hits": {
+        "thread": [
+          16,
+          33,
+          34,
+          35
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          36
+        ]
+      }
+    },
+    {
+      "path": "apps/directory/test/update_publish_contract_test.js",
+      "sha256": "71d59a5dd92d70d59244fdf58370bc3890df7cacf05cabfdef6d1748bc7770fb",
+      "lines": 193,
+      "hits": {
+        "thread": [
+          46,
+          72,
+          97
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/directory/test/update_route_test.js",
+      "sha256": "ba88a0f9ad83450730d20b419a71d695fc8a662be4a1a5e301247e446ef380dc",
+      "lines": 135,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/directory/test/version_compare_test.js",
+      "sha256": "88d49a04b2d96d1efbcd3ef5cfac8ad28f7686fbd4da6df5fa644efacc53b508",
+      "lines": 73,
+      "hits": {
+        "thread": [
+          15
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          34
+        ]
+      }
+    },
+    {
+      "path": "apps/directory/update_manifest.js",
+      "sha256": "a11254aa3fb007b6c00f184d6ad7aaa36f1a1e181ae083ad238e2eb658b641bf",
+      "lines": 228,
+      "hits": {
+        "thread": [
+          219
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          64,
+          67,
+          68,
+          71,
+          78
+        ]
+      }
+    },
+    {
+      "path": "apps/directory/version_compare.js",
+      "sha256": "5117b0a4a825c85c5da07ab3b09ef96a591d3cf62e3a9ba70423e775f54139d3",
+      "lines": 61,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/CMakeLists.txt",
+      "sha256": "be468d6e2a705116ffffe7cc6eafaf063da3155132214930d886195db71fef5a",
+      "lines": 1639,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          82,
+          165,
+          267,
+          882,
+          1262,
+          1292,
+          1293,
+          1302,
+          1303
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/installer/installer_ids.h",
+      "sha256": "16c79ca55f5d9a0e1a3020dcd00b0dab48c475ec553a556ad92cea75208ea97c",
+      "lines": 31,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/installer/installer_main.cpp",
+      "sha256": "d298d74a676a461a474075a439d69146f8dd85a1fcfc5c5f8665ceb073e26c14",
+      "lines": 703,
+      "hits": {
+        "thread": [],
+        "wait": [
+          134,
+          196,
+          216
+        ],
+        "sync": [
+          612,
+          613
+        ],
+        "recovery": [
+          474,
+          523
+        ],
+        "failure": [
+          103,
+          128,
+          148,
+          151,
+          153,
+          252,
+          253,
+          262,
+          264,
+          425,
+          427,
+          430,
+          432,
+          443,
+          452,
+          667
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/backend_request_match.hpp",
+      "sha256": "3acc2f695536ff419b9beea1efa2271b0e637dae7db68fde803f461e837ad29f",
+      "lines": 102,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          27,
+          32
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/bind_port_candidates.hpp",
+      "sha256": "9e3a11723bf1a4b07bc150948f09963f324f132eb136f8a11cb7ea719ce9a373",
+      "lines": 58,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/bind_port_candidates_test.cpp",
+      "sha256": "75c0dce1221d4cf1f5c4d552734163e778bd82f7d12c932e813b2c08b6d598ee",
+      "lines": 110,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/capture_cadence_gate.hpp",
+      "sha256": "cb90bc0937000fd6137fc90b6e42636e2de4f14adf811e6a524f324995e919d4",
+      "lines": 130,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          33,
+          35,
+          96,
+          120
+        ],
+        "failure": [
+          64,
+          86
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/capture_cadence_gate_test.cpp",
+      "sha256": "5488c176065831d6dc824077cb7f7f1255c1cf28bf10bb13ff33a1a37c71f6aa",
+      "lines": 211,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/capture_readback_test.cpp",
+      "sha256": "009b367cb0f7100cb46e0fff682eec91e92aa0088df79684affcb7cdece8b644",
+      "lines": 122,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/client_macro_window.cpp",
+      "sha256": "6cefb8a3b4f97bcccaca037b484a42babe4222a68286ae6d8ebc7ecaff6cecc3",
+      "lines": 383,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          309,
+          314,
+          348
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/client_macro_window.hpp",
+      "sha256": "9cd17d8c23b64d3763be96a2be6d32c060bb368b358111a39857be32b501ee5c",
+      "lines": 32,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/client_session_toolbar.cpp",
+      "sha256": "8d022006a62cbf6845fc568df52da51262bd5c75d8396b067972022dd3e4bfdf",
+      "lines": 515,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          403,
+          494,
+          497
+        ],
+        "recovery": [
+          480
+        ],
+        "failure": [
+          423,
+          432,
+          443
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/client_session_toolbar.hpp",
+      "sha256": "efc57c1905a7aae06c24659958cd070ee4caf57efeae92f8f3787c954e0b7f0d",
+      "lines": 94,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/client_shell_bridge.cpp",
+      "sha256": "bfc40f08643111abe39239b4616629c1d5c8226a151301482ccb9138765afa94",
+      "lines": 162,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          143,
+          145,
+          153
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/client_shell_bridge.hpp",
+      "sha256": "b8e6108a809b3ec2c87e0eecf07976c0de178c58388fdc7ad7ec7dc0af13ec02",
+      "lines": 127,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/client_shell_bridge_test.cpp",
+      "sha256": "f0ae986c899ddd03a087d85c7d9d95e9fbc5efddb282210780467c8b7b9b1c86",
+      "lines": 159,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/client_shell_main.cpp",
+      "sha256": "8bf560af09169017b5d0baf5ba315f2b9cc0831317deee5cc3d4d373ca9c68d5",
+      "lines": 1289,
+      "hits": {
+        "thread": [
+          548,
+          640,
+          754,
+          811,
+          826,
+          838,
+          1006,
+          1015,
+          1025,
+          1189
+        ],
+        "wait": [
+          304,
+          319,
+          1016
+        ],
+        "sync": [
+          189,
+          247,
+          278,
+          345,
+          375,
+          387,
+          447,
+          556,
+          606,
+          679,
+          696,
+          732,
+          741,
+          771,
+          796,
+          819,
+          851,
+          868,
+          1038,
+          1051,
+          1074,
+          1084,
+          1111,
+          1122
+        ],
+        "recovery": [
+          780
+        ],
+        "failure": [
+          156,
+          1180,
+          1225,
+          1239,
+          1278
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/client_update_flow_test.cpp",
+      "sha256": "789c4c0ec61b9be4135d257f13b3261ab29840a6735424235591cf05ee82a027",
+      "lines": 377,
+      "hits": {
+        "thread": [
+          108,
+          117,
+          154
+        ],
+        "wait": [
+          202
+        ],
+        "sync": [
+          155,
+          156,
+          196,
+          201
+        ],
+        "recovery": [],
+        "failure": [
+          98,
+          103,
+          104,
+          163,
+          203
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/client_update_gate.cpp",
+      "sha256": "0a7eb4129a9484034a8ee6806d7368728deb3f83dcb0aaf77f3ac7f9b3f82d1b",
+      "lines": 25,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/client_update_gate.hpp",
+      "sha256": "f960fd43e73ea8309c59019143482a2e11dc463249afd95c8e55ad83833c268b",
+      "lines": 57,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/client_update_ui_test.cpp",
+      "sha256": "93677273c4ce0bd93eb3828012b442485442349fc80f0c2cbac7e2ef4f490190",
+      "lines": 734,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          168,
+          169,
+          199,
+          354,
+          401
+        ],
+        "recovery": [],
+        "failure": [
+          175,
+          176,
+          322,
+          332,
+          347,
+          374,
+          413,
+          422,
+          456
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/connect_candidates.hpp",
+      "sha256": "d05aad505cc8fc297ed13dd01b08bb861825e82cbf11ede4f3eb71b4a86dd36a",
+      "lines": 110,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          52,
+          56,
+          61,
+          62,
+          63,
+          64
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/connect_candidates_test.cpp",
+      "sha256": "a9a312696cc6c0ff50f5270ffa10d78247472d943b80e7d4fb8ed0eed9fa5cb1",
+      "lines": 153,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/d3d_capture_readback.cpp",
+      "sha256": "6c04a079b16e12e6b0c05fd70e9defe70c9988a01258dc6039f41bdb5b2b9514",
+      "lines": 871,
+      "hits": {
+        "thread": [
+          102,
+          359
+        ],
+        "wait": [
+          662
+        ],
+        "sync": [
+          53,
+          71,
+          97,
+          151,
+          238,
+          243,
+          257,
+          269,
+          334,
+          340,
+          350,
+          361,
+          399,
+          506,
+          594,
+          661,
+          690,
+          769,
+          799,
+          835
+        ],
+        "recovery": [
+          615
+        ],
+        "failure": [
+          89,
+          99,
+          132,
+          136,
+          141,
+          144,
+          158,
+          164,
+          165,
+          167,
+          184,
+          186,
+          189,
+          191,
+          195,
+          196,
+          198,
+          210,
+          213,
+          217,
+          220,
+          224,
+          227,
+          278,
+          285,
+          288,
+          305,
+          308,
+          312,
+          317,
+          349,
+          385,
+          400,
+          667,
+          705
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/d3d_capture_readback.hpp",
+      "sha256": "69b6712b6dfeec67db395af5beb5dc1de33497a01462e44443fcbc5f83da2c6d",
+      "lines": 270,
+      "hits": {
+        "thread": [
+          260
+        ],
+        "wait": [],
+        "sync": [
+          111,
+          261,
+          262,
+          263,
+          264,
+          265,
+          266,
+          267
+        ],
+        "recovery": [
+          169,
+          177,
+          184
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/directory_client.cpp",
+      "sha256": "0acb3f7ccc70ec7295eefc055ddd1398d8dd4916f156d4a4c6ab4bb625c4205f",
+      "lines": 1286,
+      "hits": {
+        "thread": [
+          473,
+          479
+        ],
+        "wait": [],
+        "sync": [
+          483,
+          488,
+          530,
+          963,
+          971,
+          1172,
+          1200
+        ],
+        "recovery": [
+          1033,
+          1037,
+          1045
+        ],
+        "failure": [
+          123,
+          128,
+          136,
+          137,
+          140,
+          141,
+          158,
+          160,
+          165,
+          170,
+          173,
+          181,
+          184,
+          187,
+          188,
+          308,
+          320,
+          328,
+          344,
+          428,
+          442,
+          455,
+          468,
+          496,
+          515,
+          566,
+          568,
+          580,
+          598,
+          600,
+          602,
+          615,
+          620,
+          626,
+          630,
+          654,
+          656,
+          673,
+          694,
+          696,
+          698,
+          732,
+          744,
+          749,
+          753,
+          757,
+          762,
+          778,
+          789,
+          801,
+          805,
+          807,
+          835,
+          843,
+          850,
+          852,
+          875,
+          882,
+          887,
+          905,
+          907,
+          920,
+          940,
+          955,
+          968,
+          974,
+          1024,
+          1034,
+          1047,
+          1105,
+          1115,
+          1123,
+          1127,
+          1199,
+          1215
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/directory_client.hpp",
+      "sha256": "b66f60a842f060c3658fb07b9ee7a3d5fd9b97613f1966f05dd509c49f9ffbff",
+      "lines": 329,
+      "hits": {
+        "thread": [
+          311
+        ],
+        "wait": [],
+        "sync": [
+          312,
+          315
+        ],
+        "recovery": [
+          265
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/directory_http_contract_test.cpp",
+      "sha256": "1c9c4b41a42f9d9f2bfba027e95dd85c7d4fa297829c7f0a501d1ec2052df043",
+      "lines": 293,
+      "hits": {
+        "thread": [
+          65,
+          75,
+          142
+        ],
+        "wait": [],
+        "sync": [
+          82,
+          119,
+          143
+        ],
+        "recovery": [
+          251
+        ],
+        "failure": [
+          55,
+          60,
+          62,
+          64
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/directory_observe.hpp",
+      "sha256": "73b5d5eb38a184bbe3c32c3858d6c42c68cc46f96daadbcd70eed6c3f28c31c0",
+      "lines": 91,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/directory_rendezvous.cpp",
+      "sha256": "b33c8233db8a8691e7363a2ebc942188e8cb799e40c6c5bf0f556b5b52b71193",
+      "lines": 253,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          20,
+          36,
+          38,
+          40,
+          44,
+          53,
+          56,
+          63,
+          66,
+          87,
+          98,
+          104,
+          145,
+          152,
+          158,
+          186,
+          194,
+          198,
+          213,
+          250
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/directory_rendezvous.hpp",
+      "sha256": "2cb1355e444e83606e13c354855b0f227dca1ee0b060a89784f8d1abc563362e",
+      "lines": 76,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/directory_retry_test.cpp",
+      "sha256": "ee335d4dcd787e5e59a80b339c9bd3b238a088ec4e4f028f6595e2854909ef40",
+      "lines": 785,
+      "hits": {
+        "thread": [
+          80,
+          81,
+          109,
+          110,
+          120,
+          121,
+          277,
+          278,
+          336,
+          389
+        ],
+        "wait": [],
+        "sync": [
+          128,
+          134,
+          142,
+          182,
+          255,
+          274,
+          279,
+          335
+        ],
+        "recovery": [
+          6,
+          354,
+          409,
+          455,
+          525,
+          783
+        ],
+        "failure": [
+          77,
+          78,
+          79,
+          98,
+          108,
+          113,
+          174,
+          176
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/directory_session_bootstrap.cpp",
+      "sha256": "00d276fa8da17959557b1de0187f3cf2b176ffa967606879192ffad05d552864",
+      "lines": 156,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          96
+        ],
+        "failure": [
+          32,
+          36,
+          46,
+          68,
+          85,
+          98,
+          102,
+          106,
+          114,
+          151
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/directory_session_bootstrap.hpp",
+      "sha256": "57203b53577c486aad6d1f9511a3928b9a818c5bef22ee1a3ad639d6243b20d7",
+      "lines": 72,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/directory_session_client.cpp",
+      "sha256": "eba8f5ac1bacbbc632cc421693c639ea2b140de7b638d27788c1367c61b15aac",
+      "lines": 364,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          35,
+          42,
+          95,
+          97,
+          122,
+          140,
+          142,
+          144,
+          235,
+          244,
+          248,
+          256,
+          267,
+          273,
+          277,
+          302,
+          313,
+          318,
+          359
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/directory_session_client.hpp",
+      "sha256": "c739774721fbc6f009be30296c1b5a61b5862cd9fb5f8dea72518a7b86bc83e1",
+      "lines": 89,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          47,
+          54
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/directory_session_client_test.cpp",
+      "sha256": "7737ea69754c58be8a5a9ce438f0c198aacdf4714c464e05bf2a91e79cba4c81",
+      "lines": 683,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/encode_resolution_ladder.hpp",
+      "sha256": "594a2ad5c6447ed761dba4f10572c2c44cc1c3cafa5a081f0de408d84704f0c7",
+      "lines": 106,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          24,
+          47
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/encode_resolution_ladder_test.cpp",
+      "sha256": "036beb293d6bf9eed8b5d0ae47066ec9d5be2cae94d2b6f275585b0c37b31907",
+      "lines": 129,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          38
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/env_util.hpp",
+      "sha256": "83eaf96b813c63ebf1fbd7420c6a9ce30efc21896f31bba495f190685a2c2640",
+      "lines": 54,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          29,
+          32,
+          38,
+          40
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/gdi_capture_process.cpp",
+      "sha256": "0ad7e8d43ab057c9400717a2fcc1e20d46da809b6900c47ecd2037f1db553abc",
+      "lines": 307,
+      "hits": {
+        "thread": [
+          54,
+          160,
+          291
+        ],
+        "wait": [
+          152,
+          157
+        ],
+        "sync": [
+          45,
+          46,
+          208
+        ],
+        "recovery": [],
+        "failure": [
+          156,
+          196,
+          202,
+          220,
+          226,
+          243,
+          254,
+          261,
+          277,
+          282,
+          287
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/gdi_capture_process.hpp",
+      "sha256": "232109ddef3a41cf13d0f992d06af366299e020e3a931880063307c42d77a4c5",
+      "lines": 55,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/gdi_capture_process_test.cpp",
+      "sha256": "a82b21bbe2429c77facbb7e6f5d4f1833a34b32e6dd3f390e4bafe83227be0d1",
+      "lines": 126,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          56,
+          57,
+          72,
+          105
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/gdi_capture_protocol.hpp",
+      "sha256": "2926370a2569aebc3d3bd139ef10198b92fa9113598a76885b1ca8fea1bba8dc",
+      "lines": 53,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/gdi_capture_worker_main.cpp",
+      "sha256": "9c4551df7cb86690fe9f980cf101157dd586f3ac92d2c185323cc1def013005c",
+      "lines": 201,
+      "hits": {
+        "thread": [],
+        "wait": [
+          140
+        ],
+        "sync": [],
+        "recovery": [
+          170,
+          182,
+          183
+        ],
+        "failure": [
+          32,
+          35
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/handoff_fixture_main.cpp",
+      "sha256": "6e088ef746573490ecf5f9e61bd705768812a72d61527536ec0c557f4e9c3b1d",
+      "lines": 183,
+      "hits": {
+        "thread": [],
+        "wait": [
+          54,
+          167
+        ],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          43,
+          122
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_abr.hpp",
+      "sha256": "3f8af5de12c4b2a24c82fddae150abd8525d644d1275f9db52fe8454f2629c0f",
+      "lines": 406,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_abr_test.cpp",
+      "sha256": "9fcd3199106866ff57b421b6cd5636069ce07066df822be706e18e0c72fb58c6",
+      "lines": 457,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          177
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_app_main.cpp",
+      "sha256": "bd56adf5eea086e0ef631f488277d3a276fd8868f05c040154d439aec61d275a",
+      "lines": 2057,
+      "hits": {
+        "thread": [
+          237,
+          272,
+          557,
+          558,
+          577,
+          651,
+          1215,
+          1269,
+          1346,
+          1363
+        ],
+        "wait": [
+          377,
+          409,
+          566,
+          572
+        ],
+        "sync": [
+          291,
+          307,
+          399,
+          415,
+          546,
+          561,
+          619,
+          652,
+          653,
+          654,
+          659,
+          743,
+          877,
+          947,
+          972,
+          996,
+          1059,
+          1266,
+          1281,
+          1312,
+          1354,
+          1362,
+          1370,
+          1410,
+          1413,
+          1421,
+          1431,
+          1439,
+          1446,
+          1486,
+          1494,
+          1506,
+          1552,
+          1749,
+          1754,
+          1762,
+          1883
+        ],
+        "recovery": [
+          212,
+          296,
+          438,
+          444,
+          448,
+          449,
+          452,
+          453,
+          454,
+          582,
+          583,
+          584,
+          585,
+          586,
+          588,
+          589,
+          590,
+          592,
+          597,
+          599,
+          601,
+          626,
+          628,
+          631,
+          632,
+          654,
+          1677,
+          1678
+        ],
+        "failure": [
+          243,
+          416,
+          569,
+          779
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_args.cpp",
+      "sha256": "28aec7f7d5a10080cc32e7d2743241683d357e6cb10def3a4481f3eedc18b229",
+      "lines": 180,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_args.hpp",
+      "sha256": "342223a413dd843ae6e24cdb3b882dda807ad59b3b4cfc8fcc873bed7a04df3c",
+      "lines": 79,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_backend_policy.hpp",
+      "sha256": "24ce583215f1202aa7b5f9d2fcf31985c0448bf446b36cf63d232c597df63e4a",
+      "lines": 142,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          44,
+          45,
+          46,
+          47,
+          48,
+          49
+        ],
+        "recovery": [
+          17,
+          18,
+          19,
+          25,
+          35,
+          36,
+          76,
+          77,
+          79,
+          80,
+          83,
+          85,
+          88,
+          105,
+          112,
+          113,
+          120,
+          121,
+          122,
+          133,
+          134
+        ],
+        "failure": [
+          81,
+          94
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_backend_policy_test.cpp",
+      "sha256": "88a2863cc4f5fd24c07a1c71a162db896fd1793b62c729e3bf1c50287a21b097",
+      "lines": 135,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          2,
+          4,
+          15,
+          16,
+          36,
+          51,
+          54,
+          59,
+          62,
+          63,
+          64,
+          66,
+          70,
+          71,
+          72,
+          74,
+          75,
+          84,
+          89,
+          90,
+          111,
+          116,
+          125
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_bgra_scale.cpp",
+      "sha256": "05ebcbdfb14291fbd85c6e8fb834552208940d9415acef7651acc2b03f6220fb",
+      "lines": 360,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          250
+        ],
+        "recovery": [],
+        "failure": [
+          161,
+          232,
+          236,
+          249,
+          253,
+          255,
+          260,
+          265,
+          278,
+          281,
+          292,
+          301,
+          353
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_bgra_scale.hpp",
+      "sha256": "2a2bef7425c0115eb405e244d9e36aa200c8493785d8ca74c9ae72fffb59455f",
+      "lines": 55,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_bgra_scale_test.cpp",
+      "sha256": "edcab614da8cbfffea901ba8027df7a95cceb2c8e12c4d00d016063f8a991863",
+      "lines": 111,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_bottleneck.hpp",
+      "sha256": "214a1fd8ac92cd6257609a8e132fa7a2e17aa53d28807ce9208865c8ce1e6c01",
+      "lines": 79,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_capture_device.cpp",
+      "sha256": "f29355e19b16bf564c1635d0b1cc753b8860d77db2aee4bb5f14d3b3678164a8",
+      "lines": 416,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          41,
+          44,
+          45,
+          48,
+          53,
+          88,
+          93,
+          107,
+          112,
+          229,
+          241,
+          302,
+          305,
+          312,
+          314,
+          327,
+          388
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_capture_device.hpp",
+      "sha256": "0f24c72827fc4d5dbe5ab88ed1ba3818759f5d09ae661d955b4556766b44989c",
+      "lines": 95,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          14
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_capture_session.cpp",
+      "sha256": "e0cc2350275ed537d6a111a296bd39a097d8667e4666d41b16f7596c5fcae188",
+      "lines": 971,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          223,
+          233,
+          271,
+          304,
+          409,
+          476,
+          508,
+          600,
+          675,
+          746,
+          752,
+          805,
+          818,
+          900,
+          918
+        ],
+        "recovery": [
+          67,
+          198,
+          409,
+          422,
+          424,
+          428,
+          443,
+          449,
+          470,
+          488,
+          498,
+          568,
+          572,
+          745
+        ],
+        "failure": [
+          75,
+          78,
+          81,
+          83,
+          87,
+          90,
+          95,
+          97,
+          194,
+          200,
+          361,
+          392,
+          397,
+          401,
+          429,
+          471,
+          499,
+          505,
+          592,
+          597,
+          598,
+          664,
+          667,
+          672,
+          673,
+          703,
+          710,
+          723,
+          725,
+          808,
+          810,
+          811,
+          812,
+          813,
+          815,
+          816,
+          820,
+          823
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_capture_session.hpp",
+      "sha256": "21049a5d20865a6c3c7936cbd087d6eb44ec91ac376a91a2499b65221ff5e655",
+      "lines": 334,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          146,
+          147,
+          148,
+          149,
+          153,
+          154,
+          156,
+          161,
+          175,
+          180,
+          181,
+          188,
+          189,
+          194,
+          195,
+          196,
+          204,
+          207,
+          215,
+          217,
+          218,
+          219,
+          220,
+          227,
+          228,
+          229,
+          230,
+          231,
+          232,
+          234,
+          235,
+          236,
+          237,
+          238,
+          251,
+          255,
+          261,
+          268,
+          285,
+          312,
+          318
+        ],
+        "recovery": [
+          111,
+          158,
+          193,
+          198,
+          245,
+          246,
+          316,
+          317
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_client_metrics.hpp",
+      "sha256": "5c7abdfc5d1b18abf8a8ef4be832e173646f53490a875e81077f09b7e262cca8",
+      "lines": 74,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          55,
+          59,
+          64,
+          70,
+          71
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_command_line.hpp",
+      "sha256": "59eea916be43562d7aee317589c728544bc4c0291a77ea434b7ecfff315885bf",
+      "lines": 69,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_command_line_test.cpp",
+      "sha256": "1c2038543dec1a967730e4ce43a2f6bce473dd02a75e5a178664aace6a79f5a7",
+      "lines": 93,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_control_session.cpp",
+      "sha256": "0b9e845ab43c807d68dfb5ca560a35fa0e7645476dc25231bbfc4da079b98c9c",
+      "lines": 953,
+      "hits": {
+        "thread": [],
+        "wait": [
+          773
+        ],
+        "sync": [
+          53,
+          484,
+          485,
+          753,
+          766
+        ],
+        "recovery": [
+          78,
+          502,
+          525,
+          526,
+          528,
+          532,
+          846
+        ],
+        "failure": [
+          181,
+          334
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_control_session.hpp",
+      "sha256": "e08621772b28a05a893b78c92336cfed5e71f13bb44e3433643e111afacac88a",
+      "lines": 78,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          55,
+          67
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_encode_epoch_test.cpp",
+      "sha256": "f2435b066f66b9c2b109896990e72b736067418eba683203fd2630bb4418dd96",
+      "lines": 861,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          415
+        ],
+        "recovery": [
+          451,
+          481,
+          485,
+          619,
+          641,
+          646
+        ],
+        "failure": [
+          1,
+          96,
+          98,
+          113,
+          188,
+          397,
+          400,
+          790,
+          800,
+          816,
+          834
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_encoded_sender.cpp",
+      "sha256": "ef8eb1c48cf0b591822e27a5dbd0625e30b620decd4a310128d324aeab093bc9",
+      "lines": 348,
+      "hits": {
+        "thread": [
+          101
+        ],
+        "wait": [
+          122
+        ],
+        "sync": [
+          36,
+          56,
+          77,
+          121,
+          272,
+          329
+        ],
+        "recovery": [
+          114,
+          237,
+          238,
+          242,
+          286
+        ],
+        "failure": [
+          149,
+          151
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_encoded_sender.hpp",
+      "sha256": "12a13f45e51eb13520badb871de74adcc7830ce2c52a5ff851d0c3a2e5ef5a20",
+      "lines": 199,
+      "hits": {
+        "thread": [
+          172
+        ],
+        "wait": [],
+        "sync": [
+          82,
+          83,
+          84,
+          88,
+          99,
+          100,
+          101,
+          102,
+          125,
+          126,
+          127,
+          136,
+          148,
+          149,
+          153,
+          154,
+          158,
+          159,
+          160,
+          161,
+          162,
+          163,
+          164,
+          165,
+          166,
+          167,
+          169,
+          170,
+          171
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_encoder_manager.cpp",
+      "sha256": "80596ef19d5f8b6df1b0e9b52049ccc2e531be9f34c2cae4074d8caa830410f7",
+      "lines": 186,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          65,
+          67,
+          76
+        ],
+        "failure": [
+          62,
+          73,
+          170
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_encoder_manager.hpp",
+      "sha256": "9865ab639b5f039408ff6031b3a7c6c9da9bf5612616cec9b725a411e16d92fb",
+      "lines": 303,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          69,
+          90
+        ],
+        "recovery": [
+          40,
+          41,
+          44,
+          67,
+          125,
+          136,
+          200,
+          211,
+          237,
+          252,
+          254,
+          257,
+          282
+        ],
+        "failure": [
+          140,
+          203,
+          204,
+          208
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_epoch_gate.hpp",
+      "sha256": "f2b6145f729a4b8f603285eca58255c048d2a14ad5273c8e6be8b8ae7af7ecf7",
+      "lines": 215,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          14,
+          43,
+          196
+        ],
+        "failure": [
+          189
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_frame_gate.hpp",
+      "sha256": "f9df5cf9c7ad752063a6c780dbf9c3902d98563ee00ebbac144e070b57a6bc3d",
+      "lines": 104,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          61
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_frame_gate_test.cpp",
+      "sha256": "063ccafe04061ca3973c27269d9c4d5b6c3ce83be07902606c5ad13e5e6e5c23",
+      "lines": 143,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          62
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_frame_state.hpp",
+      "sha256": "b7dd0120f70a5303af8f2d659663c7e60316c80c26ce2547515aca6ca8a7eddc",
+      "lines": 58,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_gpu_scaler.hpp",
+      "sha256": "eb1938f4c7dfdacb2c3f1f9f0841ba57df3b5e582a0bc2ed8e9e4e214392ea44",
+      "lines": 235,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          154,
+          219
+        ],
+        "recovery": [],
+        "failure": [
+          53,
+          57,
+          58,
+          64,
+          65,
+          86,
+          89,
+          91,
+          95,
+          97,
+          108,
+          113,
+          119,
+          126,
+          128,
+          134,
+          136,
+          149,
+          158,
+          195,
+          196,
+          200
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_input_inject.cpp",
+      "sha256": "18bd1974c0b81ab5e6ab481537ecfe47ab2dfa88aad97d997dde0449c7559896",
+      "lines": 786,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          210,
+          219,
+          275,
+          320,
+          345,
+          346,
+          356,
+          536,
+          537,
+          555,
+          562,
+          625,
+          626,
+          640,
+          643,
+          645,
+          655,
+          656,
+          667,
+          676,
+          680,
+          734,
+          743,
+          779
+        ],
+        "recovery": [],
+        "failure": [
+          80,
+          144,
+          174,
+          189,
+          191,
+          229,
+          232,
+          235,
+          256,
+          286,
+          407,
+          409,
+          416
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_input_inject.hpp",
+      "sha256": "11ef8e5e91b79dde4c7ae99080863c995e3cf3b688c803c561c951ea4861f6f6",
+      "lines": 128,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          6,
+          62,
+          107,
+          113,
+          123
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_input_router.hpp",
+      "sha256": "df0b8b22cd83c8c9975cb5338ef9d3d90d2320b6ebb3cf270af7a4b2d0e6d404",
+      "lines": 89,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          51,
+          53,
+          54,
+          55,
+          56,
+          57,
+          58,
+          59,
+          63,
+          64,
+          68,
+          69,
+          70,
+          71,
+          72,
+          73,
+          74,
+          75,
+          76,
+          77,
+          78,
+          79,
+          80,
+          81
+        ],
+        "recovery": [
+          48,
+          73
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_input_target_rect.hpp",
+      "sha256": "1f07ca0d6ce7da9956010ee208cb4340cdd79dda3bb9e8ee83d7ca9aa345e3d6",
+      "lines": 81,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          8,
+          14
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_input_target_rect_test.cpp",
+      "sha256": "748f2e3564cb3557a4f1e9d755944d689fa64698e061fb55f9e322aa3445a52c",
+      "lines": 228,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          36,
+          44,
+          45,
+          46,
+          47,
+          48,
+          50,
+          51,
+          70,
+          165
+        ],
+        "failure": [
+          115
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_kick.hpp",
+      "sha256": "afd9e7f9406c22a14e7c0ae21ffaf9440edd1209112eba2e9e4d19afbe1a90bd",
+      "lines": 104,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          37
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_kick_test.cpp",
+      "sha256": "b5ca64f8871af527fdce79ca8c8bf35cfd20aacb38e0434058d6743e06f1d338",
+      "lines": 130,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_log.hpp",
+      "sha256": "c1902a903dc25a7d6597aa2dbd7d0c4852c80c680ed0aa74dae4351036c2f016",
+      "lines": 138,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          57,
+          80,
+          102
+        ],
+        "recovery": [
+          119
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_loop_helpers.cpp",
+      "sha256": "75028ab547cc16bd3a4e108e712edbaa7e82ea7d1f1b2b03bfb26adf2df963ba",
+      "lines": 537,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          116,
+          155,
+          182,
+          234,
+          278,
+          345,
+          400,
+          418,
+          490,
+          517
+        ],
+        "recovery": [
+          1,
+          70,
+          107,
+          212,
+          219,
+          226,
+          227,
+          231,
+          238,
+          241,
+          291,
+          312,
+          333,
+          364,
+          495,
+          496,
+          498,
+          509,
+          526
+        ],
+        "failure": [
+          86,
+          89,
+          231,
+          302,
+          303,
+          304,
+          318,
+          350,
+          382,
+          445,
+          456,
+          462,
+          500
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_main_loop.hpp",
+      "sha256": "9eccd15c1a8322b7acb6ea7c336eb9b9f98917ed2fe2970f6368f72fa928b924",
+      "lines": 233,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          114
+        ],
+        "recovery": [
+          42,
+          59,
+          60,
+          62,
+          66,
+          69,
+          72,
+          75,
+          76,
+          79,
+          80,
+          83,
+          101,
+          102,
+          135,
+          199,
+          207,
+          220,
+          227
+        ],
+        "failure": [
+          147
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_main_loop_mailbox.hpp",
+      "sha256": "a18adfd5e5c4bf1f526e51ba04ba3d01e89ae201f6a1502199cd44dc82d535d0",
+      "lines": 203,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          83,
+          87,
+          91,
+          101,
+          106,
+          131,
+          144,
+          153,
+          158,
+          164,
+          176
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_main_loop_mailbox_test.cpp",
+      "sha256": "3ef0ec043502106d9acf0edeb330b9f7312e10a5706ec671b0028c8d6b120956",
+      "lines": 197,
+      "hits": {
+        "thread": [
+          124,
+          144
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_net_io.cpp",
+      "sha256": "850c38b77f06e16eccb3ad949c2b3ea9f08bf98e3921a3bce416fa76d6fdf6d5",
+      "lines": 279,
+      "hits": {
+        "thread": [],
+        "wait": [
+          82
+        ],
+        "sync": [
+          114,
+          238
+        ],
+        "recovery": [],
+        "failure": [
+          50,
+          153
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_net_io.hpp",
+      "sha256": "92c74759546f96eb9360eea23e1efa1635ab7db410781ccb505fdcc98060e788",
+      "lines": 115,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          94,
+          104
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_secure_target_rect.hpp",
+      "sha256": "3c26e0bf13f37a2ce83be6fca22eeac5e8d561bde4aba1465433bab8cf4f2434",
+      "lines": 91,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_sender_epoch_test.cpp",
+      "sha256": "bf0b64860359515dea75407bcb010daf96895f4d709aa269643911f4f27ad086",
+      "lines": 354,
+      "hits": {
+        "thread": [
+          102
+        ],
+        "wait": [
+          253,
+          262
+        ],
+        "sync": [
+          72,
+          166,
+          195,
+          215,
+          250,
+          256,
+          261,
+          266,
+          272,
+          290,
+          315,
+          323
+        ],
+        "recovery": [],
+        "failure": [
+          77,
+          82,
+          83,
+          85
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_sender_queue_policy.hpp",
+      "sha256": "26ab717ab2748cc82ae4eacac37d0ef70d0b6cba20ee3e00f24c2bd438d28be1",
+      "lines": 49,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_sender_queue_policy_test.cpp",
+      "sha256": "39a6213756a4c8ed89c67ba522615ef6bd98b4364235f5670ea6aca3a6f7945f",
+      "lines": 185,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_session.hpp",
+      "sha256": "95281bef5e54cd38f7f48b3b093a9b3c5322bd2b03a9dce14f1fd903cf35b84c",
+      "lines": 148,
+      "hits": {
+        "thread": [
+          84,
+          86,
+          87
+        ],
+        "wait": [
+          112
+        ],
+        "sync": [
+          67,
+          72,
+          89,
+          90,
+          109,
+          124,
+          137
+        ],
+        "recovery": [
+          127
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_shutdown.cpp",
+      "sha256": "580ccdd562ae289e2acb29a06e4abebbb7370f3fdfc7bf3eabb90eb4b89cb4d3",
+      "lines": 163,
+      "hits": {
+        "thread": [
+          133,
+          139,
+          140,
+          148
+        ],
+        "wait": [],
+        "sync": [
+          124
+        ],
+        "recovery": [
+          81
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_backend.cpp",
+      "sha256": "74d850d3e9944b4292d75d2b1c2630c52837bd455b3432e7c281e97ee9dcce34",
+      "lines": 285,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          68,
+          101,
+          102,
+          105,
+          112,
+          138,
+          157,
+          158,
+          163,
+          184,
+          185,
+          190,
+          223,
+          224,
+          226,
+          242,
+          243,
+          246,
+          247,
+          248,
+          249,
+          251,
+          259,
+          269
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_encode_send.cpp",
+      "sha256": "a066e668d6638eca229f92df09075e9d69c04d01f24138f4abe149a720ad9a6b",
+      "lines": 297,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          70,
+          172
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_encode_send_h264.cpp",
+      "sha256": "8c8f768398bac4516abe3ae880552912d885d55d0d63e4587fb8380fa2b244e5",
+      "lines": 554,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          246,
+          531
+        ],
+        "recovery": [
+          1,
+          72,
+          95,
+          294,
+          295,
+          370,
+          371,
+          374,
+          415,
+          417,
+          420,
+          422,
+          423,
+          440,
+          446,
+          447,
+          448,
+          449,
+          509,
+          537,
+          544
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_encode_send_h264.hpp",
+      "sha256": "1bf7778f612205356cc1d9d449fdcb2eaf4e28dd9296e80674ec6ef0cde71f71",
+      "lines": 60,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          44
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_encode_send_h264_au.cpp",
+      "sha256": "a0ddc7cc38e3b74420332f1014e7cf1c89b152deb5c5bcc553b2dd84255d0b6f",
+      "lines": 746,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          381
+        ],
+        "recovery": [
+          69,
+          139,
+          197,
+          202,
+          259,
+          264,
+          479,
+          482,
+          483
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_gate_static.cpp",
+      "sha256": "d2ad55c696635b1bcb2844e6b60237ffbcbec0669a4d747bc639186a88a9fcab",
+      "lines": 178,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          68
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_geometry.cpp",
+      "sha256": "e6c3bddd3ff9a0e3468f2d1f90b73b51b6be231fd46215a7643c18035e0722c2",
+      "lines": 172,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          103,
+          139
+        ],
+        "recovery": [
+          68,
+          85,
+          95,
+          124,
+          126,
+          127,
+          146,
+          154,
+          156,
+          157,
+          163,
+          164,
+          166
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_pace.cpp",
+      "sha256": "def6218d582b1753f7814b01764de5e9e0f9670ffc01152a2567d148c8cb7c88",
+      "lines": 111,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          68
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_pop_frame.cpp",
+      "sha256": "51c65a8971dcc54f9148c7d5f2fa6babe4a9b3b32541956e30d102a4b13a3c37",
+      "lines": 363,
+      "hits": {
+        "thread": [],
+        "wait": [
+          259
+        ],
+        "sync": [
+          167,
+          175,
+          238,
+          258
+        ],
+        "recovery": [
+          68,
+          228
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_runtime_tune.cpp",
+      "sha256": "5f7daac5fc49fa0339f24d60cf412e7a4cb045f053d3ba2c49b716ab4a68299d",
+      "lines": 245,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          204,
+          222
+        ],
+        "recovery": [
+          68,
+          123,
+          182,
+          183,
+          187
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_selection.cpp",
+      "sha256": "4dcaa8842173edb8d3abe603d236e14cb46ddc2f0387992c1e6c488135efcdc4",
+      "lines": 327,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          125,
+          167,
+          237,
+          285,
+          298
+        ],
+        "recovery": [
+          68,
+          90,
+          129,
+          130,
+          131,
+          141,
+          171,
+          172,
+          173,
+          190,
+          242,
+          243,
+          244,
+          264,
+          302,
+          303,
+          304,
+          315,
+          318
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_stats.cpp",
+      "sha256": "7a67bddb4bce5a09aee66f144fde8ae575e683521ca3a4bbfd00938fc701cb7d",
+      "lines": 472,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          373
+        ],
+        "recovery": [
+          1,
+          68,
+          91,
+          109,
+          115,
+          125,
+          140,
+          141,
+          143,
+          144,
+          146,
+          148,
+          149,
+          150,
+          151,
+          152,
+          160,
+          162,
+          163,
+          164,
+          165,
+          171,
+          172,
+          174,
+          175,
+          177,
+          178,
+          181,
+          183,
+          184,
+          190,
+          192,
+          194,
+          198,
+          201,
+          205,
+          208,
+          215,
+          217,
+          219,
+          220,
+          221,
+          222,
+          225,
+          226,
+          234,
+          238,
+          258,
+          260,
+          263,
+          264,
+          265,
+          266,
+          267,
+          268,
+          274,
+          275,
+          276,
+          285,
+          287,
+          293,
+          294,
+          303,
+          304,
+          305,
+          306,
+          312,
+          313,
+          314,
+          315,
+          316,
+          317,
+          325,
+          338,
+          339,
+          344,
+          430,
+          431,
+          463
+        ],
+        "failure": [
+          301
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_stats_h264.cpp",
+      "sha256": "611dacaa320f2612ad5c0dbd8487adfdaa95fd3c9eac49630478eadbcfa6d493",
+      "lines": 444,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          208
+        ],
+        "recovery": [
+          1,
+          71,
+          97,
+          153,
+          154,
+          166,
+          167,
+          172,
+          233,
+          237,
+          238,
+          239,
+          240
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_stream_active.cpp",
+      "sha256": "9116e5349b955e07eebacbb3c084a80a3e7f7e9083b3a20f3975b96e4013a5e2",
+      "lines": 180,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          68,
+          125,
+          144,
+          145,
+          146,
+          147,
+          148,
+          149,
+          154,
+          155,
+          156,
+          173,
+          174
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_time_limit.cpp",
+      "sha256": "f47c07ffe12c00d1795a484c1b4ad55f3b5e20ce86ef3a575bb10322a2dd1343",
+      "lines": 154,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          68,
+          89,
+          95
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stage_watchdogs.cpp",
+      "sha256": "e96b5d8535145cf64632aa84c4b41a3694f017344723264c0cf6fa962a72963f",
+      "lines": 231,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          1,
+          68,
+          83,
+          85,
+          97,
+          101,
+          102,
+          103,
+          104,
+          105,
+          107,
+          108,
+          109,
+          110,
+          116,
+          117,
+          118,
+          123,
+          128,
+          132,
+          133,
+          135,
+          141,
+          142,
+          144,
+          145,
+          147,
+          151,
+          152,
+          153,
+          155,
+          157,
+          158,
+          160,
+          161,
+          163,
+          165,
+          166,
+          167,
+          168,
+          169,
+          170,
+          171,
+          174,
+          177,
+          178,
+          179,
+          184,
+          188,
+          193,
+          196,
+          197,
+          206,
+          207,
+          208,
+          209,
+          216,
+          217,
+          218,
+          219,
+          220,
+          223
+        ],
+        "failure": [
+          204
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_startup.hpp",
+      "sha256": "1f48920ac1346fc8bc7684ce336c104e71cd75dd156f43c5667fec928d40964a",
+      "lines": 57,
+      "hits": {
+        "thread": [
+          31,
+          51
+        ],
+        "wait": [],
+        "sync": [
+          30,
+          50
+        ],
+        "recovery": [
+          6,
+          9,
+          11,
+          27,
+          29,
+          32,
+          50,
+          51,
+          54
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_startup_capture.cpp",
+      "sha256": "e70202c3f59d3300d91024ff38cf9a60efee2fff89c7c2ddb0f87da031206010",
+      "lines": 409,
+      "hits": {
+        "thread": [
+          104,
+          108,
+          114,
+          372
+        ],
+        "wait": [
+          122,
+          401
+        ],
+        "sync": [
+          104
+        ],
+        "recovery": [
+          1,
+          2,
+          81,
+          104,
+          106,
+          108,
+          114,
+          125,
+          127,
+          137,
+          156,
+          177,
+          185,
+          188,
+          191,
+          192,
+          194,
+          198,
+          199,
+          202,
+          207,
+          209,
+          228,
+          229,
+          267,
+          274,
+          275,
+          277,
+          278,
+          279,
+          323,
+          359,
+          361,
+          362,
+          371,
+          372,
+          374,
+          376,
+          379,
+          381,
+          382,
+          383,
+          386,
+          394,
+          397,
+          403
+        ],
+        "failure": [
+          110,
+          149,
+          368,
+          403
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_startup_config.cpp",
+      "sha256": "98a240e5eca762f106796d7669c5d5a84765e005644ec25c4defec2227f74243",
+      "lines": 416,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          81,
+          134,
+          211,
+          213,
+          215,
+          274,
+          324,
+          325,
+          326,
+          400
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_startup_connect.cpp",
+      "sha256": "2551eb92fd100d46dfd1da9379c9fcc9fa7c1dd8684c4796d4fc18c560c70c5e",
+      "lines": 399,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          358
+        ],
+        "recovery": [
+          81
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_startup_control.cpp",
+      "sha256": "3e6900ff30af743b33964678d2c0c8562f7d4cd2ce4124c3e6926ebeecaa2e6e",
+      "lines": 434,
+      "hits": {
+        "thread": [
+          127,
+          228,
+          389
+        ],
+        "wait": [
+          242,
+          394
+        ],
+        "sync": [
+          154,
+          173,
+          238,
+          393,
+          411
+        ],
+        "recovery": [
+          81,
+          311,
+          325,
+          334,
+          406
+        ],
+        "failure": [
+          217
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_startup_graphics.cpp",
+      "sha256": "257815a3d38c2a7b32ff27be4b5cf5208afc1e720f549374f032fd7b03faf6dc",
+      "lines": 430,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          210
+        ],
+        "recovery": [
+          81,
+          170,
+          172,
+          173,
+          175,
+          176,
+          179,
+          180,
+          234,
+          370,
+          371,
+          372,
+          373,
+          379,
+          380,
+          382
+        ],
+        "failure": [
+          120,
+          131
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_stats.hpp",
+      "sha256": "6ab9b7d58bee3d35ff816d68ddc37ff6df32d0c7eae2ed3a9b7edf0882eace06",
+      "lines": 103,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          27,
+          82,
+          83,
+          99,
+          100
+        ],
+        "recovery": [
+          22,
+          23
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_string_util.hpp",
+      "sha256": "676223cdd09e8fe6acf53f240f314b548adfc618e8beeb73f6295b4b0fd8cc54",
+      "lines": 7,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_unlock_relay.cpp",
+      "sha256": "8fbc59b051767250a296699db6c422e2797d023030376d848d28e7c8224f5c2d",
+      "lines": 253,
+      "hits": {
+        "thread": [
+          70,
+          78
+        ],
+        "wait": [
+          52,
+          68,
+          117,
+          149,
+          172,
+          211
+        ],
+        "sync": [
+          116,
+          125,
+          165,
+          188,
+          202,
+          210,
+          235,
+          246
+        ],
+        "recovery": [],
+        "failure": [
+          199,
+          214,
+          245,
+          248
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_unlock_relay.hpp",
+      "sha256": "ce4a53e0b0a5d22799d61b87d2031d1701f99a04e33b81dfb2b92f3057b1c03a",
+      "lines": 67,
+      "hits": {
+        "thread": [
+          54
+        ],
+        "wait": [],
+        "sync": [
+          55,
+          56
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_watchdog.hpp",
+      "sha256": "61c40a62dfc948b38a853fc70d6042aea26442a13277dc44ce985fd7662883cb",
+      "lines": 126,
+      "hits": {
+        "thread": [
+          102,
+          122
+        ],
+        "wait": [
+          115
+        ],
+        "sync": [
+          70,
+          71,
+          72,
+          99,
+          106,
+          113,
+          114
+        ],
+        "recovery": [
+          3,
+          19,
+          22,
+          26,
+          29,
+          31,
+          32,
+          37,
+          38,
+          40,
+          41,
+          42,
+          43,
+          48,
+          49,
+          50,
+          51,
+          53,
+          54,
+          60,
+          66,
+          67,
+          69,
+          75,
+          87,
+          89,
+          98,
+          111,
+          120
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_window_enum.cpp",
+      "sha256": "295d11950d45d975df8aab3b82cbde3cf483391bccffc5e64b195183ab3568e8",
+      "lines": 340,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          314
+        ],
+        "failure": [
+          65,
+          71,
+          88,
+          100,
+          101,
+          102,
+          103,
+          104,
+          106,
+          109,
+          110,
+          112,
+          115,
+          253,
+          254,
+          256,
+          257,
+          261,
+          263,
+          264,
+          268,
+          270,
+          283,
+          299,
+          305,
+          311,
+          320,
+          337
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/host_window_enum.hpp",
+      "sha256": "f26b84a97d259ebe67b5415284925b3cde1a80e51000eeb15a52398ec9630a19",
+      "lines": 91,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/input_macro.cpp",
+      "sha256": "d6935a8994a912c4a233af62aaad02812c72f6f92b7bc013c94afed57223ca0d",
+      "lines": 311,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          55,
+          65,
+          87,
+          95,
+          112,
+          117,
+          134,
+          149,
+          187,
+          192,
+          197,
+          202,
+          211,
+          226,
+          236,
+          279,
+          288,
+          293
+        ],
+        "recovery": [],
+        "failure": [
+          118,
+          150,
+          151,
+          152,
+          212,
+          227,
+          249,
+          252,
+          265,
+          267,
+          274,
+          277,
+          280
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/input_macro.hpp",
+      "sha256": "8f0a0d4d4317c29fc17ac1143a30631ea837bfae54002ea14c62444f03103191",
+      "lines": 149,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/input_macro_test.cpp",
+      "sha256": "1c5dc40d5181a322dcc23b62679ab01f348149e09e235bdba9fbc19b9173768c",
+      "lines": 318,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/install_registration.cpp",
+      "sha256": "b8a7df75d3e44af2cd01c60514b0bf702b23ccca0cef4811f914431207bd35e4",
+      "lines": 223,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          54,
+          174,
+          206
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/install_registration.hpp",
+      "sha256": "305a5c0329321fb378964b0895ce2452c3d679b1d37cff180b531ed81cd4cbf2",
+      "lines": 142,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/install_registration_test.cpp",
+      "sha256": "39dd3ae2748af092a76bf0832bbab6190e312e600b87abf7f2a20ab92cd6a673",
+      "lines": 291,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          58,
+          97
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/json_profile.hpp",
+      "sha256": "b8c245e3631f48c0bfe592ab5b5062159af10846810c8616b2c27563733b7c5b",
+      "lines": 211,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          13,
+          17,
+          74,
+          77,
+          83,
+          86,
+          93,
+          96
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/log_upload.cpp",
+      "sha256": "d92114f1fc694501c2c9bd72ff485a9eee034147d43c9300536ba47a969be635",
+      "lines": 669,
+      "hits": {
+        "thread": [
+          127,
+          526,
+          583,
+          592
+        ],
+        "wait": [
+          284
+        ],
+        "sync": [
+          36,
+          275,
+          335,
+          464,
+          540,
+          560,
+          585,
+          593,
+          617,
+          622,
+          628,
+          637,
+          643,
+          665
+        ],
+        "recovery": [
+          62,
+          69,
+          365,
+          391,
+          398,
+          406
+        ],
+        "failure": [
+          219,
+          232,
+          438,
+          442,
+          446,
+          455,
+          470
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/log_upload.hpp",
+      "sha256": "d1716792eecfcb0b605640ab913e932df6b130228148a0e9e219ec515a2623fd",
+      "lines": 155,
+      "hits": {
+        "thread": [
+          129
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          20,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          63,
+          64,
+          67
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/log_upload_shutdown_test.cpp",
+      "sha256": "da1f4c4917d7d585c9a00dfa362d617db98ecd293730072e7a6bff8ef66833d5",
+      "lines": 401,
+      "hits": {
+        "thread": [
+          5,
+          82,
+          93,
+          124,
+          233,
+          247,
+          256
+        ],
+        "wait": [
+          300
+        ],
+        "sync": [
+          125,
+          231,
+          232
+        ],
+        "recovery": [
+          249,
+          364
+        ],
+        "failure": [
+          72,
+          77,
+          78,
+          297,
+          302,
+          304
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/log_upload_test.cpp",
+      "sha256": "bb724b6c0e1a8e4bd11996971b7595d5ca434b0f2c164bb2f41e08451bcee877",
+      "lines": 660,
+      "hits": {
+        "thread": [
+          96,
+          105,
+          193
+        ],
+        "wait": [],
+        "sync": [
+          118,
+          123,
+          127,
+          139,
+          168,
+          323,
+          459,
+          494
+        ],
+        "recovery": [
+          4,
+          208,
+          209,
+          364,
+          366,
+          367,
+          372,
+          373,
+          390,
+          638
+        ],
+        "failure": [
+          86,
+          91,
+          92
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/macro_shell_bridge.cpp",
+      "sha256": "64c90b63d02b360e4ed2c36b940eef8e0442efa519b7fb58f49216602f4bccfe",
+      "lines": 162,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          101,
+          117,
+          119,
+          129,
+          131,
+          137,
+          142,
+          144,
+          146,
+          147,
+          150,
+          157
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/macro_shell_bridge.hpp",
+      "sha256": "1480efd4d98c72b2e8999e1969e61736d3aa66a71c70ba244456030c690c64cd",
+      "lines": 63,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/macro_shell_bridge_test.cpp",
+      "sha256": "da670ac6238f1ef0922526c5fd647b20aa14b78c45a3c16abdf0702e29adbd2e",
+      "lines": 121,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/mf_h264_codec.cpp",
+      "sha256": "b3b2432d4247b2d6204234e6061c742bc5827c00f9fa0643c92fd76eedf4810d",
+      "lines": 2511,
+      "hits": {
+        "thread": [
+          289,
+          323
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          1354,
+          1358,
+          1768,
+          1927,
+          1929,
+          2006,
+          2010
+        ],
+        "failure": [
+          45,
+          47,
+          60,
+          70,
+          72,
+          74,
+          77,
+          81,
+          83,
+          91,
+          93,
+          167,
+          169,
+          180,
+          191,
+          195,
+          202,
+          206,
+          208,
+          218,
+          231,
+          236,
+          238,
+          240,
+          243,
+          246,
+          254,
+          257,
+          260,
+          273,
+          277,
+          278,
+          282,
+          285,
+          286,
+          294,
+          296,
+          300,
+          308,
+          312,
+          315,
+          317,
+          319,
+          321,
+          326,
+          331,
+          334,
+          338,
+          341,
+          345,
+          380,
+          384,
+          386,
+          464,
+          474,
+          479,
+          499,
+          505,
+          534,
+          538,
+          541,
+          544,
+          550,
+          552,
+          560,
+          572,
+          577,
+          586,
+          598,
+          604,
+          612,
+          619,
+          624,
+          635,
+          653,
+          669,
+          678,
+          694,
+          710,
+          718,
+          743,
+          795,
+          827,
+          836,
+          881,
+          916,
+          952,
+          966,
+          970,
+          1058,
+          1066,
+          1150,
+          1154,
+          1155,
+          1157,
+          1158,
+          1166,
+          1170,
+          1186,
+          1200,
+          1211,
+          1220,
+          1239,
+          1260,
+          1265,
+          1297,
+          1302,
+          1323,
+          1367,
+          1378,
+          1379,
+          1384,
+          1401,
+          1402,
+          1407,
+          1464,
+          1526,
+          1555,
+          1616,
+          1623,
+          1661,
+          1683,
+          1684,
+          1690,
+          1699,
+          1700,
+          1716,
+          1734,
+          1736,
+          1745,
+          1746,
+          1786,
+          1794,
+          1795,
+          1796,
+          1809,
+          1812,
+          1823,
+          1931,
+          1987,
+          2049,
+          2053,
+          2054,
+          2061,
+          2064,
+          2072,
+          2086,
+          2098,
+          2105,
+          2109,
+          2110,
+          2114,
+          2131,
+          2135,
+          2137,
+          2140,
+          2142,
+          2145,
+          2151,
+          2153,
+          2161,
+          2163,
+          2166,
+          2177,
+          2180,
+          2183,
+          2184,
+          2257,
+          2283,
+          2294,
+          2318,
+          2328,
+          2341,
+          2350,
+          2353,
+          2354,
+          2355,
+          2371,
+          2373,
+          2460,
+          2463
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/mf_h264_codec.hpp",
+      "sha256": "1bb8cf2a54a3f458875f139835069e54eadb2d5be8510606cc7e1ed1610ecf06",
+      "lines": 301,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          70,
+          74
+        ],
+        "failure": [
+          129
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/mf_h264_codec_test.cpp",
+      "sha256": "8b944b3b82c64fef0f0d3eec6d1412019967e06ecd0f7ff9cb65be858b5cc4de",
+      "lines": 92,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          67,
+          73
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/native_client_main.cpp",
+      "sha256": "25c31701a8bc9f0fc075984aa3a7ac23c9f69a548f883e194881c526e363f508",
+      "lines": 175,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          46,
+          49
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/native_host_main.cpp",
+      "sha256": "b1fde30071b208c59ca97f59373eacf9b98a606ba37833e906cf8febd164a669",
+      "lines": 241,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          54,
+          57,
+          67
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/native_socket.hpp",
+      "sha256": "376e116edad7a4dfba2b247c75507147049daa117d7c32ba0683641cae1b031f",
+      "lines": 192,
+      "hits": {
+        "thread": [],
+        "wait": [
+          149,
+          161,
+          177
+        ],
+        "sync": [],
+        "recovery": [
+          183
+        ],
+        "failure": [
+          54,
+          103,
+          119,
+          155,
+          166,
+          177
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/native_video_client_main.cpp",
+      "sha256": "a53f46b8eb899b9c3dcbe0ad702af17c341f969af09e3f27f0f46660a6ea991d",
+      "lines": 75,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          62,
+          64
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/native_video_client_session.cpp",
+      "sha256": "e2bff88598496ee2f816f1827744de55dbe0568c0e8c49a6be02d5491bffb25d",
+      "lines": 857,
+      "hits": {
+        "thread": [
+          101,
+          262,
+          634,
+          637
+        ],
+        "wait": [],
+        "sync": [
+          52,
+          61,
+          69,
+          77,
+          88,
+          103,
+          115,
+          120,
+          130,
+          137,
+          142,
+          151,
+          160,
+          170,
+          180,
+          193,
+          202,
+          213,
+          224,
+          236,
+          296,
+          304,
+          384,
+          401,
+          412,
+          445,
+          464,
+          478,
+          490,
+          502,
+          536,
+          628,
+          643,
+          651,
+          665,
+          706,
+          788,
+          838
+        ],
+        "recovery": [
+          21,
+          22,
+          274,
+          545,
+          674,
+          675,
+          683,
+          766,
+          768
+        ],
+        "failure": [
+          57,
+          66,
+          74,
+          82,
+          102,
+          108,
+          131,
+          143,
+          152,
+          161,
+          171,
+          176,
+          181,
+          194,
+          203,
+          205,
+          214,
+          216,
+          225,
+          227,
+          237,
+          263,
+          489,
+          492,
+          688,
+          696,
+          703,
+          709,
+          727,
+          740,
+          747,
+          777,
+          785,
+          791
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/native_video_client_session.hpp",
+      "sha256": "f5fc0b5d880f9736cdfc2c646c368c393ec1af709c3f4ea0a7d72c886c2de54d",
+      "lines": 189,
+      "hits": {
+        "thread": [
+          168,
+          169
+        ],
+        "wait": [],
+        "sync": [
+          170,
+          174,
+          181,
+          182,
+          185,
+          186
+        ],
+        "recovery": [
+          147
+        ],
+        "failure": [
+          40,
+          50
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/native_video_client_shared_core.cpp",
+      "sha256": "19d01e83eaf8f48750e58ad9d7211c6af59d6e4eb26096eae28fb6338a2c9a62",
+      "lines": 1370,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          64,
+          98,
+          114,
+          184,
+          197,
+          1145,
+          1156,
+          1162,
+          1169,
+          1178,
+          1186,
+          1191,
+          1203,
+          1214,
+          1222,
+          1230,
+          1248,
+          1254,
+          1307,
+          1342,
+          1350,
+          1361,
+          1366
+        ],
+        "recovery": [],
+        "failure": [
+          97,
+          99,
+          228,
+          266,
+          267,
+          287,
+          288,
+          307,
+          308,
+          395,
+          396,
+          397,
+          411,
+          444,
+          609,
+          688,
+          695,
+          780,
+          793,
+          813,
+          818,
+          849,
+          1163,
+          1170,
+          1179,
+          1196,
+          1215,
+          1223,
+          1349,
+          1355
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/native_video_client_shared_core.hpp",
+      "sha256": "26068d8181f25f5fca42fb426b133774a178a2ff128937f97e7e6c5c05b8b0e8",
+      "lines": 572,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          40,
+          41,
+          42,
+          79,
+          80,
+          81,
+          82,
+          83,
+          84,
+          85,
+          86,
+          106,
+          107,
+          108,
+          109,
+          110,
+          125,
+          126,
+          127,
+          142,
+          143,
+          144,
+          172,
+          173,
+          174,
+          175,
+          176,
+          177,
+          178
+        ],
+        "recovery": [
+          429,
+          459
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/native_video_client_shared_core_test.cpp",
+      "sha256": "2d2f6dcecc86960e90d33ec0551c33a598fad929a9f4cdbc38ced97910311fde",
+      "lines": 1412,
+      "hits": {
+        "thread": [
+          116,
+          117,
+          126,
+          127,
+          219,
+          220
+        ],
+        "wait": [
+          160,
+          167,
+          174,
+          182,
+          197
+        ],
+        "sync": [
+          213,
+          214
+        ],
+        "recovery": [
+          526,
+          618,
+          675,
+          1240
+        ],
+        "failure": [
+          51,
+          71,
+          78,
+          90,
+          97,
+          104,
+          110,
+          240,
+          241,
+          244,
+          250,
+          251,
+          255,
+          276,
+          278,
+          281,
+          290,
+          294,
+          296,
+          299,
+          308,
+          310,
+          313,
+          316,
+          337,
+          339,
+          343,
+          352,
+          354,
+          356,
+          360,
+          363,
+          365,
+          366,
+          396,
+          397,
+          399,
+          412,
+          420,
+          431,
+          437,
+          451,
+          458,
+          469,
+          472,
+          482,
+          484,
+          537,
+          542,
+          543,
+          544,
+          547,
+          548,
+          549,
+          550,
+          551,
+          554,
+          556,
+          560,
+          561,
+          566,
+          567,
+          570,
+          580,
+          582,
+          590,
+          595,
+          605,
+          606,
+          609,
+          612,
+          613,
+          615,
+          616,
+          627,
+          631,
+          633,
+          650,
+          653,
+          656,
+          659,
+          660,
+          661,
+          662,
+          665,
+          666,
+          669,
+          681,
+          682,
+          686,
+          692,
+          693,
+          699,
+          700,
+          703,
+          711,
+          712,
+          716,
+          729,
+          731,
+          734,
+          759,
+          762,
+          763,
+          764,
+          768,
+          771,
+          774,
+          777,
+          781,
+          784,
+          787,
+          793,
+          794,
+          796,
+          803,
+          806,
+          807,
+          812,
+          822,
+          827,
+          828,
+          830,
+          831,
+          840,
+          843,
+          846,
+          848,
+          852,
+          863,
+          868,
+          875,
+          877,
+          880,
+          1048,
+          1051,
+          1052,
+          1053,
+          1054,
+          1057,
+          1061,
+          1064,
+          1065,
+          1071,
+          1074,
+          1075,
+          1080,
+          1088,
+          1093,
+          1096,
+          1105,
+          1108,
+          1116,
+          1119,
+          1126,
+          1132,
+          1133,
+          1141,
+          1144,
+          1147,
+          1155,
+          1158,
+          1165,
+          1169,
+          1176,
+          1181,
+          1192,
+          1194,
+          1195,
+          1198,
+          1205,
+          1212,
+          1216,
+          1219,
+          1221,
+          1222,
+          1224,
+          1227,
+          1232,
+          1234,
+          1237,
+          1240,
+          1246,
+          1258,
+          1262,
+          1266,
+          1271,
+          1274,
+          1280,
+          1281,
+          1284,
+          1286,
+          1287,
+          1313,
+          1315,
+          1317,
+          1318,
+          1321,
+          1343,
+          1344,
+          1346,
+          1374,
+          1389
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/native_video_client_tcp_control.cpp",
+      "sha256": "1fe9703f7bb006440a47072354ea3237650222ad5f684c83e40b751931cd8239",
+      "lines": 206,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          157
+        ],
+        "recovery": [
+          172,
+          176,
+          198,
+          199
+        ],
+        "failure": [
+          50,
+          56,
+          61,
+          65,
+          119,
+          135,
+          137,
+          141,
+          144,
+          174,
+          203
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/native_video_client_tcp_control.hpp",
+      "sha256": "88a1af8bfdcf6d0eaff871f7634ec6fc5a5384ffb4fb5e3c2609671077526cf3",
+      "lines": 81,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          78
+        ],
+        "recovery": [
+          72
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/native_video_host_main.cpp",
+      "sha256": "5945b3ba78d20b2811e3ce7aec9bc2d46c4544bf4800c02529c8d5d580611b05",
+      "lines": 283,
+      "hits": {
+        "thread": [
+          204
+        ],
+        "wait": [],
+        "sync": [
+          178,
+          203
+        ],
+        "recovery": [
+          75,
+          100,
+          112,
+          113,
+          127,
+          130,
+          168,
+          170,
+          171,
+          201,
+          203,
+          204,
+          205,
+          206,
+          209,
+          227,
+          247,
+          250,
+          256,
+          257,
+          273
+        ],
+        "failure": [
+          142
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/native_video_transport.hpp",
+      "sha256": "92172970793ce13f032ea28052ff37fac200369632ea2045d73348003e97d302",
+      "lines": 35,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          15,
+          24
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/observe_vectors_test.cpp",
+      "sha256": "c52feb54c12f948e0accc0837fe1c31629f9433671b0bc3803f2aa57b19db522",
+      "lines": 118,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/payload_name.cpp",
+      "sha256": "3d81ef1c25fd44f1e217db8651988ecb7371ed15e412af38cde93cf5b09cedfe",
+      "lines": 190,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          157,
+          171
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/payload_name.hpp",
+      "sha256": "2e047bc9412a08aad8a66ff667ab98beb978d93b9ad4f0f97e5b8361d5cd22a4",
+      "lines": 87,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/payload_name_test.cpp",
+      "sha256": "bdc22c5ac49b029afdaa25d6fcc1d3087e28227f2a45ff59e70fe6d23192fb24",
+      "lines": 170,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/picker_empty_state_test.cpp",
+      "sha256": "10358f13b5c0170f690a5eb9cfd22b4c527ac50d3ef750c3a6bfbed4f02fc2ba",
+      "lines": 154,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          52
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/picker_open_chain_test.cpp",
+      "sha256": "b2d4b0b3f18932938f8626161b2fa0b7b6ea7ae16a23718b83fc2c230a5acdaa",
+      "lines": 274,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          136,
+          137,
+          152,
+          153,
+          260,
+          261
+        ],
+        "recovery": [],
+        "failure": [
+          69
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/poc_protocol.hpp",
+      "sha256": "c691102a1610ff57eae9f6da3ce85a6e1ee2c182ffb06b402567ca71a3dee8f9",
+      "lines": 712,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          691
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/product_version.hpp",
+      "sha256": "d4289cb7df6eb0923476a67986c926a72a46566d363144f4d61e4d8a83413936",
+      "lines": 14,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/punch_any_test.cpp",
+      "sha256": "44b0c0180fb750d3c3ebaed8df596c580f8465caebff56b2f9cac71bbbe79056",
+      "lines": 270,
+      "hits": {
+        "thread": [
+          54,
+          73,
+          84,
+          120,
+          138,
+          148
+        ],
+        "wait": [],
+        "sync": [
+          83,
+          147
+        ],
+        "recovery": [],
+        "failure": [
+          40,
+          45,
+          47,
+          112
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/scn_dummy_main.cpp",
+      "sha256": "41ed7e140a7dab519c6cc5786444930af16a6ddc61e9cdac18ca579216148966",
+      "lines": 76,
+      "hits": {
+        "thread": [],
+        "wait": [
+          72
+        ],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/sealed_unlock.cpp",
+      "sha256": "a7b69bebef50eec3b1ce67dd1f877dfb6a86b1bfca316dcfd03e259ba493202b",
+      "lines": 428,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          77,
+          82,
+          99,
+          112,
+          123,
+          153,
+          156,
+          159,
+          166,
+          170,
+          172,
+          178,
+          191,
+          204,
+          216,
+          219,
+          253,
+          258,
+          263,
+          274,
+          277,
+          300,
+          303,
+          321,
+          329,
+          331,
+          342,
+          346
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/sealed_unlock.hpp",
+      "sha256": "cce195ed23720893683b7043b94603772703703509baf50402c39eb5f748ba97",
+      "lines": 175,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/sealed_unlock_test.cpp",
+      "sha256": "525ed29c5f3bee9af3340b01825eb142eeee171f7f10ed1e533ef982ae963b52",
+      "lines": 254,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/secure_input_broker.cpp",
+      "sha256": "9c830e0ad64b7131d0aeda4b10d562cff0ed695b96ecebb83ccae95b93315cb3",
+      "lines": 268,
+      "hits": {
+        "thread": [],
+        "wait": [
+          154,
+          162
+        ],
+        "sync": [
+          50,
+          69,
+          179,
+          186,
+          210,
+          227,
+          233,
+          258,
+          264
+        ],
+        "recovery": [
+          138
+        ],
+        "failure": [
+          15,
+          39,
+          44,
+          73,
+          77,
+          90,
+          102,
+          116,
+          124,
+          128,
+          148,
+          152,
+          160
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/secure_input_broker.hpp",
+      "sha256": "a7750004cdb007f766e7fd47d246698c200c2c0c97f5feea656678e65328a27b",
+      "lines": 62,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/secure_input_diag_budget.hpp",
+      "sha256": "a197af8c94348e836eb0792e9f3038d01a6a8d037cf630202e5461c2f1e8c0a2",
+      "lines": 48,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          42
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/secure_input_mapping.hpp",
+      "sha256": "3f391e55aa880269b8565f8f7fe818d8eef5d7ca1c0a41dfd87ac54b364374b0",
+      "lines": 62,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/secure_input_mapping_test.cpp",
+      "sha256": "7df27ac66d23ea4cbfaae38360192b0b102efb43aa57815489d50c429f1f58c6",
+      "lines": 164,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/secure_input_protocol.hpp",
+      "sha256": "c076c29cf5765ad42a114bcb8e4f54a3b65061bc08c820f712e398a002045b73",
+      "lines": 44,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/secure_input_service_main.cpp",
+      "sha256": "17874fd4f71bbee21f79cdeb315e2b1c57113a600e6326c593d9b4789c39c39e",
+      "lines": 1228,
+      "hits": {
+        "thread": [
+          806,
+          848
+        ],
+        "wait": [
+          112,
+          125,
+          142,
+          146,
+          302,
+          763,
+          845
+        ],
+        "sync": [
+          76,
+          77,
+          80,
+          85,
+          86,
+          87,
+          92,
+          93,
+          954
+        ],
+        "recovery": [
+          321,
+          322,
+          323,
+          351,
+          539,
+          633,
+          714,
+          736,
+          867
+        ],
+        "failure": [
+          113,
+          126,
+          145,
+          170,
+          187,
+          218,
+          235,
+          299,
+          317,
+          324,
+          347,
+          460,
+          877,
+          880,
+          1007,
+          1014,
+          1024,
+          1051,
+          1060
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/secure_input_session.hpp",
+      "sha256": "ca00a58df5f6d356409979314aab73c62f82029d8cf7249ebd2dd3010b0ea9b5",
+      "lines": 84,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/secure_input_session_test.cpp",
+      "sha256": "ea2487bb0d837db99f04458cb9315aae5c68ccfe152bca9298b0e97a326e18f5",
+      "lines": 110,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          83
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/secure_unlock_ipc.hpp",
+      "sha256": "990ddb8066ce36cdba9dc3c4c668d482a876279cc727583ca469890af1506a9f",
+      "lines": 99,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/session_toolbar_click_test.cpp",
+      "sha256": "d25d37756707ccff9ef5e4675767f764da831bf44898a5beefb0485eca4cced5",
+      "lines": 346,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          127,
+          128,
+          151,
+          152,
+          163,
+          172,
+          173,
+          212,
+          219,
+          292,
+          300,
+          308,
+          318,
+          319
+        ],
+        "recovery": [],
+        "failure": [
+          57
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/string_util.hpp",
+      "sha256": "af6790b1dd1e5734592cfeb70388aa8e9cf3bb6c2227cdc0a760fa58b0310850",
+      "lines": 101,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/time_utils.hpp",
+      "sha256": "974890ac7efe507c16a03f392ae801f07be1a3160fcf3c0872a17f81fe6c042b",
+      "lines": 24,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/udp_control_channel.cpp",
+      "sha256": "a563db47f050f25abe0059f667faecbc4e28b8e90c6bc6faa0cce5785d87bed1",
+      "lines": 363,
+      "hits": {
+        "thread": [],
+        "wait": [
+          303,
+          309
+        ],
+        "sync": [
+          34,
+          54,
+          76,
+          131,
+          151,
+          228,
+          254
+        ],
+        "recovery": [],
+        "failure": [
+          130,
+          132,
+          150,
+          154,
+          156,
+          220,
+          226,
+          250,
+          294,
+          302,
+          308,
+          314,
+          325,
+          330,
+          338,
+          340,
+          349,
+          356
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/udp_control_channel.hpp",
+      "sha256": "307a9f3536120bb13907ca6a880d1ba03328a7682f476a27e592d391c823cccf",
+      "lines": 181,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          110,
+          111
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/udp_control_channel_test.cpp",
+      "sha256": "4abdef598d972795a9e09f6b5d62f2b017c6dfb5b7a016ba99239be2ac5a2be8",
+      "lines": 248,
+      "hits": {
+        "thread": [
+          44,
+          63,
+          87,
+          188,
+          226
+        ],
+        "wait": [],
+        "sync": [
+          48,
+          71,
+          78,
+          88,
+          89,
+          185,
+          186
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/udp_control_e2e_test.cpp",
+      "sha256": "3b890933698e2b38208f7aa888f082e28190dec6232c8064c2b04ac3526abfa9",
+      "lines": 191,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          49,
+          50,
+          51,
+          52
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/udp_fec_interleave_test.cpp",
+      "sha256": "88edd957d864f7c96f8eb151260ff4809d19023d86dd68a3a4b37e32a83b65fc",
+      "lines": 202,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/udp_video_nack.hpp",
+      "sha256": "6a22f47f3bed04eb1f9e17ef2aec2c81269863a890dd6d33d6b88f28ff61356f",
+      "lines": 163,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          59,
+          96
+        ],
+        "failure": [
+          89,
+          93,
+          126,
+          128,
+          129,
+          137
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/unlock_protocol_test.cpp",
+      "sha256": "a07242397eab49e3d8133120c79675cb02d2ad99d7b3fd168a28f98d917f23e1",
+      "lines": 142,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/unlock_wire.hpp",
+      "sha256": "6f32a134b8c527fd0af4e00278bbbe411844cb1dd0f86a50dac2f901616e6722",
+      "lines": 61,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_check.cpp",
+      "sha256": "6b80edd6f7db93e46db19f654d00ccc5b76a2d6d079652a4555e7641dd8fc086",
+      "lines": 165,
+      "hits": {
+        "thread": [
+          82,
+          85
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          103,
+          114,
+          119
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_check.hpp",
+      "sha256": "ecbad4707f80ced01a81ab98f8fadf27d064822b9ca0367a9fc1b8d3af88991e",
+      "lines": 113,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_check_test.cpp",
+      "sha256": "04c37772ac0cab7a1a1c6680b065be853fcfc5569e0fad0361d1519416aa371a",
+      "lines": 242,
+      "hits": {
+        "thread": [],
+        "wait": [
+          212,
+          233
+        ],
+        "sync": [
+          200,
+          211,
+          227,
+          232
+        ],
+        "recovery": [],
+        "failure": [
+          52,
+          66
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_credential_channel.cpp",
+      "sha256": "8426d6a86e7b839dc329ab720a1982855c40c539d22bf8cc37e5ef5730ec6145",
+      "lines": 376,
+      "hits": {
+        "thread": [],
+        "wait": [
+          65,
+          70,
+          235,
+          259,
+          325,
+          357
+        ],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          54,
+          72,
+          76,
+          107,
+          111,
+          115,
+          119,
+          124,
+          130,
+          152,
+          166,
+          181,
+          185,
+          190,
+          196,
+          207,
+          210,
+          217,
+          225,
+          239,
+          241,
+          245,
+          262,
+          264,
+          268,
+          275,
+          296,
+          300,
+          309
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_credential_channel.hpp",
+      "sha256": "6f347db8939b1af24908e4ef9cc0c7fb070f1474a4193c807ea9b25fc0d44411",
+      "lines": 106,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_credential_channel_test.cpp",
+      "sha256": "24c719125be7414ee507749a70b45ec5e9075169928d054fedc071987aa043ff",
+      "lines": 208,
+      "hits": {
+        "thread": [
+          105,
+          112,
+          149,
+          154
+        ],
+        "wait": [
+          128,
+          199
+        ],
+        "sync": [
+          102,
+          148
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_credential_hop_helper.cpp",
+      "sha256": "fdb81b4a3ed17450afb25e2598d421121a7df9c63b496f68e77c52780937fd21",
+      "lines": 223,
+      "hits": {
+        "thread": [],
+        "wait": [
+          219
+        ],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          53
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_credential_hops_test.cpp",
+      "sha256": "6e1f23e5b7942a198252672db162557df229d474bf6457f010cb6658283106fd",
+      "lines": 436,
+      "hits": {
+        "thread": [],
+        "wait": [
+          98
+        ],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_effects.cpp",
+      "sha256": "42840af26f4502b45749ed3a93cc737a65fdc29c2cd3cb27a38e60e9d5dde277",
+      "lines": 937,
+      "hits": {
+        "thread": [],
+        "wait": [
+          236,
+          470,
+          558,
+          866,
+          908
+        ],
+        "sync": [],
+        "recovery": [
+          779
+        ],
+        "failure": [
+          60,
+          93,
+          111,
+          225,
+          232,
+          240,
+          263,
+          273,
+          290,
+          294,
+          300,
+          305,
+          321,
+          332,
+          336,
+          356,
+          368,
+          373,
+          378,
+          382,
+          393,
+          401,
+          466,
+          515,
+          544,
+          582,
+          610,
+          616,
+          624,
+          672,
+          686,
+          691,
+          711,
+          759,
+          829,
+          844,
+          855,
+          884
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_effects.hpp",
+      "sha256": "24d4a719f5ea1c10790b6b1274586aa0b08026dec2a0c9267aa3b525fe0101f5",
+      "lines": 361,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_effects_test.cpp",
+      "sha256": "6769c22813288d22326e400fbba42c2c5fa72f9631fa738b6ecd588b30f609f3",
+      "lines": 1586,
+      "hits": {
+        "thread": [
+          306,
+          312
+        ],
+        "wait": [
+          105,
+          110,
+          217,
+          616,
+          661,
+          1026,
+          1044
+        ],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          104,
+          109,
+          377,
+          477,
+          615,
+          660,
+          736,
+          765,
+          783,
+          820,
+          1202,
+          1462,
+          1485,
+          1555
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_endpoint.cpp",
+      "sha256": "f63f5b50fd94e13631844291047c62fb5e74faa8486369c56d959a20b8f0e6e9",
+      "lines": 147,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          10,
+          11,
+          12,
+          24,
+          47,
+          51,
+          94,
+          108,
+          115,
+          137,
+          142
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_endpoint.hpp",
+      "sha256": "9625ceff1c2f515b1f46ad070b1ad6825cbea0bb4b641c08601f4dceaf118797",
+      "lines": 113,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_handoff.cpp",
+      "sha256": "55959da7b1217960f660987b48dbb42a909714d89e8ae712d06a1146286070fc",
+      "lines": 193,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          140,
+          144
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_handoff.hpp",
+      "sha256": "60fe436107674d27bdd797635add5d774210c371778e845a2f1dbd2b266775dd",
+      "lines": 262,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          240
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_handoff_process_test.cpp",
+      "sha256": "e750a7af5f12c7f2b759fa15a23ccb10914d52161b893da5beb16ad6243d9064",
+      "lines": 454,
+      "hits": {
+        "thread": [],
+        "wait": [
+          54
+        ],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_handoff_test.cpp",
+      "sha256": "764c1e37bc6c1fc27960ad44a92f67c72a563a96998bf40ab71fe8b36e67d00e",
+      "lines": 318,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          62
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_handoff_wait.cpp",
+      "sha256": "6985e8c1292eda23b586fe225b417294417d3fb7d59f155cd234774b092c9216",
+      "lines": 165,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          43
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_health.cpp",
+      "sha256": "bf0c992f30ef1dbae9e56d5067bf72228de494581ea8142c0e5d890d17a5552a",
+      "lines": 137,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          34
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_health.hpp",
+      "sha256": "6ef76e78a4dd24598ebba0cc32c7ed62a24ece92d80ed6ab3dd73623ce64339d",
+      "lines": 88,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_health_log.cpp",
+      "sha256": "5afd8406918f1ed7c06e15bde6a136ccb355064be246fc11a5642d6ca0b74d45",
+      "lines": 44,
+      "hits": {
+        "thread": [],
+        "wait": [
+          37
+        ],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_health_log.hpp",
+      "sha256": "0eac9a3102e6fb85467987b1bbf5e3569f76655dc4c2a219a004c185d0000bf0",
+      "lines": 40,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_http.cpp",
+      "sha256": "dddf2a04493d74b405fa3732925baefc717be8050a59e94a6a66a6ab4fb8e106",
+      "lines": 308,
+      "hits": {
+        "thread": [],
+        "wait": [
+          293
+        ],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          52,
+          61,
+          65,
+          71,
+          79,
+          90,
+          99,
+          104,
+          111,
+          122,
+          129
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_http.hpp",
+      "sha256": "fc2da8366b46a71f54c4af2cf4339e2bcc82be11b7d7a97702321e4256bab683",
+      "lines": 99,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_http_test.cpp",
+      "sha256": "cae60f9e4642e15ea6625daf104251fea2611b1d25a2b29274f1b38f7ec550b2",
+      "lines": 213,
+      "hits": {
+        "thread": [
+          65,
+          83,
+          91
+        ],
+        "wait": [],
+        "sync": [
+          92,
+          93
+        ],
+        "recovery": [],
+        "failure": [
+          54,
+          59,
+          61,
+          63
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_job_guard.cpp",
+      "sha256": "34dd1dacb46aad6aea6e51bed2184b930df2a581f8984913a2ee38f63a1076b2",
+      "lines": 167,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          39,
+          49
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_job_guard.hpp",
+      "sha256": "ef6fb99efd82e7f6593b461c005858abffc79762421e038c41dcf5a579a5cdd6",
+      "lines": 68,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_job_guard_test.cpp",
+      "sha256": "94345c436d5787e9677dcf3b15260fabaac08b750cf9d219e47ca7c4d3de482c",
+      "lines": 222,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          54,
+          74
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_manifest.cpp",
+      "sha256": "b976209ceb14055a1dba836648d5ef4ea1c89063521e49df59c15b2ea610f73d",
+      "lines": 323,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          26,
+          29,
+          31,
+          39,
+          43,
+          63,
+          69,
+          76,
+          102,
+          108,
+          120,
+          129,
+          317,
+          318
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_manifest.hpp",
+      "sha256": "64c1cf0a8e64fc2f4d5a40680c4ea461d392dfdb5def8bf2a0c1b33d41e11005",
+      "lines": 169,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_manifest_test.cpp",
+      "sha256": "2d28e70d6ae8c3b8751751bcdef6527d3fb2edc7b2bc1e76aa095055a4d81f5a",
+      "lines": 415,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          44,
+          144
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_process_identity.cpp",
+      "sha256": "12a00e129384c497621bc7332c55b958e74d6bce86fc8ee455eba468888b72f2",
+      "lines": 65,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          42,
+          44,
+          56,
+          57,
+          58,
+          61
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_process_targets.cpp",
+      "sha256": "e89ec0d05bda815c84af54d3cdf8db0fb2af0dfaf95d713a6dbf12fc5009e079",
+      "lines": 205,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          24
+        ],
+        "recovery": [],
+        "failure": [
+          47,
+          110,
+          160,
+          200,
+          202
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_process_targets.hpp",
+      "sha256": "ffdcd5b344ac356d422233bdfa771531ec344e44d5b50c921ecf35c82db30ed1",
+      "lines": 67,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_registration_com_test.cpp",
+      "sha256": "9dd8b214cfd93dd898c8d977b052f2fdc1f24df6aad6a8036cc1f36fec062663",
+      "lines": 160,
+      "hits": {
+        "thread": [
+          86,
+          91,
+          103,
+          106,
+          121,
+          133
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          92,
+          122,
+          131
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_registration_wiring.cpp",
+      "sha256": "d653b45bdcf9275eef72c728fb6eed3bae3e418108273cbd0a71e937e19daf67",
+      "lines": 197,
+      "hits": {
+        "thread": [],
+        "wait": [
+          74
+        ],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          94,
+          107,
+          118
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_registration_wiring.hpp",
+      "sha256": "22afb3f902aa665609317793c7f7a6e98f793aa65292903983fda63267e86bff",
+      "lines": 60,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_relaunch.cpp",
+      "sha256": "5f03c5cb636d46da54376f1f7870b43f1c203fa26610b99d51e579866efe9ddf",
+      "lines": 658,
+      "hits": {
+        "thread": [],
+        "wait": [
+          124,
+          618,
+          625
+        ],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          60,
+          61,
+          74,
+          77,
+          79,
+          81,
+          83,
+          85,
+          87,
+          145,
+          153,
+          181,
+          184,
+          187,
+          190,
+          193,
+          197,
+          203,
+          213,
+          241,
+          244,
+          286,
+          291,
+          298,
+          325,
+          560,
+          591,
+          604,
+          607,
+          624
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_relaunch.hpp",
+      "sha256": "82bd8fab8b60cee1e6cd02bbafb7d9a5db76bb6e411a9e5c25659efa866fe34e",
+      "lines": 295,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          128
+        ],
+        "failure": [
+          87
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_relaunch_plan.cpp",
+      "sha256": "53b6797cbc494fb8a530472bee49bc3b4fa73d4d1098bebdae1e53377f2ffd7c",
+      "lines": 106,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_relaunch_plan.hpp",
+      "sha256": "ce50fb26c1c27b2b64f9c98e796ab2e6c54509da06809bb326a03f9568a87b44",
+      "lines": 117,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          8
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_relaunch_test.cpp",
+      "sha256": "0b5f9c4d3b93b821fff1e23851dc33898c899548c5e14aabc4f6d37e9a8077bb",
+      "lines": 1006,
+      "hits": {
+        "thread": [],
+        "wait": [
+          892
+        ],
+        "sync": [],
+        "recovery": [
+          195
+        ],
+        "failure": [
+          159,
+          617,
+          679,
+          707,
+          708,
+          741,
+          922
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_release_test.cpp",
+      "sha256": "cb9ff22442643ddd70931f5e3453100baa4e0c82a6fe3142e6e321dcc25f10ba",
+      "lines": 909,
+      "hits": {
+        "thread": [],
+        "wait": [
+          174,
+          532
+        ],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          173,
+          253,
+          255,
+          258,
+          722,
+          875
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_signature.cpp",
+      "sha256": "f9344131855de39ea5d8d3f6a5f4b05664ffff9bf5bbeecdf1723238c867f635",
+      "lines": 98,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          35,
+          37,
+          44,
+          56,
+          57,
+          65,
+          71,
+          76,
+          89
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_signature.hpp",
+      "sha256": "d869c1878afef2d8852a4977248ed5971af1b15674a0d660392eb3035db09c2c",
+      "lines": 44,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_state_machine.cpp",
+      "sha256": "5d009cd19f94dc48ea269428aedade9d3f6b90e20390a9a75fb341f92273ffc5",
+      "lines": 273,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          111
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_state_machine.hpp",
+      "sha256": "3f7c5dc27b16efb890f35f744384df47615949ba8ebc6a2f385bdaf0d80b5595",
+      "lines": 266,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          243
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_state_machine_test.cpp",
+      "sha256": "6d8c041a94aa39bdc1db6572401a1df450692f9e46262592588bd1b78a90b10c",
+      "lines": 679,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          477
+        ],
+        "failure": [
+          55,
+          116,
+          123
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/update_stop_process_test.cpp",
+      "sha256": "139c4aeee63c146a8dbd17343359a871cad484a65c5d87c023e5c611a20c7498",
+      "lines": 518,
+      "hits": {
+        "thread": [],
+        "wait": [
+          74,
+          93,
+          280,
+          312,
+          368,
+          508
+        ],
+        "sync": [],
+        "recovery": [
+          434
+        ],
+        "failure": [
+          227,
+          229,
+          309,
+          311,
+          367
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/updater_assembly_test.cpp",
+      "sha256": "a2890e7395f35e7c7f369ab2580329b21c32f37a3ead2d20ae641fd0c55e2135",
+      "lines": 586,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          104,
+          290,
+          412,
+          433,
+          453,
+          552,
+          569
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/updater_effects.cpp",
+      "sha256": "77344d56c7e603e50351ad0696394b2e83b674139217bc575a5c6ed29f6f72d3",
+      "lines": 629,
+      "hits": {
+        "thread": [],
+        "wait": [
+          279
+        ],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          130,
+          201,
+          263,
+          267,
+          278,
+          307,
+          338,
+          347,
+          355,
+          371,
+          394,
+          446,
+          558
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/updater_effects.hpp",
+      "sha256": "4ca8fd98347e98d8240fd022b5d88cfe6ec08d3c99a228f21c8fdeebae8b93ac",
+      "lines": 233,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/updater_main.cpp",
+      "sha256": "b04810b15aba26bd33b8c815627c0a0ef23571c5e140cd41ecc2561f235ea11d",
+      "lines": 363,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          127,
+          133,
+          140,
+          164,
+          183,
+          191,
+          216
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/updater_options.cpp",
+      "sha256": "38fcc824aee88125d1a84aa1d80dfbf5bebb4d85d7f307d782fa369385edf8d4",
+      "lines": 223,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          30,
+          34,
+          35,
+          40,
+          43,
+          45,
+          66,
+          192,
+          195,
+          207
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/updater_options.hpp",
+      "sha256": "044986ff48e815e6bf2567b5995967a0ba1691fc8449aedac979ba05246b13e0",
+      "lines": 145,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          74
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/updater_options_test.cpp",
+      "sha256": "48366bc17b2701295c21714d9aea07d3e7395eb48ed829b5d54290c63bc219bd",
+      "lines": 285,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          80
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/updater_scenarios_test.cpp",
+      "sha256": "c22b34533c21c497612f34b9113847a6bcf6f221c3660c4f03cb99149d02068f",
+      "lines": 1411,
+      "hits": {
+        "thread": [],
+        "wait": [
+          320,
+          1055,
+          1256,
+          1259,
+          1287,
+          1290,
+          1354
+        ],
+        "sync": [],
+        "recovery": [
+          28,
+          29,
+          217,
+          878,
+          888,
+          1128
+        ],
+        "failure": [
+          97,
+          319,
+          695,
+          702,
+          856,
+          1054,
+          1258,
+          1289,
+          1353
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/url_origin.cpp",
+      "sha256": "6d848d1e174c8a6e319febb6d5dc6ed5f3ac2b0c0cb5105463b6cc99d65c8341",
+      "lines": 70,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/url_origin.hpp",
+      "sha256": "4cbe53b8d5b010d68dc257fac822e4b8473f1fbef8c2fe0b4d26668339e0c348",
+      "lines": 31,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/version_compare.hpp",
+      "sha256": "510bcaa0ab220e3317441f19b690af7321cac08cf4810232d6b8b76f1c9f1d77",
+      "lines": 83,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/version_compare_test.cpp",
+      "sha256": "d3730cf1c88704ae4c9037865fce29a7d04a200641e56f3a895ba760d6e1900b",
+      "lines": 104,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/video_playout_clock.hpp",
+      "sha256": "5d54643b5babcb0e7c6708007426ff1f8eb2538e4cdf79924939cd231fc2d6a1",
+      "lines": 201,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          44
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/video_playout_clock_test.cpp",
+      "sha256": "d3544292a0c2496cf3828d9476c92a8659f65e1393fede44f48b40f2bf2cecc9",
+      "lines": 281,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          225,
+          273
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_args.cpp",
+      "sha256": "09bf8c1550fb3c602c94f535c7893e9f446fe28849a41f2dfe1508ebeaa3e6c7",
+      "lines": 147,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_args.hpp",
+      "sha256": "3556b7716112b7f673dfe1ffa1bf58ed84faca0b64c64934c22be64652ec7c94",
+      "lines": 63,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_client_metrics.hpp",
+      "sha256": "881616b70346fef5b6fa8777f9f7bc67693b1f5a31978b286b74d69259a81c56",
+      "lines": 63,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          52,
+          58
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_common.hpp",
+      "sha256": "fa439dc2bee5a331836750e4c0e8b6ff0d9d95a817fbc0f258b95b8b1f2b2d04",
+      "lines": 122,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_constants.hpp",
+      "sha256": "d2e0037d3cbdd61a4885f0e5f5392da870c38f86e9bcc20ce74f615065a44dae",
+      "lines": 105,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          52,
+          55,
+          56,
+          59
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_context.hpp",
+      "sha256": "d3a8e68a70b76abe7da1f073258c1496b454e8d5b6beab13697249eebf7ffef7",
+      "lines": 51,
+      "hits": {
+        "thread": [
+          47,
+          48
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_control_client.cpp",
+      "sha256": "603c94069c1f82399a47bed9166c887336092ed8a856c24c23f3dd623ed4c8cb",
+      "lines": 444,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          32,
+          48,
+          141,
+          297,
+          430
+        ],
+        "recovery": [
+          155,
+          159,
+          255,
+          291,
+          292,
+          427,
+          437
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_control_client.hpp",
+      "sha256": "0cf9b16a3e689648a2fcba1bf1791096d2326c60bd635fdbbf2b824de5702946",
+      "lines": 55,
+      "hits": {
+        "thread": [
+          16
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_control_state.hpp",
+      "sha256": "3adc0e4ffe3c9bbd270c1d69f1cdbb4fa2e0ad052ca04ccabb61a3c3b93effb4",
+      "lines": 64,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          53,
+          56,
+          57,
+          59
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_cursor_overlay.cpp",
+      "sha256": "dc36c4c70cd32dbd31c438147e947cef97e4e1bc0747ab59339a517f2117bff0",
+      "lines": 138,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_cursor_overlay.hpp",
+      "sha256": "60dd46101832b80e4103445647b9d519d342a627b0479493ef6b89e9f90c51a4",
+      "lines": 30,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_decoder_backend.hpp",
+      "sha256": "59b0f98648bb408c1deda493b0de9cdb622961b31f197a93d7bcdc944ab2c347",
+      "lines": 23,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_decoder_state.hpp",
+      "sha256": "608065b5f2670e55ac98e4312d0676970f63add265551e79ab978053cac70d41",
+      "lines": 40,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_env_util.hpp",
+      "sha256": "b60bb75bca6411a479c1d46250dee5340a9d946ac607b6a35f58c7749e77f106",
+      "lines": 39,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_frame_buffer.hpp",
+      "sha256": "ffb66e1c8ba2cc7dea45fa76a9f12b83a9bede44538facc8ff183bdbc43ccaff",
+      "lines": 111,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          73,
+          74,
+          79,
+          89,
+          90,
+          91,
+          102,
+          103,
+          104,
+          105,
+          106,
+          107,
+          108
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_frame_gate.cpp",
+      "sha256": "4eeecb55550e19c52aa9804939cc5b00c3a28284cabf5f1381a74f070b3cd51d",
+      "lines": 599,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          74,
+          75,
+          76,
+          555,
+          556,
+          560,
+          565,
+          566,
+          569,
+          573,
+          577,
+          578,
+          583,
+          586,
+          587,
+          589,
+          590,
+          591,
+          592,
+          596
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_frame_gate.hpp",
+      "sha256": "4ba9b2b6043b638814862ae150e10455a8f1e8b16f79c60c31d3ae82ea7aa9af",
+      "lines": 117,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_frame_gate_state.hpp",
+      "sha256": "bd00e3a218a3b9bf68338e4c65ce1ddd44dc864d4f48c7ca4efd1ed5075152ff",
+      "lines": 157,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          63,
+          142,
+          143,
+          144,
+          145,
+          146,
+          149,
+          150,
+          151,
+          152,
+          153
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_frame_gate_test.cpp",
+      "sha256": "7f248c0d5226c1418865424b8a011ad916146751ceda995ce5fb3509a02dda47",
+      "lines": 1119,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          61,
+          62,
+          63,
+          875,
+          919,
+          920,
+          921,
+          948,
+          965,
+          972,
+          991,
+          994
+        ],
+        "failure": [
+          104,
+          626
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_gdi_util.cpp",
+      "sha256": "5bf8524fea928497a72f484f3781349478d7e21e4825634d126cbcf1f5746e31",
+      "lines": 125,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_gdi_util.hpp",
+      "sha256": "c89be7703ae2b42933241cc13427cc0acdd273427ea0d2451d52f672abdd40b9",
+      "lines": 37,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_input_forward.cpp",
+      "sha256": "8e2a777b03d8d7e2d7789d47ce5412c31b1cc4f9c81720535d6aca760d8d7051",
+      "lines": 186,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          36,
+          37,
+          102,
+          104,
+          108,
+          113
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_input_forward.hpp",
+      "sha256": "2a0f54621d0131b6a53e72367624f5eee5add96632689eb0dab8eaef27acd0ec",
+      "lines": 75,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_input_state.hpp",
+      "sha256": "9dc3bae9f7d762eeadbf87705c18c93bad8fa9fd330ca42e311ecee78db77283",
+      "lines": 48,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          23,
+          24,
+          25,
+          30,
+          31,
+          36,
+          37,
+          38,
+          39,
+          44
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_layout.cpp",
+      "sha256": "5c8338405c57a6501a99a3fba2fdcf9ffd7b8b5b0ef31711f5b4cdfdd3b4ce60",
+      "lines": 116,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          32
+        ],
+        "recovery": [],
+        "failure": [
+          19,
+          64,
+          103,
+          106,
+          109
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_layout.hpp",
+      "sha256": "9c817db2882201edcc5bd2531cd7d247d73ba5e07314a5e51be0b45ff8001eeb",
+      "lines": 43,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_layout_math.hpp",
+      "sha256": "3ce6c6d4fb894af8a74861ee290423585ac199bac90764e6f58c132d130db0bc",
+      "lines": 264,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          251,
+          256,
+          258,
+          259
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_layout_test.cpp",
+      "sha256": "bf4a0e13dfe88230126eb39cb411577ff364c5910bb6abd84753e3b8dc14d8be",
+      "lines": 197,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_liveness_test.cpp",
+      "sha256": "44408ce7b9b346927399621cd3754a6dd856bbb38bd2258304bdeff71904ace2",
+      "lines": 188,
+      "hits": {
+        "thread": [
+          169,
+          178
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          3,
+          142
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_log.cpp",
+      "sha256": "a0e74824c7acb0aaca3c4d1afedd670441692e47010c6fd2beace8b3d7671c80",
+      "lines": 26,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          11
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_log.hpp",
+      "sha256": "4971db1520ae159dd27a78089425bcca36eee44247f3b2e347c10775f105c525",
+      "lines": 25,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_nv12_renderer.hpp",
+      "sha256": "97319e3748fbf924669204edbc163f08bdb9a08a51bf906e9a7b45957cddddff",
+      "lines": 609,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          106,
+          110,
+          116,
+          118,
+          120,
+          134,
+          137,
+          181,
+          183,
+          185,
+          187,
+          189,
+          190,
+          192,
+          193,
+          196,
+          198,
+          200,
+          202,
+          211,
+          217,
+          224,
+          235,
+          239,
+          243,
+          244,
+          252,
+          272,
+          284,
+          290,
+          296,
+          308,
+          371,
+          388,
+          394,
+          409,
+          413,
+          417,
+          420,
+          422,
+          489,
+          496,
+          502,
+          528,
+          553,
+          557,
+          561,
+          570,
+          572,
+          587,
+          589
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_overlay_draw.cpp",
+      "sha256": "05aa546d4327f9cf51447bd0e7a7cb03199cc8976b912c0f1f4b000407033c07",
+      "lines": 316,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          54
+        ],
+        "recovery": [
+          297
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_overlay_draw.hpp",
+      "sha256": "2f7c904844af4307f945fc6a32f5bc275ac3e25291561c4c2e4877b46ad8ed59",
+      "lines": 29,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_picker.cpp",
+      "sha256": "e430adbb8d3d5b7bc392c51afd5315c7ed131b49e1077736d13412d0219676ba",
+      "lines": 247,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          43,
+          179
+        ],
+        "recovery": [
+          155,
+          192
+        ],
+        "failure": [
+          160,
+          161,
+          163,
+          219,
+          221,
+          225,
+          232,
+          234
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_picker.hpp",
+      "sha256": "bec8ce6425dea35a38ac39915e7ce16e5a7355c76156f2003dacaa22059b4f00",
+      "lines": 87,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          64
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_picker_empty_line.hpp",
+      "sha256": "3a1cc5a2d32ae6688ecc8f56ba5abbba0eac5f8c42284c053d54d3369e4077e3",
+      "lines": 51,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_picker_gesture_test.cpp",
+      "sha256": "c200556ed2056c4221ce379b56935ecc09ef45120f658bc4f1e702bbf93159b4",
+      "lines": 118,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_picker_state.cpp",
+      "sha256": "3cc2641955831d33d1502c2630a4dcee28176a31ee6dbe1ca667c0983f908cb3",
+      "lines": 43,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_picker_state.hpp",
+      "sha256": "1f5c9494a0597a4b9306f1e07060b48ab5add1a0e7639da88883e18a6dd58cd9",
+      "lines": 62,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          37,
+          39,
+          40,
+          42,
+          43,
+          44,
+          49
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_present.cpp",
+      "sha256": "6ffbb7502baee9dd8105d0d42b7c9cff7cfa4a5fec91ec2420aa9916a6ca7875",
+      "lines": 498,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          40,
+          201,
+          407,
+          491
+        ],
+        "recovery": [],
+        "failure": [
+          78,
+          81,
+          95,
+          119,
+          122,
+          135
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_present.hpp",
+      "sha256": "3ff3512d216237aa3f4e158a7f52b040b46f8054659770baa178121a65bf9726",
+      "lines": 37,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_present_stats.hpp",
+      "sha256": "c22795c6514f7961870533041715ae8f7b68f119662bd42a641811b2e125a3b0",
+      "lines": 59,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          29,
+          30,
+          31,
+          32,
+          33,
+          34,
+          36,
+          37,
+          41,
+          42,
+          43
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_recv_liveness.hpp",
+      "sha256": "7ccbdbdb3065d52c74a81bceafbc5e1dd1367dc372fb5c898aa04a814491992e",
+      "lines": 144,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          61,
+          62,
+          63,
+          64,
+          65,
+          66,
+          67,
+          68,
+          69
+        ],
+        "recovery": [
+          7,
+          12,
+          17,
+          49,
+          50,
+          71,
+          82,
+          133,
+          135
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_recv_stats.hpp",
+      "sha256": "ab482f66ddbea4ccfbc4f017d5d4ec9ee22b73354ac5a68c76471a1386c296ad",
+      "lines": 67,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_remote_cursor.hpp",
+      "sha256": "d5ef2d8d4f4e243cef1a0bc9e131c4c341b03afd2fdae15ff961c4619eaa9e28",
+      "lines": 53,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          42,
+          46
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_selection_gate.cpp",
+      "sha256": "0864972aef92377bd1dfe51087dcce072d5853438622b343b6105dbc6ab4fb87",
+      "lines": 106,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          4
+        ],
+        "recovery": [],
+        "failure": [
+          41
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_selection_gate.hpp",
+      "sha256": "073e9c6d6083f0896fc0106a5dfbb4573286da20109ba8e74c885a4bced5463f",
+      "lines": 82,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          59,
+          60,
+          61,
+          62,
+          63,
+          65,
+          66,
+          67
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_selection_gate_test.cpp",
+      "sha256": "0ad6795258635ad9952bacaa7b76e17a98f11de2a741d95e7a77a8bf7e9cc061",
+      "lines": 149,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_session_state.hpp",
+      "sha256": "c7e47564be98cefafaad73475655523c525167b95efb5df432d55eeecda8cb9c",
+      "lines": 88,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          28,
+          30,
+          35,
+          38,
+          42,
+          48,
+          49,
+          50,
+          51,
+          52,
+          53,
+          68,
+          76,
+          82
+        ],
+        "recovery": [
+          60,
+          62
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_session_watchdog.cpp",
+      "sha256": "de9ae770549c4ca1cd74948cd64a01fdef9c5eab034f5e54a12ded499ca3932d",
+      "lines": 100,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          95
+        ],
+        "recovery": [
+          1,
+          3,
+          21,
+          93,
+          94
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_session_watchdog.hpp",
+      "sha256": "9dc93a91c0f09626c76750e63e86daa31361743b1ce850729a58ea853990200d",
+      "lines": 23,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          3
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_shutdown.cpp",
+      "sha256": "58e32c56b0511da0d7b81669840cf79891f736a7220b4311b5787a3bc310a291",
+      "lines": 85,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          75
+        ],
+        "recovery": [
+          27,
+          63
+        ],
+        "failure": [
+          37
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_shutdown.hpp",
+      "sha256": "bd0cd24ed2a0f5cc0fd3e3a5e928870d494131b2507f3a75a07c766d61edc183",
+      "lines": 12,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_startup.cpp",
+      "sha256": "6e5dcb27c0bfe8fe8b54c83ffbb3c1f455809eab33e6502b216a52e6722b6cf4",
+      "lines": 738,
+      "hits": {
+        "thread": [
+          661,
+          695
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          98,
+          99,
+          100,
+          101,
+          102,
+          103,
+          104,
+          278,
+          374,
+          389,
+          404,
+          433,
+          451,
+          453,
+          454,
+          487,
+          600,
+          601,
+          644
+        ],
+        "failure": [
+          227,
+          402
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_startup.hpp",
+      "sha256": "b9221364a7470488bd503e995774f6bcd6281bf3c941d1bd0cc7c320b04f518a",
+      "lines": 41,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_startup_failure_test.cpp",
+      "sha256": "9d2cd262ef26c57b2640ddfa74ec35655befbe501048980df07030e2bf1504cb",
+      "lines": 141,
+      "hits": {
+        "thread": [],
+        "wait": [
+          109,
+          123,
+          129,
+          131
+        ],
+        "sync": [
+          122
+        ],
+        "recovery": [],
+        "failure": [
+          45,
+          71,
+          130
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_state.hpp",
+      "sha256": "bde59c3769d8949d575ae8da7623f12aa84db47347ca4c634e425c0091350562",
+      "lines": 48,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          45
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_thread_join.hpp",
+      "sha256": "da50b41bbdb3bbc257daafbdc05ac730511d5d90a362b09aa1e63031b7bb2615",
+      "lines": 32,
+      "hits": {
+        "thread": [
+          23,
+          28
+        ],
+        "wait": [
+          26
+        ],
+        "sync": [],
+        "recovery": [
+          8
+        ],
+        "failure": [
+          27
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_udp_recovery_test.cpp",
+      "sha256": "bcd16d0ae5ef30a9c41050b82d5a68ad4393edd6ce8273017ca8c4db6d74994c",
+      "lines": 1887,
+      "hits": {
+        "thread": [
+          144,
+          150,
+          155,
+          567,
+          627,
+          628,
+          734,
+          735,
+          743,
+          744
+        ],
+        "wait": [
+          178,
+          183
+        ],
+        "sync": [
+          168,
+          173,
+          182,
+          187,
+          205,
+          221,
+          322,
+          334,
+          392,
+          408,
+          456,
+          488,
+          493,
+          513,
+          520,
+          568,
+          571,
+          572,
+          578,
+          605,
+          606,
+          607,
+          608,
+          612,
+          613,
+          629,
+          633,
+          644,
+          645,
+          646,
+          647,
+          651,
+          652,
+          656,
+          664,
+          671,
+          759,
+          770,
+          935,
+          988,
+          1017,
+          1018,
+          1084,
+          1135,
+          1171,
+          1172,
+          1532,
+          1563,
+          1564,
+          1623,
+          1624,
+          1637,
+          1657,
+          1658,
+          1685,
+          1686,
+          1711,
+          1712,
+          1812,
+          1813
+        ],
+        "recovery": [
+          217,
+          693,
+          694,
+          695,
+          956,
+          1152,
+          1192,
+          1365
+        ],
+        "failure": [
+          121,
+          126,
+          128,
+          133,
+          310,
+          324,
+          663,
+          668,
+          705,
+          710,
+          724,
+          910,
+          914,
+          920,
+          1569,
+          1641,
+          1643,
+          1852
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_udp_session.hpp",
+      "sha256": "8dc818e552a9a58c6ed903d9a431fbc5e70eee0a0167b76ec227e075970e3b95",
+      "lines": 61,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          38
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_ui_resources.hpp",
+      "sha256": "a4989cafea4ee224e15ec56c5317032a60d3d8c233e55cfd23af4f22672615ab",
+      "lines": 45,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_unlock.cpp",
+      "sha256": "a114d0cfc3c9a4d1a9771b11aff6f5c781debd0aeb5836f41d100fcc2329f5ea",
+      "lines": 342,
+      "hits": {
+        "thread": [],
+        "wait": [
+          51,
+          69
+        ],
+        "sync": [
+          188
+        ],
+        "recovery": [],
+        "failure": [
+          36,
+          44,
+          59,
+          62,
+          65,
+          73,
+          80,
+          140,
+          155,
+          247,
+          250,
+          253,
+          259,
+          263,
+          281,
+          304,
+          321,
+          339
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_unlock.hpp",
+      "sha256": "299a292a8a66b35d8294a681ec958be63f5369a01712261baca1a88dc0f4cfcb",
+      "lines": 46,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_video_receiver.cpp",
+      "sha256": "48b8e87f01939b4d602b6cf7c26a23285f14906a702ae24c380c781fa49f6e43",
+      "lines": 663,
+      "hits": {
+        "thread": [],
+        "wait": [
+          535,
+          543,
+          545,
+          633,
+          635
+        ],
+        "sync": [
+          517,
+          560,
+          647
+        ],
+        "recovery": [
+          315,
+          331
+        ],
+        "failure": [
+          192,
+          226
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_video_receiver.hpp",
+      "sha256": "8d442989b3e5bdca4320df26df78bc58f77510ee9adc70080fe085bb2c650cd7",
+      "lines": 97,
+      "hits": {
+        "thread": [
+          14
+        ],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_video_receiver_frame.cpp",
+      "sha256": "9afa77b7f661d305772bb3f7c5542119c3649dfe5e22a50082b66ddbd2dca12c",
+      "lines": 455,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          309
+        ],
+        "recovery": [],
+        "failure": [
+          191
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_window_proc.cpp",
+      "sha256": "4394c4fe151588358708b4116b7ce5ad3130aa0824a7d06015471b752169e2e7",
+      "lines": 702,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          22,
+          55,
+          161,
+          288
+        ],
+        "failure": [
+          109,
+          235,
+          676,
+          684
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_window_proc.hpp",
+      "sha256": "91e562cd62e7400bbc000559edf4a148e1bdecbe4de01e977160f068b95210bf",
+      "lines": 31,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/src/viewer_window_proc_isolated_test.cpp",
+      "sha256": "5f19fd98abaa98724220385480e3a2db30c808cd77ae33ec89fede5d59ae20fc",
+      "lines": 536,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          138,
+          139,
+          193,
+          195,
+          207,
+          208,
+          241,
+          242,
+          338,
+          339,
+          387,
+          389,
+          445
+        ],
+        "recovery": [
+          55
+        ],
+        "failure": [
+          515,
+          516,
+          517,
+          518,
+          522,
+          523,
+          525,
+          526,
+          527,
+          535
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/winhttp_tls_posture_test.cpp",
+      "sha256": "e7e7ff8d38c7d0113cc12f9f81ceab146a2235f1767ec07cd77dee003a24bd56",
+      "lines": 273,
+      "hits": {
+        "thread": [],
+        "wait": [
+          86,
+          101
+        ],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          66,
+          84,
+          89,
+          100,
+          117,
+          134
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/winhttp_transport.cpp",
+      "sha256": "70a774d9fac223251efbc0d1838f9d67e70d6fc1cd4bc35e722deacad53476f5",
+      "lines": 167,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          69,
+          73,
+          81,
+          91,
+          100,
+          123,
+          127,
+          136,
+          159
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/src/winhttp_transport.hpp",
+      "sha256": "39572f4f29ea12f20f9315e49f9b8427e90dca530cbd5402a407ef2b0328f0f1",
+      "lines": 72,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/tools/desktop_update_rate.cpp",
+      "sha256": "f25ac2448f9a054ab6214cd1361392c9ce56125cd52a609379ecf79812e1a923",
+      "lines": 266,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          78,
+          80,
+          95,
+          113,
+          116,
+          118,
+          120,
+          133,
+          207,
+          239
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/tools/directory_login_probe.cpp",
+      "sha256": "dce0a14a259887d7820fb77c7a75867471b81e8673a2eb5643ec737eb5bc8423",
+      "lines": 62,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/tools/picker_preview.cpp",
+      "sha256": "47f31e29b2f596d11e479dc9b66214f2103b2e5b0aef7521d73ec26854e4ff91",
+      "lines": 368,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          258
+        ],
+        "recovery": [
+          201,
+          206
+        ],
+        "failure": [
+          80
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/tools/ui_preview.cpp",
+      "sha256": "0c7636fb94ec14969d11a84945520f5100dae364f496feb07bdd803480678ab2",
+      "lines": 377,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          40,
+          41,
+          100,
+          121,
+          200
+        ],
+        "recovery": [],
+        "failure": [
+          85,
+          117,
+          119,
+          133,
+          135,
+          137,
+          171,
+          205,
+          213
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/tools/verify_release_manifest.cpp",
+      "sha256": "b48e9f1ee3732b1a2ed03bed5028c83fc1fdd05efcf8bfdb9356abe274ae9987",
+      "lines": 117,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": [
+          29
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/tools/webview2_spike.cpp",
+      "sha256": "7261ec66cc906ee3e3c92c05aa3b6b33aca5857485f0a145550e2f9952fca103",
+      "lines": 175,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          33,
+          51
+        ],
+        "recovery": [],
+        "failure": [
+          82,
+          115,
+          124,
+          162
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/tools/winlogon_capture_probe.cpp",
+      "sha256": "513baa483b0a9f82c9be641e670943028a0bbbf62c29d649f2d0a0bdeaa49446",
+      "lines": 772,
+      "hits": {
+        "thread": [
+          69,
+          75,
+          394,
+          430
+        ],
+        "wait": [
+          561
+        ],
+        "sync": [],
+        "recovery": [
+          426,
+          478
+        ],
+        "failure": [
+          104,
+          122,
+          142,
+          173,
+          181,
+          244,
+          251,
+          269,
+          274,
+          282,
+          288,
+          543,
+          585,
+          593,
+          600
+        ]
+      }
+    },
+    {
+      "path": "apps/native_poc/ui/macro.html",
+      "sha256": "f589f5df16d24fc8932d230da35f1661f0e97c1c63a6f2d43ad7a8fcc095529b",
+      "lines": 274,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          142
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "apps/native_poc/ui/shell.html",
+      "sha256": "3e59eb07d159bb4625eac713b8434d2e04d79c5100fed0afc24698e55677b5a6",
+      "lines": 463,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          242
+        ],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "libs/capture/CMakeLists.txt",
+      "sha256": "1f0a5786a81b5857cc35b1e4ca4e87a87bed0678b7e0335d2a3da4eea7f149c7",
+      "lines": 20,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "libs/capture/src/capture_backend_dxgi.cpp",
+      "sha256": "deada5063b3c4e838435ff57315f93ca8cedd5c5ad03d24de66211533dceb7a5",
+      "lines": 603,
+      "hits": {
+        "thread": [
+          81,
+          557,
+          573
+        ],
+        "wait": [],
+        "sync": [
+          64,
+          65,
+          66,
+          67,
+          68,
+          69,
+          70,
+          71,
+          72,
+          80
+        ],
+        "recovery": [
+          61,
+          275,
+          361,
+          400,
+          404,
+          542,
+          559
+        ],
+        "failure": [
+          125,
+          127,
+          140,
+          155,
+          157,
+          159,
+          170,
+          172,
+          176,
+          178,
+          187,
+          189,
+          203,
+          216,
+          224,
+          227,
+          229,
+          280,
+          285,
+          293,
+          296,
+          298,
+          426,
+          477,
+          496,
+          532,
+          539,
+          558,
+          564
+        ]
+      }
+    },
+    {
+      "path": "libs/capture/src/capture_backend_dxgi.hpp",
+      "sha256": "15fe266157209687f8c886a082270ee886cd63cf63c6942ec54ea2625ae481ae",
+      "lines": 109,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [
+          47,
+          62,
+          96,
+          97
+        ],
+        "failure": []
+      }
+    },
+    {
+      "path": "libs/capture/src/capture_runtime.cpp",
+      "sha256": "757505f944a298355e8535a081b144d420d4562f0f7b831e0cc3393913bc2cc0",
+      "lines": 276,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [
+          164,
+          165,
+          166,
+          167,
+          168
+        ],
+        "recovery": [],
+        "failure": [
+          68,
+          111,
+          118,
+          128,
+          146,
+          158,
+          194,
+          210,
+          216
+        ]
+      }
+    },
+    {
+      "path": "libs/capture/src/capture_runtime.hpp",
+      "sha256": "aeef6113642871688b3c7f1933d530ca7519f66a42f068bafff71526470e8310",
+      "lines": 27,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "libs/capture/src/dxgi_output_selection.hpp",
+      "sha256": "ccd0c905b3533851b97cd8476c8b5f13c8254406cd8123c2c4b48bad5250bdfe",
+      "lines": 137,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "libs/capture/src/dxgi_output_selection_test.cpp",
+      "sha256": "003a5c9ebc475ede60ce93d27dfcafe34a6c874814aa1694d097bae8dfcd408c",
+      "lines": 191,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "libs/common/CMakeLists.txt",
+      "sha256": "bf234cbf263e2e8668a581b8de2cd5d582bd6d394d04f2de939269739dd95ec8",
+      "lines": 17,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "libs/common/include/common/input_protocol.hpp",
+      "sha256": "df1d649d9b1ccdfcd6da40246e84e81ab4a57784a0c1e0414d56d9c4de624744",
+      "lines": 32,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "libs/common/include/common/version.hpp",
+      "sha256": "74ab130afa0765751a8cb97db3215eb22f2756d44b54ad1028345c544b3c0716",
+      "lines": 5,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "libs/common/src/input_protocol.cpp",
+      "sha256": "d2f73c95c2c3f163ebfd83ac56915ea73bf8377327d38bbdb904c0d4a693d748",
+      "lines": 89,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    },
+    {
+      "path": "libs/common/src/version.cpp",
+      "sha256": "97b49fa0b46319023f77cb3022b8461d253a5d70c8a965d3bc8d1fdc578377c0",
+      "lines": 5,
+      "hits": {
+        "thread": [],
+        "wait": [],
+        "sync": [],
+        "recovery": [],
+        "failure": []
+      }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+﻿exe: C:\work\gnlink-wt\rel-0164-testbuild\apps\native_poc\Release\remote60_directory_retry_test.exe  sha256: C50D3D181B1FDE8081049C0239A13C2CD6E4ECF00EF6683AA6299D603353F843
+run  1 rc=0 PASS=178 FAIL=0 single-use-FAIL=0 | System.Object[]
+run  2 rc=0 PASS=178 FAIL=0 single-use-FAIL=0 | System.Object[]
+run  3 rc=0 PASS=178 FAIL=0 single-use-FAIL=0 | System.Object[]
+run  4 rc=0 PASS=178 FAIL=0 single-use-FAIL=0 | System.Object[]
+run  5 rc=0 PASS=178 FAIL=0 single-use-FAIL=0 | System.Object[]
+run  6 rc=0 PASS=178 FAIL=0 single-use-FAIL=0 | System.Object[]
+run  7 rc=0 PASS=178 FAIL=0 single-use-FAIL=0 | System.Object[]
+run  8 rc=0 PASS=178 FAIL=0 single-use-FAIL=0 | System.Object[]
+run  9 rc=0 PASS=178 FAIL=0 single-use-FAIL=0 | System.Object[]
+run 10 rc=0 PASS=178 FAIL=0 single-use-FAIL=0 | System.Object[]
+TOTAL single-use FAIL in 0 of 10 runs; other FAIL lines: 0

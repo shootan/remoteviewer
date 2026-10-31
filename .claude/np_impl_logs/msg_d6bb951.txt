@@ -1,0 +1,18 @@
+fix(host): a failed observation on the legacy default says both facts; test: directory_retry by completed cycle (WIP)
+
+directory-retry-fix r1 (Codex contract codex_directory_retry_flake_r1.md), committed at this stage and paused
+for rel-apk-0231; results and history entry follow in the task commit.
+
+- A (product, directory_client.*, directory_observe.hpp): explicit ObserveAim (NotAimed / Pinned / Advertised
+  / LegacyDefault) set wherever the observe socket is aimed, and ObserveHealth (NotAsked / Advertised /
+  NoAdvertisement / Unreachable + error) set where the health route answers, kept through its cooldown.
+  A failed observation from an aimed socket is said by observe_failure_status(): on the legacy default,
+  "this directory does not say where to send address observations; the observation via the legacy
+  default (port N) timed out" (or the health error); pinned/advertised read exactly as before. Aiming,
+  ready, attempts/interval, cooldown, heartbeat, auth and registration are unchanged.
+- B (test): StagedHost observes the agent's own completed cycles (REMOTE60_DIRECTORY_TEST_HOOKS, test
+  targets only). cached-silent and inactive are read by stage; added pinned-silent, advertised-silent,
+  https-unaimed and the pure rules. Two mutant targets (TIMEOUT_ONLY, NO_LEGACY_ATTEMPT) must fail.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+(cherry picked from commit d6bb951ec9772778d4463e65ce6b7cbf1d85fb96)

@@ -1,0 +1,285 @@
+﻿exe=C:\work\gnlink-wt\apk-decoder-liveness\build\apps\native_poc\Release\remote60_android_decoder_idr_recovery_test.exe
+exe_sha256=1864FBABC98F05C54995C71D8FCF6E61F72EA5AD7F031294F338A6C4C79B9E05
+exit=0
+remote60_android_decoder_idr_recovery_test.exe : [native-video-client-session] video receive nack=0 holdUs=0 nonblockin
+g=1
+At line:1 char:864
++ ... te60_android_decoder_idr_recovery_test.exe"; $o = & $exe 2>&1 | Out-S ...
++                                                       ~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([native-video-c...0 nonblocking=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] keyframe owed to selection 1: asked (1)
+[native-video-client-session] keyframe owed to selection 1: asked (2)
+[native-video-client-session] keyframe owed to selection 1: asked (3)
+[native-video-client-session] keyframe owed to selection 1: asked (4)
+[native-video-client-session] keyframe owed to selection 1: asked (5)
+[native-video-client-session] keyframe owed to selection 1: asked (6)
+[native-video-client-session] keyframe owed to selection 1: asked (7)
+[native-video-client-session] keyframe owed to selection 1: asked (8)
+[native-video-client-session] keyframe owed to selection 2: asked (1)
+android_decoder_idr_recovery_test  late=12000 ms (owed retries: 8 x 1 s; control budget 24 x 250 ms)
+
+--- U1 deltas
+      [decoder I] selection prepare localGen=1
+      [decoder I] selection ack localGen=1 streamGen=7001 hostSendQpcUs=0 rekey=0
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=7001 remoteUs=12699883 localUs=620344331051 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=25 key=1 ptsUs=620344414383
+      [decoder I] selection first output localGen=1 streamGen=7001 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+  trace: liveness-trace rx=wait/6ms tid=3024997234 dg=6ms ctl=13ms tick=-1ms n=825/473 dmax=0ms | wk=pass/2ms tid=2406255017 pass=2ms | owed=0/0 next+0ms kq=9 kr=0 | kf=9/2 ok=1 age=13ms tmsg=238 | ch sent=238 recv=229 retx=0 nack=0 pend=0 closed=0 reason=none
+      [decoder I] video surface cleared
+PASS  U1 deltas: connected (control over the video socket) and the pick sent
+PASS  U1 deltas: control stayed open on both ends (no peer-lost)  pingGap=55ms asks before ready=8 after=1 queued+19ms present+21ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U1 deltas: the client's keepalive kept reaching the host while the decoder was not ready (gap < 1000 ms)  pingGap=55ms asks before ready=8 after=1 queued+19ms present+21ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U1 deltas: the CURRENT generation's IDR is the codec's first input (< 3.5 s after ready)  pingGap=55ms asks before ready=8 after=1 queued+19ms present+21ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U1 deltas: a picture of it is presented -- the selection is ready  pingGap=55ms asks before ready=8 after=1 queued+19ms present+21ms first=217 hostPeerLost=0 clientConnected=1
+[native-video-client-session] video receive nack=0 holdUs=0 nonblocking=1
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] keyframe owed to selection 1: asked (1)
+[native-video-client-session] keyframe owed to selection 1: asked (2)
+[native-video-client-session] keyframe owed to selection 1: asked (3)
+[native-video-client-session] keyframe owed to selection 1: asked (4)
+[native-video-client-session] keyframe owed to selection 1: asked (5)
+[native-video-client-session] keyframe owed to selection 1: asked (6)
+[native-video-client-session] keyframe owed to selection 1: asked (7)
+[native-video-client-session] keyframe owed to selection 1: asked (8)
+[native-video-client-session] keyframe owed to selection 2: asked (1)
+
+--- U1 idle
+      [decoder I] selection prepare localGen=1
+      [decoder I] selection ack localGen=1 streamGen=7001 hostSendQpcUs=0 rekey=0
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=7001 remoteUs=1299997 localUs=620356377062 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=25 key=1 ptsUs=620356460394
+      [decoder I] selection first output localGen=1 streamGen=7001 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+  trace: liveness-trace rx=wait/6ms tid=2134253405 dg=6ms ctl=16ms tick=-1ms n=483/473 dmax=0ms | wk=pass/6ms tid=289668045 pass=6ms | owed=0/0 next+0ms kq=9 kr=0 | kf=9/2 ok=1 age=16ms tmsg=238 | ch sent=238 recv=229 retx=0 nack=0 pend=0 closed=0 reason=none
+      [decoder I] video surface cleared
+PASS  U1 idle: connected (control over the video socket) and the pick sent
+PASS  U1 idle: control stayed open on both ends (no peer-lost)  pingGap=55ms asks before ready=8 after=1 queued+18ms present+22ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U1 idle: the client's keepalive kept reaching the host while the decoder was not ready (gap < 1000 ms)  pingGap=55ms asks before ready=8 after=1 queued+18ms present+22ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U1 idle: the CURRENT generation's IDR is the codec's first input (< 3.5 s after ready)  pingGap=55ms asks before ready=8 after=1 queued+18ms present+22ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U1 idle: a picture of it is presented -- the selection is ready  pingGap=55ms asks before ready=8 after=1 queued+18ms present+22ms first=217 hostPeerLost=0 clientConnected=1
+[native-video-client-session] video receive nack=0 holdUs=0 nonblocking=1
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 1: asked (1)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 1: asked (2)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 1: asked (3)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 1: asked (4)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 1: asked (5)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 1: asked (6)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 1: asked (7)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 1: asked (8)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+
+--- U2 deltas
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] selection prepare localGen=1
+      [decoder I] selection ack localGen=1 streamGen=7001 hostSendQpcUs=0 rekey=0
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] decoder inbox full: oldest frame dropped drops=1
+      [decoder I] decoder inbox full: oldest frame dropped drops=31
+      [decoder I] decoder inbox full: oldest frame dropped drops=61
+      [decoder I] decoder inbox full: oldest frame dropped drops=91
+      [decoder I] decoder inbox full: oldest frame dropped drops=121
+      [decoder I] decoder inbox full: oldest frame dropped drops=151
+      [decoder I] decoder inbox full: oldest frame dropped drops=181
+      [decoder I] decoder inbox full: oldest frame dropped drops=211
+      [decoder I] decoder inbox full: oldest frame dropped drops=241
+      [decoder I] decoder inbox full: oldest frame dropped drops=271
+      [decoder I] decoder inbox full: oldest frame dropped drops=301
+      [decoder I] decoder inbox full: oldest frame dropped drops=331
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=7001 remoteUs=1000000 localUs=620368405447 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=25 key=1 ptsUs=620368488779
+      [decoder I] selection first output localGen=1 streamGen=7001 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+  trace: liveness-trace rx=wait/1ms tid=49725062 dg=1ms ctl=1ms tick=-1ms n=868/516 dmax=0ms | wk=pass/1ms tid=944123234 pass=1ms | owed=0/0 next+0ms kq=12 kr=339 | kf=42/2 ok=1 age=1ms tmsg=281 | ch sent=281 recv=229 retx=0 nack=0 pend=0 closed=0 reason=none
+      [decoder I] video surface cleared
+PASS  U2 deltas: connected (control over the video socket) and the pick sent
+PASS  U2 deltas: control stayed open on both ends (no peer-lost)  pingGap=55ms asks before ready=41 after=1 queued+2ms present+9ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U2 deltas: the client's keepalive kept reaching the host while the decoder was not ready (gap < 1000 ms)  pingGap=55ms asks before ready=41 after=1 queued+2ms present+9ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U2 deltas: the CURRENT generation's IDR is the codec's first input (< 3.5 s after ready)  pingGap=55ms asks before ready=41 after=1 queued+2ms present+9ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U2 deltas: a picture of it is presented -- the selection is ready  pingGap=55ms asks before ready=41 after=1 queued+2ms present+9ms first=217 hostPeerLost=0 clientConnected=1
+[native-video-client-session] video receive nack=0 holdUs=0 nonblocking=1
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+
+--- U2 idle
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] selection prepare localGen=1
+      [decoder I] selection ack localGen=1 streamGen=7001 hostSendQpcUs=0 rekey=0
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=7001 remoteUs=1000000 localUs=620380441830 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=25 key=1 ptsUs=620380525162
+      [decoder I] selection first output localGen=1 streamGen=7001 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+  trace: liveness-trace rx=wait/21ms tid=2522765655 dg=22ms ctl=21ms tick=-1ms n=475/474 dmax=0ms | wk=pass/0ms tid=3761689200 pass=0ms | owed=0/0 next+0ms kq=0 kr=0 | kf=0/0 ok=0 age=-1ms tmsg=0 | ch sent=239 recv=229 retx=0 nack=0 pend=0 closed=0 reason=none
+      [decoder I] video surface cleared
+PASS  U2 idle: connected (control over the video socket) and the pick sent
+PASS  U2 idle: control stayed open on both ends (no peer-lost)  pingGap=56ms asks before ready=0 after=0 queued+2ms present+5ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U2 idle: the client's keepalive kept reaching the host while the decoder was not ready (gap < 1000 ms)  pingGap=56ms asks before ready=0 after=0 queued+2ms present+5ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U2 idle: the CURRENT generation's IDR is the codec's first input (< 3.5 s after ready)  pingGap=56ms asks before ready=0 after=0 queued+2ms present+5ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U2 idle: a picture of it is presented -- the selection is ready  pingGap=56ms asks before ready=0 after=0 queued+2ms present+5ms first=217 hostPeerLost=0 clientConnected=1
+[native-video-client-session] video receive nack=0 holdUs=0 nonblocking=1
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] keyframe owed to selection 1: asked (1)
+[native-video-client-session] keyframe owed to selection 1: asked (2)
+[native-video-client-session] keyframe owed to selection 2: asked (1)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 2: asked (2)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 2: asked (3)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 2: asked (4)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 2: asked (5)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 2: asked (6)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 2: asked (7)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] keyframe owed to selection 2: asked (8)
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+[native-video-client-session] held keyframe request queued
+
+--- U4 deltas
+      [decoder I] selection prepare localGen=1
+      [decoder I] selection ack localGen=1 streamGen=7001 hostSendQpcUs=0 rekey=0
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] decoder inbox full: oldest frame dropped drops=1
+      [decoder I] decoder inbox full: oldest frame dropped drops=31
+      [decoder I] decoder inbox full: oldest frame dropped drops=61
+      [decoder I] decoder inbox full: oldest frame dropped drops=91
+      [decoder I] decoder inbox full: oldest frame dropped drops=121
+      [decoder I] decoder inbox full: oldest frame dropped drops=151
+      [decoder I] decoder inbox full: oldest frame dropped drops=181
+      [decoder I] decoder inbox full: oldest frame dropped drops=211
+      [decoder I] decoder inbox full: oldest frame dropped drops=241
+      [decoder I] decoder inbox full: oldest frame dropped drops=271
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=7001 remoteUs=12633217 localUs=620392468287 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=25 key=1 ptsUs=620392551619
+      [decoder I] selection first output localGen=1 streamGen=7001 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+  trace: liveness-trace rx=wait/7ms tid=2171664195 dg=7ms ctl=7ms tick=-1ms n=864/512 dmax=0ms | wk=pass/7ms tid=4237683877 pass=7ms | owed=2/8 next-596ms kq=14 kr=281 | kf=38/2 ok=1 age=93ms tmsg=275 | ch sent=277 recv=229 retx=0 nack=0 pend=0 closed=0 reason=none
+      [decoder I] video surface cleared
+PASS  U4 deltas: connected (control over the video socket) and the pick sent
+PASS  U4 deltas: control stayed open on both ends (no peer-lost)  pingGap=55ms asks before ready=38 after=0 queued+2ms present+5ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U4 deltas: the client's keepalive kept reaching the host while the decoder was not ready (gap < 1000 ms)  pingGap=55ms asks before ready=38 after=0 queued+2ms present+5ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U4 deltas: the CURRENT generation's IDR is the codec's first input (< 3.5 s after ready)  pingGap=55ms asks before ready=38 after=0 queued+2ms present+5ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U4 deltas: a picture of it is presented -- the selection is ready  pingGap=55ms asks before ready=38 after=0 queued+2ms present+5ms first=217 hostPeerLost=0 clientConnected=1
+[native-video-client-session] video receive nack=0 holdUs=0 nonblocking=1
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] keyframe owed to selection 1: asked (1)
+[native-video-client-session] keyframe owed to selection 1: asked (2)
+[native-video-client-session] keyframe owed to selection 2: asked (1)
+[native-video-client-session] keyframe owed to selection 2: asked (2)
+[native-video-client-session] keyframe owed to selection 2: asked (3)
+[native-video-client-session] keyframe owed to selection 2: asked (4)
+[native-video-client-session] keyframe owed to selection 2: asked (5)
+[native-video-client-session] keyframe owed to selection 2: asked (6)
+[native-video-client-session] keyframe owed to selection 2: asked (7)
+[native-video-client-session] keyframe owed to selection 2: asked (8)
+
+--- U4 idle
+      [decoder I] selection prepare localGen=1
+      [decoder I] dropped stale frame streamGen=7001 expected=0 pendingSel=1 drops=1
+      [decoder I] selection ack localGen=1 streamGen=7001 hostSendQpcUs=0 rekey=1
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=7001 remoteUs=1099999 localUs=620404496633 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=25 key=1 ptsUs=620404579965
+      [decoder I] selection first output localGen=1 streamGen=7001 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+  trace: liveness-trace rx=wait/16ms tid=1830560545 dg=16ms ctl=16ms tick=-1ms n=495/484 dmax=0ms | wk=pass/5ms tid=1323289849 pass=5ms | owed=0/0 next+0ms kq=10 kr=0 | kf=10/2 ok=1 age=2975ms tmsg=190 | ch sent=249 recv=229 retx=0 nack=0 pend=0 closed=0 reason=none
+      [decoder I] video surface cleared
+PASS  U4 idle: connected (control over the video socket) and the pick sent
+PASS  U4 idle: control stayed open on both ends (no peer-lost)  pingGap=55ms asks before ready=10 after=0 queued+2ms present+6ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U4 idle: the client's keepalive kept reaching the host while the decoder was not ready (gap < 1000 ms)  pingGap=55ms asks before ready=10 after=0 queued+2ms present+6ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U4 idle: the CURRENT generation's IDR is the codec's first input (< 3.5 s after ready)  pingGap=55ms asks before ready=10 after=0 queued+2ms present+6ms first=217 hostPeerLost=0 clientConnected=1
+PASS  U4 idle: a picture of it is presented -- the selection is ready  pingGap=55ms asks before ready=10 after=0 queued+2ms present+6ms first=217 hostPeerLost=0 clientConnected=1
+[native-video-client-session] video receive nack=0 holdUs=0 nonblocking=1
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] keyframe owed to selection 1: asked (1)
+[native-video-client-session] keyframe owed to selection 1: asked (2)
+[native-video-client-session] keyframe owed to selection 2: asked (1)
+[native-video-client-session] keyframe owed to selection 2: asked (2)
+[native-video-client-session] keyframe owed to selection 2: asked (3)
+[native-video-client-session] keyframe owed to selection 2: asked (4)
+
+--- U3 newer idle
+      [decoder I] selection prepare localGen=1
+      [decoder I] selection ack localGen=1 streamGen=7001 hostSendQpcUs=0 rekey=0
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] selection prepare localGen=2
+      [decoder I] selection ack localGen=2 streamGen=7002 hostSendQpcUs=0 rekey=0
+      [decoder I] codec made after a reset was asked for: discarded
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=7002 remoteUs=1233331 localUs=620416521493 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=25 key=1 ptsUs=620416604825
+      [decoder I] selection first output localGen=2 streamGen=7002 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+  trace: liveness-trace rx=wait/5ms tid=2354981215 dg=5ms ctl=5ms tick=-1ms n=490/482 dmax=0ms | wk=pass/5ms tid=2789102062 pass=5ms | owed=0/0 next+0ms kq=6 kr=0 | kf=6/2 ok=1 age=6974ms tmsg=107 | ch sent=246 recv=230 retx=0 nack=0 pend=0 closed=0 reason=none
+      [decoder I] video surface cleared
+PASS  U3 newer idle: connected (control over the video socket) and the pick sent
+PASS  U3 newer idle: control stayed open on both ends (no peer-lost)  pingGap=54ms asks before ready=6 after=0 queued+2ms present+8ms first=218 hostPeerLost=0 clientConnected=1
+PASS  U3 newer idle: the client's keepalive kept reaching the host while the decoder was not ready (gap < 1000 ms)  pingGap=54ms asks before ready=6 after=0 queued+2ms present+8ms first=218 hostPeerLost=0 clientConnected=1
+PASS  U3 newer idle: the CURRENT generation's IDR is the codec's first input (< 3.5 s after ready)  pingGap=54ms asks before ready=6 after=0 queued+2ms present+8ms first=218 hostPeerLost=0 clientConnected=1
+PASS  U3 newer idle: a picture of it is presented -- the selection is ready  pingGap=54ms asks before ready=6 after=0 queued+2ms present+8ms first=218 hostPeerLost=0 clientConnected=1
+PASS  U3 newer idle: nothing of the superseded generation was queued  pingGap=54ms asks before ready=6 after=0 queued+2ms present+8ms first=218 hostPeerLost=0 clientConnected=1
+
+android_decoder_idr_recovery_test: 36 checks, 0 failed
+RESULT: PASS
+

@@ -1,0 +1,16 @@
+10-23 18:07:16 {"present": 1, "seqFirst": 151572, "seqLast": 151572, "gen": ["20"]}
+10-23 18:07:17 {"present": 2, "seqFirst": 151573, "seqLast": 151577, "gen": ["20"]}
+10-23 18:07:18 {"present": 3, "seqFirst": 151583, "seqLast": 151586, "gen": ["20"]}
+10-23 18:07:19 {"present": 9, "seqFirst": 151591, "seqLast": 151609, "gen": ["20"]}
+10-23 18:07:20 {"present": 9, "seqFirst": 151611, "seqLast": 151630, "gen": ["20"]}
+10-23 18:07:21 {"present": 9, "seqFirst": 151633, "seqLast": 151649, "gen": ["20"]}
+10-23 18:07:22 {"present": 10, "seqFirst": 151652, "seqLast": 151669, "gen": ["20"]}
+10-23 18:07:23 {"present": 13, "seqFirst": 151671, "seqLast": 151689, "gen": ["20"]}
+10-23 18:07:24 {"present": 10, "seqFirst": 151691, "seqLast": 151709, "gen": ["20"]}
+10-23 18:07:25 {"present": 7, "seqFirst": 151711, "seqLast": 151720, "gen": ["20"]}
+10-23 18:07:26 {"present": 4, "seqFirst": 151722, "seqLast": 151725, "gen": ["20"]}
+10-23 18:07:27 {"present": 2, "seqFirst": 151728, "seqLast": 151730, "gen": ["20"]}
+10-23 18:07:28 {"present": 1, "seqFirst": 151731, "seqLast": 151731, "gen": ["20"]}
+ERROR/ROLE LINES (not normal zero counters):
+10-23 18:07:14.541 [native-video-client][attempt] hello ok=1 attempts=1 badAcks=0 recvErrors=0 ms=2 budgetMs=30000 budgetSpent=0 host=175.207.45.151:3478 viewerSession=9032-697529000 viewerPid=9032 hostId=f6e8e54a7d5aff7c productVersion=0.2.162 collectedTickMs=697529687
+10-23 18:07:14.681 [native-video-client] keyframe-request-limiter minIntervalUs=120000 tokenRefillUs=300000 tokenCapacity=3 catchupReenterMinUs=600000 staleCaptureDropUs=50000 congestionRecoverMinUs=250000 congestionRecoveryTimeoutUs=1500000 keyRecoveryRetryUs=500000 keyRecoveryRetryMaxUs=2000000 vi

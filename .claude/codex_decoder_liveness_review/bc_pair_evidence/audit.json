@@ -1,0 +1,43 @@
+[
+  {
+    "run": "bc-b-shoff-20261030081349-43476",
+    "segment_ms": 123851,
+    "decoder_span_s": 122.734,
+    "out_delta": 1979,
+    "out_per_s": 16.12430133459351,
+    "host_interval_rows": 124,
+    "host_interval_sent_sum": 2735,
+    "host_unique_requests": 142,
+    "hashes": {
+      "slot.txt": "04750418159f1708eb48622642ae28bc2f20035c687745d61554e27f503635f3",
+      "fixture_result.txt": "d98720e2ea03197b248612323ab1756ad61134ba97663e8620a669b51cd0bba6",
+      "avd/steps.txt": "09db9a2486e7827aa8d48652ad17eaa2e99de711f2f2d4f013e974d2993cc3d8",
+      "avd/result.json": "10974617bf206c651a430de78abbb017ecadf58558ca706a93a9607eea22c3ff",
+      "avd/app_final.log": "855c4b772c69d96a0d5c468576309abc7da20aa0bc0ee7530be00a959c2bd716",
+      "a/directoryhost_host.log": "400aa24ce02a304376eca1f12ef73941bcf50f3e535e2cc8aab98f844f696527",
+      "dir/server.stdout.txt": "78f0292bdbac8f661f4ec3269946126c8facd22d1570879d208447a02d21a1f8"
+    }
+  },
+  {
+    "run": "bc-c-shoff-20261030081943-25112",
+    "segment_ms": 123371,
+    "decoder_span_s": 122.881,
+    "out_delta": 1798,
+    "out_per_s": 14.63204238246759,
+    "host_interval_rows": 123,
+    "host_interval_sent_sum": 2691,
+    "host_unique_requests": 81,
+    "hashes": {
+      "slot.txt": "f151879b704b97e181330995241f7a88d7eb6a6d2766e1677942f76dc2fea79d",
+      "fixture_result.txt": "9e5561a96c5c004c998fc82a7df9b840092d7175a2ebd7c6697d650828704033",
+      "avd/steps.txt": "e2a0eea0e5093f1a65daf857f2e8bee67c8d906b4647ad37f6d2b86ae7f537ee",
+      "avd/result.json": "bdaf997f0c2fdccb80fb446528f5b9833d0baee5898a501dd12deaef75cc077b",
+      "avd/app_final.log": "d2222e44ddf93ed3c8f313ff04350f3e93276b8622157483bddaaaf85df52ed5",
+      "a/directoryhost_host.log": "194e4dd74ea77f7ab17d6db347d25b925b7f3f0cdda670b43944fdda8800abb5",
+      "dir/server.stdout.txt": "d9abe2cca737934545105ab5b93d2b4e12f24d67042473293369fc27a8ae1341",
+      "avd/logcat.txt": "b26f5a922ab9b4fec987c7b85fa67f6dc82542769a9752b4363621414780cdf5"
+    },
+    "bulk_drop_events": 77,
+    "bulk_drop_aus": 693
+  }
+]

@@ -1,0 +1,9 @@
+﻿what the viewer believes from a retry's answer (lk-ux-retry r3, Codex N2-b)
+
+FAIL  an ISSUED challenge of another purpose (same request id): the earlier wait is NOT believed over, nothing sealed  done=0 stage=0 issued=1 superseded=0 sealSent=0 sealed=0
+FAIL  a Superseded of another purpose: not believed (the earlier wait is kept), nothing sealed  done=1 stage=17 issued=0 superseded=1 sealSent=0 sealed=0
+PASS  an issued challenge for ANOTHER request id: not believed, nothing sealed  done=0 stage=0 issued=0 superseded=0 sealSent=0 sealed=0
+PASS  control: a Superseded of the lock-screen purpose IS believed (the earlier wait over, no new challenge)  done=1 stage=17 issued=0 superseded=1 sealSent=0 sealed=0
+PASS  control: the right challenge is believed and the new password sealed and SENT (its answer not come: told apart)  done=0 stage=0 issued=1 superseded=0 sealSent=1 sealed=1
+
+RESULT: FAILED  (5 checks, 2 failed)

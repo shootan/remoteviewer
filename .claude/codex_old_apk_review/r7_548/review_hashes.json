@@ -1,0 +1,62 @@
+[
+  {
+    "path": "oa_avd.py",
+    "blob_sha256": "99bf47f6b4c33681edb71899ed02ea7141ef233cc5722a7c730506e5142dc617",
+    "verify_raw_sha256": "da07c11c121e815cb887f297f0e5f3f5bbfa05ff998393aedec5378cf93f3573",
+    "normalized_equal": true
+  },
+  {
+    "path": "oa_pick_test.py",
+    "blob_sha256": "ae3efb2da8e740c71ed212fc2dc8e66a1fc133d2a07a9c79d02873e242038740",
+    "verify_raw_sha256": "5ef7a72574500e3e7065695db9e70d808b9ac4f30811961f65c0eb696b510569",
+    "normalized_equal": true
+  },
+  {
+    "path": "stubs/fake_ui_adb.py",
+    "blob_sha256": "476b572594340096b4dc8702fd3c887225d12de814f546ba78ba1fec4edc1173",
+    "verify_raw_sha256": "87415d45183799a32d65f87606f03f81c5997db907997ca3b85c66f93a4c699f",
+    "normalized_equal": true
+  },
+  {
+    "path": "stubs/fake_ui_adb.cmd",
+    "blob_sha256": "8f02a3e062efca29b98c179ee8b78dd1d14f4fbf27f84ff3208255a820f453a6",
+    "verify_raw_sha256": "feb2733399223622b8c11e432a59fd4132850f010230cbfef7051fd3c6b27897",
+    "normalized_equal": true
+  },
+  {
+    "path": "oa_adb.py",
+    "blob_sha256": "29ca128ebe23f55824a10f42fd27823191986b8b148b91aaaac4cdb3560966b7",
+    "verify_raw_sha256": "84a3ca2c9d5f71dd916e92d7a2980cef4e4f0275dbf3438549325ebbead7a6b9",
+    "normalized_equal": true
+  },
+  {
+    "path": "oa_slot.ps1",
+    "blob_sha256": "7d51a234b3a1f2b4c722ffd86176ec3a1c86c13a88ad4a38f864cee5edfa1cc1",
+    "verify_raw_sha256": "985834ac383c0483db34c7198f99a374bc63934325f5e466cf25cde6d074c547",
+    "normalized_equal": true
+  },
+  {
+    "path": "oa_fixture.ps1",
+    "blob_sha256": "60e694f463e2fca52509efe25a20dbbc76a0353cc45ea254d299d910a3e35c55",
+    "verify_raw_sha256": "63c1704a6108798a5b46df49bfe4835b2d37f82275b43dd4b589709784663f22",
+    "normalized_equal": true
+  },
+  {
+    "path": "oa_orchestration_test.ps1",
+    "blob_sha256": "de764e88847e6e3fd7f59b42cd0a2ac832acc60ae265157d62317e98e9d88055",
+    "verify_raw_sha256": "be4f27bee6be9e05c071d9292b86059414e54c093ce1f61c7656975508d03d21",
+    "normalized_equal": true
+  },
+  {
+    "path": "oa_pmclear_test.py",
+    "blob_sha256": "251043f5a572909836d1d62da851931c23e14a0525b66d944cdaa6946cf25ac2",
+    "verify_raw_sha256": "2c5827ae99e335c4858709baf3700542e1813abbfb9b352e3916502b8cc7340c",
+    "normalized_equal": true
+  },
+  {
+    "path": "stubs/fake_adb.py",
+    "blob_sha256": "7819642e0d1e677d84922e2e33d9502db1dc55ab8348a034fcc702d6bffabbb7",
+    "verify_raw_sha256": "742acfa1c8be0a904dcde2b73dd206c207c2dfac0b6794c633b407009cec38e8",
+    "normalized_equal": true
+  }
+]

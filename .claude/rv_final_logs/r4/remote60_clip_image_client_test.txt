@@ -1,0 +1,166 @@
+
+--- ① the user cancels a transfer the host has ALREADY published ---
+      client: package ready 64x64 png=14631 textUtf16=0 sha=2e775fa6 buildMs=5
+      client: accepted gen=7 window=2
+PASS  offered and being served
+      client: user cancel requested active=1
+      client: stopped here, cancel sent reason=9 bytes=14631 served=0 ms=1 sha=2e775fa6
+      client: cancel answered reason=9 hostState=4 hostReason=0 seqOk=1 idOk=1
+      client: outcome=3 detail=9
+PASS  the cancel goes out
+PASS  the outcome is 'it was already there', NOT 'cancelled'
+PASS  ...counted as published, not cancelled
+
+--- ① cancel while the host is still verifying, and a newer copy waiting ---
+      client: package ready 64x64 png=14616 textUtf16=0 sha=4f4f49ce buildMs=0
+      client: accepted gen=7 window=2
+PASS  offered and being served
+      client: stopped here, cancel sent reason=10 bytes=14616 served=0 ms=0 sha=4f4f49ce
+      client: cancel answered reason=10 hostState=2 hostReason=0 seqOk=1 idOk=1
+PASS  the older transfer is cancelled at once, as superseded
+PASS  ...and it is not settled: the host is still verifying
+      client: package ready 64x64 png=14636 textUtf16=0 sha=847a8ca6 buildMs=0
+PASS  the newer copy is NOT offered while the older one is unsettled (it would meet Busy)
+PASS  ...the host is asked about the OLDER transfer
+PASS  an answer naming another transfer settles nothing
+      client: outcome=2 detail=10
+      client: accepted gen=7 window=2
+      client: outcome=2 detail=10
+      client: end state=6 reason=10 bytes=14636 served=0 ms=529 sha=847a8ca6 rateBps=256000
+PASS  the host's real answer settles it: cancelled (superseded)
+PASS  ...and only then is the newer copy offered
+
+--- ① the cancel's answer never arrives ---
+      client: package ready 64x64 png=14551 textUtf16=0 sha=f3ea2bca buildMs=0
+      client: accepted gen=7 window=2
+PASS  offered and being served
+      client: user cancel requested active=1
+      client: stopped here, cancel sent reason=9 bytes=14551 served=0 ms=0 sha=f3ea2bca
+      client: outcome=4 detail=9
+PASS  the link fails
+PASS  the outcome is 'not known', NOT 'cancelled'
+
+--- ① an ordinary user cancel, confirmed ---
+      client: package ready 64x64 png=14587 textUtf16=0 sha=9cb6b33d buildMs=0
+      client: accepted gen=7 window=2
+PASS  offered and being served
+      client: user cancel requested active=1
+      client: stopped here, cancel sent reason=9 bytes=14587 served=0 ms=0 sha=9cb6b33d
+      client: cancel answered reason=9 hostState=6 hostReason=9 seqOk=1 idOk=1
+      client: outcome=2 detail=9
+PASS  cancelled by the user, and the host said so
+
+--- ② a new copy that cannot be read still cancels the older transfer ---
+      client: package ready 64x64 png=14631 textUtf16=0 sha=6669927c buildMs=0
+      client: accepted gen=7 window=2
+PASS  offered and being served
+      client: copy not sent result=2 (text, if any, goes by text sync)
+      client: stopped here, cancel sent reason=10 bytes=14631 served=0 ms=0 sha=6669927c
+      client: cancel answered reason=10 hostState=6 hostReason=10 seqOk=1 idOk=1
+      client: outcome=2 detail=10
+      client: outcome=7 detail=2
+PASS  the older transfer is cancelled (superseded) without any new package
+PASS  the last line is about the NEW copy: too large, not sent
+
+--- ② / ③ a refused copy's text, then a newer copy ---
+      client: package ready 64x64 png=14623 textUtf16=24 sha=16340864 buildMs=0
+      client: refused verdict=3 (text, if any, goes by text sync)
+      client: outcome=8 detail=3
+PASS  offered
+PASS  the refusal is an outcome with the host's reason
+PASS  its text goes by text sync while it is still the newest copy
+      client: package ready 64x64 png=14545 textUtf16=10 sha=483fca4a buildMs=0
+      client: refused verdict=3 (text, if any, goes by text sync)
+      client: outcome=8 detail=3
+PASS  offered again
+PASS  a newer copy makes the older refused copy's text void (it would arrive after it)
+
+--- ② a refusal that arrives after a newer copy was made ---
+      client: package ready 64x64 png=14545 textUtf16=26 sha=2198c181 buildMs=0
+      client: refused verdict=3 (text, if any, goes by text sync)
+PASS  offered
+PASS  the older copy's refusal brings no text after the newer copy
+PASS  ...and no 'refused' line about a copy the user has already replaced
+
+--- ③ a copy that never leaves this PC ---
+      client: package refused result=2 (not sent; text, if any, goes by text sync)
+      client: outcome=7 detail=2
+PASS  a copy over the size gate ends with 'not sent: too large'
+PASS  ...and nothing is offered
+
+--- r4 ①: a newer copy during A's offer, A refused -> the next copy B is not cancelled ---
+      client: package ready 64x64 png=14606 textUtf16=0 sha=1d9cde53 buildMs=0
+      client: refused verdict=3 (text, if any, goes by text sync)
+PASS  A offered (and refused)
+      client: package ready 64x64 png=14605 textUtf16=0 sha=f622fa80 buildMs=0
+      client: accepted gen=7 window=2
+PASS  B offered and being served
+PASS  no Cancel was sent for B (A's cancel did not outlive A)
+      client: outcome=1 detail=0
+      client: end state=4 reason=0 bytes=14605 served=0 ms=526 sha=f622fa80 rateBps=256000
+PASS  B is published
+
+--- r4 ②: the user cancels A while A's Status (published) is in flight -> B is not cancelled ---
+      client: package ready 64x64 png=14614 textUtf16=0 sha=26779062 buildMs=0
+      client: accepted gen=7 window=2
+PASS  A offered and being served
+      client: user cancel requested active=1
+      client: outcome=1 detail=0
+      client: end state=4 reason=0 bytes=14614 served=0 ms=500 sha=26779062 rateBps=256000
+PASS  A ended by the host's answer, no Cancel sent
+      client: package ready 64x64 png=14636 textUtf16=0 sha=72f4eaad buildMs=0
+      client: accepted gen=7 window=2
+PASS  B offered and being served
+PASS  no Cancel was sent for B (the user's cancel was A's)
+      client: outcome=1 detail=0
+      client: end state=4 reason=0 bytes=14636 served=0 ms=501 sha=72f4eaad rateBps=256000
+PASS  B is published
+
+--- r4 ②: the user cancels A while A's Status (failed) is in flight -> B is not cancelled ---
+      client: package ready 64x64 png=14614 textUtf16=0 sha=26779062 buildMs=0
+      client: accepted gen=7 window=2
+PASS  A offered and being served
+      client: user cancel requested active=1
+      client: outcome=6 detail=0
+      client: end state=5 reason=0 bytes=14614 served=0 ms=529 sha=26779062 rateBps=256000
+PASS  A ended by the host's answer, no Cancel sent
+      client: package ready 64x64 png=14636 textUtf16=0 sha=72f4eaad buildMs=0
+      client: accepted gen=7 window=2
+PASS  B offered and being served
+PASS  no Cancel was sent for B (the user's cancel was A's)
+      client: outcome=1 detail=0
+      client: end state=4 reason=0 bytes=14636 served=0 ms=525 sha=72f4eaad rateBps=256000
+PASS  B is published
+
+--- r4 ③: A's cancel unsettled (verifying), B's package fails -> the last line is B's ---
+      client: package ready 64x64 png=14540 textUtf16=0 sha=c7f41f56 buildMs=0
+      client: accepted gen=7 window=2
+PASS  A offered and being served
+      client: stopped here, cancel sent reason=10 bytes=14540 served=0 ms=0 sha=c7f41f56
+      client: package refused result=2 (not sent; text, if any, goes by text sync)
+      client: cancel answered reason=10 hostState=2 hostReason=0 seqOk=1 idOk=1
+PASS  A is being cancelled (superseded) and not settled
+PASS  B's failure is held while A is unsettled (not shown under 'cancelling')
+      client: outcome=2 detail=10
+      client: outcome=7 detail=2
+PASS  after A settles, the LAST line is B's: not sent, too large
+
+--- r4 ④: as ③, but the user copies C before A settles -> no line about B ---
+      client: package ready 64x64 png=14484 textUtf16=0 sha=ba8108af buildMs=0
+      client: accepted gen=7 window=2
+PASS  A offered and being served
+      client: stopped here, cancel sent reason=10 bytes=14484 served=0 ms=0 sha=ba8108af
+      client: package refused result=2 (not sent; text, if any, goes by text sync)
+      client: cancel answered reason=10 hostState=2 hostReason=0 seqOk=1 idOk=1
+      client: outcome=2 detail=10
+PASS  after A settles there is no line about B (C replaced it): A's cancel is the last
+
+--- normal path: offered, served, published ---
+      client: package ready 64x64 png=14552 textUtf16=0 sha=5bc7212f buildMs=0
+      client: accepted gen=7 window=2
+PASS  offered and being served
+      client: outcome=1 detail=0
+      client: end state=4 reason=0 bytes=14552 served=0 ms=524 sha=5bc7212f rateBps=256000
+PASS  the host's Published ends it as published
+
+RESULT: PASSED  (52 checks, 0 failed)

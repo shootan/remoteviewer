@@ -1,0 +1,40 @@
+﻿=== C:\work\gnlink-wt\feat-apk-0233\.claude\e2e\runs\bc-c-shoff-20261030081943-25112
+fixture (in its job, e2e_job_run dc4c5049e8e9d32a) runner pid 12168 at 2026-10-30T08:19:44
+job_run: child_exit=0 residual=0 forced=0 ended_confirmed=1
+slot run=bc-c-shoff-20261030081943-25112 done 2026-10-30T08:24:52: rc=0 (fixture 0, avd 0)
+fixture run=bc-c-shoff-20261030081943-25112 result /   node ended /   a exit 0 /   failures: none
+08:19:52 SEGMENT startup begin epoch_ms=1793315992925
+08:21:49 PASS  E2 A (ordinary connect, sharpening pipeline OFF): selection -> first frame  4929 ms
+08:21:51 SEGMENT startup end epoch_ms=1793316111263
+08:21:51   watch begins 1014 ms after the first frame was seen (select returned)
+08:21:51 SEGMENT watch begin epoch_ms=1793316111405
+08:23:54 SEGMENT watch end epoch_ms=1793316234776
+08:23:54 PASS  E2-SHOFF the session stayed up 120 s after its first frame (no keep_end, still the viewer)  watched=120414ms liveness_trace lines=0 video_debug lines=188
+08:23:56 SEGMENT list begin epoch_ms=1793316236137
+08:24:50 SEGMENT list end epoch_ms=1793316290199
+startup: SEGMENT len=118.338s keyframe=8 bytes=13098 kreq=9 kreq/s=0.076
+watch: SEGMENT len=123.371s keyframe=81 bytes=135984 kreq=81 kreq/s=0.657
+list: SEGMENT len=54.062s keyframe=31 bytes=52034 kreq=31 kreq/s=0.573
+host peer-lost lines: 0
+relay 77734289 watch: snap0 errMs=-1107 snap1 errMs=531 dt=125.008s h2c 30,477 B/s c2h 546 B/s
+video_debug inside watch: n=189
+watch fps (same segment, first->last video_debug 122.881s apart): out 14.63/s  in 14.65/s  (out +1798, in +1800)
+  episodes: 3 -> 81 (+78)
+  asks: 1 -> 1 (+0)
+  recSent: 6 -> 85 (+79)
+  recExhausted: 1 -> 1 (+0)
+  recMoot: 0 -> 0 (+0)
+  recClosed: 1 -> 80 (+79)
+  chainSkipped: 16 -> 21 (+5)
+  inboxDrops: 130 -> 1017 (+887)
+  gapDrops: 101 -> 288 (+187)
+  keyTaken: 6 -> 86 (+80)
+  chainDup: 0 -> 0 (+0)
+  chainStale: 0 -> 0 (+0)
+  chainTrim: 0 -> 5 (+5)
+  lossRecovered: 0 -> 0 (+0)
+  beyondGap: 0 -> 0 (+0)
+  covered: 0 -> 0 (+0)
+  coveredExh: 0 -> 0 (+0)
+  coveredStale: 0 -> 0 (+0)
+sample lines: 14 miss-nonempty: 1

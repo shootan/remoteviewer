@@ -1,0 +1,462 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <string>
+#include <vector>
+
+#include <d3d11.h>
+#include <mfidl.h>
+#include <mftransform.h>
+#include <wrl/client.h>
+// The Windows headers above define min/max as macros unless NOMINMAX was set by the including
+// translation unit; the policy header below uses std::min/std::max.
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+
+#include "host_encoder_rc_policy.hpp"
+#include "time_utils.hpp"
+
+namespace remote60::native_poc {
+
+// encoder-rc-budget C3: what a runtime rate-control call did to the RUNNING instance.
+//   Applied   -- SetValue issued and accepted (the legacy/AMD live path).
+//   Unchanged -- the instance already runs this plan: nothing was issued (same instance, same plan).
+//   Unproven  -- the profile does not trust runtime changes on this instance (NVIDIA pre-types):
+//                nothing was issued, and the caller must re-initialise with a new plan if it needs
+//                the change. Never to be counted as applied.
+//   Failed    -- SetValue was issued and rejected, or there is no instance.
+enum class RcRuntimeResult { Applied, Unchanged, Unproven, Failed };
+
+// What the MFT reported after types + stream start, against the plan it was given.
+enum class RcPlanState { Unknown, Accepted, Mismatch };
+
+struct H264AccessUnit {
+  std::vector<uint8_t> bytes;
+  bool keyFrame = false;
+  int64_t sampleTimeHns = 0;
+  bool sampleTimeFromOutput = false;
+  // Provenance of the INPUT that produced this AU (host kick / static refresh = synthetic). Carried
+  // through the accepted-input FIFO next to the timestamp, because an async MFT returns an older
+  // input's AU during the current call -- the call's own flag would land on the wrong AU. (0.2.97)
+  bool synthetic = false;
+  // The host's flush epoch the input was accepted in (0 = untagged). Same FIFO: lets the emit
+  // stage tell a pre-flush AU from the first AU of the new epoch (P11, host_epoch_gate.hpp).
+  uint64_t inputEpoch = 0;
+  // stutter-keyframe r4 G: clamp-detector provenance (carried through the same FIFO as synthetic/
+  // epoch). acceptedInputOrdinal = the MFT-accepted-input count that produced this AU (G1).
+  // inputWasForcedKey = that input carried a host key request (G2). rawIdr = the Annex-B bytes carry a
+  // real NAL type 5 (not just CleanPoint), so the detector confirms a true IDR, not any clean point.
+  uint64_t acceptedInputOrdinal = 0;
+  // encoder-output-poll r1: when the MFT accepted the input behind this AU (encoder clock, us; 0 = no
+  // provenance) -- accepted -> output latency in the DIAG trace.
+  uint64_t inputAcceptedAtUs = 0;
+  bool inputWasForcedKey = false;
+  bool rawIdr = false;
+};
+
+struct DecodedFrameNv12 {
+  // Coded plane geometry -- the byte-buffer layout. H.264 aligns the coded height to 16
+  // rows, so a 1080p stream decodes into a 1088-row plane whose bottom 8 rows are padding.
+  uint32_t width = 0;
+  uint32_t height = 0;
+  // Display aperture -- the pixels that are real content. Always inside the coded plane and
+  // even-aligned; equals the coded size when the decoder reports no aperture.
+  uint32_t visibleLeft = 0;
+  uint32_t visibleTop = 0;
+  uint32_t visibleWidth = 0;
+  uint32_t visibleHeight = 0;
+  int64_t sampleTimeHns = 0;
+  bool sampleTimeFromOutput = false;
+  // Provenance of the input AU this output came from (wire synthetic flag), mapped through the
+  // pending-input FIFO like the timestamp, so a delayed decoder output keeps its own flag. (0.2.97)
+  bool synthetic = false;
+  std::vector<uint8_t> bytes;
+  // Hardware decoders expose their NV12 output as a D3D11 surface. Keeping both the sample
+  // and texture alive prevents the decoder pool from reusing the surface before paint.
+  Microsoft::WRL::ComPtr<IMFSample> surfaceSample;
+  Microsoft::WRL::ComPtr<ID3D11Texture2D> surfaceTexture;
+  uint32_t surfaceSubresource = 0;
+};
+
+struct H264EncodeFrameStats {
+  uint64_t encodeCallUs = 0;
+  uint64_t colorConvertUs = 0;
+  uint64_t sampleCreateUs = 0;
+  uint64_t processInputUs = 0;
+  uint64_t processOutputDrainUs = 0;
+  uint64_t processOutputDrainLoops = 0;
+  uint64_t processOutputSamples = 0;
+  uint64_t processOutputBytes = 0;
+  uint32_t processInputNotAcceptingCount = 0;
+  uint32_t processOutputNeedMoreInputCount = 0;
+  uint32_t processOutputStreamChangeCount = 0;
+  uint32_t processOutputErrorCount = 0;
+  uint32_t asyncPollCount = 0;
+  uint32_t asyncPollNoEventCount = 0;
+  uint32_t asyncPollNeedInputCount = 0;
+  uint32_t asyncPollHaveOutputCount = 0;
+  // Diagnostic for the async output-starvation wedge: this call saw MFT events but none were
+  // METransformHaveOutput. Repeated while input keeps being accepted is the wedge fingerprint.
+  uint32_t asyncNeedInputOnlyCall = 0;
+  // encoder-output-poll r1 (trace): when ProcessInput started / returned (encoder clock, us), and the
+  // events the post-input poll read, in order, as "<N|H|O><us after ProcessInput returned>" (N NeedInput,
+  // H HaveOutput, O other), "-<us>" for a poll that found none, "E<us>" for a failed read. The read time of
+  // an event is not the time the output became ready.
+  uint64_t processInputStartUs = 0;
+  uint64_t processInputEndUs = 0;
+  char postInputEvents[96] = {0};
+  // encoder-output-poll r1: why the post-input poll failed and with which HRESULT (0 = none) -- only
+  // MF_E_NO_EVENTS_AVAILABLE is the normal "nothing yet". 1 = GetEvent failed, 2 = GetEvent succeeded with
+  // no event, 3 = the event's GetType failed.
+  uint8_t asyncEventFailure = 0;
+  int32_t asyncEventFailHr = 0;
+  // Held input-timestamp FIFO depth after this call, and the cumulative count of FIFO overflow
+  // drops. A depth pinned near the 64 cap with output stalled is decisive starvation evidence.
+  uint32_t pendingInputDepth = 0;
+  uint64_t pendingInputOverflowTotal = 0;
+  // A06: the accepted-input FIFO overflowed and no output carries trustworthy provenance until
+  // the encoder is rebuilt. The stage closes the emit gate and asks for that rebuild.
+  uint8_t provenanceInvalid = 0;
+  uint8_t asyncEnabled = 0;
+  // stutter-keyframe r1 (recovery-1): this encode call asked the MFT for a forced key, and the raw
+  // HRESULT the CODECAPI_AVEncVideoForceKeyFrame SetValue returned. The setter return used to be
+  // discarded, so a rejected force looked identical to an accepted one in the recovery timeline. The
+  // force applies to the NEXT accepted input, so a non-S_OK here means the key was never even armed
+  // (fail the recovery contract) -- distinct from an armed force whose IDR has not surfaced yet.
+  uint8_t forceKeyRequested = 0;
+  int32_t forceKeySetHr = 0;  // S_OK when not requested; the SetValue HRESULT when requested
+};
+
+bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t bgraStride,
+                  std::vector<uint8_t>* outNv12);
+bool bgra_to_nv12_buffer(const uint8_t* bgra, uint32_t width, uint32_t height,
+                         uint32_t bgraStride, uint8_t* outNv12, size_t outNv12Size);
+bool nv12_to_bgra(const uint8_t* nv12, uint32_t width, uint32_t height, std::vector<uint8_t>* outBgra);
+
+// One entry per input the encoder's MFT accepted, in order (A02). An asynchronous MFT answers a
+// call with an OLDER input's access unit, so every output is stamped from the front of this queue
+// rather than from the current call: the capture timestamp the viewer paces on, the synthetic flag
+// the wire carries, and the flush epoch the emit gate judges (host_epoch_gate.hpp). The three used
+// to be three parallel deques and one path (an output with no usable bytes) popped only two of
+// them, which shifted every later AU's epoch by one for the rest of the session -- so they are one
+// record now and every path moves them together.
+struct PendingInput {
+  int64_t tsHns = 0;
+  bool synthetic = false;
+  uint64_t epoch = 0;
+  // stutter-keyframe r4 G: provenance for the clamp detector. acceptedOrdinal is a monotonic count of
+  // inputs the MFT actually accepted (real AND synthetic/kick), so the self-IDR interval is measured
+  // in true encoder inputs -- not the host's realInputsSinceKey, which excludes synthetic and counts
+  // before the codec accepts (G1). forcedKey marks an input the host requested a key for, so a forced
+  // IDR is not mistaken for the encoder's own periodic one (G2).
+  uint64_t acceptedOrdinal = 0;
+  bool forcedKey = false;
+  uint64_t acceptedAtUs = 0;  // encoder-output-poll r1: when the MFT accepted it (H264AccessUnit::inputAcceptedAtUs)
+};
+
+// The FIFO itself, separate from the codec so the rules are testable without an MFT.
+//
+// Overflow (A06): 64 accepted inputs with no output means the queue no longer describes what the
+// MFT will emit. Dropping the oldest entry would silently re-label later outputs with a NEWER
+// input's provenance -- including its epoch, which can open the emit gate for a pre-flush picture.
+// Instead the FIFO latches `provenance invalid`: it empties, every later output is stamped epoch 0
+// (unknown -> the gate fails closed), and only a successful encoder rebuild (Reset, from
+// H264Encoder::initialize) clears the latch, because only a rebuild also empties what the MFT is
+// still holding. Clear() -- the shutdown half of a rebuild -- deliberately keeps the latch.
+class PendingInputFifo {
+ public:
+  static constexpr size_t kMaxEntries = 64;
+
+  void Push(const PendingInput& in) {
+    entries_.push_back(in);
+    if (entries_.size() <= kMaxEntries) return;
+    ++overflowTotal_;
+    ++fallbackTotal_;
+    provenanceInvalid_ = true;
+    entries_.clear();
+  }
+
+  // An output that carries bytes: takes the provenance of the input that produced it. False when
+  // the queue is empty (no provenance: the caller stamps epoch 0 and counts a fallback).
+  bool Pop(PendingInput* out) {
+    if (entries_.empty()) {
+      ++fallbackTotal_;
+      return false;
+    }
+    if (out) *out = entries_.front();
+    entries_.pop_front();
+    return true;
+  }
+
+  // An output with no usable bytes: the MFT consumed an input for it all the same, so its entry
+  // goes too -- all three fields at once (the 0.2.97 fix, and the epoch the pre-A02 code forgot).
+  void PopForEmptyOutput() {
+    if (entries_.empty()) return;
+    entries_.pop_front();
+    ++fallbackTotal_;
+  }
+
+  // True while no output may be trusted with provenance (see the overflow note above).
+  bool provenance_invalid() const { return provenanceInvalid_; }
+  size_t size() const { return entries_.size(); }
+  uint64_t overflow_total() const { return overflowTotal_; }
+  uint64_t fallback_total() const { return fallbackTotal_; }
+  void NoteFallback() { ++fallbackTotal_; }
+
+  // shutdown(): the queue is meaningless without the MFT, but the latch survives -- a rebuild is
+  // only complete when initialize() succeeds.
+  void Clear() { entries_.clear(); }
+  // A successful initialize(): a fresh MFT holds nothing, so provenance starts trustworthy again.
+  void Reset() {
+    entries_.clear();
+    provenanceInvalid_ = false;
+  }
+
+ private:
+  std::deque<PendingInput> entries_;
+  bool provenanceInvalid_ = false;
+  uint64_t overflowTotal_ = 0;
+  uint64_t fallbackTotal_ = 0;
+};
+
+class H264Encoder {
+ public:
+  H264Encoder() = default;
+  ~H264Encoder();
+
+  bool set_d3d11_device(ID3D11Device* device);
+  /**
+   * A new encoder instance for (size, fps, mean E, keyint). encoder-rc-budget C2: `bitrate` is the
+   * encoder PAYLOAD mean E (host_encoder_budget.hpp), not the wire budget. Every call builds one RC
+   * plan for the identity of the MFT it activates (host_encoder_rc_policy.hpp) and hands it to the
+   * new instance -- before the media types on the NVIDIA profile, after them on the legacy one --
+   * then reads it back and classifies (rc_plan_state).
+   */
+  bool initialize(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate, uint32_t keyint);
+  /**
+   * A new mean on the RUNNING instance. Unchanged when it already runs this mean; Applied on the
+   * legacy profile; Unproven on the NVIDIA profile (nothing issued -- re-initialise instead).
+   */
+  RcRuntimeResult reconfigure_bitrate(uint32_t bitrate);
+  /**
+   * quality r5: the quantiser ceiling at runtime (the rate governor). 0 returns to the configured
+   * one (REMOTE60_NATIVE_MAX_QP, default 32). Same results as reconfigure_bitrate; a static-ceiling
+   * profile answers Unproven without touching the MFT.
+   */
+  RcRuntimeResult set_max_qp(uint32_t maxQp);
+  uint32_t max_qp_override() const { return maxQpOverride_; }
+  /**
+   * The governor's ceiling the NEXT initialize() should start from on the legacy profile (0 = the
+   * configured one). Lets a rebuilt encoder start at the loop's ceiling instead of being restored to
+   * it with a late post-type SetValue (C4). Ignored by profiles with a static ceiling.
+   */
+  void set_initial_max_qp(uint32_t maxQp) { initialMaxQp_ = maxQp; }
+  /** The configured ceiling (REMOTE60_NATIVE_MAX_QP, default 32; 0 = none). */
+  static uint32_t configured_max_qp();
+  // encoder-rc-budget: the instance's policy and plan, for the host's governor and diagnostics.
+  RcProfile rc_profile() const { return rcProfile_; }
+  const RcPlan& rc_plan() const { return rcPlan_; }
+  RcPlanState rc_plan_state() const { return rcPlanState_; }
+  bool rc_set_accepted() const { return rcSetAccepted_; }
+  /** The requested plan is what the instance runs: Sets accepted and no known readback mismatch. */
+  bool rc_plan_effective() const { return rcSetAccepted_ && rcPlanState_ != RcPlanState::Mismatch; }
+  /** The ceiling field alone is in force (accepted, not contradicted) -- the governor's no-op basis (r4 Q1b). */
+  bool rc_max_qp_field_applied() const { return rcFieldMaxQp_.applied(); }
+  const MftIdentity& identity() const { return identity_; }
+  /** The mean E this instance was configured with (what the MFT was told, not what it produces). */
+  uint32_t configured_bitrate() const { return bitrate_; }
+  bool started() const { return started_; }
+  bool runtime_mean_live() const { return rc_runtime_controls_for(rcProfile_).liveMean; }
+  bool runtime_max_qp_live() const { return rc_runtime_controls_for(rcProfile_).liveMaxQp; }
+  /** The plan's ceiling when it set one (0 = none set). */
+  uint32_t plan_max_qp() const { return rcPlan_.maxQpSet ? rcPlan_.maxQp : 0; }
+  bool encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFrame, int64_t inputSampleTimeHns,
+                    std::vector<H264AccessUnit>* outUnits, H264EncodeFrameStats* encodeStats = nullptr);
+  /** Converts BGRA directly into the Media Foundation input buffer, avoiding the temporary
+   *  NV12 vector and the full-frame copy performed by encode_frame. */
+  bool encode_frame_bgra(const uint8_t* bgra, uint32_t width, uint32_t height,
+                         uint32_t bgraStride, bool forceKeyFrame, int64_t inputSampleTimeHns,
+                         std::vector<H264AccessUnit>* outUnits,
+                         H264EncodeFrameStats* encodeStats = nullptr);
+  /** Zero-copy variant: wraps an NV12 texture in a DXGI surface buffer. The texture must not
+   *  be written again until the MFT releases it (tracked by the caller). */
+  bool encode_frame_surface(ID3D11Texture2D* texture, bool forceKeyFrame,
+                            int64_t inputSampleTimeHns, std::vector<H264AccessUnit>* outUnits,
+                            H264EncodeFrameStats* encodeStats = nullptr);
+  const char* backend_name() const { return backendName_; }
+  bool using_hardware() const { return usingHardware_; }
+  // r4 G1: a monotonic id bumped on every successful initialize(), so the clamp detector can reset its
+  // latch/baseline on ANY codec reinit path (not just ApplyTarget's main branch) by watching it change.
+  uint64_t instance_id() const { return codecInstanceId_; }
+  // r4 G3: the MFT clamped the GOP below the policy (post-type readbackGop < requestedGop). Combined
+  // with the short self-IDR cadence it distinguishes a real clamp from content scene-change keys.
+  bool gop_readback_clamped() const { return gopReadbackClamped_; }
+  // Provenance of the NEXT input (kick / static refresh = true); rides the accepted-input FIFO so
+  // each AU reports the flag of the input that produced it. (0.2.97)
+  void set_next_input_synthetic(bool synthetic) { nextInputSynthetic_ = synthetic; }
+  // Flush epoch of the NEXT input (CaptureState::inputEpoch); same FIFO, same reason. (P11)
+  void set_next_input_epoch(uint64_t epoch) { nextInputEpoch_ = epoch; }
+  // A06: the accepted-input FIFO overflowed, so nothing this encoder emits may be trusted with
+  // provenance (every AU goes out tagged epoch 0, which the emit gate refuses). Only a rebuild --
+  // shutdown() followed by a successful initialize() -- clears it.
+  bool provenance_invalid() const { return pendingInputs_.provenance_invalid(); }
+  // Inputs the async MFT has accepted but not yet drained as output (bitrate-hard-cap r1): the
+  // encode-input gate reads this so it can pre-empt the backlog the still-in-flight inputs will
+  // become, not only the backlog already in the sender queue. Single-threaded with encode.
+  uint32_t pending_input_depth() const { return static_cast<uint32_t>(pendingInputs_.size()); }
+  /**
+   * Test seam (A06 regression only): initialize() adopts this transform instead of enumerating
+   * one, so a test can drive the accepted-input FIFO and the drain path deterministically --
+   * an overflow followed by a failing drain cannot be produced through a real encoder.
+   *
+   * Product code never calls this and its behaviour is unchanged when it is unset: the
+   * enumeration, the backend choice and every configuration step stay exactly as they are.
+   * Ownership: this encoder holds its own reference (ComPtr) from here until shutdown() releases
+   * it, like any enumerated transform; the caller keeps its own reference. Passing nullptr
+   * restores the enumeration path. If initialize() fails after adopting it, shutdown() (which
+   * initialize() calls on entry and on failure) releases it as usual.
+   */
+  void set_transform_for_test(IMFTransform* transform) { testTransform_ = transform; }
+  // encoder-output-poll r1, TEST SEAM ONLY: the clock this encoder reads for an encode call's start and its
+  // async poll budget (default: the QPC clock). host_encoder_poll_test advances a fake clock inside a
+  // fake MFT's GetEvent; the product never sets it.
+  void set_clock_for_test(uint64_t (*clock)()) { testClock_ = clock; }
+  // Inputs this encoder instance accepted (ProcessInput succeeded), real and synthetic.
+  uint64_t accepted_input_count() const { return acceptedInputCounter_; }
+  void shutdown();
+
+ private:
+  bool configure_types(const char* stageReason = "init");
+  void apply_low_latency_codec_api();
+  bool apply_rate_control(const char* reason);
+  // encoder-rc-budget (mf_h264_codec.cpp, next to initialize):
+  void adopt_identity();                                   // from the activate / the transform's attributes
+  RcPlan build_rc_plan(uint32_t meanBps, uint32_t legacyMaxQp) const;
+  bool apply_rc_plan(const RcPlan& plan, const char* stage, bool onlyMismatched);
+  RcPlanState read_back_rc_plan(const RcPlan& plan, std::string* outDetail, std::string* outMismatched);
+  bool encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime, bool forceKeyFrame,
+                            std::vector<H264AccessUnit>* outUnits,
+                            H264EncodeFrameStats* encodeStats, uint64_t encodeCallStartUs);
+  void report_sps_profile_once(const uint8_t* data, size_t size);
+
+  Microsoft::WRL::ComPtr<IMFTransform> enc_;
+  Microsoft::WRL::ComPtr<IMFTransform> testTransform_;  // see set_transform_for_test
+  uint64_t (*testClock_)() = nullptr;  // set_clock_for_test
+  uint64_t clock_us() const { return testClock_ ? testClock_() : qpc_now_us(); }
+  uint32_t width_ = 0;
+  uint32_t height_ = 0;
+  uint32_t fps_ = 0;
+  uint32_t bitrate_ = 0;
+  uint32_t maxQpOverride_ = 0;  // quality r5: the governor's ceiling, 0 = configured
+  uint32_t initialMaxQp_ = 0;   // set_initial_max_qp: the ceiling the next legacy instance starts from
+  uint32_t keyint_ = 0;
+  // encoder-rc-budget: who this instance is and what it was told.
+  MftIdentity identity_;
+  RcProfile rcProfile_ = RcProfile::Legacy;
+  RcPlan rcPlan_;
+  // r2 (Codex R2): three separate facts about rcPlan_, never folded into one bool.
+  //   rcPlan_        -- what was REQUESTED of the instance (the last plan issued to it);
+  //   rcSetAccepted_ -- every SetValue of that plan returned S_OK (mode and MaxQP included);
+  //   rcPlanState_   -- what the MFT READS BACK against it: Accepted / Mismatch / Unknown.
+  // "The instance runs this plan" (rc_plan_effective) needs the Sets accepted and no known mismatch;
+  // Unknown (the MFT reports nothing) is tolerated there and said so in the log, never turned into a
+  // rebuild loop. A rejected Set or a known mismatch is never reported as Applied or Unchanged.
+  bool rcSetAccepted_ = false;
+  RcPlanState rcPlanState_ = RcPlanState::Unknown;
+  // r3 (Codex S1): the same three facts PER FIELD, so a runtime call answers for the fields it
+  // changed -- Applied needs each of them accepted AND not contradicted by its own readback; a field
+  // the MFT cannot report (readback -1) is Unknown, tolerated, never promoted to confirmed. The last
+  // outcome of a field counts (a first refusal that a bounded retry then fixes is fixed).
+  struct RcFieldStatus {
+    bool requested = false;
+    bool setOk = false;
+    long long want = -1;
+    long long readback = -1;
+    bool knownMismatch() const { return requested && readback >= 0 && readback != want; }
+    bool confirmed() const { return requested && setOk && readback >= 0 && readback == want; }
+    bool applied() const { return requested && setOk && !knownMismatch(); }  // accepted, not contradicted
+  };
+  RcFieldStatus rcFieldMode_, rcFieldMean_, rcFieldPeak_, rcFieldVbv_, rcFieldMaxQp_;
+  void rc_fields_reset(const RcPlan& plan);                 // requested/want from a plan, outcomes cleared
+  void rc_fields_derive();                                  // rcSetAccepted_ / rcPlanState_ from the fields
+  uint64_t acceptedInputCounter_ = 0;  // r4 G: monotonic MFT-accepted input count (real+synthetic)
+  uint64_t codecInstanceId_ = 0;       // r4 G1: bumped per initialize() (detector resets on change)
+  bool gopReadbackClamped_ = false;    // r4 G3: post-type readbackGop < requestedGop (MFT clamp signal)
+  uint32_t outBufferBytes_ = 0;
+  uint64_t frameIndex_ = 0;
+  int64_t sampleDurationHns_ = 0;
+  // Hardware/async MFTs can return one or more older outputs while accepting the current
+  // input. Keep the accepted input timeline so each output is stamped with the frame that
+  // actually produced it, rather than the input from the current encode call.
+  PendingInputFifo pendingInputs_;
+  bool nextInputSynthetic_ = false;
+  uint64_t nextInputEpoch_ = 0;
+  std::vector<uint8_t> sequenceHeaderAnnexb_;
+  bool spsProfileReported_ = false;
+  bool started_ = false;
+  bool asyncTransform_ = false;
+  bool usingHardware_ = false;
+  bool stableTextTune_ = false;
+  const char* backendName_ = "unknown";
+  uint64_t sampleTimeOutputTimestampTotalSamples_ = 0;
+  uint64_t sampleTimeOutputTimestampFallbackCount_ = 0;
+  uint64_t pendingInputOverflowTotal_ = 0;
+  uint32_t d3dManagerResetToken_ = 0;
+  Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> d3dManager_;
+  Microsoft::WRL::ComPtr<IMFMediaEventGenerator> eventGenerator_;
+};
+
+class H264Decoder {
+ public:
+  H264Decoder() = default;
+  ~H264Decoder();
+
+  bool set_d3d11_device(ID3D11Device* device);
+  bool initialize(uint32_t width, uint32_t height, uint32_t fps);
+  bool decode_access_unit(const std::vector<uint8_t>& annexb, bool keyFrame,
+                          int64_t inputSampleTimeHns,
+                          std::vector<DecodedFrameNv12>* outFrames,
+                          bool* outPendingTimestampOverflow = nullptr);
+  const char* backend_name() const { return backendName_; }
+  bool using_hardware() const { return usingHardware_; }
+  // Provenance of the NEXT input AU (wire synthetic flag); mapped to the decoded frame through the
+  // pending-input FIFO like its timestamp. (0.2.97)
+  void set_next_input_synthetic(bool synthetic) { nextInputSynthetic_ = synthetic; }
+  void reset();
+  void shutdown();
+
+ private:
+  bool configure_input_type();
+  bool configure_output_type();
+  bool configure_surface_allocator(IMFMediaType* outputType);
+  bool query_output_size(uint32_t* outWidth, uint32_t* outHeight) const;
+  bool query_output_geometry(uint32_t* codedWidth, uint32_t* codedHeight, uint32_t* visibleLeft,
+                             uint32_t* visibleTop, uint32_t* visibleWidth,
+                             uint32_t* visibleHeight) const;
+
+  Microsoft::WRL::ComPtr<IMFTransform> dec_;
+  uint32_t width_ = 0;
+  uint32_t height_ = 0;
+  uint32_t fps_ = 0;
+  uint64_t sampleIndex_ = 0;
+  int64_t sampleDurationHns_ = 0;
+  bool started_ = false;
+  bool outputConfigured_ = false;
+  bool usingHardware_ = false;
+  const char* backendName_ = "unknown";
+  uint64_t missingOutputTimestampCount_ = 0;
+  std::deque<int64_t> pendingInputSampleTimesHns_;
+  std::deque<bool> pendingInputSynthetic_;  // lockstep with pendingInputSampleTimesHns_ (0.2.97)
+  bool nextInputSynthetic_ = false;
+  uint32_t d3dManagerResetToken_ = 0;
+  Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> d3dManager_;
+  Microsoft::WRL::ComPtr<IMFVideoSampleAllocatorEx> videoAllocator_;
+};
+
+}  // namespace remote60::native_poc

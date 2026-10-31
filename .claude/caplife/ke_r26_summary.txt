@@ -1,0 +1,49 @@
+﻿== ke-r26-sh-lt-20261029234709-6732
+  first frame at 23:49:38 KST (13700 ms after the pick); watch 14:49:38-14:50:39 UTC
+  23:49:11   E2-SH: Settings untouched -- the default sharpening of a cleared app
+  23:49:39   E2-SH requested=weak effective=direct fallback=[sharpen_fallback] requested=weak effective=off reason=no_output_after_ready
+  23:49:39   E2-SH NOTE: this run went DIRECT -- it is NOT an SH-on render check
+  app liveness_trace (session): 244 lines, 108 in the watch
+    max rx dg age ms: watch=203 session=632
+    max rx ctl age ms: watch=678 session=1233
+    max rx dmax ms (undivided elapsed): watch=425 session=425
+    max wk outer-pass snapshot age ms (not a stall): watch=457 session=2813
+    max ch fragment retransmits (NOT head timeout resends): watch=0 session=0
+    max ch nack: watch=0 session=0
+    max ch rxPending: watch=0 session=0
+    max ch txq: watch=4 session=4
+    max ch head attempts (timeout resends of the head): watch=2 session=10
+    max sink codecCall in-progress age at a sample ms: watch=276 session=2238
+    max sink inbox: watch=6 session=8
+    closed=1 lines: 0
+  app end / lost lines: 0
+  host a: keyframe-request lines total=179 (whole run: startup + watch + list) in the 60 s watch=60 by wire reason={'2': 179}; peer-lost lines=0
+    (the app's kq counts Request(...).queued on SOME paths only -- not sends, not Host receipts)
+    10-29 23:51:38.492 [native-video-host][control] udp control session ended epoch=1 resumed=0 reason=none
+  relay-trace: 35 snapshots, socket send-callback errors>0 in 0 (not delivery / ACK); connections=['7adfa6de', '3da11a63']
+    [relay-trace] ENABLED (REMOTE60_RELAY_TRACE=1: a test fixture only)
+== ke-r26-shoff-lt-20261029235145-37360
+  first frame at 23:53:59 KST (5138 ms after the pick); watch 14:53:59-14:55:00 UTC
+  23:53:28 PASS  E2-SHOFF the sharpening pipeline is set OFF in Settings (level=off, effective=off)  [sharpness_select] level=off s=0.0 origin=settings path=NONE effective=off
+  23:54:00 PASS  E2-SHOFF the viewer used the direct path only (requested=off, no sharpen_start)  [sharpen_path] path=direct requested=off effective=off fallback=none
+  23:55:03 PASS  E2-SHOFF the session stayed up 60 s after its first frame (no keep_end, still the viewer)  liveness_trace lines=109
+  app liveness_trace (session): 289 lines, 105 in the watch
+    max rx dg age ms: watch=167 session=1493
+    max rx ctl age ms: watch=718 session=1605
+    max rx dmax ms (undivided elapsed): watch=634 session=634
+    max wk outer-pass snapshot age ms (not a stall): watch=2761 session=2761
+    max ch fragment retransmits (NOT head timeout resends): watch=0 session=0
+    max ch nack: watch=0 session=0
+    max ch rxPending: watch=0 session=0
+    max ch txq: watch=5 session=5
+    max ch head attempts (timeout resends of the head): watch=6 session=6
+    max sink codecCall in-progress age at a sample ms: watch=151 session=1633
+    max sink inbox: watch=8 session=8
+    closed=1 lines: 0
+  app end / lost lines: 0
+  host a: keyframe-request lines total=174 (whole run: startup + watch + list) in the 60 s watch=67 by wire reason={'2': 174}; peer-lost lines=0
+    (the app's kq counts Request(...).queued on SOME paths only -- not sends, not Host receipts)
+    10-29 23:56:04.439 [native-video-host][control] udp control session ended epoch=1 resumed=0 reason=none
+  relay-trace: 37 snapshots, socket send-callback errors>0 in 0 (not delivery / ACK); connections=['69e9f6f0', '20fba01e']
+    [relay-trace] ENABLED (REMOTE60_RELAY_TRACE=1: a test fixture only)
+

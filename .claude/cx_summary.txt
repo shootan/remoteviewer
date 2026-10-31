@@ -1,0 +1,12 @@
+run1 EXIT=0 viewer_udp_recovery_test: PASS fails=0 giveups=6
+run2 EXIT=0 viewer_udp_recovery_test: PASS fails=0 giveups=6
+run3 EXIT=0 viewer_udp_recovery_test: PASS fails=0 giveups=6
+run4 EXIT=1 viewer_udp_recovery_test: FAIL (1) fails=1 giveups=6
+run5 EXIT=0 viewer_udp_recovery_test: PASS fails=0 giveups=6
+shared_core2 EXIT=0
+epoch EXIT=0 host_encode_epoch_test: PASS
+FULL_BUILD_EXIT=0
+errors=0
+remote60_viewer_selection_gate_test                  exit=0      0s  viewer_selection_gate_test: PASS
+remote60_viewer_udp_recovery_test                    exit=0     60s  viewer_udp_recovery_test: PASS
+--- summary: 37 ok / 3 not ok

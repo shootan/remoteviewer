@@ -1,0 +1,145 @@
+#pragma once
+
+// Process-wide session state of the viewer (Phase 1-1 state struct).
+//
+// Role:    the run flag, the media socket, the main window handle and its requested size, whether
+//          the input channel is on, which path (relay/direct) won, the shell-requested monitor, the
+//          input-event counter, the stdout log mutex, and the toolbar refresh clock of the
+//          message pump.
+// Thread:  main creates and tears down; every thread reads `running`; `sock` is read by recv and
+//          the control tunnel send; `inputEnabled` is set at connect / cleared at shutdown and read
+//          by the UI input path; `logMu` serialises stdout from any thread.
+// Input:   startup (args, connect results).
+// Output:  read everywhere.
+// Callers: main(), viewer_window_proc, viewer_input_forward, viewer_picker, viewer_log, recv/control threads.
+//
+// Fields are the former globals gRunning / gSock / gHwnd / gWindowW / gWindowH / gInputEnabled /
+// gRelayPath / gRequestedMonitorId / gInputEventsSent / gLogMu and the message pump's
+// `static nextToolbarPushUs`, initialisers unchanged (viewer split refactor Phase 1-1). The
+// write-only gOverlayConfig snapshot that came with them is gone (F-03).
+
+#include "viewer_common.hpp"
+#include "viewer_constants.hpp"
+
+namespace remote60::native_poc::viewer {
+
+struct SessionState {
+  // cross-thread: every thread polls `running`; recv reads `sock`; the control tunnel sends on it.
+  std::atomic<bool> running{true};
+  std::atomic<int> recoveryExitCode{0};
+  std::atomic<uint64_t> uiHeartbeatUs{0};
+  bool controlRequired = false;
+  SOCKET sock = INVALID_SOCKET;
+  // cross-thread: set once by create_window; recv/control thread call InvalidateRect/PostMessage on it.
+  HWND hwnd = nullptr;
+  uint32_t windowW = 1600;
+  uint32_t windowH = 900;
+  // cross-thread: main sets at connect / clears at shutdown; UI input path and toolbar read.
+  std::atomic<bool> inputEnabled{false};
+  // Host advertised sealed host-side IME support (kCaptureFlagHostImeV1). Host-IME key path is used
+  // only when this is set AND the user opted in (env REMOTE60_HOST_IME=1). (Codex #366.)
+  std::atomic<bool> hostImeSupported{false};
+  std::atomic<bool> hostFrameHeartbeat{false};
+  // Host advertised host-IME v2 (kCaptureFlagHostImePulseStateV2): make-only pulse + ImeState
+  // handshake. The default-on host-IME path activates only against a v2 host; a v1-only host stays
+  // on legacy client-side IME. (Codex v2.)
+  std::atomic<bool> hostImeV2Supported{false};
+  // Host-IME routing state: 0 Disabled (legacy client IME, local HIMC attached), 2 Active (local
+  // HIMC detached, keys forwarded as physical scans). Written ONLY on the UI thread (WM_APP_IME_*
+  // handlers) so the detach and the mode flip are atomic w.r.t. key handling; read on the UI thread
+  // (routing) and control thread (pump gate). (Codex Edge 4, simplified: negotiation lives in the
+  // control-thread pump as imeEnterPending, not as a separate routing state.)
+  std::atomic<int> imeMode{0};
+  std::atomic<uint32_t> imeGeneration{0};      // bumped each entry; fences a stale ImeState response
+  std::atomic<int> imeReportedOpen{-1};        // host-authoritative: -1 unknown/?, 0 EN, 1 KR
+  std::atomic<bool> imeEnterPending{false};    // control thread: run the EN-align exchange, then activate
+  std::atomic<bool> unlockRequested{false};  // set by the unlock trigger; the control thread runs it
+  std::atomic<bool> unlockSupported{false};  // host advertised kCaptureFlagUnlockSealedV1 (Pong)
+  // Raw host Pong capability bits, refreshed every pong so the toolbar/menu can decide the reboot and
+  // prelogin affordances via reboot_menu_policy (DecideRebootMenu / DecidePreloginCred). 0 until the
+  // first pong and after teardown, so a reconnect never inherits a stale answer. (prelogin-service r3.)
+  std::atomic<uint32_t> hostCaptureFlags{0};
+  // Set by the reboot confirm (the UI thread, after the user picks 확인); the control thread drains it
+  // and sends ControlRebootRequest exactly once. (prelogin-service r3 R3.)
+  std::atomic<bool> rebootRequested{false};
+  // r5 G11: which control connection the confirm was for. The control thread bumps controlRunGen when it
+  // starts serving a connection; a confirm made for an earlier one is not sent on this one.
+  std::atomic<uint64_t> controlRunGen{0};
+  std::atomic<uint64_t> rebootRequestedRunGen{0};
+  // r9 R5: "Ctrl+Alt+Del" clicked (UI thread) for this control connection; the control thread sends one 83.
+  std::atomic<bool> sasRequested{false};
+  std::atomic<uint64_t> sasRequestedRunGen{0};
+  // "Windows 로그인" (prelogin-ui r3, item 5): the UI thread's prompt leaves the password here and
+  // sets the flag; the control thread takes it (swap under the lock), seals it, and zeroes it. Never
+  // stored anywhere else. preloginInjectedAtUs: when the host last said "typed", so the first pong
+  // without kCaptureFlagPreloginV1 after it can be told apart as the actual logon.
+  std::atomic<bool> preloginCredRequested{false};
+  std::mutex preloginCredMu;
+  std::wstring preloginCredPassword;
+  std::atomic<uint64_t> preloginInjectedAtUs{0};
+  // lockscreen-cred r1: which screen the waiting password was asked for (kLoginRolePrelogin / LockScreen) and
+  // on which control connection; the control thread sends it only if the host is still at that screen on
+  // that connection, else drops it (zeroed) and says so. A prompt is open (one at a time, whatever opened it).
+  std::atomic<int> preloginCredRole{0};
+  std::atomic<uint64_t> preloginCredRunGen{0};
+  std::atomic<bool> loginPromptOpen{false};
+  // lockscreen-cred r1 (Codex Q1): a typed lock-screen credential is still waiting for its unlock on this
+  // connection (the control thread is following it). A new press then says so instead of sending.
+  std::atomic<bool> lockCredPending{false};
+  // r5 G8: input not sent because the host is at the logon screen (characters, text), and whether the
+  // window has said so since the host last arrived at it.
+  std::atomic<uint64_t> preloginInputHeldBack{0};
+  // r7 H6: a pong of THIS connection has said what the host is (its flags are then meaningful). False at
+  // the start of every connection (ControlClient::Run).
+  std::atomic<bool> hostRoleKnown{false};
+  std::atomic<uint64_t> preloginHeldBackAtSend{0};  // input queued earlier, not sent once the role was known
+  std::atomic<bool> preloginHeldBackNoticed{false};
+  // Host advertised kCaptureFlagMouseXButtonsV1 (Pong): the back / forward mouse buttons may be
+  // sent. Written by the control thread on every pong (release), read by the UI thread's window
+  // procedure and the input fence (acquire). False until the first pong and after teardown, and an
+  // X press in that state is dropped with one log line -- never sent, because a host without the
+  // bit made an unknown button key a LEFT click. (mouse-xbutton r1)
+  std::atomic<bool> hostMouseXButtons{false};
+  // UDP video handshake result: the HelloAck feature bits, and whether the host acknowledged
+  // kUdpFeatureVideoNack so the recv thread may ask for selective retransmits. main sets both at
+  // connect, before the threads start; the recv thread reads. (Windows NACK wiring: the viewer
+  // used to discard the ack bits, so the 0.2.95/96 NACK path never ran in GNLinkViewer.)
+  uint32_t udpHelloAckFeatures = 0;
+  bool hostSupportsNack = false;
+  // Whether the host acknowledged kUdpFeatureControlResume (item 8, C3). False against a
+  // host that predates it, and then the viewer never sends a resume at all.
+  bool hostSupportsControlResume = false;
+  // C0 stage 1: this viewer asked for bandwidth observation and the host acknowledged it. Only
+  // then does the control thread send ControlClientBandwidth.
+  bool bandwidthObserveNegotiated = false;
+  // Clipboard image v1: this viewer asked for kUdpFeatureBulkChannel and the host acknowledged it.
+  bool bulkChannelNegotiated = false;
+  // Session watchdog (viewer_session_watchdog.cpp): a session whose control channel is gone for
+  // good and whose video has not progressed for deadSessionUs is declared dead; deadSessionExit
+  // then ends the viewer so the shell offers a reconnect (REMOTE60_NATIVE_DEAD_SESSION_EXIT=0 only
+  // notifies). main sets both; the UI thread reads.
+  uint32_t deadSessionUs = 5000000;
+  bool deadSessionExit = true;
+  // Which candidate won the race. The relay is billed per byte, so the session says which one it
+  // is rather than leaving the user to guess from the bill.
+  std::atomic<bool> relayPath{false};
+  /**
+   * Whether `relayPath` has been decided by anything.
+   *
+   * Without this the two states "direct" and "not yet known" share one value, and the toolbar
+   * showed the second as the first -- a claim about the connection made before the connection
+   * existed.
+   */
+  std::atomic<bool> relayPathKnown{false};
+  // Which screen the shell asked for. Applied once the host has said it understands the monitor
+  // messages, which it does in the window list.
+  uint32_t requestedMonitorId = 0;
+  // Counted at the point the exchange succeeded, so it can be compared against the acks: the two
+  // diverging is what tells "the host never answered" apart from "nothing was ever sent".
+  std::atomic<uint64_t> inputEventsSent{0};
+  std::mutex logMu;
+  // UI thread only: the 500ms toolbar push clock of the message pump (was a function static).
+  uint64_t nextToolbarPushUs = 0;  // main-loop only; 0 = push on the next tick (F-14 resets it per episode)
+};
+
+}  // namespace remote60::native_poc::viewer

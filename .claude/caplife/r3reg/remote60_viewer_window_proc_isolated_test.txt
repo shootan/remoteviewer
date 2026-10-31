@@ -1,0 +1,83 @@
+﻿[picker] visible 1->1 activeGen=0 eventQpcUs=353350260980
+PASS  the picker is up
+[native-video-client][picker] pick held until the host's role is known id=0
+[native-video-client][picker] select source=mouse x=146 y=169 id=0 shownAgeMs=532
+[picker] first paint after show, client=1584x860 desktopCard=24,78,268,260 eventQpcUs=353350793446
+FAIL  with the gate open, a click on the desktop card starts a selection
+[native-video-client][picker] mouse down ignored: touch suppresses the mouse for another 299ms
+PASS  with the gate armed, the same click starts nothing
+PASS  and nothing was forwarded to the host either, so the message stopped at the gate  events=0
+PASS  and the gate counts what it swallowed instead of dropping it in silence  swallowed=2
+[native-video-client][picker] pick held until the host's role is known id=0
+[native-video-client][picker] select source=mouse x=146 y=169 id=0 shownAgeMs=1127
+FAIL  once the 300ms window passes, the same click works again
+[native-video-client][picker] pick held until the host's role is known id=0
+[native-video-client][picker] select source=mouse x=146 y=169 id=0 shownAgeMs=1219
+PASS  mouse messages never arm the gate, so a mouse-only session cannot gate itself  until=0
+PASS  a click on empty picker space selects nothing, so the readings above are about the card
+PASS  the session toolbar exists
+PASS  and can be found
+[picker] visible 1->1 activeGen=0 eventQpcUs=353352103974
+PASS  the 대상 선택 button is where a click can reach it  x=10
+[picker] visible 1->0 activeGen=0 eventQpcUs=353352105280
+[picker] visible 0->1 activeGen=0 eventQpcUs=353352417107
+[picker] first paint after show, client=1584x860 desktopCard=24,78,268,260 eventQpcUs=353352418427
+PASS  before any present, GDI still reaches this window
+PASS  and the picker is on the screen  0D0F14
+[picker] visible 1->0 activeGen=0 eventQpcUs=353352802816
+PASS  a real D3D11 swapchain can be created in this harness
+      device=hardware  swapEffect=FLIP_DISCARD
+PASS  and a frame reaches it without a host or a decoder
+PASS  the video is what is on the screen  00E600
+PASS  and from now on GDI does NOT reach this window -- this is the contract, not a symptom
+[picker] visible 0->1 activeGen=0 eventQpcUs=353353320403
+[picker] first paint after show, client=1584x860 desktopCard=24,78,268,260 eventQpcUs=353353322805
+PASS  pressing 대상 선택 on the real toolbar opens the picker
+PASS  and the picker is ON THE SCREEN over a live swapchain  0D0F14
+PASS  with the window's own DC agreeing -- the two readings used to disagree, which was the bug  0D0F14
+PASS  and it got there through the swapchain rather than by luck  picker presents=1
+PASS  showing the picker presented no video frames
+[native-video-client][picker] pick held until the host's role is known id=0
+[native-video-client][picker] select source=mouse x=146 y=169 id=0 shownAgeMs=367
+FAIL  a card on the presented picker is clickable -- the hit test still matches what is drawn
+[picker] visible 1->0 activeGen=0 eventQpcUs=353353803990
+PASS  the stream resumes after the picker closes
+PASS  and the video is back on the screen  00E600
+[picker] visible 0->1 activeGen=0 eventQpcUs=353354086436
+[picker] first paint after show, client=1584x860 desktopCard=24,78,268,260 eventQpcUs=353354088337
+[picker] visible 1->0 activeGen=0 eventQpcUs=353354452938
+[picker] visible 0->1 activeGen=0 eventQpcUs=353354836368
+[picker] first paint after show, client=1584x860 desktopCard=24,78,268,260 eventQpcUs=353354838294
+[picker] visible 1->0 activeGen=0 eventQpcUs=353355219423
+[picker] visible 0->1 activeGen=0 eventQpcUs=353355586566
+[picker] first paint after show, client=1584x860 desktopCard=24,78,268,260 eventQpcUs=353355588563
+[picker] visible 1->0 activeGen=0 eventQpcUs=353355970065
+PASS  three picker/video round trips, each seen on the screen  3/3
+[picker] visible 0->1 activeGen=0 eventQpcUs=353356336374
+[picker] first paint after show, client=1584x860 desktopCard=24,78,268,260 eventQpcUs=353356338609
+PASS  the picker survives a resize on screen  0D0F14
+PASS  and the offscreen surface followed the new client size  surface 1464x780, client 1464x780
+PASS  a repaint carrying wide and tall thumbnails still presents  0D0F14
+[picker] visible 1->0 activeGen=0 eventQpcUs=353357835786
+      video path: 60 frames in 41086 us  (685 us/frame, 1584x860)
+PASS  sixty video frames present with the picker closed  60/60
+PASS  and none of them uploaded the picker  picker presents during video=0
+[picker] visible 0->0 activeGen=0 eventQpcUs=353358032011
+PASS  video again, for the before/after pair
+PASS  BEFORE: drawn with GDI and not presented, the screen still shows the video  00E600
+PASS  ...while the window's own DC holds a perfectly good picker -- the two disagree, which is the defect  0D0F14
+[picker] visible 0->1 activeGen=0 eventQpcUs=353358670068
+[picker] first paint after show, client=1584x860 desktopCard=24,78,268,260 eventQpcUs=353358671936
+PASS  AFTER: presented through the swapchain, the screen shows it  00E600 -> 0D0F14
+[picker] visible 1->0 activeGen=0 eventQpcUs=353359236204
+[picker] visible 0->1 activeGen=7 eventQpcUs=353359238639
+[picker] first paint after show, client=1584x860 desktopCard=24,78,268,260 eventQpcUs=353359239918
+PASS  opening the picker mid-session does not ask the host to stop the stream  requests=0
+[picker] visible 1->0 activeGen=7 eventQpcUs=353359746389
+PASS  the control channel was never dropped across the round trips
+PASS  and the swapchain was never released -- the old fix released it on every picker entry
+PASS  100 real window drags release outside the video without stranding a button
+PASS  forwarded secondary button is released even during touch suppression
+PASS  forwarded secondary button is released even during touch suppression
+PASS  F-23: unknown timer follows the default window-procedure return path
+viewer_window_proc_isolated_test: FAIL (39 passed, 3 failed)

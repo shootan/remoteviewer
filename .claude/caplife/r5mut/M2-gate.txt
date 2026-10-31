@@ -1,0 +1,6 @@
+﻿[T2] pick -> ack -> first frame of the acked generation -> commit; stragglers filtered afterwards
+[T2] a failed ack leaves the transaction to the caller to clear; no transaction -> NotPending
+[T2] reveal race: cancel / new pick / disconnect between the post and the commit -> no commit, latch released
+  FAIL C:\work\gnlink-wt\rel-0163\apps\native_poc\src\viewer_selection_gate_test.cpp:310: panelApplied == 0 && g.expectedGeneration.load() == 0 && g.pending.load()
+  FAIL C:\work\gnlink-wt\rel-0163\apps\native_poc\src\viewer_selection_gate_test.cpp:314: panelApplied == 1 && g.expectedGeneration.load() == 5 && !g.awaitingAck.load()
+viewer_selection_gate_test: FAIL (2)

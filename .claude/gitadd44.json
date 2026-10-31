@@ -1,0 +1,30 @@
+{
+ "repo_path": "D:/remote/remote",
+ "files": [
+  "apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/DirectoryClient.kt",
+  "apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt",
+  "apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/UpdateFlow.kt",
+  "apps/android_direct_client/app/src/test/java/com/remote60/androiddirect/DirectoryObserveTest.kt",
+  "apps/native_poc/CMakeLists.txt",
+  "apps/native_poc/src/client_shell_main.cpp",
+  "apps/native_poc/src/directory_client.cpp",
+  "apps/native_poc/src/directory_client.hpp",
+  "apps/native_poc/src/directory_session_client_test.cpp",
+  "apps/native_poc/src/host_app_main.cpp",
+  "apps/native_poc/src/update_check.cpp",
+  "apps/native_poc/src/update_check.hpp",
+  "apps/native_poc/src/update_handoff.cpp",
+  "apps/native_poc/src/update_handoff.hpp",
+  "apps/native_poc/src/update_http.cpp",
+  "apps/native_poc/src/update_http.hpp",
+  "apps/native_poc/src/updater_assembly_test.cpp",
+  "apps/native_poc/src/updater_effects.cpp",
+  "apps/native_poc/src/updater_options.cpp",
+  "apps/native_poc/src/updater_options.hpp",
+  "docs/history.md",
+  "apps/native_poc/src/update_endpoint.cpp",
+  "apps/native_poc/src/update_endpoint.hpp",
+  "apps/native_poc/src/url_origin.cpp",
+  "apps/native_poc/src/url_origin.hpp"
+ ]
+}

@@ -1,0 +1,11 @@
+{
+  "base": "2742143d72bb9482429f3046109b0a833bbf8a5049a3b26a8e1eac2f586c4bb7",
+  "traced": "52918c04b8fef8f4e66af5c6abe4a7332429416397004432accb79d8c231492a",
+  "original_lines_replaced": [
+    "  if (relaySock) relaySock.send(msg, session.clientPort, session.clientIp);",
+    "  if (out) out.send(msg, session.hostPort, session.hostIp);",
+    "  if (relaySock) relaySock.send(msg, session.clientPort, session.clientIp);"
+  ],
+  "node_syntax_rc": 0,
+  "node_server_launched": false
+}

@@ -1,0 +1,26 @@
+>>> remote: journalctl --user -u remote60-directory -n 25 --no-pager
+Oct 11 12:42:30 CHO node[3142968]: [host-hb] host=df15b73b wire=211.218.222.1:43000 public=211.218.222.1:43000 aim=211.218.222.1:43000 via=wire localIps=1 sinceLastMs=25477
+Oct 11 12:42:44 CHO node[3142968]: [observe-rx] token=e084e307 from=192.168.0.1:25870 advertised=175.207.45.151:25870
+Oct 11 12:42:44 CHO node[3142968]: [host-hb] host=f6e8e54a wire=192.168.0.1:25870 public=175.207.45.151:25870 aim=192.168.0.76:43000 via=lan localIps=3 sinceLastMs=25104
+Oct 11 12:42:55 CHO node[3142968]: [observe-rx] token=e0333537 from=211.218.222.1:43000 advertised=211.218.222.1:43000
+Oct 11 12:42:55 CHO node[3142968]: [host-hb] host=df15b73b wire=211.218.222.1:43000 public=211.218.222.1:43000 aim=211.218.222.1:43000 via=wire localIps=1 sinceLastMs=25465
+Oct 11 12:43:06 CHO node[3142968]: [wake] sent=237 resent=17 resendStopped=237 resendCapped=0 resendReplaced=0 suppressed=0 skippedStale=0 failed=0
+Oct 11 12:43:09 CHO node[3142968]: [observe-rx] token=e084e307 from=192.168.0.1:25870 advertised=175.207.45.151:25870
+Oct 11 12:43:09 CHO node[3142968]: [host-hb] host=f6e8e54a wire=192.168.0.1:25870 public=175.207.45.151:25870 aim=192.168.0.76:43000 via=lan localIps=3 sinceLastMs=25110
+Oct 11 12:43:17 CHO systemd[1580]: Stopping remote60-directory.service - remote60 directory service...
+Oct 11 12:43:17 CHO systemd[1580]: Stopped remote60-directory.service - remote60 directory service.
+Oct 11 12:43:17 CHO systemd[1580]: remote60-directory.service: Consumed 25min 50.353s CPU time, 616.3M memory peak, 0B memory swap peak.
+Oct 11 12:43:18 CHO systemd[1580]: Started remote60-directory.service - remote60 directory service.
+Oct 11 12:43:18 CHO node[2951580]: [relay] ENABLED ip=175.207.45.151 port=29190 grace=2500ms allowIps=* allowAccounts=*
+Oct 11 12:43:18 CHO node[2951580]: [wake] on
+Oct 11 12:43:18 CHO node[2951580]: [directory] https on 29180
+Oct 11 12:43:18 CHO node[2951580]: [logs] collecting into /opt/gnlink/remote60-directory/logs; 2048KB/min per device, rotate at 16MB x10, keep 14d
+Oct 11 12:43:18 CHO node[2951580]: [update] serving manifests from /opt/gnlink/update-manifests
+Oct 11 12:43:18 CHO node[2951580]: [directory] udp observe on 29181; own-lan observations reported as 175.207.45.151
+Oct 11 12:43:18 CHO node[2951580]: [relay] listening on udp 29190; grace=2500ms
+Oct 11 12:43:18 CHO node[2951580]: [admin] account admin v1 on http://127.0.0.1:29182
+Oct 11 12:43:20 CHO node[2951580]: [observe-rx] token=e0333537 from=211.218.222.1:43000 advertised=211.218.222.1:43000 moved
+Oct 11 12:43:21 CHO node[2951580]: [host-hb] host=df15b73b wire=211.218.222.1:43000 public=211.218.222.1:43000 aim=211.218.222.1:43000 via=wire localIps=1 sinceLastMs=25499
+Oct 11 12:43:34 CHO node[2951580]: [observe] 192.168.0.1 is on our own lan; advertising 175.207.45.151 (port 25870 kept), still sending to 192.168.0.1
+Oct 11 12:43:34 CHO node[2951580]: [observe-rx] token=e084e307 from=192.168.0.1:25870 advertised=175.207.45.151:25870 moved
+Oct 11 12:43:34 CHO node[2951580]: [host-hb] host=f6e8e54a wire=192.168.0.1:25870 public=175.207.45.151:25870 aim=192.168.0.76:43000 via=lan localIps=3 sinceLastMs=25116

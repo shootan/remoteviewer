@@ -1,0 +1,28 @@
+﻿remote60_native_video_client_shared_core_test.exe : [native-video-client-session] video receive nack=1 holdUs=120000 no
+nblocking=1
+At line:1 char:944
++ ... $t MISSING"; continue }; & "$rel\$t.exe" > "$out\$t.txt" 2>&1; "$t rc ...
++                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([native-video-c...0 nonblocking=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[native-video-client-session] udp recv drop sock=304 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=30 stop=0
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=1 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] udp recv drop sock=304 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=33 sinceDatagramMs=528 stop=0
+[native-video-client-session] udp recv drop sock=304 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=66 sinceDatagramMs=1554 stop=0
+[native-video-client-session] video receive nack=0 holdUs=0 nonblocking=1
+[native-video-client-session] udp recv drop sock=288 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=108 stop=0
+[native-video-client-session] udp recv drop sock=288 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=8 sinceDatagramMs=654 stop=0
+[native-video-client-session] udp recv drop sock=288 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=18 sinceDatagramMs=1741 stop=0
+  ok input queue preserves key edges on overflow, coalesces moves
+  ok session video pipeline (hold + NACK repair, give-up, host gap)
+  lossy key, NACK host: 1 2 3 4 5 6 7 requests=0 nacks=1 retransmits=1 resets=0
+  lossy key, old host (no NACK): requests=2 nacks=0 retransmits=0 resets=0
+  ok session lossy keyframe (real receive loop)
+[shared-core-test] PASS

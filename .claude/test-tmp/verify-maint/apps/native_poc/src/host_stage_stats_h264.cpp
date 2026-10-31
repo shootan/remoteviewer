@@ -1,0 +1,714 @@
+// Stage 12 (H.264 arm of the 1s tick): the stats line, encoder-starvation summary, ABR profile and
+// M9 level decisions.
+//
+// Host split refactor Phase 3.5b: the `} else {` arm of the former stage_stats tick, verbatim; the
+// seven per-tick values it reads are passed in. See host_main_loop.hpp for HostContext / Flow.
+
+//
+
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <mfapi.h>
+#include <wrl/client.h>
+
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Capture.h>
+#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#include <winrt/base.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "capture_backend_dxgi.hpp"
+#include "d3d_capture_readback.hpp"
+#include "encode_resolution_ladder.hpp"
+#include "gdi_capture_process.hpp"
+#include "host_abr.hpp"
+#include "host_args.hpp"
+#include "host_backend_policy.hpp"
+#include "host_bgra_scale.hpp"
+#include "host_bottleneck.hpp"
+#include "host_capture_device.hpp"
+#include "host_capture_session.hpp"
+#include "host_client_metrics.hpp"
+#include "host_control_session.hpp"
+#include "host_encoded_sender.hpp"
+#include "host_encoder_manager.hpp"
+#include "host_frame_gate.hpp"
+#include "host_frame_state.hpp"
+#include "host_gpu_scaler.hpp"
+#include "host_input_inject.hpp"
+#include "host_input_router.hpp"
+#include "host_kick.hpp"
+#include "host_log.hpp"
+#include "host_main_loop.hpp"
+#include "host_net_io.hpp"
+#include "host_session.hpp"
+#include "host_stats.hpp"
+#include "host_string_util.hpp"
+#include "host_watchdog.hpp"
+#include "host_window_enum.hpp"
+#include "mf_h264_codec.hpp"
+#include "native_video_transport.hpp"
+#include "poc_protocol.hpp"
+#include "time_utils.hpp"
+
+using namespace winrt::Windows::Graphics::Capture;
+using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
+using remote60::host::DesktopCaptureBackend;
+using remote60::host::DxgiDesktopCaptureConfig;
+using remote60::host::DxgiDesktopCaptureSession;
+
+namespace remote60::native_poc {
+
+Flow stats_tick_h264(HostContext& hx, TickContext& tc, uint64_t t, bool statsPrintDue, double mbps,
+                     const std::string& targetProcessName, uint64_t queuePushPerSec,
+                     uint64_t callbackFramesPerSec, uint64_t idleHoldPerSec,
+                     const CaptureCadenceGate::Counters& cadence) {
+  if (hx.encoder.targetPending) return Flow::Next;
+  auto& transport = hx.transport;
+  auto& startUs = hx.startUs;
+  auto& frameGating = hx.frameGating;
+  auto& rate = hx.rate;
+  auto& kick = hx.kick;
+  auto& clientMetrics = hx.clientMetrics;
+  auto& backend = hx.backend;
+  auto& watchdog = hx.watchdog;
+  auto& inputRouter = hx.inputRouter;
+  auto& sender = hx.sender;
+  auto& encoder = hx.encoder;
+  auto& stats = hx.stats;
+  auto& capture = hx.capture;
+  auto& res = hx.res;
+  const uint64_t capAgeAvgUs = (encoder.encodedFrames > 0) ? (stats.captureAgeSumUs / encoder.encodedFrames) : 0;
+  const uint64_t cb2eAvgUs = (encoder.encodedFrames > 0) ? (stats.callbackToEncodeStartSumUs / encoder.encodedFrames) : 0;
+  const uint64_t captureD3DWaitAvgUs =
+      (stats.captureReadbackSamples > 0) ? (stats.captureD3DWaitSumUs / stats.captureReadbackSamples) : 0;
+  const uint64_t captureCopyMapAvgUs =
+      (stats.captureReadbackSamples > 0) ? (stats.captureCopyMapSumUs / stats.captureReadbackSamples) : 0;
+  const uint64_t captureMemcpyAvgUs =
+      (stats.captureReadbackSamples > 0) ? (stats.captureMemcpySumUs / stats.captureReadbackSamples) : 0;
+  const uint64_t captureUnmapWaitAvgUs =
+      (stats.captureReadbackSamples > 0) ? (stats.captureUnmapWaitSumUs / stats.captureReadbackSamples) : 0;
+  const uint64_t captureUnmapAvgUs =
+      (stats.captureReadbackSamples > 0) ? (stats.captureUnmapSumUs / stats.captureReadbackSamples) : 0;
+  const uint64_t captureWorkerCtxWaitAvgUs =
+      (stats.captureReadbackSamples > 0) ? (stats.captureWorkerCtxWaitSumUs / stats.captureReadbackSamples) : 0;
+  const uint64_t captureWorkerD3dCallAvgUs =
+      (stats.captureReadbackSamples > 0) ? (stats.captureWorkerD3dCallSumUs / stats.captureReadbackSamples) : 0;
+  const uint64_t gpuScaleD3DWaitAvgUs =
+      (stats.gpuScaleTimedCount > 0) ? (stats.gpuScaleD3DWaitSumUs / stats.gpuScaleTimedCount) : 0;
+  const uint64_t gpuScaleCopyMapAvgUs =
+      (stats.gpuScaleTimedCount > 0) ? (stats.gpuScaleCopyMapSumUs / stats.gpuScaleTimedCount) : 0;
+  const uint64_t gpuScaleMemcpyAvgUs =
+      (stats.gpuScaleTimedCount > 0) ? (stats.gpuScaleMemcpySumUs / stats.gpuScaleTimedCount) : 0;
+  const uint64_t gpuScaleUnmapWaitAvgUs =
+      (stats.gpuScaleTimedCount > 0) ? (stats.gpuScaleUnmapWaitSumUs / stats.gpuScaleTimedCount) : 0;
+  const uint64_t gpuScaleUnmapAvgUs =
+      (stats.gpuScaleTimedCount > 0) ? (stats.gpuScaleUnmapSumUs / stats.gpuScaleTimedCount) : 0;
+  const uint64_t frameGatingChangeAvgPm =
+      (frameGating.changePermilleCount > 0)
+          ? (frameGating.changePermilleSum / frameGating.changePermilleCount)
+          : frameGating.changePermilleLast;
+  const double rawEquivMbps = (stats.rawEquivalentBytes * 8.0) / (1000.0 * 1000.0);
+  const uint64_t encRatioX100 =
+      (sender.sentBytes > 0) ? ((stats.rawEquivalentBytes * 100ULL) / sender.sentBytes) : 0;
+  // The sender thread owns the UDP wire counters now.
+  if (transport == VideoTransport::Udp) {
+    sender.udpTxFrames = sender.txFrames.load(std::memory_order_relaxed);
+    sender.udpTxChunks = sender.txChunks.load(std::memory_order_relaxed);
+    sender.udpTxBytes = sender.txBytes.load(std::memory_order_relaxed);
+    sender.udpTxNoPeer += sender.txNoPeer.exchange(0, std::memory_order_relaxed);
+  }
+  // quality r5: the rate governor, once a tick. The payload this second against the user's target;
+  // when the ceiling moves it goes to the encoder at once and the line says whether it stuck.
+  {
+    static const bool governorOn = [] {
+      const char* v = std::getenv("REMOTE60_NATIVE_RATE_GOVERNOR");
+      return !(v && v[0] == '0') && H264Encoder::configured_max_qp() != 0;
+    }();
+    const uint64_t txNow = sender.txBytes.load(std::memory_order_relaxed);
+    const uint64_t txDelta =
+        txNow >= encoder.rateGovernorLastTxBytes ? txNow - encoder.rateGovernorLastTxBytes : 0;
+    encoder.rateGovernorLastTxBytes = txNow;
+    // The governor assist (bitrate-hard-cap r1): when the wire cap is active the sender only sends up
+    // to the cap, so txDelta alone can never read "over" and the loop would never lower quality under
+    // motion. Judge the GENERATED load instead -- the bytes sent plus an estimate of the bytes the
+    // input gate skipped to stay under the cap (skipped frames x the average sent frame) -- and
+    // normalise it to the real tick length so a long or short tick is not misread. Cap off: the
+    // estimate is just txDelta, still normalised by elapsed (more correct than assuming exactly 1 s).
+    const bool wireCapActive = sender.wireCapEnabled && sender.wireLimiter && sender.wireLimiter->enabled();
+    const uint64_t framesNow = sender.txFrames.load(std::memory_order_relaxed);
+    const uint64_t framesDelta =
+        framesNow >= encoder.rateGovernorLastTxFrames ? framesNow - encoder.rateGovernorLastTxFrames : 0;
+    encoder.rateGovernorLastTxFrames = framesNow;
+    const uint64_t skipsNow = stats.wireOverloadSkipCount;
+    const uint64_t skipsDelta =
+        skipsNow >= encoder.rateGovernorLastSkips ? skipsNow - encoder.rateGovernorLastSkips : 0;
+    encoder.rateGovernorLastSkips = skipsNow;
+    const uint64_t tickNowUs = qpc_now_us();
+    const uint64_t elapsedUs =
+        encoder.rateGovernorLastTickUs > 0 && tickNowUs > encoder.rateGovernorLastTickUs
+            ? tickNowUs - encoder.rateGovernorLastTickUs
+            : 1000000ULL;
+    encoder.rateGovernorLastTickUs = tickNowUs;
+    // A tick with no completed frame (framesDelta == 0: one big AU spanned the whole interval, or
+    // every frame was gate-skipped) must not value the skipped frames at 0 -- use the last known
+    // average so the generated load still reads as over. (r2)
+    const uint64_t avgSentFrameBytes =
+        framesDelta > 0 ? txDelta / framesDelta : encoder.rateGovernorLastAvgFrameBytes;
+    if (framesDelta > 0) encoder.rateGovernorLastAvgFrameBytes = avgSentFrameBytes;
+    const uint64_t generatedBytes = wireCapActive ? txDelta + skipsDelta * avgSentFrameBytes : txDelta;
+    // Normalise to a per-second figure so OnSecond's "percent of target" is a true bitrate.
+    const uint64_t govBytesPerSec =
+        elapsedUs > 0 ? static_cast<uint64_t>(generatedBytes * 1000000ULL / elapsedUs) : generatedBytes;
+    if (governorOn && encoder.activeBitrate > 0) {
+      auto& governor = encoder.rateGovernor;
+      // The user's frame rate is the ceiling; the loop only ever goes below it (r6).
+      const uint32_t userFps = rate.userFpsCeiling > 0 ? rate.userFpsCeiling : encoder.activeFps;
+      // encoder-rc-budget C4: the ladder follows the LIVE codec instance's profile. A static-ceiling
+      // instance (NVIDIA pre-types, its plan's MaxQP -- 51 since r9 -- for its life) gets base == cap == that ceiling, so the quantiser
+      // stage never asks for a step the instance cannot take and calm/reset never "restores" 32; its
+      // frame-rate stage engages directly. A legacy instance keeps today's 32..40 ladder.
+      if (encoder.codec.instance_id() != encoder.rateGovernorCodecInstance) {
+        encoder.rateGovernorCodecInstance = encoder.codec.instance_id();
+        const RateGovernorConfig want = governor_config_for(encoder.codec.rc_profile(), H264Encoder::configured_max_qp(),
+                                                            encoder.codec.plan_max_qp());
+        if (want.baseQp != governor.config().baseQp || want.capQp != governor.config().capQp) {
+          governor.Reconfigure(want);
+          std::cout << "[native-video-host][rate-governor] ladder profile=" << rc_profile_name(encoder.codec.rc_profile())
+                    << " baseQp=" << want.baseQp << " capQp=" << want.capQp << " instance=" << encoder.codec.instance_id() << "\n";
+        }
+      }
+      // The ceiling the next LEGACY rebuild starts from is the loop's CURRENT one -- pinned in the codec
+      // right after every decision that moves it (Reset, OnSecond), before any ApplyTarget that could
+      // rebuild, instead of restored afterwards with a late post-type SetValue (C4). r2 (Codex R3): it
+      // used to be pinned at the top of the tick, so a step taken in this tick (38 -> 40) was followed
+      // by a rebuild that started at 38. A static-ceiling profile ignores the seed (its plan sets 44).
+      // r3 (Codex S2): not only the seed -- the LIVE legacy instance follows the loop's current ceiling
+      // too (a Reset brings a 40 instance back to 32 at once instead of leaving it until the next step),
+      // bounded and degraded-on-refusal; a static-ceiling instance is never poked. Logged when it does
+      // something or gives up.
+      const auto reconcileCeiling = [&](const char* why) {
+        const EncoderState::CeilingReconcile rc = encoder.ReconcileGovernorCeiling(governor.maxQp(), H264Encoder::configured_max_qp());
+        if (rc.attempted || rc.degraded) {
+          std::cout << "[native-video-host][rate-governor] ceiling-reconcile why=" << why << " desired=" << rc.desired
+                    << " codecBefore=" << rc.codecBefore << " attempted=" << (rc.attempted ? 1 : 0)
+                    << " result=" << (rc.result == RcRuntimeResult::Applied ? "applied"
+                                      : rc.result == RcRuntimeResult::Unchanged ? "unchanged"
+                                      : rc.result == RcRuntimeResult::Unproven ? "unproven" : "failed")
+                    << " failures=" << encoder.governorQpApplyFailures << " degraded=" << (rc.degraded ? 1 : 0) << "\n";
+        }
+        return rc;
+      };
+      // One apply path per decision (r4 Q1a): the reconcile's result is kept and the log below reads
+      // it -- the log must not call the setter again (a refused ceiling was being written twice a tick,
+      // the second time outside the failure budget).
+      EncoderState::CeilingReconcile lastReconcile{};
+      const auto seedInitialQp = [&] { lastReconcile = reconcileCeiling("decision"); };
+      // r2 (Codex R4): the loop's input is PAYLOAD (bytes sent + the gate's skipped frames at the average
+      // frame size); its target must be in the same unit -- the payload the wire can carry at R and this
+      // frame rate, not R itself (a wire figure that includes parity and headers) and not E (a target
+      // with the overshoot slack removed). E == payloadBudget / 1.12; the 125% / 85% bands sit on
+      // payloadBudget, so 2.5 Mbps of payload at R 3 Mbps / 30 fps (budget ~2.14 Mbps) reads as ~117%
+      // (in band, near over), not 83% (under).
+      const uint32_t payloadBudgetBps = encoder.PayloadBudgetFor(encoder.activeBitrate, encoder.activeFps);
+      if (encoder.activeBitrate != encoder.rateGovernorBitrate || userFps != encoder.rateGovernorUserFps) {
+        // A new target, or the user chose another frame rate: start over from the floor.
+        governor.Reset();
+        seedInitialQp();
+        encoder.rateGovernorBitrate = encoder.activeBitrate;
+        encoder.rateGovernorUserFps = userFps;
+      } else {
+        const RateDecision before{governor.maxQp(), governor.FpsForStep(userFps, governor.fpsStep())};
+        if (governor.fpsStep() > 0 && encoder.activeFps != before.fps) {
+          // Something else moved the frame rate (ABR, M9, the overview) since this loop set it:
+          // that controller owns it now, and the loop starts over rather than fight it.
+          governor.Reset();
+          seedInitialQp();
+        } else {
+          // (The late "put the loop's ceiling back after a rebuild" SetValue that used to live here is
+          // gone: a rebuilt legacy instance starts at the loop's ceiling through seedInitialQp, and a
+          // static-ceiling instance must not be poked at all. C4.)
+          const RateDecision after = governor.OnSecond(govBytesPerSec, payloadBudgetBps, userFps);
+          seedInitialQp();  // the decision just taken is what the next rebuild starts from
+          if (after.fps != before.fps) {
+            const uint32_t prevFps = encoder.activeFps;
+            const bool fpsApplied = encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender,
+                                                        encoder.nominalEncodeW, encoder.nominalEncodeH,
+                                                        after.fps, encoder.activeBitrate, encoder.activeKeyint);
+            if (fpsApplied) {
+              // The rebuilt instance started at the loop's ceiling (seeded); the reconcile confirms and
+              // issues nothing when it is in force (static profile: never poked).
+              (void)reconcileCeiling("fps-rebuilt");
+              // Same as ABR: the GDI worker captures at the rate it was started with.
+              if (!capture.windowModeActive.load(std::memory_order_acquire) &&
+                  backend.active == DesktopCaptureBackend::Gdi && restart_capture_session(hx)) {
+                ++capture.restartCount;
+                capture.FlushCapturePipelineState(res, frameGating, stats, "gdi-rate-governor-fps");
+              }
+            } else {
+              governor.Reset();  // the encoder refused; do not keep a state that describes nothing
+              (void)reconcileCeiling("fps-apply-failed");  // r3 S2: seed and live ceiling follow the Reset too
+            }
+            std::cout << "[native-video-host][rate-governor] fps " << prevFps << "->" << after.fps
+                      << " userFps=" << userFps << " maxQp=" << after.maxQp
+                      << " genKbps=" << (govBytesPerSec * 8ULL / 1000ULL)
+                      << " sentKbps=" << (txDelta * 8ULL / 1000ULL) << " skips=" << skipsDelta
+                      << " targetKbps=" << (encoder.activeBitrate / 1000U)
+                      << " payloadBudgetKbps=" << (payloadBudgetBps / 1000U)
+                      << " applied=" << (fpsApplied ? 1 : 0) << "\n";
+          } else if (after.maxQp != before.maxQp) {
+            // C3: only an Applied answer counts as applied. Unproven (a static-ceiling instance) is
+            // logged as such and never as success; the governor then knows its lever did nothing. The
+            // reconcile above (seedInitialQp after OnSecond) issued the step; THIS is its result -- no
+            // second setter call (r4 Q1a). An un-attempted reconcile means the ceiling was already in
+            // force on the instance (or the plan owns it): counted as applied only if the field confirms.
+            const RcRuntimeResult rr = lastReconcile.attempted
+                                           ? lastReconcile.result
+                                           : (encoder.codec.rc_max_qp_field_applied() ? RcRuntimeResult::Unchanged
+                                                                                      : RcRuntimeResult::Unproven);
+            const bool applied = rr == RcRuntimeResult::Applied || rr == RcRuntimeResult::Unchanged;
+            std::cout << "[native-video-host][rate-governor] maxQp " << before.maxQp << "->" << after.maxQp
+                      << " fps=" << encoder.activeFps
+                      << " genKbps=" << (govBytesPerSec * 8ULL / 1000ULL)
+                      << " sentKbps=" << (txDelta * 8ULL / 1000ULL) << " skips=" << skipsDelta
+                      << " targetKbps=" << (encoder.activeBitrate / 1000U)
+                      << " payloadBudgetKbps=" << (payloadBudgetBps / 1000U)
+                      << " applied=" << (applied ? 1 : 0)
+                      << " result=" << (rr == RcRuntimeResult::Applied ? "applied"
+                                        : rr == RcRuntimeResult::Unchanged ? "unchanged"
+                                        : rr == RcRuntimeResult::Unproven ? "unproven" : "failed")
+                      << " attempted=" << (lastReconcile.attempted ? 1 : 0) << " degraded=" << (lastReconcile.degraded ? 1 : 0) << "\n";
+          }
+        }
+      }
+    }
+  }
+  const uint64_t udpTxChunkPerFrameX100 =
+      (sender.udpTxFrames > 0) ? ((sender.udpTxChunks * 100ULL) / sender.udpTxFrames) : 0;
+  const uint64_t senderSendCountNow = sender.sendCount.load(std::memory_order_relaxed);
+  const uint64_t senderSendDurAvgUs =
+      (senderSendCountNow > 0)
+          ? (sender.sendDurSumUs.load(std::memory_order_relaxed) / senderSendCountNow)
+          : 0;
+  // Per-flow totals for the stats line (quality r1).
+  const uint64_t txParity = sender.txParityBytes.load(std::memory_order_relaxed);
+  const uint64_t txChunkHdr = sender.txChunkHeaderBytes.load(std::memory_order_relaxed);
+  const uint64_t txVideoDg = sender.txVideoDatagrams.load(std::memory_order_relaxed);
+  const uint64_t txNack = sender.txNackBytes.load(std::memory_order_relaxed);
+  const uint64_t txNackDg = sender.txNackDatagrams.load(std::memory_order_relaxed);
+  const uint64_t txCtl = sender.txControlBytes.load(std::memory_order_relaxed);
+  const uint64_t txCtlDg = sender.txControlDatagrams.load(std::memory_order_relaxed);
+  const uint64_t txIpUdpHdrEst = (txVideoDg + txNackDg + txCtlDg) * 28ULL;
+  const uint64_t txWireEst = sender.udpTxBytes + txParity + txChunkHdr + txNack + txCtl + txIpUdpHdrEst;
+  if (statsPrintDue) {
+  // Age of the last frame published to the encoder -- diagnostic only. A frozen ring shows
+  // this climbing in lockstep with watchdog.oldestGpuPendingPeakUs. Per Codex: report it, but never
+  // drive the watchdog off it, since a static change-driven desktop is legitimately silent.
+  const uint64_t statsNowUs = qpc_now_us();
+  const uint64_t lastPublishAtUs = capture.lastPublishUs.load(std::memory_order_acquire);
+  const uint64_t lastPublishAgeUs =
+      (lastPublishAtUs > 0 && statsNowUs > lastPublishAtUs) ? statsNowUs - lastPublishAtUs : 0;
+  // r13 (Codex C2): one snapshot, its validity and generation, consumed as a unit -- three separate
+  // getters read three snapshots and dropped the torn/uninitialised flag (a torn read printed as 0/0/0).
+  const auto rbDiag = res.captureReadback.ViewDiag();
+  std::cout << "[native-video-host] encodedFrames=" << encoder.encodedFrames
+            << " sentFrames=" << sender.sentFrames
+            << " queuePushCount=" << stats.queuePushCount
+            << " queuePopCount=" << stats.queuePopCount
+            << " queuePushPerSec=" << stats.queuePushPerSecLatest
+            << " idleHoldPerSec=" << idleHoldPerSec
+            << " idleHoldTotal=" << stats.idleHoldTotal
+            << " captureInputLowPushStreakSec=" << watchdog.inputLowPushStreakSec
+            << " captureDeadRestartCount=" << watchdog.deadRestartCount
+            << " queueDepthMax=" << stats.queueDepthMax.load(std::memory_order_relaxed)
+            << " queueDepthWindowMax=" << stats.queueDepthWindowMax.load(std::memory_order_relaxed)
+            << " queueWaitTimeoutCount=" << stats.queueWaitTimeoutCount
+            << " queueWaitNoWorkCount=" << stats.queueWaitNoWorkCount
+            << " captureRestarts=" << capture.restartCount
+            << " wgcContentSizeMismatchDrops=" << capture.wgcContentSizeMismatchDrops.load(std::memory_order_relaxed)
+                << " staleAttachmentDrops=" << capture.staleAttachmentDrops.load(std::memory_order_relaxed)
+            << " wgcPoolRecreates=" << capture.wgcPoolRecreates
+            << " captureWindowRebindCount=" << capture.rebindCount.load(std::memory_order_relaxed)
+            << " captureTargetPid=" << capture.targetPid.load(std::memory_order_relaxed)
+            << " captureTargetProc=" << targetProcessName
+            << " captureTargetHwnd=0x" << std::hex
+            << capture.targetHwnd.load(std::memory_order_relaxed) << std::dec
+            << " callbackFrames=" << callbackFramesPerSec
+            << " skippedByOverwrite=" << stats.skippedByOverwrite
+            << " stalePreEncodeDrops=" << stats.stalePreEncodeDropCount
+            << " staleEncodedDrops=" << stats.staleEncodedDropCount
+            << " encoderResets=" << encoder.resetCount
+            << " keyReqTotal=" << clientMetrics.keyFrameRequestCount.load()
+            << " keyReqDropTotal=" << clientMetrics.keyFrameRequestDropped.load()
+            << " inputEvents=" << inputRouter.events.load()
+            << " secureInputAttempts=" << inputRouter.secureAttempts.load()
+            << " secureInputDelivered=" << inputRouter.secureDelivered.load()
+            << " secureInputBrokerFailed=" << inputRouter.secureBrokerFailed.load()
+            << " secureInputSkipWindowMode=" << inputRouter.secureSkipWindowMode.load()
+            << " secureInputSkipUnauth=" << inputRouter.secureSkipUnauthenticated.load()
+            << " desktopPromo=" << backend.promotionAttempts.load() << "/"
+            << backend.promotionSuccess.load() << "/" << backend.promotionFail.load()
+            << " desktopPromoDeferSecure=" << backend.promotionDeferredSecureTotal.load()
+            << " desktopSecureProbeFalse=" << backend.secureProbeFalseTotal.load()
+            << " lastPromoWaitUs=" << backend.lastPromotionWaitUs.load()
+            << " inputIgnoredMove=" << inputRouter.ignoredMove.load(std::memory_order_relaxed)
+            << " inputNoTarget=" << inputRouter.noTarget.load(std::memory_order_relaxed)
+            << " inputUnsupported=" << inputRouter.unsupported.load(std::memory_order_relaxed)
+            << " inputInjectFail=" << inputRouter.injectFail.load(std::memory_order_relaxed)
+            << " inputFreshProbeSecure=" << inputRouter.freshProbeSecure.load(std::memory_order_relaxed)
+            << " inputFreshProbeReroute=" << inputRouter.freshProbeReroute.load(std::memory_order_relaxed)
+            << " inputInjectFailDefault=" << inputRouter.injectFailDefault.load(std::memory_order_relaxed)
+            << " inputFailSetCursorPos=" << inputRouter.failSetCursorPos.load(std::memory_order_relaxed)
+            << " inputFailSendInputMouse=" << inputRouter.failSendInputMouse.load(std::memory_order_relaxed)
+            << " inputFailSendInputKey=" << inputRouter.failSendInputKey.load(std::memory_order_relaxed)
+            << " inputFailPostMessage=" << inputRouter.failPostMessage.load(std::memory_order_relaxed)
+            << " inputDefaultBrokerFallback=" << inputRouter.defaultBrokerFallback.load(std::memory_order_relaxed)
+            << " inputDefaultBrokerQueued=" << inputRouter.defaultBrokerQueued.load(std::memory_order_relaxed)
+            << " inputDefaultBrokerPipeFail=" << inputRouter.defaultBrokerPipeFail.load(std::memory_order_relaxed)
+            << " capAgeAvgUs=" << capAgeAvgUs
+            << " capAgeMaxUs=" << stats.captureAgeMaxUs
+            << " cb2eAvgUs=" << cb2eAvgUs
+            << " cb2eMaxUs=" << stats.callbackToEncodeStartMaxUs
+            << " captureReadbackSamples=" << stats.captureReadbackSamples
+            << " captureStagingBusyDrops=" << res.captureReadback.BusyDrops()
+            << " captureSupersededDrops=" << res.captureReadback.SupersededDrops()
+            << " captureCpuBufferReuse=" << res.captureReadback.BufferReuseCount()
+            << " capturePreprocessed=" << res.captureReadback.PreprocessCount()
+            << " capturePreprocessFallbacks=" << res.captureReadback.PreprocessFallbacks()
+            << " nv12Converted=" << res.captureReadback.Nv12Converted()
+            << " nv12RingBusy=" << res.captureReadback.Nv12RingBusy()
+            << " nv12SurfaceFrames=" << encoder.nv12SurfaceEncodeCount
+            << " captureD3DWaitAvgUs=" << captureD3DWaitAvgUs
+            << " captureD3DWaitMaxUs=" << stats.captureD3DWaitMaxUs
+            << " captureCopyMapAvgUs=" << captureCopyMapAvgUs
+            << " captureCopyMapMaxUs=" << stats.captureCopyMapMaxUs
+            << " captureMemcpyAvgUs=" << captureMemcpyAvgUs
+            << " captureMemcpyMaxUs=" << stats.captureMemcpyMaxUs
+            << " captureUnmapWaitAvgUs=" << captureUnmapWaitAvgUs
+            << " captureUnmapWaitMaxUs=" << stats.captureUnmapWaitMaxUs
+            << " oldestGpuPendingPeakUs=" << watchdog.oldestGpuPendingPeakUs
+            << " oldestSubmittingUs=" << rbDiag.oldestSubmittingAgeUs
+            << " oldestGpuPendingNowUs=" << rbDiag.oldestGpuPendingAgeUs
+            << " gpuPendingCount=" << rbDiag.gpuPendingCount
+            << " rbDiag=" << D3dCaptureReadbackPipeline::diag_validity_name(rbDiag.validity)  // ok | torn | uninit: non-ok = the three values are NOT data
+            << " rbDiagGen=" << rbDiag.generation
+            << " rbDiagAgeUs=" << rbDiag.snapshotAgeUs  // snapshot freshness; large + pending>0 = frozen ring
+            << " rbDiagInvalidSamples=" << watchdog.readbackDiagInvalidSamples
+            << " gpuPendingCountPeak=" << watchdog.gpuPendingCountPeak
+            << " frozenRingRestarts=" << watchdog.frozenRingRestartCount
+            << " readbackDrainRestarts=" << watchdog.drainRestartCount
+            << " readbackDrainSec=" << watchdog.drainConsecutiveSec
+            << " lastPublishAgeUs=" << lastPublishAgeUs
+            << " captureUnmapAvgUs=" << captureUnmapAvgUs
+            << " captureUnmapMaxUs=" << stats.captureUnmapMaxUs
+            << " workerCtxWaitAvgUs=" << captureWorkerCtxWaitAvgUs
+            << " workerCtxWaitMaxUs=" << stats.captureWorkerCtxWaitMaxUs
+            << " workerD3dCallAvgUs=" << captureWorkerD3dCallAvgUs
+            << " workerD3dCallMaxUs=" << stats.captureWorkerD3dCallMaxUs
+            << " d3dMt=" << d3d_multithread_state_name(d3d_multithread_state(res.ctx.Get()))
+            << " mbps=" << mbps
+            << " rawEquivMbps=" << rawEquivMbps
+            << " encRatioX100=" << encRatioX100
+            << " udpTxFrames=" << sender.udpTxFrames
+            << " udpTxChunks=" << sender.udpTxChunks
+            << " udpTxChunkPerFrameX100=" << udpTxChunkPerFrameX100
+            << " udpTxBytes=" << sender.udpTxBytes
+            << " udpTxFail=" << sender.udpTxFail
+            << " udpTxNoPeer=" << sender.udpTxNoPeer
+            << " senderQueueDrops=" << sender.dropCount.load(std::memory_order_relaxed)
+            // Frames the queue policy withheld: the direct measure of how long a viewer
+            // was looking at a frozen picture.
+            << " senderHeldFrames=" << sender.heldFrames
+            << " senderSendDurAvgUs=" << senderSendDurAvgUs
+            << " senderSendDurMaxUs=" << sender.sendDurMaxUs.load(std::memory_order_relaxed)
+            << " bitrateTarget=" << encoder.activeBitrate
+            // encoder-rc-budget C1 diagnostics: the four numbers that used to be one.
+            << " requestedWire=" << encoder.activeBitrate
+            << " effectiveWire=" << sender.wireCapBps.load(std::memory_order_relaxed)
+            << " desiredEncoder=" << encoder.desiredEncoderBps
+            << " appliedEncoder=" << encoder.applied_encoder_bps()
+            << " rcProfile=" << rc_profile_name(encoder.codec.rc_profile())
+            << " rcPlanState=" << (encoder.codec.rc_plan_state() == RcPlanState::Accepted ? "accepted"
+                                   : encoder.codec.rc_plan_state() == RcPlanState::Mismatch ? "mismatch" : "unknown")
+            << " rcEffective=" << (encoder.codec.rc_plan_effective() ? 1 : 0)
+            << " payloadBudget=" << encoder.PayloadBudgetFor(encoder.activeBitrate, encoder.activeFps)
+            << " wireOverloadSkips=" << stats.wireOverloadSkipCount  // frames the cap's input gate skipped (cumulative)
+            << " fpsTarget=" << encoder.activeFps
+            << " keyintTarget=" << encoder.activeKeyint
+            << " size=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
+            << " gpuScaleReq=" << (capture.gpuScalerRequested ? 1 : 0)
+            << " gpuScaleReady=" << (capture.gpuScalerHealthy ? 1 : 0)
+            << " gpuScaleAttempts=" << stats.gpuScaleAttempts
+            << " gpuScaleSuccess=" << stats.gpuScaleSuccess
+            << " gpuScaleFail=" << stats.gpuScaleFail
+            << " gpuScaleCpuFallback=" << stats.gpuScaleCpuFallback
+            << " gpuScaleTimedCount=" << stats.gpuScaleTimedCount
+            << " gpuScaleD3DWaitAvgUs=" << gpuScaleD3DWaitAvgUs
+            << " gpuScaleD3DWaitMaxUs=" << stats.gpuScaleD3DWaitMaxUs
+            << " gpuScaleCopyMapAvgUs=" << gpuScaleCopyMapAvgUs
+            << " gpuScaleCopyMapMaxUs=" << stats.gpuScaleCopyMapMaxUs
+            << " gpuScaleMemcpyAvgUs=" << gpuScaleMemcpyAvgUs
+            << " gpuScaleMemcpyMaxUs=" << stats.gpuScaleMemcpyMaxUs
+            << " gpuScaleUnmapWaitAvgUs=" << gpuScaleUnmapWaitAvgUs
+            << " gpuScaleUnmapWaitMaxUs=" << stats.gpuScaleUnmapWaitMaxUs
+            << " gpuScaleUnmapAvgUs=" << gpuScaleUnmapAvgUs
+            << " gpuScaleUnmapMaxUs=" << stats.gpuScaleUnmapMaxUs
+            << " abrProfile=" << ((rate.abrProfile == 0) ? "high" : ((rate.abrProfile == 1) ? "mid" : "low"))
+            << " abrModSec=" << rate.abrModeratePressureSeconds
+            << " abrSevSec=" << rate.abrSeverePressureSeconds
+            << " abrGoodSec=" << rate.abrGoodSeconds
+            << " abrOverride=" << (encoder.tuneManualOverride ? 1 : 0)
+            << " frameGatingMode=" << (frameGating.staticMode ? "static" : "motion")
+            << " frameGatingSkips=" << frameGating.skipCount
+            << " frameGatingStaticSkips=" << frameGating.staticSkipCount
+            << " frameGatingChangePm=" << frameGating.changePermilleLast
+            << " frameGatingChangeAvgPm=" << frameGatingChangeAvgPm
+            << " captureOfferContent=" << cadence.offerContent
+            << " captureOfferPointer=" << cadence.offerPointer
+            << " captureGateDeferredContent=" << cadence.gateDropContent
+            << " captureGateDropPointer=" << cadence.gateDropPointer
+            << " trailingKickCount=" << kick.count
+            << " staticRefreshCount=" << kick.staticRefreshCount
+            << " lastKickSourceAgeUs=" << kick.lastSourceAgeUs
+            << " stampClampCount=" << kick.stampClampCount
+            << " stampClampMaxUs=" << kick.stampClampMaxUs
+            << " mediaEpoch=" << sender.mediaSessionEpoch.load(std::memory_order_acquire)
+            << " forceKeyInputCount=" << encoder.forceKeyInputCount
+            << " nonKeyAuWhileWaiting=" << sender.nonKeyAuWhileWaiting
+            << " barrierRearm=" << sender.barrierRearmCount.load(std::memory_order_relaxed)
+            << " firstKeyEnqueuedUs=" << sender.firstKeyEnqueuedUs
+            << " firstKeyWireUs=" << sender.firstKeyWireUs.load(std::memory_order_relaxed)
+            << " lastKeyAuBytes=" << sender.lastKeyAuBytes.load(std::memory_order_relaxed)
+            << " lastKeyAuChunks=" << sender.lastKeyAuChunks.load(std::memory_order_relaxed)
+            // Per-flow wire bytes (quality r1), appended; cumulative like udpTxBytes (= AU payload).
+            // IP+UDP headers are an estimate: 28 bytes per datagram (IPv4 without options), no
+            // Ethernet framing. udpTxWireEstBytes is the sum of every host->viewer flow here.
+            << " udpTxParityBytes=" << txParity
+            << " udpTxChunkHdrBytes=" << txChunkHdr
+            << " udpTxVideoDatagrams=" << txVideoDg
+            << " udpTxNackBytes=" << txNack
+            << " udpTxNackDatagrams=" << txNackDg
+            << " ctlTxBytes=" << txCtl
+            << " ctlTxDatagrams=" << txCtlDg
+            << " udpTxIpUdpHdrEstBytes=" << txIpUdpHdrEst
+            << " udpTxWireEstBytes=" << txWireEst
+            << "\n";
+  }
+
+  // One copy for the whole tick -- the freshness gate and every value below then describe the
+  // same report. (Phase 4: ClientMetricsSnapshot.)
+  const ViewerMetrics viewer = clientMetrics.Snapshot();
+  const uint64_t metricsUpdatedUs = viewer.updatedUs;
+  const bool metricsFresh =
+      (metricsUpdatedUs > 0) && (t >= metricsUpdatedUs) && ((t - metricsUpdatedUs) <= 3000000ULL);
+  const uint64_t clAvgLatencyUs = metricsFresh ? viewer.avgLatencyUs : 0;
+  const uint64_t clAvgDecodeTailUs = metricsFresh ? viewer.avgDecodeTailUs : 0;
+  const uint32_t clDecodedFpsX100 = metricsFresh ? viewer.decodedFpsX100 : 0;
+  const uint32_t clRecvMbpsX1000 = metricsFresh ? viewer.recvMbpsX1000 : 0;
+  const uint32_t clWidth = metricsFresh ? viewer.width : 0;
+  const uint32_t clHeight = metricsFresh ? viewer.height : 0;
+  const uint32_t clCongestionState = metricsFresh ? viewer.congestionState : 0;
+  const uint32_t clCongestionTransitions = metricsFresh ? viewer.congestionTransitions : 0;
+  const uint32_t clCongestionRecoveryCount = metricsFresh ? viewer.congestionRecoveryCount : 0;
+  const uint32_t clCongestionRecoveryReq = metricsFresh ? viewer.congestionRecoveryReq : 0;
+  const uint32_t clCongestionRecoveryMaxUs = metricsFresh ? viewer.congestionRecoveryMaxUs : 0;
+  const uint32_t clQueueDepthMax = metricsFresh ? viewer.queueDepthMax : 0;
+  const uint32_t clQueueDepthH4p = metricsFresh ? viewer.queueDepthH4p : 0;
+  const uint32_t clUdpDropPm = metricsFresh ? viewer.udpAssemblyDropPm : 0;
+
+  // Hold ABR/M9 for a tick when an explicit tune is already queued. stage_stats runs BEFORE
+  // stage_runtime_tune now (the 1s tick had to move to the front so it stops being skipped -- see
+  // native_video_host_main.cpp), and the old ordering was the other way round: a tune arriving on
+  // a second boundary set tuneManualOverride first, which suppressed ABR for that tick. Without
+  // this peek ABR would re-init the encoder from pre-tune state and the tune would re-init it
+  // again a few stages later -- two teardowns and a visible gap where there used to be one.
+  // (Ledger H-26d.)
+  const bool tuneQueued = hx.mailbox.TuneEncoderPending();
+  if (rate.abrEnabled && !encoder.tuneManualOverride && !rate.m9Apply && !tuneQueued) {
+    // The current target, not the one the process started with. A runtime FPS tune moves
+    // encoder.activeFps, and judging against the startup args.fps would compare the client's rate
+    // to a target that no longer exists -- after a tune to 20, a healthy 20 fps reads as
+    // 66% of 30 and trips a demote; after a tune to 60, a struggling 20 fps reads as fine.
+    // ABR only runs when no manual override or M9 is lowering encoder.activeFps, so here it is the
+    // authoritative target. All four thresholds and the sparse floor share it.
+    const AbrInputs abrIn{metricsFresh, clDecodedFpsX100, clAvgLatencyUs, clAvgDecodeTailUs, cb2eAvgUs,
+                          sender.sentFrames, frameGating.staticMode, encoder.activeFps, startUs, clUdpDropPm,
+                          viewer.firstUs != 0, viewer.decodeReported};
+    const AbrDecision abrDecision = rate.DecideAbrProfile(abrIn, t);
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+    // keepalive r5 D1, TEST BUILD ONLY (GNLinkStreamPinnedSelectTest): what every second's verdict stood
+    // on -- whether the viewer's report kept arriving (reports grows), and with decode values, while it
+    // showed nothing. The [abr] line below is written only when the profile changes.
+    std::cout << "[native-video-host][abr-trace] evidence=" << abr_evidence_names(abrDecision.evidence)
+              << " metricsFresh=" << (metricsFresh ? 1 : 0)
+              << " clientDecodeValid=" << (abrDecision.clientDecodeValid ? 1 : 0)
+              << " clientReports=" << viewer.reports
+              << " clientReportAgeMs=" << (viewer.updatedUs > 0 && t >= viewer.updatedUs ? (t - viewer.updatedUs) / 1000 : 0)
+              << " reportHasDecode=" << (viewer_report_has_decode_fields(viewer) ? 1 : 0)
+              << " rawRecvFps=" << (viewer.recvFpsX100 / 100.0)
+              << " rawDecodedFps=" << (viewer.decodedFpsX100 / 100.0)
+              << " rawSize=" << viewer.width << "x" << viewer.height
+              << " sentFrames=" << sender.sentFrames
+              << " sevSec=" << rate.abrSeverePressureSeconds << " profile=" << rate.abrProfile
+              << " target=" << abrDecision.targetProfile << "\n";
+#endif
+    const int targetProfile = abrDecision.targetProfile;
+    const char* abrReason = abrDecision.reason;
+
+    if (targetProfile != rate.abrProfile) {
+      uint32_t targetBitrate = rate.abrHighBitrate;
+      if (targetProfile == 1) {
+        targetBitrate = rate.abrMidBitrate;
+      } else if (targetProfile == 2) {
+        targetBitrate = rate.abrLowBitrate;
+      }
+      // Derived at transition time, never read from the profile: frozen profile sizes
+      // are the bug that put "profile=high encode=1256x706 bitrate=12000000" in a live
+      // log. Deriving from the ladder also tracks capture-size changes (monitor
+      // switches, RDP) that a frozen value never could. Runtime tuning does the same
+      // already, and the hysteresis state is shared so the two cannot fight.
+      const EncodePriority priority =
+          rate.PriorityFor(capture.windowModeActive.load(std::memory_order_acquire));
+      const auto ladderChoice = remote60::native_poc::choose_abr_profile_size(
+          targetProfile, targetBitrate, capture.width, capture.height, rate.encodeLadderReduced,
+          priority);
+      uint32_t targetW = ladderChoice.width;
+      uint32_t targetH = ladderChoice.height;
+      // quality r2: DesktopText gives up frames at mid rather than pixels. Standard keeps the
+      // current fps exactly as before (AbrProfileFps returns the ceiling, and the ceiling is what
+      // activeFps is whenever ABR runs -- see the comment on the ABR inputs above).
+      const uint32_t targetFps = priority == EncodePriority::DesktopText
+                                     ? rate.AbrProfileFps(targetProfile, priority)
+                                     : encoder.activeFps;
+      const uint32_t prevAbrFps = encoder.activeFps;
+
+      if (!encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, targetW, targetH, targetFps, targetBitrate, encoder.activeKeyint)) {
+        std::cerr << "[native-video-host][abr] encoder profile apply failed\n";
+        return Flow::Next;
+      }
+      // Committed only once the encoder accepted the target, so a failed reinit cannot
+      // leave the hysteresis state describing an encoder that does not exist.
+      rate.CommitAbrProfile(targetProfile, ladderChoice.reduced, t);
+      encoder.boxPriority = priority;
+      // r3: the GDI backend captures at the encoder's fps, fixed when its capture process starts
+      // (host_capture_session.cpp). A runtime fps tune restarts it for that reason, and an ABR fps
+      // change has to as well -- otherwise a capture restarted at mid's 20 fps keeps feeding 20
+      // after high has gone back to 30. DXGI/WGC are event driven and need nothing.
+      if (targetFps != prevAbrFps && !capture.windowModeActive.load(std::memory_order_acquire) &&
+          backend.active == DesktopCaptureBackend::Gdi) {
+        if (restart_capture_session(hx)) {
+          ++capture.restartCount;
+          capture.FlushCapturePipelineState(res, frameGating, stats, "gdi-abr-fps-change");
+        } else {
+          std::cerr << "[native-video-host][abr] GDI fps restart failed\n";
+        }
+      }
+      encoder.RequestKey(kHostKeyReasonAbr);
+
+      std::cout << "[native-video-host][abr] profile="
+                << ((rate.abrProfile == 0) ? "high" : ((rate.abrProfile == 1) ? "mid" : "low"))
+                << " encode=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
+                << " bitrate=" << encoder.activeBitrate
+                << " reason=" << abrReason
+                << " fps=" << encoder.activeFps
+                << " priority=" << (priority == EncodePriority::DesktopText ? "desktop_text" : "standard")
+                << " clientSize=" << clWidth << "x" << clHeight
+                << " clientDecodedFps=" << (clDecodedFpsX100 / 100.0)
+                << " clientAvgLatUs=" << clAvgLatencyUs
+                << " clientAvgTailUs=" << clAvgDecodeTailUs
+                << " clientMbps=" << (clRecvMbpsX1000 / 1000.0)
+                // quality r1: what this decision stood on, and whether it was valid evidence.
+                // evidence = the verdicts live this second; the raw inputs are the unmasked report
+                // (the client* keys above read 0 whenever the report is stale).
+                << " evidence=" << abr_evidence_names(abrDecision.evidence)
+                << " metricsFresh=" << (metricsFresh ? 1 : 0)
+                << " clientDecodeValid=" << (abrDecision.clientDecodeValid ? 1 : 0)
+                << " clientReports=" << viewer.reports
+                << " clientReportAgeMs=" << (viewer.updatedUs > 0 && t >= viewer.updatedUs ? (t - viewer.updatedUs) / 1000 : 0)
+                << " clientFirstReportAgeMs=" << (viewer.firstUs > 0 && t >= viewer.firstUs ? (t - viewer.firstUs) / 1000 : 0)
+                << " clientFirstDecodeAgeMs=" << (viewer.firstDecodeUs > 0 && t >= viewer.firstDecodeUs ? (t - viewer.firstDecodeUs) / 1000 : 0)
+                << " rawDecodedFps=" << (viewer.decodedFpsX100 / 100.0)
+                << " rawAvgLatUs=" << viewer.avgLatencyUs
+                << " rawAvgTailUs=" << viewer.avgDecodeTailUs
+                << " rawDropPm=" << viewer.udpAssemblyDropPm
+                << " cb2eAvgUs=" << cb2eAvgUs
+                << " sentFrames=" << sender.sentFrames
+                << " activeFps=" << encoder.activeFps
+                << " staticMode=" << (frameGating.staticMode ? 1 : 0)
+                << " streamAgeMs=" << (t >= startUs ? (t - startUs) / 1000 : 0)
+                << "\n";
+    }
+  }
+
+  if (rate.m9Enabled && !encoder.tuneManualOverride && !tuneQueued) {
+    const M9Inputs m9In{metricsFresh, clCongestionState, clDecodedFpsX100, clQueueDepthMax, clUdpDropPm,
+                        clAvgLatencyUs, clAvgDecodeTailUs, cb2eAvgUs};
+    const M9Decision m9Decision = rate.DecideM9Level(m9In, t);
+    const int targetLevel = m9Decision.targetLevel;
+    const char* m9Reason = m9Decision.reason;
+
+
+    if (targetLevel != rate.m9Level) {
+      const char* action = (targetLevel > rate.m9Level) ? "down" : "up";
+      const uint32_t targetBitrate = rate.M9LevelBitrate(targetLevel);
+      const uint32_t targetFps = rate.M9LevelFps(targetLevel);
+      const uint32_t targetW = rate.M9LevelW(targetLevel);
+      const uint32_t targetH = rate.M9LevelH(targetLevel);
+      std::cout << "[native-video-host][m9] action=" << action
+                << " mode=" << (rate.m9Apply ? "apply" : "dryrun")
+                << " fromLevel=" << rate.m9Level
+                << " toLevel=" << targetLevel
+                << " reason=" << m9Reason
+                << " targetBitrate=" << targetBitrate
+                << " targetFps=" << targetFps
+                << " targetSize=" << targetW << "x" << targetH
+                << " decodedFps=" << (clDecodedFpsX100 / 100.0)
+                << " avgLatUs=" << clAvgLatencyUs
+                << " avgTailUs=" << clAvgDecodeTailUs
+                << " queueDepthMax=" << clQueueDepthMax
+                << " queueDepthH4p=" << clQueueDepthH4p
+                << " udpDropPm=" << clUdpDropPm
+                << " congState=" << clCongestionState
+                << " congTrans=" << clCongestionTransitions
+                << " congRecCnt=" << clCongestionRecoveryCount
+                << " congRecReq=" << clCongestionRecoveryReq
+                << " congRecMaxUs=" << clCongestionRecoveryMaxUs
+                << "\n";
+      if (rate.m9Apply) {
+        if (!encoder.ApplyTarget(capture, res, frameGating, inputRouter, sender, targetW, targetH, targetFps, targetBitrate, encoder.activeKeyint)) {
+          std::cerr << "[native-video-host][m9] encoder target apply failed level=" << targetLevel << "\n";
+          return Flow::Next;
+        }
+        encoder.RequestKey(kHostKeyReasonM9);
+      }
+      rate.CommitM9Level(targetLevel, t);
+    }
+  }
+  return Flow::Next;
+}
+
+}  // namespace remote60::native_poc

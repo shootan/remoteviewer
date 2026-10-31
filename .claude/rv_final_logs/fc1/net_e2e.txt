@@ -1,0 +1,132 @@
+PASS  the helper and the paste consumer are beside this test
+PASS  a private window station for the helper and the consumer (their clipboard is not the user's)
+PASS  the host advertises file copy when switched on (Pong 0x800)
+
+--- A. P->R: three files copied here, pasted there ---
+      viewer: copy of 3 file(s) to offer, excluded=0
+      host: offer published files=3
+      viewer: offer accepted files=3
+PASS  the offer reached the helper's clipboard (published)  hostOffers=1 launches=1
+PASS  the paste consumer starts on the station
+      host: prepare verdict=0 files=3
+      viewer: paste prepared files=3 gen=1
+      host: paste ended state=3 reason=1 bytes=4546592 wholeVerified=1
+      viewer: paste ended state=3 reason=1
+PASS  the consumer finished (EndOperation) with exit 0  exit=0
+PASS  EVERY FILE LANDED BYTE-FOR-BYTE AS THE SOURCE  alpha.bin=same gamma.dat=same 사진 b.txt=same 
+PASS  the host saw the paste end completed  ended=1 failed=0 reason=1
+PASS  ...and the viewer learned it (700 ms query), unpinned, and gave the bulk back
+FAIL  every delivered byte passed its chunk check, none rejected  verified=72 delivered=4546592/2404371
+      files whole-file verified: 1, chunk verified: 2
+PASS  the viewer served every chunk it was asked for  served=4808736
+
+--- C. one byte flipped on the wire: that Read fails, nothing unchecked is delivered ---
+      viewer: copy of 1 file(s) to offer, excluded=0
+      host: offer published files=1
+      viewer: offer accepted files=1
+      host: prepare verdict=0 files=1
+      viewer: paste prepared files=1 gen=2
+      host: paste ended state=4 reason=8 bytes=0 wholeVerified=1
+      viewer: paste ended state=4 reason=8
+PASS  the corrupted chunk was rejected by its SHA-256  3 rejected
+PASS  ...its Read failed and the paste ended failed (verification)  reason=8
+PASS  ...and no complete copy with different content exists at the destination  absent
+
+--- D. a new copy while a paste runs: the new offer is the future, the running paste finishes ---
+      viewer: copy of 1 file(s) to offer, excluded=0
+      host: offer published files=1
+      viewer: offer accepted files=1
+PASS  the paste of the big file starts
+      host: prepare verdict=0 files=1
+      viewer: paste prepared files=1 gen=3
+PASS  ...bytes are moving (over 1 MiB delivered)
+      viewer: copy of 1 file(s) to offer, excluded=0
+      host: offer published files=1
+      viewer: offer accepted files=1
+PASS  the new copy became the remote clipboard's offer (published) during the paste
+PASS  ...while the running paste is still running
+      host: paste ended state=3 reason=1 bytes=16777216 wholeVerified=2
+      viewer: paste ended state=3 reason=1
+PASS  the running paste finished (exit 0)  exit=0
+PASS  THE BIG FILE LANDED WHOLE -- the new copy did not cut it  big.bin=same 
+PASS  ...and the host counts it completed, not failed
+FAIL  a paste after it gets the NEW copy  next.txt=missing 
+
+--- F. an image holds this session's bulk: the paste is refused before any byte ---
+      viewer: copy of 1 file(s) to offer, excluded=0
+      host: offer published files=1
+      viewer: offer accepted files=1
+PASS  an image transfer takes the viewer's bulk
+      host: prepare verdict=1 files=1
+      viewer: paste not prepared: pinned=0 verdict=1
+PASS  the paste was refused as Busy (never swapped in)
+PASS  ...nothing landed
+PASS  ...and the image still holds the bulk
+PASS  the control link never went out of step
+PASS  the user's clipboard (WinSta0) did not move
+
+--- helper log ---
+    0.000 tid=22632 ready pid=22724 host=35332 idleMs=8000
+    0.016 tid=22632 publish offer=1968459388469165471 items=3 on the clipboard
+    0.094 tid=22632 paste op=1 begin (StartOperation) offer=1968459388469165471
+    0.157 tid=22632 paste op=1 end reason=superseded
+    0.157 tid=22632 paste op=2 begin (StartOperation) offer=1968459388469165471
+    0.719 tid=22632 descriptor served op=2 items=3
+    0.719 tid=22632 contents index=0 (alpha.bin) size=307213 op=2
+    9.172 tid=22632 stream index=0 Read cb=262144 -> 262144 pos=262144
+    9.907 tid=22632 stream index=0 Read cb=262144 -> 45069 pos=307213
+    9.922 tid=22632 stream index=0 released pos=0 reads=3
+    9.922 tid=22632 contents index=1 (gamma.dat) size=2097153 op=2
+   14.141 tid=22632 stream index=1 Read cb=262144 -> 262144 pos=262144
+   14.141 tid=22632 descriptor: op=1 changed while waiting (now 2) -> E_FAIL
+   14.141 tid=22632 descriptor served op=2 items=3
+   14.141 tid=22632 contents index=0 (alpha.bin) size=307213 op=2
+   20.500 tid=22632 stream index=0 Read cb=262144 -> 262144 pos=262144
+   20.500 tid=22632 stream index=1 Read cb=262144 -> 262144 pos=524288
+   22.969 tid=22632 stream index=0 Read cb=262144 -> 45069 pos=307213
+   22.969 tid=22632 stream index=0 released pos=0 reads=3
+   22.969 tid=22632 contents index=1 (gamma.dat) size=2097153 op=2
+   26.157 tid=22632 stream index=1 Read cb=262144 -> 262144 pos=262144
+   27.797 tid=22632 stream index=1 Read cb=262144 -> 262144 pos=524288
+   29.578 tid=22632 stream index=1 released pos=0 reads=10
+   29.578 tid=22632 contents index=2 (?? b.txt) size=5 op=2
+   29.719 tid=22632 stream index=2 Read cb=262144 -> 5 pos=5
+   29.719 tid=22632 stream index=2 released pos=0 reads=2
+   29.719 tid=22632 EndOperation hr=0 effects=1
+   29.719 tid=22632 paste op=2 end reason=ended
+   31.875 tid=22632 publish offer=6303795589505377979 items=1 on the clipboard
+   31.985 tid=22632 paste op=3 begin (StartOperation) offer=6303795589505377979
+   32.578 tid=22632 descriptor served op=3 items=1
+   32.578 tid=22632 contents index=0 (tamper.bin) size=716800 op=3
+   34.703 tid=22632 stream index=0 Read offset=0 -> read-error -> E_FAIL
+   34.703 tid=22632 stream index=0 released pos=0 reads=1
+   41.000 tid=22632 paste op=3 idle for 8000 ms: ending it
+   41.000 tid=22632 paste op=3 end reason=idle
+   59.719 tid=22632 stream index=1 op=2 ended while a Read was waiting -> E_FAIL
+   59.719 tid=22632 stream index=1 released pos=0 reads=8
+   62.610 tid=22632 publish offer=394625605995883990 items=1 on the clipboard
+   62.719 tid=22632 paste op=4 begin (StartOperation) offer=394625605995883990
+   63.328 tid=22632 descriptor served op=4 items=1
+   63.328 tid=22632 contents index=0 (big.bin) size=16777216 op=4
+   69.000 tid=22632 clipboard taken over: offer=394625605995883990 dropped
+   69.000 tid=22632 offer=394625605995883990 off the clipboard (released); paste op=4 runs on
+   71.782 tid=22632 stream index=0 Read cb=262144 -> 262144 pos=262144
+   76.016 tid=22632 stream index=0 Read cb=262144 -> 262144 pos=524288
+   86.016 tid=22632 publish offer=9004091695438803199 items=1 on the clipboard
+  100.016 tid=22632 clipboard taken over: offer=9004091695438803199 dropped
+  100.016 tid=22632 dataobject offer=9004091695438803199 released
+  107.344 tid=22632 stream index=0 released pos=0 reads=65
+  107.344 tid=22632 EndOperation hr=0 effects=1
+  107.344 tid=22632 paste op=4 end reason=ended
+  108.016 tid=22632 retired offer=394625605995883990 released (its paste is over)
+  109.375 tid=22632 dataobject offer=394625605995883990 released
+  140.219 tid=22632 publish offer=281587647191484726 items=1 on the clipboard
+  140.328 tid=22632 paste op=5 begin (StartOperation) offer=281587647191484726
+  140.938 tid=22632 descriptor: host answered refused -> E_FAIL
+  150.938 tid=22632 descriptor: host answered timeout -> E_FAIL
+  150.938 tid=22632 EndOperation hr=2147745892 effects=1
+  150.938 tid=22632 paste op=5 end reason=error
+  155.953 tid=21124 host says shutdown
+PASS  the staging directory is removed
+
+RESULT: FAILED  (29 checks, 2 failed)

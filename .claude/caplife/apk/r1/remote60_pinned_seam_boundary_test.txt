@@ -1,0 +1,3 @@
+﻿SKIPPED  launches the pinned test host. Set REMOTE60_ALLOW_HOST_E2E=1 to run it.
+
+RESULT: SKIPPED

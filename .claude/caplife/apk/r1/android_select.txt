@@ -1,0 +1,78 @@
+﻿mode: host in --prelogin; the shared session (Android) types
+PASS  the fake directory starts
+PASS  the test's own target and decoy windows are up
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r6 V1 counter-example: with the service's old environment the worker exits at once, rc 11 (h264 refused)  11
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r6 V7: a machine record naming another server is not used (the worker stays offline)
+PASS  r6 V5: a decoy directory starts
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r6 V5: a worker given a directory in its environment reaches its configuration and says it is ignored  10-26 21:17:34.540 [native-video-host] latency-priority processAboveNormal=1 mainThreadAboveNormal=1
+
+10-26 21:17:34.548 [native-video-host][clipboard] monitor started
+
+10-26 21:17:34.549 [native-video-host] waiting client bindPort=64143 transport=udp fps=30 bitrate=8000000 seconds=150
+
+10-26 21:17:34.549 [native-video-host] wireCap=on wireCapBps=8000000 wireCapMtu=1200
+
+10-26 21:17:34.549 [native-video-host] h264 pacing=on udpPacePeakPercent=500 udpPacePeakBps=40000000 udpPacePeakFloorBps=40000000 udpKeyframePacePeakBps=100000000 fecSingleChunkStride=tight stalePreEncodeGuard=0 capturePoolBuffers=2 encoderTuneMode=low_latency abr=on abrMode=default frameGating=on staticSceneFps=8 gatingStaticPm=6 m9=off m9Mode=dry-run keyReqMinUs=120000 keyReqBucketCap=3 captureInputMinPushPerSec=10 captu
+PASS  r6 V5: ...and never talks to that directory (0 register, 0 heartbeat)  0 registrations
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r9 W2: a worker whose input desktop is a user's (not the logon desktop) leaves at once, exit 14  14
+PASS  ...it never served it and never registered
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r6 V2: the worker started EXACTLY as the service starts it (--prelogin alone, the service's environment function)
+PASS  r6 V2: ...it loaded the machine record (no directory argument exists to stand in for it)
+PASS  the host registered and collected the viewer's capability from its heartbeat
+
+--- r5 G8: the shared session the Android app drives ---
+remote60_viewer_prelogin_login_e2e_test.exe : [native-video-client-session] video receive nack=1 holdUs=120000 nonblock
+ing=1
+At D:\remote\remote\.claude\caplife\apk_runs.ps1:34 char:27
++     if ($a.Count -gt 0) { & $exe @a > "$out\$name.txt" 2>&1 } else {  ...
++                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([native-video-c...0 nonblocking=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[native-video-client-session] udp recv drop sock=684 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=29 stop=0
+PASS  the session connects, directory-authenticated  connected
+
+--- apk-0232: the app's desktop pick at the logon screen (shared session) ---
+PASS  ...the session is up
+PASS  apk-0232: the pick is taken before the host's role is known (queued, not refused)  0
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] udp recv drop sock=684 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=24 sinceDatagramMs=23 stop=0
+[native-video-client-session] udp recv drop sock=684 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=35 sinceDatagramMs=25 stop=0
+[native-video-client-session] queued desktop pick 1: the host is at the logon screen, continues as a local selection
+[native-video-client-session] keyframe owed to selection 1: asked (1)
+PASS  apk-0232: ...the host's role arrives: the logon screen (0x2000)
+[native-video-client][control] window-selected local (logon screen) streamGen=1 selection=1
+PASS  apk-0232: the SAME pick went local and the host's own IDR completed it: selected (APK: ACKED) with the generation of that IDR  window_selected: desktop (logon screen) gen=1
+PASS  apk-0232: ...its first picture came out (APK: select_ready)
+[native-video-client-session] desktop pick at the logon screen: local selection 2
+PASS  apk-0232: no WindowSelect reached the host (it would have closed the link): nothing rejected, still connected  connected window_selected: desktop (logon screen) selected=desktop
+[native-video-client-session] keyframe owed to selection 2: asked (1)
+[native-video-client][control] window-selected local (logon screen) streamGen=1 selection=2
+PASS  apk-0232: a second desktop pick (role known): local at once, completed by a NEW IDR  window_selected: desktop (logon screen) keys=1
+[native-video-client-session] window pick refused: the host is at the logon screen
+PASS  apk-0232: a window pick at the logon screen is refused at once
+[native-video-client-session] udp recv drop sock=684 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=55 sinceDatagramMs=31 stop=0
+PASS  apk-0232: ...the link is still up and the host rejected nothing
+
+--- nothing kept ---
+PASS  the password is in none of the viewer's output
+PASS  ...nor in the host's
+PASS  ...nor in any file of this run (the viewer's credential store included)
+PASS  no credential file was written by the viewer
+PASS  the scratch directory is cleaned up
+
+RESULT: ALL PASS  (37 checks, 0 failed)

@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.20)
+project(readback_idle_probe LANGUAGES CXX)
+add_executable(readback_idle_probe readback_idle_probe.cpp ../../apps/native_poc/src/d3d_capture_readback.cpp)
+target_include_directories(readback_idle_probe PRIVATE ../../apps/native_poc/src)
+target_compile_features(readback_idle_probe PRIVATE cxx_std_17)
+target_compile_definitions(readback_idle_probe PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_link_libraries(readback_idle_probe PRIVATE d3d11)

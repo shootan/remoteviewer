@@ -1,0 +1,4 @@
+{
+ "repo_path": "D:/remote/remote",
+ "message": "docs(observe): the commit list stopped one short of the commit that fixed it\n\nCounted the range as ending at the commit before the correction, which is\nthe same shape as the omission it was correcting: a range that stops where\nthe record looks tidiest. Sixteen, ending at the one that fixed the count.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+}

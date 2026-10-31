@@ -1,0 +1,1251 @@
+diff --git a/automation/old_apk_lane/oa_adb.py b/automation/old_apk_lane/oa_adb.py
+index 1ca1e70..d594707 100644
+--- a/automation/old_apk_lane/oa_adb.py
++++ b/automation/old_apk_lane/oa_adb.py
+@@ -110,6 +110,8 @@ def dump():
+                     'desc': n.get('content-desc', ''),
+                     'enabled': n.get('enabled') == 'true',
+                     'clickable': n.get('clickable') == 'true',
++                    'selected': n.get('selected') == 'true',  # r7f: a segment button's chosen state (View.isSelected)
++                    'password': n.get('password') == 'true',  # r7f: its text is never recorded
+                     'bounds': (x1, y1, x2, y2),
+                 })
+             return nodes
+diff --git a/automation/old_apk_lane/oa_avd.py b/automation/old_apk_lane/oa_avd.py
+index 0a67baf..7a5b58a 100644
+--- a/automation/old_apk_lane/oa_avd.py
++++ b/automation/old_apk_lane/oa_avd.py
+@@ -27,6 +27,14 @@ log: the test host's `[input-trace]` lines (input injection none: the events are
+   not agree on is refused with NO tap. 4 is the tap's own events: a button down then up on the host after it, inside
+   the window's picture -- not a count of lines. The seam is never relaxed and id 0 is never redirected to the window.
+   Scope: S window 3 4 + park 5 / reuse 6; P window 3 4, P-5d, P-6r (5 6 NOT RUN), 7 with P.
++  r7f (Codex codex_old_apk_lane_src_r7d.md (3)): both arms with SH REQUESTED off through 0.2.32's own Settings
++  (listSettingsButton -> settingsSharpOffButton, b554e76 MainActivity.kt:531/5308) -- set after install + pm clear, seen
++  in the UI dump and the app's own sharpness_select level=off origin=settings; at the picture sharpen_path path=direct
++  requested=off and no sharpen_start (a weak request that merely fell back to effective=off is NOT this). A Settings
++  control that cannot be used safely: the arm is NOT RUN (INVALID), never prefs / a hidden handler. After the first
++  frame, 30 s with no input at all watching the viewer and the connection (3w); a break ends the arm there. Any FAIL is
++  followed at once by a READ-ONLY record of the screen (ui dump with no password text, screenshot, logs). A failed step
++  ends the arm: no further input (4, 5, 6a, 3w).
+ No clipboard is changed. No real password is shown: adb errors and steps are cleaned (oa_adb._clean).
+ 
+   python -I oa_avd.py <run folder> <S|P> <apk> <out>"""
+@@ -63,6 +71,48 @@ def step(msg):
+ def verdict(name, ok, detail=''):
+     results.append((name, bool(ok), detail))
+     step(('PASS  ' if ok else 'FAIL  ') + name + ('  ' + detail if detail else ''))
++    if not ok:
++        failure_record(name)
++
++
++FAIL_RECORDS = []
++
++
++def ui_record(name, nodes=None):
++    """r7f: the screen as uiautomator shows it, kept as <OUT>/<name>.txt -- READ ONLY (a dump, no input). A password
++    field's text is never written (its flag or its id), and the fixture password is masked wherever it would appear."""
++    nodes = ka.dump() if nodes is None else nodes
++    lines = []
++    for n in nodes:
++        if not (n['id'] or n['text']):
++            continue
++        text = n['text'][:80]
++        if n.get('password') or 'password' in n['id'].lower():
++            text = '<not recorded: a password field>'
++        elif PW and PW in text:
++            text = text.replace(PW, '<masked>')
++        lines.append(f"{n['id'] or '-':<30} en={int(n['enabled'])} sel={int(n.get('selected', False))} {n['bounds']} {text!r}")
++    open(os.path.join(OUT, name + '.txt'), 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
++    return lines
++
++
++def failure_record(name):
++    """r7f: right after a FAIL -- what the screen says (ui dump, screenshot) and both logs as they are; READ ONLY."""
++    tag = f'fail{len(FAIL_RECORDS) + 1}'
++    FAIL_RECORDS.append(tag)
++    try:
++        lines = ui_record(tag + '_ui')
++        shot(tag + '_screen')
++        open(os.path.join(OUT, tag + '_app.log'), 'w', encoding='utf-8').write(applog())
++        try:
++            open(os.path.join(OUT, tag + '_host.log'), 'w', encoding='utf-8').write(host_log())
++        except Exception as e:  # noqa: BLE001 -- the record is best effort; it never changes a verdict
++            step(f'  {tag}: no host log ({e})')
++        shown = [l for l in lines if re.search(r"(?i)status|error|message|dialog|android:id/(message|alertTitle)", l)]
++        step(f'  {tag} (after "{name[:60]}"): ui {tag}_ui.txt -- ' + (' | '.join(x.strip()[:120] for x in shown[:4]) or
++                                                                      f'{len(lines)} elements, no status / error text'))
++    except Exception as e:  # noqa: BLE001
++        step(f'  {tag}: no record ({type(e).__name__}: {e})')
+ 
+ 
+ def skip_case(name, why):
+@@ -402,6 +452,107 @@ def pick_pinned(tag):
+     return digest
+ 
+ 
++SH_MARK = []  # r7f: the app log cursor right before Settings' 끄기 was tapped
++
++
++def screen_box(nodes):
++    boxes = [n['bounds'] for n in nodes if n['id'] == 'android:id/content']
++    return boxes[0] if boxes else None
++
++
++def sh_off(tag):
++    """r7f: SH REQUESTED off through 0.2.32's public Settings (on the targets screen: listSettingsButton, then the
++    sharpening row's settingsSharpOffButton -> selectSharpness(OFF, "settings"), b554e76 MainActivity.kt:531, :5308).
++    The control must be ON SCREEN (inside the app's content), enabled -- else the arm is NOT RUN (INVALID: no
++    prefs edit, no hidden handler, no scrolling guess). Judged: the app's own `[sharpness_select] level=off ...
++    origin=settings` and the button shown selected afterwards."""
++    t = tag.split()[0]
++    tab = ka.wait('listSettingsButton', 20)
++    if not tab or not tab['enabled']:
++        raise Invalid(f'{tag}: the Settings tab is not shown enabled ({tab}) -- SH cannot be set through the UI')
++    tap('listSettingsButton')
++    ka.wait('settingsSharpOffButton', 10)
++    nodes = ka.dump()
++    ui_record(t + '_settings_ui', nodes)
++    box = screen_box(nodes)
++    offs = [n for n in nodes if n['id'] == 'settingsSharpOffButton' and n['bounds'][2] > n['bounds'][0]
++            and n['bounds'][3] > n['bounds'][1]]
++    inside = bool(offs) and box is not None and all(box[i] <= offs[0]['bounds'][i] for i in (0, 1)) and \
++        all(offs[0]['bounds'][i] <= box[i] for i in (2, 3))
++    if len(offs) != 1 or not offs[0]['enabled'] or not inside:
++        raise Invalid(f'{tag}: settingsSharpOffButton not usable on screen (found {len(offs)}, '
++                      f'{offs[0]["bounds"] if offs else "-"} enabled={offs[0]["enabled"] if offs else "-"} screen={box}) '
++                      f'-- SH not set; the arm is NOT RUN (no prefs edit, no other way)')
++    n0 = cursor()
++    SH_MARK[:] = [n0]
++    x1, y1, x2, y2 = offs[0]['bounds']
++    ka.adb('shell', 'input', 'tap', str((x1 + x2) // 2), str((y1 + y2) // 2))
++    step(f'tapped settingsSharpOffButton at {(x1 + x2) // 2},{(y1 + y2) // 2} text={offs[0]["text"]!r}')
++    m = wait_log(r'\[sharpness_select\][^\n]*', n0, 10)
++    after = ka.dump()
++    ui_record(t + '_settings_ui_after', after)
++    sel = [n for n in after if n['id'] == 'settingsSharpOffButton']
++    line = m.group(0) if m else ''
++    ok = bool(m) and ' level=off ' in line + ' ' and 'origin=settings' in line and bool(sel) and sel[0]['selected']
++    verdict(f'{tag}: SH requested=off through Settings (settingsSharpOffButton; the app\'s own sharpness_select level=off '
++            'origin=settings; the button selected)', ok,
++            f'{line[:160] or "no sharpness_select line"} | selected={sel[0]["selected"] if sel else "not shown"} '
++            f'screen={box} button={offs[0]["bounds"]}')
++    return ok
++
++
++def sh_in_effect(tag):
++    """r7f: the picture runs with SH requested off -- since the Settings tap: a `[sharpen_path] path=direct
++    requested=off` line, no sharpen path, no `[sharpen_start]`, no fallback of another request. effective=off alone (a
++    weak request that fell back) is NOT this."""
++    log = since(SH_MARK[0]) if SH_MARK else ''
++    paths = re.findall(r'\[sharpen_path\][^\n]*', log)
++    starts = re.findall(r'\[sharpen_start\][^\n]*', log)
++    falls = re.findall(r'\[sharpen_fallback\][^\n]*', log)
++    direct = [x for x in paths if 'path=direct' in x and 'requested=off' in x]
++    other = [x for x in paths if x not in direct]
++    ok = bool(SH_MARK) and bool(direct) and not other and not starts and not falls
++    verdict(f'{tag}: SH off in effect for the picture (sharpen_path path=direct requested=off; sharpen_start 0)', ok,
++            f'direct={[x[:90] for x in direct[:1]]} other={[x[:90] for x in other[:2]]} sharpen_start={len(starts)} '
++            f'fallback={[x[:90] for x in falls[:1]]}')
++    return ok
++
++
++OBSERVE_SEC = 30
++
++
++def observe_connection(tag):
++    """r7f: after the first frame, OBSERVE_SEC (30) s with NO input: the same viewer and connection throughout (no
++    other scene, no non-connected status, no new pick, the host's session not ended, no new client) and the picture
++    going on (video_debug out grows). A break ends the watch at once. Shorter only for the stub test."""
++    sec = float(os.environ.get('OA_OBSERVE_SEC', OBSERVE_SEC))
++    if sec < OBSERVE_SEC and not os.environ.get('OA_TEST_FAKE_ADB'):
++        raise Invalid(f'OA_OBSERVE_SEC={sec:g} is below {OBSERVE_SEC} s: for the stub test only')
++    outs0 = [int(o) for o in re.findall(r'\[video_debug\][^\n]* out=(\d+)', since(PICK_MARK[0]))] if PICK_MARK else []
++    out0 = outs0[-1] if outs0 else 0
++    t0 = time.time()
++    same, why = same_viewer()
++    while same and time.time() - t0 < sec:
++        time.sleep(min(2.0, max(0.1, sec / 15)))
++        same, why = same_viewer()
++    held = time.time() - t0
++    outs = [int(o) for o in re.findall(r'\[video_debug\][^\n]* out=(\d+)', since(PICK_MARK[0]))] if PICK_MARK else []
++    out1 = outs[-1] if outs else 0
++    ok = same and held >= sec and out1 > out0
++    verdict(f'{tag}: {sec:g} s with no input after the first frame -- the same viewer and connection held, the picture '
++            'went on', ok, f'held {held:.1f} s; video out {out0} -> {out1}; {why}')
++    return ok
++
++
++def p_keyboard_clear(tag):
++    """r7f: arm P -- before its manual connect the keyboard must not be up; it is never put away there (no BACK / Enter
++    on the connect form or in the viewer): a keyboard up or unknown is a FAIL, nothing is tapped."""
++    st, why = ime_state()
++    ok = st == 'hidden'
++    verdict(f'{tag}: no soft keyboard up before the manual connect (none put away)', ok, f'keyboard {st} {why}')
++    return ok
++
++
+ def input_check():
+     """r7 (4): one tap on the window's picture; judged by judge_input on the host's lines after it."""
+     hl = host_log()
+@@ -477,6 +628,8 @@ def p_first_connect(video_port, control_port):
+     if not ka.wait('connectButton', 20):
+         verdict('2 (P) the manual connect form is shown', False)
+         return False
++    if not p_keyboard_clear('2k (P)'):  # r7f
++        return False
+     tap('connectButton')
+     ok = ka.wait('listDevicesButton', 40) is not None
+     hl = host_log()
+@@ -529,6 +682,8 @@ def p_reconnect(control_port):
+     if not ka.wait('connectButton', 10):
+         verdict('6r (P) the connect form is there to connect again', False)
+         return False
++    if not p_keyboard_clear('6k (P)'):  # r7f
++        return False
+     tap('connectButton')
+     ok = ka.wait('listDevicesButton', 40) is not None
+     tcp = tcp_clients(host_log()) - h0
+@@ -648,9 +803,18 @@ def main():
+             if not video_port or not control_port or not p_first_connect(video_port, control_port):
+                 return 1
+ 
++        # r7f: SH requested off through Settings, on the targets screen, before anything is picked
++        if not sh_off('2s SH off'):
++            return 1
++
+         # 3
+         if not pick_pinned('3 the pinned window picked'):
+             return 1
++        if not sh_in_effect('3s SH off'):
++            return 1
++        # r7f: 30 s, no input, the connection watched; a break ends the arm here (no 4, nothing after)
++        if not observe_connection('3w the connection'):
++            return 1
+ 
+         # 4: one tap on the window's picture -> its own down/up on the host (injection none: logged, not injected)
+         # r8: a FAIL here ends the arm -- no menu wake tap, no 5 / 6 / P-5d (they are NOT RUN)
+@@ -666,15 +830,19 @@ def main():
+             time.sleep(2)
+             log = since(n0)
+             ended = len(re.findall(r'udp control session ended', host_log())) - len(re.findall(r'udp control session ended', h0))
+-            verdict('5 PC 목록: 0.2.32\'s park (park_begin, park_confirmed) -- the PC listed', listed and '[park_begin]' in log
+-                    and '[park_confirmed]' in log, ' | '.join(re.findall(r'\[park_[a-z_]+\][^\n]*', log))[:300] +
+-                    f' | host sessions ended since: {ended}')
++            ok5 = listed and '[park_begin]' in log and '[park_confirmed]' in log
++            verdict('5 PC 목록: 0.2.32\'s park (park_begin, park_confirmed) -- the PC listed', ok5,
++                    ' | '.join(re.findall(r'\[park_[a-z_]+\][^\n]*', log))[:300] + f' | host sessions ended since: {ended}')
+             shot('5_list')
++            if not ok5:  # r7f: no further input after a failed step
++                return 1
+             n0 = cursor()
+             tap('card:' + HOST)
+             m = wait_log(r'\[park_reuse\][^\n]*', n0, 30)
+             verdict('6a the parked PC again: 0.2.32 reuses the parked session (park_reuse)', m is not None,
+                     m.group(0)[:200] if m else ' | '.join(re.findall(r'\[(?:park_[a-z_]+|directory_[a-z_]+)\][^\n]*', since(n0)))[:240])
++            if m is None:  # r7f
++                return 1
+             pick_pinned('6b the pinned window again after the park')
+         else:
+             # r2 (Codex: map 1-7 to what the arm's UI really has; no hidden handler, no fake capability)
+@@ -715,8 +883,9 @@ def main():
+         step('EXCEPTION ' + tb.strip().splitlines()[-1][:300] + ' (in full: avd_traceback.txt)')
+         try:
+             shot('exception')
++            ui_record('exception_ui')  # r7f: read only
+         except Exception as e:
+-            step(f'  no screenshot at the exception ({e})')
++            step(f'  no screenshot / ui record at the exception ({e})')
+         raise
+     finally:
+         if logcat:
+diff --git a/automation/old_apk_lane/oa_fixture.ps1 b/automation/old_apk_lane/oa_fixture.ps1
+index 2f60b14..cbd6d8f 100644
+--- a/automation/old_apk_lane/oa_fixture.ps1
++++ b/automation/old_apk_lane/oa_fixture.ps1
+@@ -12,6 +12,8 @@ param(
+   [ValidateSet('S', 'P')][string]$Arm = 'S',
+   [string]$BuildDir = '',
+   [string]$ServerJs = '',
++  # r7f: the directory's pinned sha256 (required with KE_RELAY_TRACE=1: the trace-only test copy of the candidate)
++  [string]$ServerSha256 = '',
+   [switch]$WithStandby,
+   [string[]]$HolderCmd = @(),
+   [int]$ControlPort = 18460,
+@@ -192,9 +194,31 @@ try {
+     $NodeCmd = @('node', $server)
+     Say "  directory server.js $server $((Get-FileHash $server).Hash.ToLower().Substring(0,16)) relayTrace=$($dirEnv['REMOTE60_RELAY_TRACE'])"
+   }
++  # r7f (Codex codex_old_apk_lane_src_r7d.md (3)): the candidate 53fced4's server.js has NO relay trace -- the variable
++  # alone traces nothing. With KE_RELAY_TRACE=1 the directory run must be the pinned file (-ServerSha256: the trace-only
++  # test copy oa_relay_trace_server.py builds) AND must say itself that its trace is on; else nothing more starts.
++  $script_ = $NodeCmd[$NodeCmd.Count - 1]
++  if ($ServerSha256) {
++    $got = if (Test-Path -LiteralPath $script_ -PathType Leaf) { (Get-FileHash -LiteralPath $script_).Hash.ToLower() } else { 'no file' }
++    if ($got -ne $ServerSha256.ToLower()) { throw "the directory $script_ is not the pinned one (sha256 $got, pinned $ServerSha256)" }
++    Say "  directory pinned: $script_ sha256=$got"
++  } elseif ($dirEnv['REMOTE60_RELAY_TRACE'] -eq '1') {
++    throw "KE_RELAY_TRACE=1 needs -ServerSha256 (the pinned trace-only test copy of the candidate's server)"
++  }
+   $node = Start-Owned 'node' $NodeCmd[0] @($NodeCmd | Select-Object -Skip 1) "$Root\dir\server" $dirEnv
+   Start-Sleep 2
+   if ($node.HasExited) { throw "the directory ended at once (exit $($node.ExitCode))" }
++  if ($dirEnv['REMOTE60_RELAY_TRACE'] -eq '1') {
++    $on = $false
++    $deadline = (Get-Date).AddSeconds(8)
++    while ((Get-Date) -lt $deadline -and -not $node.HasExited) {
++      if ((Test-Path -LiteralPath "$Root\dir\server.stdout.txt") -and
++          (Select-String -LiteralPath "$Root\dir\server.stdout.txt" -SimpleMatch '[relay-trace] ENABLED' -Quiet)) { $on = $true; break }
++      Start-Sleep -Milliseconds 250
++    }
++    if (-not $on) { throw "KE_RELAY_TRACE=1 but the directory never said '[relay-trace] ENABLED' -- it has no trace (53fced4 as it is has none)" }
++    Say "  relay trace: the directory says it is on"
++  }
+ 
+   # ---- the hosts, one after another; any failure -- or any child found dead -- stops the rest from starting
+   $b = if ($BuildDir) { $BuildDir } else { "$wt\build\apps\native_poc\Release" }
+diff --git a/automation/old_apk_lane/oa_orchestration_test.ps1 b/automation/old_apk_lane/oa_orchestration_test.ps1
+index 08da065..48609c9 100644
+--- a/automation/old_apk_lane/oa_orchestration_test.ps1
++++ b/automation/old_apk_lane/oa_orchestration_test.ps1
+@@ -148,6 +148,21 @@ $r = Run-Case 'orch-stopthrow' 'a=ok' @{ KE_FIXTURE_TEST_STOP_THROW_FOR = 'stand
+ Check 'one cleanup error: holder killed after its error, a and node ended, rc 3, nothing left' ($r.rc -eq 3 -and $r.result -match 'standby stop error' -and
+   $r.result -match '  a exit 0' -and $r.result -match '  node ended' -and $r.left -eq 0) "rc=$($r.rc) left=$($r.left)"
+ 
++"--- r7f: the relay trace -- the variable alone traces nothing (53fced4); the pinned trace-only copy must say it is on"
++$stubNodeSha = (Get-FileHash "$e\stubs\stub_node.py").Hash.ToLower()
++$r = Run-Case 'orch-trace-ok' 'a=ok' @{ KE_RELAY_TRACE = '1'; KE_STUB_NODE_TRACE = '1' } @('-Arm', 'S', '-ServerSha256', $stubNodeSha)
++Check 'trace on, the pinned directory says "[relay-trace] ENABLED": host started, AVD ran, rc 0' ($r.avd -and $r.hostStarted -and
++  $r.rc -eq 0 -and $r.fx -match 'relay trace: the directory says it is on' -and $r.fx -match 'directory pinned:' -and $r.left -eq 0) "rc=$($r.rc)"
++$r = Run-Case 'orch-trace-silent' 'a=ok' @{ KE_RELAY_TRACE = '1' } @('-Arm', 'S', '-ServerSha256', $stubNodeSha)
++Check 'NEGATIVE trace on, the directory never says so (53fced4 as it is): no host, no AVD, rc != 0, the reason said' (-not $r.avd -and
++  -not $r.hostStarted -and $r.rc -ne 0 -and $r.fx -match "never said '\[relay-trace\] ENABLED'" -and $r.left -eq 0) "rc=$($r.rc)"
++$r = Run-Case 'orch-trace-nopin' 'a=ok' @{ KE_RELAY_TRACE = '1'; KE_STUB_NODE_TRACE = '1' } @('-Arm', 'S')
++Check 'NEGATIVE trace on with no -ServerSha256: the directory is not even started, no host, no AVD' (-not $r.avd -and
++  -not $r.hostStarted -and $r.rc -ne 0 -and $r.fx -notmatch 'started node' -and $r.fx -match 'needs -ServerSha256') "rc=$($r.rc)"
++$r = Run-Case 'orch-trace-wrongpin' 'a=ok' @{ KE_RELAY_TRACE = '1'; KE_STUB_NODE_TRACE = '1' } @('-Arm', 'S', '-ServerSha256', ('0' * 64))
++Check 'NEGATIVE trace on, the directory file is not the pinned one: not started, no host, no AVD' (-not $r.avd -and
++  -not $r.hostStarted -and $r.rc -ne 0 -and $r.fx -notmatch 'started node' -and $r.fx -match 'is not the pinned one') "rc=$($r.rc)"
++
+ "--- a real run without an APK file is refused before anything starts"
+ $before = @(Get-ChildItem $runs -Directory | ForEach-Object Name)
+ $p = Start-Process -FilePath powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$e\oa_slot.ps1", '-Tag', 'orch-noapk',
+diff --git a/automation/old_apk_lane/oa_pick_test.py b/automation/old_apk_lane/oa_pick_test.py
+index 68471a9..afd561a 100644
+--- a/automation/old_apk_lane/oa_pick_test.py
++++ b/automation/old_apk_lane/oa_pick_test.py
+@@ -14,6 +14,7 @@ Each case runs in its own new folder under <worktree>/.claude/oa_runs (nothing o
+ import importlib.util
+ import json
+ import os
++import subprocess
+ import sys
+ import time
+ 
+@@ -35,7 +36,8 @@ def check(what, ok, detail=''):
+     print(f'{"PASS" if ok else "FAIL"}  {what}' + (f'  {detail}' if detail else ''), flush=True)
+ 
+ 
+-def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novideo=False, back='ime', scene=None):
++def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novideo=False, back='ime', scene=None,
++         avd=None, sh='ok', drop=None, frozen=False, pw_text=None):
+     """A fresh run folder, the fake's state, and oa_avd loaded anew against it. -> (module, paths)"""
+     run_id = f'{tag}-{time.strftime("%Y%m%d%H%M%S")}-{os.getpid()}'
+     root = os.path.join(RUNS, run_id)
+@@ -47,6 +49,12 @@ def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novide
+         f.write(CAPTURE + f'10-30 00:00:00.000 [native-video-host][control] window-list seq=1 count=1 selectedId={listed_id}\n')
+     with open(os.path.join(root, 'a', 'directoryhost_ready.txt'), 'w', encoding='ascii') as f:
+         f.write(f'ready run={run_id}-a harness_pid=1 host_pid=2 host_log={host_log}\n')
++    # r7e: what oa_avd.main reads before it starts (a fixture, an APK the fake hands back as the installed one)
++    with open(os.path.join(root, 'fixture_ready.txt'), 'w', encoding='ascii') as f:
++        f.write(f'ready run={run_id} hosts=a standby=none controlPort=0 relay=10.0.2.2\n')
++    apk = os.path.join(root, 'none.apk')
++    with open(apk, 'wb') as f:
++        f.write(b'PK fake apk for ' + run_id.encode())
+     applog = os.path.join(root, 'app.log')
+     with open(applog, 'w', encoding='utf-8') as f:
+         f.write('2026-10-30 00:00:00.000 [targets_ready] origin=connect ms=1 items=1\n')
+@@ -56,12 +64,14 @@ def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novide
+     open(calls, 'w').close()
+     os.environ.update({'OA_FAKE_ADB_LOG': calls, 'OA_FAKE_UI_STATE': st, 'OA_FAKE_APPLOG': applog,
+                        'OA_FAKE_HOSTLOG': host_log, 'OA_FAKE_UI_VARIANT': variant, 'OA_FAKE_INPUT': input_mode,
+-                       'OA_FAKE_IME': ime, 'OA_FAKE_NOVIDEO': '1' if novideo else '0', 'OA_FAKE_BACK': back})
++                       'OA_FAKE_IME': ime, 'OA_FAKE_NOVIDEO': '1' if novideo else '0', 'OA_FAKE_BACK': back,
++                       'OA_FAKE_ADB_APK': apk, 'OA_FAKE_SH': sh, 'OA_FAKE_DROP_SEC': drop or '',
++                       'OA_FAKE_FROZEN': '1' if frozen else '0', 'OA_FAKE_PW_TEXT': pw_text or 'Password'})
+     sys.argv = ['oa_avd.py', root, 'S', os.path.join(root, 'none.apk'), os.path.join(root, 'avd')]
+-    spec = importlib.util.spec_from_file_location(f'oa_avd_{tag.replace("-", "_")}', os.path.join(E, 'oa_avd.py'))
++    spec = importlib.util.spec_from_file_location(f'oa_avd_{tag.replace("-", "_")}', avd or os.path.join(E, 'oa_avd.py'))
+     m = importlib.util.module_from_spec(spec)
+     spec.loader.exec_module(m)
+-    return m, {'calls': calls, 'host': host_log, 'app': applog, 'out': os.path.join(root, 'avd')}
++    return m, {'calls': calls, 'host': host_log, 'app': applog, 'out': os.path.join(root, 'avd'), 'root': root}
+ 
+ 
+ def taps(paths):
+@@ -81,7 +91,8 @@ def main():
+     os.makedirs(RUNS, exist_ok=True)
+     print('oa_pick_test (old-APK lane r7): pick_pinned / judge_pick / input_check against a fake 0.2.32')
+     os.environ.pop('KE_ADB_SHA256', None)
+-    os.environ.update({'OA_TEST_FAKE_ADB': os.path.join(E, 'stubs', 'fake_ui_adb.cmd'), 'KA_SERIAL': 'emulator-5554'})
++    os.environ.update({'OA_TEST_FAKE_ADB': os.path.join(E, 'stubs', 'fake_ui_adb.cmd'), 'KA_SERIAL': 'emulator-5554',
++                       'OA_OBSERVE_SEC': '3'})  # r7f: the 30 s watch, 3 s against the fake
+ 
+     # the control: the pinned card -> 3 PASS, then the tap's own down->up -> 4 PASS (the gates are not dead ends)
+     m, p = case('pick-ok', 'ok')
+@@ -193,6 +204,40 @@ def main():
+     src = open(os.path.join(E, 'oa_avd.py'), encoding='utf-8').read()
+     check('r8 (source): a 4 FAIL ends the arm before the menu / 5 / 6 / P-5d',
+           'if not input_check():\n            return 1' in src.replace('\r\n', '\n'))
++    # r7e: arm S driven from the install to 4 (the fake's login -> PC list -> pick); 4 FAILs (no input events). The
++    # arm must end there: no tap of any kind after 4's, and 5 / 6 / 7 NOT RUN in result.json. The contrast: the same
++    # flow against c468c27's oa_avd.py (it threw 4's answer away and went on into the menu).
++    def run_flow(tag, avd=None, **kw):
++        m, p = case(tag, 'ok', input_mode=kw.pop('input_mode', 'none'), scene='login', avd=avd, **kw)
++        try:
++            rc = m.main()
++        except RuntimeError as e:  # c468c27 went on into the menu and raised there (its result.json is still written)
++            rc = f'raised {e}'
++        res = json.load(open(os.path.join(p['out'], 'result.json'), encoding='utf-8'))
++        all_taps = taps(p)
++        # 4's tap: the FIRST at the video view's centre (a later wake tap of the menu lands there too)
++        i4 = min([i for i, t in enumerate(all_taps) if t == ['540', '1268']], default=-1)
++        after = all_taps[i4 + 1:] if i4 >= 0 else all_taps
++        four = [r for r in res['results'] if r[0].startswith('4 ')]
++        nr = sorted({n for n, _ in res['not_run']})
++        run_flow.res = res
++        run_flow.taps = all_taps
++        return rc, four, nr, i4, after
++    rc, four, nr, i4, after = run_flow('flow-4fail')
++    check('r7e: arm S, 4 FAILs -> the arm ends there: no tap after 4 (no menu wake / menu), 5 6 7 NOT RUN',
++          rc != 0 and four and four[-1][1] is False and i4 >= 0 and not after and all(c in nr for c in '567'),
++          f'rc={rc} 4={[f[1] for f in four]} taps after 4={after} not run={nr}')
++    steps_ok = {r[0].split()[0]: r[1] for r in run_flow.res['results']}
++    check('r7f: the same flow went through 2s SH off (Settings), 3s SH in effect and 3w the 30 s watch (stub: 3 s) -- '
++          'all PASS before 4', steps_ok.get('2s') is True and steps_ok.get('3s') is True and steps_ok.get('3w') is True,
++          f'{steps_ok}')
++    old = os.path.join(RUNS, f'oa_avd_c468c27-{os.getpid()}.py')
++    with open(old, 'wb') as f:
++        f.write(subprocess.run(['git', '-C', WT, 'show', 'c468c27:automation/old_apk_lane/oa_avd.py'], capture_output=True,
++                               check=True).stdout)
++    rc, four, nr, i4, after = run_flow('flow-4fail-c468c27', avd=old)
++    check('r7e contrast: c468c27 (4 answer thrown away) on the same flow went on tapping after 4 -- the check sees it',
++          i4 >= 0 and len(after) > 0, f'taps after 4={len(after)} first={after[:2]} not run={nr}')
+     m, p = case('hosts-ime-hide', 'ok', ime='shown', scene='hosts')
+     ok = m.hide_ime_on_hosts('1b the sign-in keyboard')
+     check('control 1b r7d: on the PC list a keyboard up is put away with BACK (it takes it); the list stays, no dialog',
+@@ -207,6 +252,116 @@ def main():
+     m, p = case('hosts-ime-hidden', 'ok', ime='hidden', scene='hosts')
+     check('1b r7d: no keyboard up -> nothing sent, goes on', m.hide_ime_on_hosts('1b the sign-in keyboard') and not keys(p))
+ 
++    # r7f (Codex codex_old_apk_lane_src_r7d.md (3)): SH off through Settings, SH in effect, the 30 s watch, the
++    # read-only record after a FAIL, arm P's keyboard check -- each with its refusal
++    def sh_taps(paths):  # the fake's sharpening row spans y 1300-1400 (and the off-screen Off at y 2450-2550)
++        return [t for t in taps(paths) if 1300 <= int(t[1]) <= 1400 or 2450 <= int(t[1]) <= 2550]
++
++    m, p = case('sh-ok', 'ok')
++    ok = m.sh_off('2s SH off')
++    ui = os.path.join(p['out'], '2s_settings_ui.txt')
++    check('control 2s r7f: Settings -> settingsSharpOffButton (on screen, enabled) -> sharpness_select level=off '
++          'origin=settings, the button selected -> PASS; the settings screen kept as a UI dump',
++          ok and last(m)[1] is True and sh_taps(p) == [['185', '1350']] and os.path.exists(ui) and
++          'settingsSharpOffButton' in open(ui, encoding='utf-8').read(), last(m)[2][:200])
++    m.pick_pinned('3 the pinned window picked')
++    check('control 3s r7f: the picture: sharpen_path path=direct requested=off, no sharpen_start -> PASS',
++          m.sh_in_effect('3s SH off') and last(m)[1] is True, last(m)[2][:200])
++    for sh, what in (('norow', 'no sharpening row on the Settings screen'),
++                     ('offscreen', "the Off button below the app's content box (not on screen)")):
++        m, p = case(f'sh-{sh}', 'ok', sh=sh)
++        try:
++            m.sh_off('2s SH off')
++            raised = ''
++        except m.Invalid as e:
++            raised = str(e)
++        check(f'NEGATIVE 2s r7f: {what} -> the arm is NOT RUN (INVALID), the Off button never tapped',
++              'NOT RUN' in raised and not sh_taps(p), f'sh taps={sh_taps(p)} {raised[:160]}')
++    for sh, what in (('nolog', 'the tap logs no sharpness_select level=off'),
++                     ('noselect', 'logged, but the requested level stays weak (the button not selected)')):
++        m, p = case(f'sh-{sh}', 'ok', sh=sh)
++        ok = m.sh_off('2s SH off')
++        check(f'NEGATIVE 2s r7f: {what} -> FAIL', not ok and last(m)[1] is False, last(m)[2][:200])
++    m, p = case('sh-fallback', 'ok')
++    m.SH_MARK[:] = [m.cursor()]  # Settings never used: weak is still REQUESTED
++    m.pick_pinned('3 the pinned window picked')
++    ok = m.sh_in_effect('3s SH off')
++    check('NEGATIVE 3s r7f: weak requested, effective=off by a fallback (path=direct requested=weak) -> FAIL '
++          '(a fallback is not SH off)', not ok and 'requested=weak' in last(m)[2], last(m)[2][:200])
++    m, p = case('sh-start', 'ok', sh='start')
++    m.sh_off('2s SH off')
++    m.pick_pinned('3 the pinned window picked')
++    ok = m.sh_in_effect('3s SH off')
++    check('NEGATIVE 3s r7f: the picture went through the sharpen path (sharpen_start) -> FAIL', not ok and
++          'sharpen_start=1' in last(m)[2], last(m)[2][:200])
++
++    m, p = case('watch-ok', 'ok')
++    m.pick_pinned('3 the pinned window picked')
++    n_taps, n_keys = len(taps(p)), len(keys(p))
++    ok = m.observe_connection('3w the connection')
++    check('control 3w r7f: the connection held for the whole watch, the picture went on, NO input during it -> PASS',
++          ok and last(m)[1] is True and len(taps(p)) == n_taps and len(keys(p)) == n_keys, last(m)[2][:200])
++    m, p = case('watch-drop', 'ok', drop='4.0')
++    m.pick_pinned('3 the pinned window picked')
++    n_taps = len(taps(p))
++    os.environ['OA_OBSERVE_SEC'] = '10'
++    t0 = time.time()
++    ok = m.observe_connection('3w the connection')
++    took = time.time() - t0
++    os.environ['OA_OBSERVE_SEC'] = '3'
++    rec = os.path.join(p['out'], 'fail1_ui.txt')
++    rec_text = open(rec, encoding='utf-8').read() if os.path.exists(rec) else ''
++    check('NEGATIVE 3w r7f: the connection breaks during the watch -> FAIL at once (not after the full watch), no input',
++          not ok and last(m)[1] is False and took < 9 and "'HOSTS'" in last(m)[2] and len(taps(p)) == n_taps,
++          f'{took:.1f} s {last(m)[2][:200]}')
++    check('r7f: right after that FAIL a READ-ONLY record of the screen holds the error text (and the screenshot, logs)',
++          '연결이 끊겼습니다' in rec_text and os.path.exists(os.path.join(p['out'], 'fail1_screen.png')) and
++          os.path.exists(os.path.join(p['out'], 'fail1_app.log')), rec_text.strip()[:160])
++    m, p = case('watch-frozen', 'ok', frozen=True)
++    m.pick_pinned('3 the pinned window picked')
++    ok = m.observe_connection('3w the connection')
++    check('NEGATIVE 3w r7f: connected but the picture does not go on (video out unchanged) -> FAIL', not ok and
++          last(m)[1] is False, last(m)[2][:160])
++    m, p = case('watch-short', 'ok')
++    m.pick_pinned('3 the pinned window picked')
++    fake = os.environ.pop('OA_TEST_FAKE_ADB')
++    try:
++        m.observe_connection('3w the connection')
++        raised = ''
++    except m.Invalid as e:
++        raised = str(e)
++    finally:
++        os.environ['OA_TEST_FAKE_ADB'] = fake
++    check('NEGATIVE 3w r7f: a watch shorter than 30 s outside the stub test is refused (INVALID)', 'below 30' in raised,
++          raised[:120])
++    m, p = case('record-redact', 'ok', scene='login', pw_text='notarealpassword')
++    m.ui_record('redact_ui')
++    text = open(os.path.join(p['out'], 'redact_ui.txt'), encoding='utf-8').read()
++    check('r7f: a record of the sign-in screen never writes the password field\'s text (the fixture password is absent)',
++          'notarealpassword' not in text and '<not recorded: a password field>' in text, text.strip()[:160])
++    m, p = case('p-kbd-shown', 'ok', ime='shown')
++    ok = m.p_keyboard_clear('2k (P)')
++    check('NEGATIVE 2k r7f (P): a keyboard up before the manual connect -> FAIL, nothing sent (no BACK, no tap)',
++          not ok and not keys(p) and not taps(p), f'keys={keys(p)} taps={len(taps(p))}')
++    m, p = case('p-kbd-hidden', 'ok', ime='hidden')
++    check('control 2k r7f (P): no keyboard -> PASS', m.p_keyboard_clear('2k (P)') and not keys(p))
++    src2 = open(os.path.join(E, 'oa_avd.py'), encoding='utf-8').read().replace('\r\n', '\n')
++    check('r7f (source): both of arm P\'s connect taps come after its keyboard check',
++          src2.count("    if not p_keyboard_clear('2k (P)'):  # r7f\n        return False\n    tap('connectButton')") == 1 and
++          src2.count("    if not p_keyboard_clear('6k (P)'):  # r7f\n        return False\n    tap('connectButton')") == 1)
++    os.environ['OA_OBSERVE_SEC'] = '12'
++    rc, four, nr, i4, after = run_flow('flow-watchdrop', input_mode='pair', drop='5.0')
++    os.environ['OA_OBSERVE_SEC'] = '3'
++    res = run_flow.res['results']
++    check('r7f: arm S driven from the install, the connection breaks in the 30 s watch -> the arm ends there: 3w FAIL, '
++          'NO tap on the picture at all, 4 5 6 7 NOT RUN', rc != 0 and any(r[0].startswith('3w') and r[1] is False for r in res)
++          and i4 < 0 and all(c in nr for c in '4567'),
++          f'rc={rc} taps at the picture={i4 >= 0} not run={nr} 3w={[r[2][:120] for r in res if r[0].startswith("3w")]}')
++    rc, four, nr, i4, after = run_flow('flow-shnorow', sh='norow')
++    card = [t for t in run_flow.taps if 100 <= int(t[0]) <= 470 and 1000 <= int(t[1]) <= 1100]
++    check('r7f: arm S driven from the install, the Settings control not usable -> INVALID (exit 2): nothing picked, '
++          'nothing tapped after', rc == 2 and not card and i4 < 0, f'rc={rc} card taps={card}')
++
+     print(f'\n{checks} checks, {fails} failed\nRESULT: {"PASS" if fails == 0 else "FAIL"}')
+     return 0 if fails == 0 else 1
+ 
+diff --git a/automation/old_apk_lane/oa_relay_trace_server.py b/automation/old_apk_lane/oa_relay_trace_server.py
+new file mode 100644
+index 0000000..ce36b66
+--- /dev/null
++++ b/automation/old_apk_lane/oa_relay_trace_server.py
+@@ -0,0 +1,150 @@
++"""old-APK lane r7f (Codex codex_old_apk_lane_src_r7d.md (3)): the 0.2.164 candidate's directory (53fced4 apps/directory)
++as a TEST COPY with the relay trace -- and nothing else -- added. 53fced4's server.js has no REMOTE60_RELAY_TRACE at all:
++setting the variable alone traces nothing. The trace is the one already reviewed (7a79b09 apps/directory/server.js, test
++fixture only), re-cut against 53fced4 as relay_trace/relay_trace_53fced4.diff: additions, and three relay sends that gain
++the trace's send callback (undefined -- a send exactly as before -- when the trace is off). No other branch's server.js
++replaces the candidate's; no deployment, no NAS.
++
++  python -I oa_relay_trace_server.py build <out>          the traced copy: 53fced4 files + the diff, every hash pinned
++  python -I oa_relay_trace_server.py build <out> --plain  53fced4 unchanged (the negative control's server)
++  python -I oa_relay_trace_server.py check <traced> <plain>
++        7a79b09's relay_trace_test.js against both: the traced copy must pass it whole (trace off: no line; on: ENABLED,
++        flows both ways, clocks, buckets, no credential); 53fced4 as it is must FAIL "the trace says it is on" with the
++        variable set -- the variable alone instruments nothing -- while its relay itself works.
++<out> is a NEW folder under <worktree>/.claude/oa_relay_server (refused if it exists). The fixture takes
++<out>/apps/directory/server.js through -ServerJs and its sha256 through -ServerSha256."""
++import hashlib
++import os
++import re
++import subprocess
++import sys
++
++E = os.path.dirname(os.path.abspath(__file__))
++WT = os.path.normpath(os.path.join(E, '..', '..'))
++ANCHOR = os.path.join(WT, '.claude', 'oa_relay_server')
++CANDIDATE = '53fced4'
++BASE_SHA = '2742143d72bb9482429f3046109b0a833bbf8a5049a3b26a8e1eac2f586c4bb7'    # 53fced4 apps/directory/server.js
++TRACED_SHA = '52918c04b8fef8f4e66af5c6abe4a7332429416397004432accb79d8c231492a'  # the same + relay_trace_53fced4.diff
++DIFF = os.path.join(E, 'relay_trace', 'relay_trace_53fced4.diff')
++DIFF_SHA = 'f72329cc3602733213ed57ca6aaf6ff6069a77199cc5de8f7ec47bf9bf47dc86'
++TRACE_TEST = os.path.join(E, 'relay_trace', 'relay_trace_test_7a79b09.js')
++TRACE_TEST_SHA = '7a762e7af8865fbc91c820092d4c5e15c27a1b6de8b3d3ae0164950cd0875b07'  # 7a79b09 test/relay_trace_test.js
++# what server.js needs at run time (its require()s and package.json), and the two test helpers relay_trace_test uses
++FILES = ['server.js', 'accounts.js', 'device_credentials.js', 'relay_diag.js', 'update_manifest.js', 'version_compare.js',
++         'wake_target.js', 'package.json', 'test/relay_test.js', 'test/test_tmp.js']
++TEST_TMP_ANCHOR = 'D:/remote/remote/.claude/test-tmp'  # test_tmp.js's own fixed anchor (the main repository's)
++
++
++def sha(b):
++    return hashlib.sha256(b).hexdigest()
++
++
++def git_show(path):
++    return subprocess.run(['git', '-C', WT, 'show', f'{CANDIDATE}:apps/directory/{path}'], capture_output=True,
++                          check=True).stdout
++
++
++def apply_diff(src, diff):
++    """A unified diff applied EXACTLY: every hunk's old lines must stand at its stated line (no fuzz, no offset)."""
++    lines = src.split(b'\n')
++    out, pos = [], 0
++    hunks = re.split(rb'(?m)^(?=@@ )', diff)[1:]
++    for h in hunks:
++        head, *body = h.split(b'\n')
++        m = re.match(rb'@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@', head)
++        start = int(m.group(1)) - 1
++        old, new = [], []
++        for l in body:
++            if l.startswith(b' '):
++                old.append(l[1:]); new.append(l[1:])
++            elif l.startswith(b'-'):
++                old.append(l[1:])
++            elif l.startswith(b'+'):
++                new.append(l[1:])
++        if start < pos or lines[start:start + len(old)] != old:
++            raise SystemExit(f'the diff does not apply exactly at line {start + 1}')
++        out += lines[pos:start] + new
++        pos = start + len(old)
++    return b'\n'.join(out + lines[pos:])
++
++
++def build(out, plain):
++    out = os.path.abspath(out)
++    if os.path.dirname(out) != ANCHOR:
++        raise SystemExit(f'the copy must be a folder directly under {ANCHOR}: {out}')
++    os.makedirs(ANCHOR, exist_ok=True)
++    os.makedirs(out)  # new: an existing folder is refused
++    d = os.path.join(out, 'apps', 'directory')
++    os.makedirs(os.path.join(d, 'test'))
++    manifest = [f'candidate {CANDIDATE} ({"plain" if plain else "relay trace added"})']
++    for f in FILES:
++        b = git_show(f)
++        if f == 'server.js':
++            if sha(b) != BASE_SHA:
++                raise SystemExit(f'53fced4 server.js is not the pinned one ({sha(b)})')
++            if not plain:
++                diff = open(DIFF, 'rb').read().replace(b'\r\n', b'\n')  # a CRLF checkout: the same bytes
++                if sha(diff) != DIFF_SHA:
++                    raise SystemExit(f'relay_trace_53fced4.diff is not the pinned one ({sha(diff)})')
++                b = apply_diff(b, diff)
++                if sha(b) != TRACED_SHA:
++                    raise SystemExit(f'the traced server.js is not the pinned one ({sha(b)})')
++        open(os.path.join(d, *f.split('/')), 'wb').write(b)
++        manifest.append(f'{sha(b)}  apps/directory/{f}')
++    t = open(TRACE_TEST, 'rb').read().replace(b'\r\n', b'\n')
++    if sha(t) != TRACE_TEST_SHA:
++        raise SystemExit(f'relay_trace_test_7a79b09.js is not the pinned one ({sha(t)})')
++    open(os.path.join(d, 'test', 'relay_trace_test.js'), 'wb').write(t)
++    manifest.append(f'{sha(t)}  apps/directory/test/relay_trace_test.js (7a79b09)')
++    open(os.path.join(out, 'MANIFEST.txt'), 'w', encoding='utf-8').write('\n'.join(manifest) + '\n')
++    print('\n'.join(manifest))
++    print(f'server.js for the fixture: {os.path.join(d, "server.js")}')
++    return 0
++
++
++def run_trace_test(copy, tag):
++    tmp = f'{TEST_TMP_ANCHOR}/oa-relay-trace-{tag}-{os.getpid()}'
++    env = {**os.environ, 'REMOTE60_TEST_TMP': tmp}
++    env.pop('REMOTE60_RELAY_TRACE', None)
++    r = subprocess.run(['node', os.path.join(copy, 'apps', 'directory', 'test', 'relay_trace_test.js')], env=env,
++                       capture_output=True, timeout=180)
++    text = r.stdout.decode('utf-8', 'replace')
++    open(os.path.join(copy, f'relay_trace_test_{tag}.txt'), 'w', encoding='utf-8').write(text)
++    return r.returncode, text
++
++
++def check(traced, plain):
++    fails = 0
++
++    def c(what, ok, detail=''):
++        nonlocal fails
++        fails += 0 if ok else 1
++        print(f'{"PASS" if ok else "FAIL"}  {what}' + (f'  {detail}' if detail else ''), flush=True)
++
++    for copy, want in ((traced, TRACED_SHA), (plain, BASE_SHA)):
++        got = sha(open(os.path.join(copy, 'apps', 'directory', 'server.js'), 'rb').read())
++        c(f'{os.path.basename(copy)}: server.js is the pinned one', got == want, got[:16])
++    rc, text = run_trace_test(traced, 'traced')
++    passes = re.findall(r'(?m)^PASS  .*', text)
++    c('POSITIVE: the traced 53fced4 passes 7a79b09\'s relay_trace_test whole (off: no line; on: ENABLED, both ways, '
++      'clocks, buckets, no credential; the relay works both ways)', rc == 0 and 'relay_trace_test: ALL PASS' in text,
++      f'exit={rc} PASS lines={len(passes)}')
++    ex = re.search(r'(?m)^  e\.g\. (\[relay-trace\][^\n]{0,200})', text)
++    c('POSITIVE: a real [relay-trace] flow line was written', ex is not None, ex.group(1) if ex else 'none')
++    rc2, text2 = run_trace_test(plain, 'plain')
++    c('NEGATIVE: 53fced4 as it is, the variable set -- "the trace says it is on" FAILs (the variable alone traces nothing)',
++      rc2 != 0 and re.search(r'(?m)^FAIL  the trace says it is on', text2) is not None, f'exit={rc2}')
++    c('NEGATIVE control is sound: its relay itself works both times (relay_test passes)',
++      len(re.findall(r'(?m)^PASS  the relay works', text2)) == 2, '')
++    print(f'\nrelay trace copy check: {"PASS" if fails == 0 else f"{fails} FAILED"}\nRESULT: {"PASS" if fails == 0 else "FAIL"}')
++    return 0 if fails == 0 else 1
++
++
++if __name__ == '__main__':
++    a = sys.argv[1:]
++    if a[:1] == ['build'] and len(a) in (2, 3):
++        sys.exit(build(a[1], a[2:] == ['--plain']))
++    if a[:1] == ['check'] and len(a) == 3:
++        sys.exit(check(os.path.abspath(a[1]), os.path.abspath(a[2])))
++    print(__doc__)
++    sys.exit(2)
+diff --git a/automation/old_apk_lane/oa_slot.ps1 b/automation/old_apk_lane/oa_slot.ps1
+index 85b801c..c970a06 100644
+--- a/automation/old_apk_lane/oa_slot.ps1
++++ b/automation/old_apk_lane/oa_slot.ps1
+@@ -20,6 +20,7 @@ param(
+   [string]$Apk = '',
+   [string]$BuildDir = '',
+   [string]$ServerJs = '',
++  [string]$ServerSha256 = '',  # r7f: passed to the fixture (required there with KE_RELAY_TRACE=1)
+   [string]$JobRun = '',
+   [switch]$WithStandby,
+   [string[]]$HolderCmd = @()
+@@ -71,7 +72,7 @@ if (Is-Link $root) { "FAIL  SETUP slot: the run folder is a link`nRESULT: INVALI
+ $sum = "$root\slot.txt"
+ function Say([string]$line) { $line | Out-File $sum -Append -Encoding utf8 }
+ Say "slot run=$runId start $(Get-Date -Format s) (qwinsta: $((qwinsta | Select-String '^>').Line.Trim()))"
+-Say "  arm $Arm standby=$([bool]$WithStandby) build=$BuildDir server=$ServerJs"
++Say "  arm $Arm standby=$([bool]$WithStandby) build=$BuildDir server=$ServerJs serverSha256=$ServerSha256 relayTrace=$env:KE_RELAY_TRACE"
+ if ($AvdCmd.Count -eq 0) {
+   if (-not $Apk -or -not (Test-Path -LiteralPath $Apk -PathType Leaf)) { "FAIL  SETUP slot: -Apk is not a file ($Apk)`nRESULT: INVALID"; exit 2 }
+   Say "  apk $Apk $((Get-FileHash $Apk).Hash.ToLower())"
+@@ -117,6 +118,10 @@ $fxCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $(& $q "$e\oa_
+          "-HostSec 2400 -ReadyTimeoutSec $ReadyTimeoutSec -StopWaitSec $StopWaitSec -Arm $Arm"
+ if ($BuildDir) { $fxCmd += " -BuildDir $(& $q $BuildDir)" }
+ if ($ServerJs) { $fxCmd += " -ServerJs $(& $q $ServerJs)" }
++if ($ServerSha256) {
++  if ($ServerSha256 -notmatch '^[0-9a-fA-F]{64}$') { "FAIL  SETUP slot: -ServerSha256 is not a sha256`nRESULT: INVALID"; exit 2 }
++  $fxCmd += " -ServerSha256 $ServerSha256"
++}
+ if ($WithStandby) { $fxCmd += " -WithStandby" }
+ if ($HolderCmd.Count) { $fxCmd += " -HolderCmd $(& $q ($HolderCmd -join ','))" }
+ if ($HarnessCmd.Count) { $fxCmd += " -HarnessCmd $(& $q ($HarnessCmd -join ','))" }
+diff --git a/automation/old_apk_lane/relay_trace/relay_trace_53fced4.diff b/automation/old_apk_lane/relay_trace/relay_trace_53fced4.diff
+new file mode 100644
+index 0000000..23548e5
+--- /dev/null
++++ b/automation/old_apk_lane/relay_trace/relay_trace_53fced4.diff
+@@ -0,0 +1,231 @@
++--- a/apps/directory/server.js
+++++ b/apps/directory/server.js
++@@ -1652,9 +1652,112 @@
++   if (map.get(key) === session) map.delete(key);
++ }
++ 
+++// apk-decoder-liveness r3 (Codex design r3 D2) -- TEST FIXTURE trace of each relay flow, on only with
+++// REMOTE60_RELAY_TRACE=1 (the local AVD fixture sets it; no deployment does). Per flow and direction: what arrived,
+++// what was handed to the socket and what the socket said (sent / its error), by packet kind read from the header only
+++// (video / control data / ACK / NACK / handshake / standby / unknown -- never a payload), in 1 s buckets on this
+++// process's monotonic clock (mono0 = the flow's first trace, wall0 = the wall clock then), the last time of each, and
+++// the events that change a flow (a refused host-side datagram, a host tuple change). A send that succeeded is the
+++// socket's word only -- not that the far end received it. Written at each sweep (5 s, no buckets) and at the close
+++// (with the buckets). Off: nothing is counted and every send is made exactly as before.
+++const RELAY_TRACE = process.env.REMOTE60_RELAY_TRACE === '1';
+++const RELAY_TRACE_MAX_BUCKETS = 600;
+++const relayTraceUnmatched = { count: 0, lastMono: 0, lastSrc: '' };
+++
+++function relayTraceMonoMs() {
+++  return Number(process.hrtime.bigint() / 1000000n);
+++}
+++
+++function relayTraceKind(msg) {
+++  if (!msg || msg.length < 6 || msg.readUInt32LE(0) !== UDP_MAGIC) return 'unknown';
+++  const k = msg.readUInt16LE(4);
+++  switch (k) {
+++    case 300: return 'hello';
+++    case 301: return 'helloAck';
+++    case 302: return 'video';
+++    case 303: return 'punch';
+++    case 304: return 'ctlData';
+++    case 305: return 'ctlAck';
+++    case 306: return 'ctlNack';
+++    case 307: return 'cursor';
+++    case 308: return 'videoNack';
+++    case 309: return 'resume';
+++    case 310: return 'resumeAck';
+++    default: return (k >= 311 && k <= 316) ? 'standby' : 'other';
+++  }
+++}
+++
+++function relayTraceOf(session) {
+++  if (!session.trace) {
+++    session.trace = {
+++      mono0: relayTraceMonoMs(), wall0: Date.now(), buckets: new Map(),
+++      last: { c2hRx: 0, c2hSent: 0, h2cRx: 0, h2cSent: 0 }, sendErr: { c2h: 0, h2c: 0 }, lastErr: '', events: [],
+++    };
+++  }
+++  return session.trace;
+++}
+++
+++// what: 'rx' (arrived and taken for this flow), 'sent' / 'sendErr' (the socket's answer to our send).
+++function relayTraceCount(session, dir, what, msg) {
+++  if (!RELAY_TRACE || !session) return;
+++  const t = relayTraceOf(session);
+++  const mono = relayTraceMonoMs();
+++  const sec = Math.floor((mono - t.mono0) / 1000);
+++  let b = t.buckets.get(sec);
+++  if (!b) {
+++    b = {};
+++    t.buckets.set(sec, b);
+++    if (t.buckets.size > RELAY_TRACE_MAX_BUCKETS) t.buckets.delete(t.buckets.keys().next().value);
+++  }
+++  const key = `${dir}.${what}.${relayTraceKind(msg)}`;
+++  b[key] = (b[key] || 0) + 1;
+++  if (what === 'rx') t.last[`${dir}Rx`] = mono;
+++  if (what === 'sent') t.last[`${dir}Sent`] = mono;
+++}
+++
+++// The callback for a send of this flow (undefined when the trace is off: the send is then exactly as before).
+++function relayTraceSendCb(session, dir, msg) {
+++  if (!RELAY_TRACE) return undefined;
+++  return (err) => {
+++    if (err) {
+++      const t = relayTraceOf(session);
+++      t.sendErr[dir]++;
+++      t.lastErr = `${dir}:${err.code || err.message}`;
+++      relayTraceCount(session, dir, 'sendErr', msg);
+++    } else {
+++      relayTraceCount(session, dir, 'sent', msg);
+++    }
+++  };
+++}
+++
+++function relayTraceEvent(session, what) {
+++  if (!RELAY_TRACE || !session) return;
+++  const t = relayTraceOf(session);
+++  t.events.push(`${relayTraceMonoMs() - t.mono0}:${what}`);
+++  if (t.events.length > 50) t.events.shift();
+++}
+++
+++function relayTraceLine(session, why, withBuckets) {
+++  const t = relayTraceOf(session);
+++  const mono = relayTraceMonoMs();
+++  const age = (x) => (x ? mono - x : -1);
+++  let line = `[relay-trace] connect=${session.connectId} ${why} wall=${new Date().toISOString()} mono=${mono} ` +
+++             `mono0=${t.mono0} wall0=${new Date(t.wall0).toISOString()} state=${session.state} ` +
+++             `ageMs c2hRx=${age(t.last.c2hRx)} c2hSent=${age(t.last.c2hSent)} h2cRx=${age(t.last.h2cRx)} ` +
+++             `h2cSent=${age(t.last.h2cSent)} sendErr c2h=${t.sendErr.c2h} h2c=${t.sendErr.h2c} ` +
+++             `lastErr=${t.lastErr || 'none'} events=[${t.events.join(' ')}]`;
+++  if (withBuckets) {
+++    const parts = [];
+++    for (const [sec, b] of t.buckets) parts.push(`${sec}:` + Object.entries(b).map(([k, v]) => `${k}=${v}`).join(','));
+++    line += ` buckets=[${parts.join(' ')}]`;
+++  }
+++  return line;
+++}
+++
++ function relayDropSession(session, reason) {
++   if (!session || session.dropped) return;
++   session.dropped = true;
+++  if (RELAY_TRACE && session.trace) console.log(relayTraceLine(session, `close reason=${reason}`, true));
++   relaySessions.delete(session);
++   if (session.clientPort) relayUnindex(relaySessionByClient, endpointKey(session.clientIp, session.clientPort), session);
++   if (session.cls === 'standby') {
++@@ -1705,6 +1808,7 @@
++                     `was=${standby.hostIp}:${standby.hostPort}`);
++       }
++       standby.hostPinned = false;
+++      relayTraceEvent(standby, `host-moved-unpinned`);
++       relayStandbyReprove(standby, 'host moved');
++     }
++     if (!standby.hostPinned) {
++@@ -1724,6 +1828,7 @@
++   console.log(`[relay] connect=${session.connectId} host moved ${session.hostIp}:${session.hostPort}` +
++               ` -> ${aim.ip}:${aim.port} via=${aim.via}` +
++               (previousWire.ip ? '' : ' (first heartbeat)'));
+++  relayTraceEvent(session, `host-tuple ${aim.ip}:${aim.port}`);
++   session.hostIp = aim.ip;
++   session.hostPort = aim.port;
++   relaySessionByHost.set(newKey, session);
++@@ -1740,6 +1845,15 @@
++     if (now > rec.expiresAt) relayEligibleByWireIp.delete(ip);
++   }
++   relayDiag.sweep();
+++  if (RELAY_TRACE) {
+++    for (const session of relaySessions) {
+++      if (!session.dropped && session.trace) console.log(relayTraceLine(session, 'snap', false));
+++    }
+++    if (relayTraceUnmatched.count > 0) {
+++      console.log(`[relay-trace] unmatched c2h count=${relayTraceUnmatched.count} lastSrc=${relayTraceUnmatched.lastSrc} ` +
+++                  `ageMs=${relayTraceMonoMs() - relayTraceUnmatched.lastMono}`);
+++    }
+++  }
++   for (const session of [...relaySessions]) {
++     // CONNECT-DIAG: said once, while the session is still open, so the silence is visible before
++     // the close line rather than only in the post-mortem it produces.
++@@ -2116,6 +2230,7 @@
++     const host = store.hosts[session.hostId];
++     const known = host ? [host.wireIp, host.publicIp, session.hostIp].filter(Boolean) : [];
++     if (!known.includes(rinfo.address) || !proofMatches(punchProofOf(msg), session.hostProof)) {
+++      relayTraceEvent(session, `h2c-refused:unproven:${relayTraceKind(msg)}`);
++       relayDiag.note('standby-host-unproven', rinfo.address,
++                      `[relay] connect=${session.connectId} standby host-side datagram refused ` +
++                      `src=${rinfo.address}:${rinfo.port} reason=${known.includes(rinfo.address) ? 'no-host-proof' : 'not-the-host'}`);
++@@ -2127,12 +2242,14 @@
++     console.log(`[relay] connect=${session.connectId} standby host pinned ${rinfo.address}:${rinfo.port} ` +
++                 `hostFacing=${session.hostFacingPort}`);
++   } else if (rinfo.address !== session.hostIp || rinfo.port !== session.hostPort) {
+++    relayTraceEvent(session, `h2c-refused:not-pinned:${rinfo.address}:${rinfo.port}:${relayTraceKind(msg)}`);
++     relayDiag.note('standby-host-unpinned', rinfo.address,
++                    `[relay] connect=${session.connectId} standby host-side datagram refused ` +
++                    `src=${rinfo.address}:${rinfo.port} reason=not-the-pinned-tuple`);
++     return;
++   }
++   session.lastHostAt = Date.now();
+++  relayTraceCount(session, 'h2c', 'rx', msg);
++   const handshake = parseHandshakePacket(msg);
++   if (handshake && handshake.kind === UDP_KIND_PUNCH) return;
++   session.pktH2C++;
++@@ -2153,12 +2270,13 @@
++     console.log(`[relay] connect=${session.connectId} standby active (activation over the same lease)`);
++   }
++   if (!session.clientPort) return;  // a reservation: the host's punch pinned it, nothing to carry yet
++-  if (relaySock) relaySock.send(msg, session.clientPort, session.clientIp);
+++  if (relaySock) relaySock.send(msg, session.clientPort, session.clientIp, relayTraceSendCb(session, 'h2c', msg));
++ }
++ 
++ // Forwards one client packet to the host and counts it.
++ function relayForwardToHost(session, msg) {
++   session.lastClientAt = Date.now();
+++  relayTraceCount(session, 'c2h', 'rx', msg);
++   session.pktC2H++;
++   session.bytesC2H += msg.length;
++   // CONNECT-DIAG: the first hop towards the host, once per session.
++@@ -2171,7 +2289,7 @@
++   }
++   // A standby lease goes out of its OWN host-facing socket; a legacy one out of the observe socket.
++   const out = session.cls === 'standby' ? session.sock : observeSock;
++-  if (out) out.send(msg, session.hostPort, session.hostIp);
+++  if (out) out.send(msg, session.hostPort, session.hostIp, relayTraceSendCb(session, 'c2h', msg));
++ }
++ 
++ /**
++@@ -2241,6 +2359,11 @@
++         }
++         return;
++       }
+++      if (RELAY_TRACE) {
+++        relayTraceUnmatched.count++;
+++        relayTraceUnmatched.lastMono = relayTraceMonoMs();
+++        relayTraceUnmatched.lastSrc = `${rinfo.address}:${rinfo.port}:${relayTraceKind(msg)}`;
+++      }
++       return;  // anything else opens nothing
++     }
++ 
++@@ -2282,6 +2405,7 @@
++   const session = relaySessionByHost.get(endpointKey(rinfo.address, rinfo.port));
++   if (!session || session.dropped) return false;
++   session.lastHostAt = Date.now();
+++  relayTraceCount(session, 'h2c', 'rx', msg);
++   session.pktH2C++;
++   session.bytesH2C += msg.length;
++   // CONNECT-DIAG: the first sign of life from the host, once per session. The gap from the first
++@@ -2303,7 +2427,7 @@
++       console.log(`[relay] connect=${session.connectId} active; helloAck in ${session.ackMs}ms`);
++     }
++   }
++-  if (relaySock) relaySock.send(msg, session.clientPort, session.clientIp);
+++  if (relaySock) relaySock.send(msg, session.clientPort, session.clientIp, relayTraceSendCb(session, 'h2c', msg));
++   return true;
++ }
++ 
++@@ -3061,6 +3185,7 @@
++     const ips = RELAY_ALLOW_IPS.any ? '*' : ([...RELAY_ALLOW_IPS.set].join(',') || '(none)');
++     const accounts = RELAY_ALLOW_ACCOUNTS.any
++       ? '*' : ([...RELAY_ALLOW_ACCOUNTS.set].join(',') || '(none)');
+++    if (RELAY_TRACE) console.log('[relay-trace] ENABLED (REMOTE60_RELAY_TRACE=1: a test fixture only)');
++     console.log(`[relay] ENABLED ip=${RELAY_IP || '(unset -- candidate NOT offered)'} ` +
++                 `port=${RELAY_PORT} grace=${RELAY_GRACE_MS}ms allowIps=${ips} ` +
++                 `allowAccounts=${accounts}`);
+diff --git a/automation/old_apk_lane/relay_trace/relay_trace_test_7a79b09.js b/automation/old_apk_lane/relay_trace/relay_trace_test_7a79b09.js
+new file mode 100644
+index 0000000..e7f96e6
+--- /dev/null
++++ b/automation/old_apk_lane/relay_trace/relay_trace_test_7a79b09.js
+@@ -0,0 +1,75 @@
++// apk-decoder-liveness r3 (Codex design r3 D2): the relay's TEST trace (REMOTE60_RELAY_TRACE=1, the local AVD
++// fixture's setting). A throwaway server on spare ports, run twice through relay_test.js (a fake host and a fake phone
++// talking real packets): with the trace OFF it writes no trace line; with it ON it says so, every flow's direction /
++// kind counts and last times appear (at the 5 s sweep or at the close), credentials never do -- and the relay works
++// the same both ways (relay_test passes).
++//
++//   REMOTE60_TEST_TMP=D:/remote/remote/.claude/test-tmp/<name> node test/relay_trace_test.js
++const { spawn, spawnSync } = require('child_process');
++const path = require('path');
++const testTmp = require('./test_tmp');
++
++const serverPath = path.join(__dirname, '..', 'server.js');
++const testRoot = testTmp.root();
++const dataPath = testTmp.file(`remote60-relay-trace-test-${process.pid}.json`);
++const env = { ...process.env, REMOTE60_TEST_TMP: testRoot, TEMP: testRoot, TMP: testRoot, TMPDIR: testRoot,
++              REMOTE60_DIR_DATA: dataPath, REMOTE60_DIR_PORT: '18090', REMOTE60_DIR_UDP_PORT: '18091',
++              REMOTE60_DIR_SIGNUP_KEY: 'test-signup-key', T_PORT: '18090', T_UDP: '18091',
++              REMOTE60_RELAY_ENABLED: '1', REMOTE60_RELAY_IP: '127.0.0.1', REMOTE60_RELAY_PORT: '18453',
++              REMOTE60_RELAY_GRACE_MS: '400', REMOTE60_RELAY_ALLOW_IPS: '127.0.0.1',
++              REMOTE60_RELAY_ALLOW_ACCOUNTS: 'tester', T_RELAY: '18453' };
++
++const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
++let failures = 0;
++function check(name, cond, detail) {
++  console.log(`${cond ? 'PASS' : 'FAIL'}  ${name}${detail ? '  ' + detail : ''}`);
++  if (!cond) failures++;
++}
++
++async function runOnce(trace) {
++  testTmp.remove(dataPath);
++  spawnSync(process.execPath, [serverPath, '--add-account', 'tester', 'test-pass-1234'], { env, stdio: 'ignore' });
++  spawnSync(process.execPath, [serverPath, '--add-account', 'outsider', 'outsider-pass-1234'], { env, stdio: 'ignore' });
++  const serverEnv = trace ? { ...env, REMOTE60_RELAY_TRACE: '1' } : env;
++  const server = spawn(process.execPath, [serverPath], { env: serverEnv, stdio: ['ignore', 'pipe', 'inherit'] });
++  let out = '';
++  server.stdout.on('data', (c) => (out += c));
++  await sleep(1500);
++  const code = await new Promise((resolve) => {
++    const child = spawn(process.execPath, [path.join(__dirname, 'relay_test.js')], { env, stdio: 'inherit' });
++    child.on('exit', (c) => resolve(c ?? 1));
++  });
++  await sleep(6000);  // one sweep (5 s)
++  await new Promise((resolve) => {
++    server.on('exit', () => resolve());
++    server.kill();
++  });
++  testTmp.remove(dataPath);
++  return { code, out };
++}
++
++(async () => {
++  console.log('--- the relay with the trace OFF ---');
++  const off = await runOnce(false);
++  check('the relay works (relay_test)', off.code === 0, `exit ${off.code}`);
++  check('no trace line is written', !off.out.includes('[relay-trace]'));
++
++  console.log('\n--- the relay with the trace ON (REMOTE60_RELAY_TRACE=1) ---');
++  const on = await runOnce(true);
++  const lines = on.out.split(/\r?\n/).filter((l) => l.startsWith('[relay-trace]'));
++  const flows = lines.filter((l) => / connect=\S+ (snap|close) /.test(l));
++  check('the relay works the same (relay_test)', on.code === 0, `exit ${on.code}`);
++  check('the trace says it is on', lines.some((l) => l.includes('ENABLED')));
++  check('flows are traced both ways (a c2h and an h2c last time)',
++        flows.some((l) => /c2hRx=\d+/.test(l) && /h2cRx=\d+/.test(l)), `lines=${flows.length}`);
++  check('the clocks are named (mono, mono0, wall, wall0)',
++        flows.length > 0 && flows.every((l) => / mono=\d+ mono0=\d+ /.test(l) && / wall=\S+/.test(l) && / wall0=\S+/.test(l)));
++  const closes = flows.filter((l) => / close reason=/.test(l));
++  check('a closed flow carries its 1 s buckets by direction and kind',
++        closes.length === 0 || closes.some((l) => /buckets=\[\d+:\S*(c2h|h2c)\.(rx|sent)\./.test(l)),
++        `closes=${closes.length}`);
++  check('no credential in the output', !on.out.includes('test-pass-1234') && !on.out.includes('outsider-pass-1234'));
++  if (flows.length) console.log('  e.g. ' + flows[flows.length - 1].slice(0, 500));
++  console.log(`\nrelay_trace_test: ${failures === 0 ? 'ALL PASS' : failures + ' FAILED'}`);
++  process.exit(failures === 0 ? 0 : 1);
++})();
+diff --git a/automation/old_apk_lane/stubs/fake_ui_adb.py b/automation/old_apk_lane/stubs/fake_ui_adb.py
+index 1c6b7d5..365c6ff 100644
+--- a/automation/old_apk_lane/stubs/fake_ui_adb.py
++++ b/automation/old_apk_lane/stubs/fake_ui_adb.py
+@@ -21,16 +21,37 @@ the PinnedSelectTest host log when a card / the picture is tapped. Every call is
+        OA_FAKE_BACK       what BACK does on the PC list with the keyboard up: ime (the keyboard takes it and hides) |
+                           leak (the app takes it: the exit question, android:id/button1; the keyboard stays)
+   The ui state's "scene": "hosts" (the PC list: hostCardName oa-pc-a), "targets" (default) or "viewer" (set by a pick).
++  r7e: "login" too (loginIdInput / loginPasswordInput / loginButton; Sign-in -> the PC list, the card -> the targets), and
++  what oa_avd.main asks before the app starts (install, pm clear, pm path, dumpsys package, pull of base.apk =
++  OA_FAKE_ADB_APK) -- so the stub can drive arm S from the install to 4 and see what it does after.
++  r7f: the Settings tab (listSettingsButton) with 0.2.32's sharpening row (settingsSharpOffButton / Weak / Strong; the
++  requested level "selected", weak until changed); the app's content box android:id/content (0,136)-(1080,2400).
++       OA_FAKE_SH   ok (default) | norow (no sharpening row shown) | offscreen (Off below the content box) | nolog (the
++                    tap logs no sharpness_select) | noselect (logged, but the level stays weak) | start (the picture
++                    still goes through the sharpen path: sharpen_path path=sharpen + sharpen_start)
++                    At the picture: requested off -> sharpen_path path=direct requested=off; still weak -> path=direct
++                    requested=weak effective=off fallback=... (a fallback, not SH off).
++       In the viewer every pull of the app log adds a video_debug line with out one higher (OA_FAKE_FROZEN=1: not);
++       OA_FAKE_DROP_SEC=<s>: that long after the picture the connection breaks (the app: scene HOSTS, status error; the
++       host: udp control session ended) and the PC list shows the error text (statusText).
++       OA_FAKE_PW_TEXT: the login password field's text (to see that a record never writes it).
+ """
+ import json
+ import os
+ import shutil
+ import sys
++import time
+ 
+ PINNED = int(os.environ.get('OA_FAKE_PINNED', '80809746'))
+ TITLE = 'remote60 mobile abr target pid 43948 92abc8fe'
+ PKG = 'com.remote60.androiddirect'
+-TABS = {'listWindowsButton': (0, 380, 400, 430, 'Windows'), 'listDevicesButton': (420, 380, 660, 430, 'Desktop')}
++TABS = {'listWindowsButton': (0, 380, 400, 430, 'Windows'), 'listDevicesButton': (420, 380, 660, 430, 'Desktop'),
++        'listSettingsButton': (680, 380, 1040, 430, 'Settings')}
++CONTENT = (0, 136, 1080, 2400)
++SH_ROW = {'settingsSharpOffButton': (40, 1300, 330, 1400, '끄기', 'off'),
++          'settingsSharpWeakButton': (370, 1300, 660, 1400, '약하게', 'weak'),
++          'settingsSharpStrongButton': (700, 1300, 1040, 1400, '강하게', 'strong')}
++SH = os.environ.get('OA_FAKE_SH', 'ok')
+ CARD = (100, 1000, 470, 1100)
+ HOSTCARD = (40, 400, 1040, 560)
+ VIDEO = (0, 136, 1080, 2400)
+@@ -62,14 +83,29 @@ def card_text():
+     return 'Notepad' if variant == 'nopinned' else 'remote60 mobile abr…'
+ 
+ 
++LOGIN = {'loginIdInput': (40, 480, 1040, 560, 'ID'), 'loginPasswordInput': (40, 630, 1040, 720, 'Password'),
++         'loginButton': (40, 800, 1040, 900, 'Sign In')}
++
++
+ def nodes():
++    root = [('android:id/content', CONTENT, '')]
++    if state.get('scene') == 'login':
++        return root + [(k, v[:4], os.environ.get('OA_FAKE_PW_TEXT', v[4]) if k == 'loginPasswordInput' else v[4])
++                       for k, v in LOGIN.items()]
+     if state.get('scene') == 'hosts':
+-        out = [('hostCardName', HOSTCARD, 'oa-pc-a')]
++        out = root + [('hostCardName', HOSTCARD, 'oa-pc-a')]
++        if state.get('err'):
++            out.append(('statusText', (40, 300, 1040, 380), '연결이 끊겼습니다 (peer lost)'))
+         if state.get('dialog'):
+             out.append(('android:id/button1', DIALOG_OK, 'OK'))
+         return out
+-    out = [(k, v[:4], v[4]) for k, v in TABS.items()]
+-    if state.get('scene') != 'viewer':
++    out = root + [(k, v[:4], v[4]) for k, v in TABS.items()]
++    if state.get('scene') != 'viewer' and state['tab'] == 'settings':
++        if SH != 'norow':
++            for k, v in SH_ROW.items():
++                b = v[:4] if not (SH == 'offscreen' and k == 'settingsSharpOffButton') else (40, 2450, 330, 2550)
++                out.append((k, b, v[4]))
++    elif state.get('scene') != 'viewer':
+         out.append(('targetCardTitle', CARD, card_text()))
+     elif os.environ.get('OA_FAKE_NOVIDEO') != '1':
+         out.append(('videoTextureView', VIDEO, ''))
+@@ -78,8 +114,10 @@ def nodes():
+ 
+ def node_xml(rid, b, text):
+     full = rid if ':' in rid else f'{PKG}:id/{rid}'
++    sel = 'true' if rid in SH_ROW and SH_ROW[rid][5] == state.get('sh', 'weak') else 'false'
++    pw = 'true' if rid == 'loginPasswordInput' else 'false'
+     return (f'<node resource-id="{full}" text="{text}" content-desc="" enabled="true" clickable="true" '
+-            f'bounds="[{b[0]},{b[1]}][{b[2]},{b[3]}]" />')
++            f'selected="{sel}" password="{pw}" bounds="[{b[0]},{b[1]}][{b[2]},{b[3]}]" />')
+ 
+ 
+ def ime():
+@@ -107,15 +145,31 @@ elif cmd.startswith('exec-out uiautomator'):
+                              ''.join(node_xml(*n) for n in nodes()) + '</hierarchy>').encode('utf-8'))
+ elif cmd.startswith('shell input tap'):
+     x, y = int(args[3]), int(args[4])
+-    hit = [n for n in nodes() if n[1][0] <= x <= n[1][2] and n[1][1] <= y <= n[1][3]]
++    hit = [n for n in nodes() if n[1][0] <= x <= n[1][2] and n[1][1] <= y <= n[1][3] and n[0] != 'android:id/content']
+     rid = hit[0][0] if hit else ''
+-    if rid == 'listWindowsButton':
++    if rid == 'loginButton':
++        state['scene'] = 'hosts'
++        app('[login_attempt] server=http://10.0.2.2:18410 id=oatest')
++    elif rid == 'hostCardName':
++        state['scene'] = 'targets'
++        app('[directory_chosen] 10.0.2.2:18443|relay')
++        app('[targets_ready] origin=connect ms=1 items=1 gen=1')
++        host('client connected transport=udp', tag=' ')
++    elif rid == 'listWindowsButton':
+         state['tab'] = 'windows'
+         app('[tab_switch] tab=windows')
+         host(f'window-list seq=2 count=1 selectedId={PINNED}')
+     elif rid == 'listDevicesButton':
+         state['tab'] = 'desktop'
+         app('[tab_switch] tab=desktop')
++    elif rid == 'listSettingsButton':
++        state['tab'] = 'settings'
++        app('[tab_switch] tab=settings')
++    elif rid == 'settingsSharpOffButton':
++        if SH != 'nolog':
++            app('[sharpness_select] level=off s=0.0 origin=settings path=none effective=off')
++        if SH != 'noselect':
++            state['sh'] = 'off'
+     elif rid == 'targetCardTitle':
+         if state['tab'] == 'windows' and variant in ('ok', 'genmismatch', 'novideo'):
+             tid, label, tab = PINNED, TITLE, 'WINDOWS'
+@@ -129,9 +183,17 @@ elif cmd.startswith('shell input tap'):
+             host(f'window-select seq=1 requestedId={tid} applied=1 selectedId={tid} streamGen=2 reason=ok title={TITLE}')
+             app(f'[select_ack] targetId={tid} gen=1 streamGen={7 if variant == "genmismatch" else 2} hostSendQpcUs=1 title={TITLE}')
+             app(f'[select_ready] targetId={tid} gen=1 lastOutUs=1 title={TITLE} ms=900')
++            if state.get('sh', 'weak') == 'off' and SH != 'start':
++                app('[sharpen_path] path=direct requested=off effective=off fallback=none')
++            elif SH == 'start':
++                app('[sharpen_path] path=sharpen gen=1 requested=off s=0.0')
++                app('[sharpen_start] gen=1 s=0.0 faults=none')
++            else:
++                app('[sharpen_path] path=direct requested=weak effective=off fallback=gl_unavailable')
+             if variant != 'novideo':
+                 app('[video_debug] surface=on codec=on in=3 out=3')
+             state['scene'] = 'viewer'
++            state['viewer_t'] = time.time()
+             if os.environ.get('OA_FAKE_INPUT') == 'pretap':  # a down/up BEFORE the picture tap: not its events
+                 for kind in (2, 3):
+                     state['inseq'] = state.get('inseq', 0) + 1
+@@ -157,7 +219,30 @@ elif cmd == 'shell input keyevent 4':
+         state['dialog'] = True
+     json.dump(state, open(state_path, 'w', encoding='utf-8'))
+ elif args[:1] == ['pull']:
+-    shutil.copyfile(os.environ['OA_FAKE_APPLOG'], args[2])
++    if args[1].endswith('base.apk'):
++        shutil.copyfile(os.environ['OA_FAKE_ADB_APK'], args[2])
++    else:
++        if state.get('scene') == 'viewer':  # r7f: the picture goes on (or breaks) while the viewer is up
++            drop = os.environ.get('OA_FAKE_DROP_SEC')
++            if drop and time.time() - state.get('viewer_t', 0) >= float(drop):
++                app('[scene] HOSTS')
++                app('[status] error: 연결이 끊겼습니다 (peer lost)')
++                host('udp control session ended epoch=1 resumed=0 reason=none')
++                state['scene'] = 'hosts'
++                state['err'] = True
++            elif os.environ.get('OA_FAKE_FROZEN') != '1' and os.environ.get('OA_FAKE_UI_VARIANT') != 'novideo':
++                state['vout'] = state.get('vout', 3) + 1
++                app(f"[video_debug] surface=on codec=on in={state['vout']} out={state['vout']}")
++            json.dump(state, open(state_path, 'w', encoding='utf-8'))
++        shutil.copyfile(os.environ['OA_FAKE_APPLOG'], args[2])
++elif args[:1] == ['install']:
++    print('Performing Streamed Install\nSuccess')
++elif cmd.startswith('shell pm clear'):
++    print('Success')
++elif cmd.startswith('shell pm path'):
++    print('package:/data/app/~~fake/com.remote60.androiddirect-1/base.apk')
++elif cmd.startswith('shell dumpsys package'):
++    print('    versionCode=31 minSdk=28 targetSdk=34\n    versionName=0.2.32')
+ elif cmd.startswith('exec-out screencap'):
+     sys.stdout.buffer.write(b'\x89PNG fake')
+ sys.exit(0)
+diff --git a/automation/old_apk_lane/stubs/stub_node.py b/automation/old_apk_lane/stubs/stub_node.py
+index e3527f7..80221e8 100644
+--- a/automation/old_apk_lane/stubs/stub_node.py
++++ b/automation/old_apk_lane/stubs/stub_node.py
+@@ -1,10 +1,15 @@
+ """A stand-in for the directory (server.js) in the orchestration test: no socket. KE_STUB_NODE=dies: ends at once (1);
+-else it sleeps until it is ended (by its owner's handle)."""
++else it sleeps until it is ended (by its owner's handle).
++r7f: KE_STUB_NODE_TRACE=1 plays a server WITH the relay trace (the trace-only test copy): it says
++'[relay-trace] ENABLED' only when REMOTE60_RELAY_TRACE=1 reached it. Without KE_STUB_NODE_TRACE it is 53fced4 as it is:
++the variable changes nothing, no line."""
+ import os
+ import sys
+ import time
+ 
+ if os.environ.get('KE_STUB_NODE') == 'dies':
+     sys.exit(1)
++if os.environ.get('KE_STUB_NODE_TRACE') == '1' and os.environ.get('REMOTE60_RELAY_TRACE') == '1':
++    print('[relay-trace] ENABLED (REMOTE60_RELAY_TRACE=1: a test fixture only) -- stub', flush=True)
+ while True:
+     time.sleep(1)

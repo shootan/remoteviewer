@@ -1,0 +1,34 @@
+﻿host_capture_quarantine_test (dxgi-wedge-fix r1)
+PASS  test capture-recovery folder chain
+PASS  1: two children ran  2
+PASS  1: the first child of a fresh supervisor (nothing stored) is not quarantined  pid=37860 q=-
+PASS  1: after its exit 44 the next child is quarantined for this run  pid=1880 q=wedge-this-run
+PASS  1: the wedge is recorded against the adapter the child reported  schema=1
+adapter=0123456789abcdef
+driver=31.0.15.5244
+first=1792997501
+last=1792997501
+expires=1793602301
+wedges=1
+
+PASS  1: the supervisor logged the record
+PASS  2: a NEW supervisor quarantines its very first child (same adapter + driver)  pid=25412 q=persisted:key=0123456789abcdef:driver=31.0.15.5244:expires=1793602301
+PASS  2: and says so in its log
+PASS  3: after a driver update the first child is NOT quarantined  pid=7980 q=-
+PASS  3: the log names the reason (driver-changed)
+PASS  4: the recorded adapter is not present -> not quarantined  pid=5884 q=-
+PASS  5: an expired record is written
+PASS  5: 7 days after the last wedge the first child is NOT quarantined  pid=26096 q=-
+PASS  5: the log says expired
+PASS  6: a damaged record is written
+PASS  6: a damaged record quarantines nothing  pid=27068 q=-
+PASS  6: ...and is reported
+PASS  6: a record from the future quarantines nothing  pid=15808 q=-
+PASS  6: ...and is reported
+PASS  7: still WGC for the rest of this run  pid=35092 q=wedge-this-run
+PASS  7: but nothing is recorded (the default GPU is not assumed)
+PASS  7: and the log says why
+PASS  8: a value in the parent's environment is stripped from the child  pid=7292 q=-
+
+RESULT: ALL PASS  (23 checks, 0 failed)
+WARN  staging directory not removed (C:\work\gnlink-wt\fix-capture-lifecycle\build\test-scratch\run-39504-3433152004062-0\capq-1, attributes error 0)

@@ -1,0 +1,4 @@
+{
+ "repo_path": "D:/remote/remote",
+ "message": "docs(observe): a7cda4c is a ledger commit, not a product one\n\nCalled the fixed list \"product and test\", and one of the twelve touches only\ndocs/작업목록.md. The label was wrong even though the list was right, and\nthe point of that list is that it can be trusted without re-deriving it.\n\nKept in place -- it records a finding from this work -- and now says so.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+}

@@ -1,0 +1,233 @@
+#pragma once
+
+// How the updater assembles everything else — the layer where five defects lived undetected.
+//
+// It used to be a class inside updater_main.cpp, which is linked into the product binary and
+// nothing else. That meant nobody could drive it, and nobody did: set_manifest had no caller, the
+// verified version was never assigned, and process identities were captured after the point at
+// which they had already gone. All three were assembly mistakes -- every part they connect was
+// correct and separately tested. The suites were green while the feature could not run.
+//
+// So the assembly is here, in a translation unit a test links, and everything effectful it needs
+// arrives as UpdaterDeps. The point is not that the dependencies are swappable; it is that
+// "does the updater wire this up correctly" becomes a question something can ask.
+//
+// The trusted key is one of those dependencies. Production passes default_verifier(); a test
+// passes a verifier for a throwaway key, so a signed fixture can be exercised end to end WITHOUT
+// the product's trust anchor being altered or a build flag changing what production trusts.
+//
+// Design: docs/업데이트_배선_계획.md W1, docs/업데이트_기능_설계.md 3.1-3.6.
+
+#include <functional>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "install_registration.hpp"
+#include "update_effects.hpp"
+#include "update_endpoint.hpp"
+#include "update_relaunch.hpp"
+#include "update_state_machine.hpp"
+#include "updater_options.hpp"
+
+namespace remote60::native_poc::update {
+
+/** Everything the assembly needs from the outside world. Nothing here has a default. */
+struct UpdaterDeps {
+  /** Fetches a small text document. Production is WinHTTP; a test serves from memory. */
+  std::function<bool(const std::string& url, size_t maxBytes, std::string* body,
+                     std::string* error)>
+      fetchText;
+  /** Streams one artifact to a path, refusing anything larger than `maxBytes`. */
+  std::function<bool(const std::string& url, const std::wstring& destPath, uint64_t maxBytes,
+                     std::string* error)>
+      fetchFile;
+  /** The product processes that are running. Production enumerates by image name. */
+  std::function<std::vector<ProcessTarget>()> enumerateTargets;
+  /** Asks one to close. Never forces. */
+  std::function<bool(const ProcessTarget&)> requestStop;
+  /** Service, firewall and shortcut operations. A test records rather than performs. */
+  install::RegistrationOps registrationOps;
+  /** Builds the relaunch effects. Injected so a test can substitute dummies for real images. */
+  std::function<RelaunchEffects(const RelaunchConfig&, const std::vector<ProcessTarget>&)>
+      makeRelaunch;
+  /** Checks the manifest signature. Production uses the compiled-in trusted key. */
+  SignatureVerifier verifier;
+  /** Releases a caller waiting to exit. Called at exactly one point; see UpdaterEffects::run. */
+  /**
+   * Tells whoever is waiting that the download is verified. Returns whether it was DELIVERED.
+   *
+   * The return value used to be void, and that was half of a defect: an updater whose signal went
+   * nowhere carried on and stopped the product anyway. Nobody was waiting, so nobody was going to
+   * bring it back.
+   */
+  std::function<bool(const std::wstring& eventName)> signalReady;
+
+  /**
+   * Waits for the acknowledgement that belongs to `readyEventName`. Returns whether it came.
+   *
+   * The other half. A signal that was delivered still does not mean anyone acted on it -- the
+   * waiting caller may have already given up and told the user that no update would happen. It
+   * must not then be shut down by an updater that arrived late, so the updater waits to be told
+   * "yes, I am standing down" before it stops anything.
+   */
+  /**
+   * Opens the acknowledgement channel and hands back a handle to HOLD. Null when it cannot.
+   *
+   * Opened BEFORE the ready signal goes out, and that order is the whole point. The caller
+   * creates the channel and closes it the moment it has answered -- so if the updater waits until
+   * it needs the answer before opening it, the last handle can be gone by then and the named
+   * object with it. The open fails, the answer looks absent, and the update stands down having
+   * already told the caller to leave.
+   *
+   * Holding it from before the signal until after the answer keeps the object alive across the
+   * window where both sides are letting go.
+   */
+  std::function<void*(const std::wstring& readyEventName)> openAck;
+
+  /** Waits on a handle from `openAck`. Returns whether the answer came. */
+  std::function<bool(void* ackHandle, uint32_t timeoutMs)> awaitAck;
+
+  /** Releases a handle from `openAck`. */
+  std::function<void(void* ackHandle)> closeAck;
+  /** Where log lines go. */
+  std::function<void(const std::string&)> log;
+  /** This process's own image, so the swap can refuse to replace it. */
+  std::wstring selfImagePath;
+  /**
+   * What a swap replaces, and what the relaunch plan may start.
+   *
+   * Production passes the product's own lists. They are dependencies rather than constants for
+   * the same reason everything else here is: an assembly that decides them for itself cannot be
+   * driven against anything but the real product, which is how this layer went untested while
+   * five defects lived in it.
+   *
+   * The two are related on purpose -- the set that is stopped and the set that is replaced must
+   * not drift apart -- so they are supplied together.
+   */
+  /**
+   * The mutual-exclusion name (design 3.3). A dependency, not a constant.
+   *
+   * It was hardcoded to the production name, which meant every test that drove this assembly
+   * competed with the INSTALLED product for the same machine-wide mutex. That is not theoretical:
+   * a run here failed with "another update or installer holds the lock" because something else on
+   * the machine had it -- and the same collision in the other direction would have a test block a
+   * real update from starting.
+   *
+   * Production supplies `Global\\GNLinkUpdate`; a test supplies something of its own.
+   */
+  std::wstring lockName;
+
+  std::vector<std::wstring> payloadNames;
+  std::vector<KnownImage> relaunchTable;
+  /**
+   * How long a process asked to stop is given to finish closing before "still running" is
+   * believed. See RelaunchConfig::closingGraceMs -- zero means no grace, which is right for a
+   * test injecting a fixed liveness answer and wrong for anything reading a real process.
+   */
+  uint32_t closingGraceMs = 0;
+
+  /** False when anything required is missing. */
+  bool validate(std::string* detail = nullptr) const;
+};
+
+/** The production set: WinHTTP, the real enumerator, the real SCM, the compiled trusted key. */
+/**
+ * `endpoint` decides what may be attached to which request. An endpoint with no credential -- an
+ * override, or a run that never received one -- produces fetchers that send nothing, which is the
+ * behaviour this had before there was a credential at all.
+ */
+UpdaterDeps production_updater_deps(std::function<void(const std::string&)> log,
+                                    const UpdateEndpoint& endpoint = {});
+
+/**
+ * Assembles the effects from options and dependencies, and runs one update.
+ *
+ * Kept as a class only because the assembly happens in two stages: what can be known before the
+ * manifest, and what cannot be known until it has been verified.
+ */
+class UpdaterEffects {
+ public:
+  UpdaterEffects(UpdaterOptions options, UpdaterDeps deps);
+
+  /** Builds what does not depend on the manifest. False when the dependencies are incomplete. */
+  bool build(std::string* detail);
+
+  /** Runs one attempt. */
+  UpdateOutcome run(const std::string& platform);
+
+  /** What to tell the user when something did not come back. Empty when everything did. */
+  const std::string& user_notice() const { return userNotice_; }
+
+  /**
+   * The version this attempt verified, or empty when it never got that far.
+   *
+   * Exposed for the same reason it exists: a caller -- or a test -- must be able to see that the
+   * version which reached registration came from the manifest and not from this binary.
+   */
+  const std::string& verified_version() const { return verifiedVersion_; }
+
+  /**
+   * The last thing the effects complained about, or empty.
+   *
+   * The state machine's detail says which STEP failed ("swap failed"); this says what it hit
+   * ("could not move aside GNLinkHost.exe"). Both are needed to act on a failure, and only the
+   * first was reaching the log.
+   */
+  const std::string& last_effects_error() const { return lastEffectsError_; }
+
+  /**
+   * Seams the assembly left empty on the last run. Empty is the only acceptable value.
+   *
+   * Exposed rather than merely logged because "production wires everything a test wires" is the
+   * question this layer kept answering wrongly, and it should be answerable by an assertion
+   * instead of by reading the assembly and hoping.
+   */
+  const std::vector<std::string>& unwired_seams() const { return unwiredSeams_; }
+
+  /**
+   * Backups the commit could not delete, from the last run.
+   *
+   * They used to leave no trace: the delete result was ignored, so a file that stayed beside the
+   * installation was indistinguishable from one that had been removed. A surviving .gnlink-old
+   * with nothing to explain it is exactly what this records.
+   */
+  const std::vector<std::wstring>& orphaned_backups() const { return orphanedBackups_; }
+
+ private:
+  UpdaterOptions options_;
+  UpdaterDeps deps_;
+  UpdateEffectsConfig config_;
+  install::RegistrationTarget registrationTarget_;
+  std::string userNotice_;
+  std::string verifiedVersion_;
+  std::string lastEffectsError_;
+  std::vector<std::string> unwiredSeams_;
+  std::vector<std::wstring> orphanedBackups_;
+};
+
+/**
+ * The order in which a working copy is made and started.
+ *
+ * Extracted with its steps injected because the ORDER is the property that matters and nothing
+ * could observe it: the directory has to be checked before it is created, created before anything
+ * is copied into it, and the copy has to exist before it is launched. A check that ran after the
+ * copy would be reporting on a directory that had already received an executable.
+ */
+struct WorkingCopySteps {
+  /** Returns false to refuse. Called first, always. */
+  std::function<bool()> checkDirectory;
+  std::function<bool()> createDirectory;
+  std::function<bool()> copySelf;
+  /** Returns false when the child could not be started safely. */
+  std::function<bool()> launch;
+};
+
+enum class WorkingCopyResult { Started, RefusedDirectory, CreateFailed, CopyFailed, LaunchFailed };
+
+const char* working_copy_result_name(WorkingCopyResult result);
+
+/** Runs the steps in the one order that is safe, stopping at the first refusal. */
+WorkingCopyResult prepare_working_copy(const WorkingCopySteps& steps);
+
+}  // namespace remote60::native_poc::update

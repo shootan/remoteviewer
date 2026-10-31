@@ -1,0 +1,34 @@
+[native-video-host] directory using machine credential hostId=punch-test-host
+PASS  the agent starts (an unreachable directory)
+
+--- a Stop in the middle of a train ---
+[native-video-host] directory punch -> 127.0.0.1:40001
+[native-video-host][punch-reply] window open for 10000ms (capability collected)
+[native-video-host][dir-cycle] n=1 start cause=first
+PASS  the train runs beside the cycle (punches out, more queued)  sent=3
+[native-video-host][dir-cycle] n=1 step=health ok=0 ms=6002
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=0
+[native-video-host][dir-cycle] n=1 sleep planMs=-1002 workMs=6002
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=0
+PASS  Stop: the queue is gone (the rest of the train is discarded, not kept)  pending=0
+PASS  ...and nothing more goes out after the Stop
+
+--- a late Punch after Stop (the cycle's step between its check and its push) ---
+[native-video-host] directory punch -> 127.0.0.1:40003
+PASS  a Punch while stopped queues nothing
+
+--- the next Start ---
+[native-video-host] directory using machine credential hostId=punch-test-host
+PASS  the agent starts again
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host][dir-cycle] n=1 step=health ok=0 ms=0
+PASS  ...the old train never comes back: no punch to its target, its host proof not on the wire again  old=0 late=0
+[native-video-host] directory punch -> 127.0.0.1:40002
+PASS  ...a new train of this Start goes out (with its own proof)
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=1318
+[native-video-host][dir-cycle] n=1 sleep planMs=3682 workMs=1318
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=0
+PASS  Stop again: empty
+
+9 checks, 0 failures
+RESULT PASS

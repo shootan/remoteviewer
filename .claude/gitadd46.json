@@ -1,0 +1,18 @@
+{
+ "repo_path": "D:/remote/remote",
+ "files": [
+  "apps/native_poc/CMakeLists.txt",
+  "apps/native_poc/src/client_shell_main.cpp",
+  "apps/native_poc/src/host_app_main.cpp",
+  "apps/native_poc/src/update_handoff.cpp",
+  "apps/native_poc/src/update_handoff.hpp",
+  "apps/native_poc/src/update_handoff_test.cpp",
+  "apps/native_poc/src/updater_effects.cpp",
+  "apps/native_poc/src/updater_effects.hpp",
+  "apps/native_poc/src/updater_main.cpp",
+  "apps/native_poc/src/updater_options.cpp",
+  "apps/native_poc/src/updater_options.hpp",
+  "apps/native_poc/src/updater_options_test.cpp",
+  "docs/history.md"
+ ]
+}

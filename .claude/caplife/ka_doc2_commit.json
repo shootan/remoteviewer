@@ -1,0 +1,1 @@
+{"repo_path": "C:/work/gnlink-wt/ka-r3", "message": "docs(keepalive-r2 A r3): the relay drops Standby* from a legacy lease -- a client probes standby on its own socket\n\nProduct / test / docs: product (none) / test (none) / docs (standby contract 2.7).\n\nCo-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"}

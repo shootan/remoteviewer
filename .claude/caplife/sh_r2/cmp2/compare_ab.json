@@ -1,0 +1,37 @@
+{
+ "A_off": {
+  "x0": 276,
+  "A_text_edge": 8.395,
+  "A_text_clip": 0.9371,
+  "B_lowcontrast_edge": 1.484,
+  "B_lowcontrast_clip": 0.0,
+  "C_lines_edge": 54.71,
+  "C_lines_clip": 0.7632,
+  "D_flat_edge": 0.0,
+  "D_flat_clip": 0.0,
+  "E_checker_edge": 58.993,
+  "E_checker_clip": 0.753,
+  "border_top_rgb": [
+   145,
+   15,
+   31
+  ],
+  "border_bottom_rgb": [
+   106,
+   238,
+   88
+  ],
+  "border_right_rgb": [
+   245,
+   254,
+   124
+  ]
+ },
+ "A_s20": null,
+ "A_s35": null,
+ "A_s60": null,
+ "B_s20": null,
+ "B_s35": null,
+ "B_s60": null,
+ "Bdouble_s35": null
+}

@@ -1,0 +1,31 @@
+﻿the service <-> lock-screen agent channel (lockscreen-cred r1)
+
+PASS  one-shot: a fresh random 32-hex id, and a second create of the same name FAILS (first instance only)  err2=231
+PASS  ...and the next pipe gets another id
+PASS  a malformed id is refused
+
+[the held child gets the job]
+PASS  the child the service started (held handle: pid, running, session, its Hello) is accepted  ok
+PASS  ...gets the job whole, asks the fence once right before typing, is allowed, answers Typed, exits by itself  exit 0
+
+[r2 L2: the fence says no at the commit]
+PASS  L2: the request no longer holds when the agent is ready: Denied, and the agent typed NOTHING (exit 6)  exit 6
+
+[NEGATIVE: a stranger connects first]
+PASS  NEGATIVE: a client that is not the held child is refused ("client-not-the-child")  client-not-the-child
+PASS  NEGATIVE: ...and it was sent nothing  stranger exit 0
+PASS  ...the real child, kept out, reads no job (exit 3/4)  3
+
+[NEGATIVE: the agent and a server that is not its parent]
+PASS  NEGATIVE: the agent refuses a server that is not its parent (exit 3)  3
+PASS  NEGATIVE: ...that server never got its Hello  server exit 0
+
+[NEGATIVE: the SHIPPED service binary started directly as an agent]
+PASS  NEGATIVE: GNLinkInputService.exe --lockcred-agent <id> against a pipe that is not the installed service's: refused (exit 3), no Hello  exit 3
+PASS  NEGATIVE: ...with a malformed id: refused (exit 2)
+
+[bounded]
+PASS  a child that dies before connecting ends the wait at once (not the 20 s bound)  no-connection 16 ms
+PASS  a child that never answers: the read ends at its bound  1506 ms
+
+RESULT: ALL PASS  (15 checks, 0 failed)

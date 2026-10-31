@@ -1,0 +1,50 @@
+[
+  {
+    "name": "selection complete current id/gen/stream/video",
+    "ok": true
+  },
+  {
+    "name": "id0 request rejected",
+    "ok": true
+  },
+  {
+    "name": "wrong ACK stream rejected",
+    "ok": true
+  },
+  {
+    "name": "wrong ready gen rejected",
+    "ok": true
+  },
+  {
+    "name": "no output after ready rejected",
+    "ok": true
+  },
+  {
+    "name": "down/up same point inside accepted",
+    "ok": true
+  },
+  {
+    "name": "modifier releases alone rejected",
+    "ok": true
+  },
+  {
+    "name": "up alone rejected",
+    "ok": true
+  },
+  {
+    "name": "down alone rejected",
+    "ok": true
+  },
+  {
+    "name": "moved pair rejected",
+    "ok": true
+  },
+  {
+    "name": "first invalid pair cannot hide behind later valid pair",
+    "ok": true
+  },
+  {
+    "name": "unknown picture size rejected",
+    "ok": true
+  }
+]

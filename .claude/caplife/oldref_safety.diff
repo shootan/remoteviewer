@@ -1,0 +1,167 @@
+diff --git a/apps/native_poc/src/host_args.cpp b/apps/native_poc/src/host_args.cpp
+index 3c2ee27..e40b09e 100644
+--- a/apps/native_poc/src/host_args.cpp
++++ b/apps/native_poc/src/host_args.cpp
+@@ -99,6 +99,23 @@ Args parse_args(int argc, char** argv) {
+       ++i;
+       continue;
+     }
++    if (k == "--host-power-management") {
++      // old-ref r1 safety port (53fced4 host_args.cpp): this switch's own operand, the next token; the last one wins
++      if (i + 1 >= argc) {
++        a.hostPower.ok = false;
++        a.hostPower.bad = "(missing)";
++      } else {
++        const std::string v = argv[++i];
++        if (v == "on" || v == "off") {
++          a.hostPower.enabled = (v == "on");
++          a.hostPower.fromCommandLine = true;
++        } else {
++          a.hostPower.ok = false;
++          a.hostPower.bad = v;
++        }
++      }
++      continue;
++    }
+     if (k == "--bind-port" && i + 1 < argc) {
+       // Accepts one port or an ordered comma-separated fallback list.
+       a.bindPortCandidates = remote60::native_poc::parse_bind_port_candidates(argv[++i]);
+diff --git a/apps/native_poc/src/host_args.hpp b/apps/native_poc/src/host_args.hpp
+index bb9de4c..417638b 100644
+--- a/apps/native_poc/src/host_args.hpp
++++ b/apps/native_poc/src/host_args.hpp
+@@ -23,10 +23,13 @@
+ #include <vector>
+ 
+ #include "env_util.hpp"
++#include "host_power_policy.hpp"  // old-ref r1 safety port
+ 
+ namespace remote60::native_poc {
+ 
+ struct Args {
++  // old-ref r1 safety port (53fced4 ba2eaf2): --host-power-management on|off, read by parse_args
++  HostPowerPolicy hostPower;
+   uint16_t bindPort = 43000;
+   // Ordered fallback list for the media socket; the first port that binds wins. Corporate
+   // firewalls commonly permit outbound UDP only to a whitelist of destination ports, so a host
+diff --git a/apps/native_poc/src/host_log.hpp b/apps/native_poc/src/host_log.hpp
+index 1bdc3c1..07ce763 100644
+--- a/apps/native_poc/src/host_log.hpp
++++ b/apps/native_poc/src/host_log.hpp
+@@ -107,14 +107,19 @@ inline void wake_display_for_remote_session() {
+ 
+ class HostPowerKeepalive {
+  public:
+-  HostPowerKeepalive() {
+-    Apply(false);
++  // old-ref r1 safety port (53fced4): bound to the local startup policy BEFORE the object exists; OFF -> no
++  // execution-state request, no release, no display wake (synthetic mouse move / monitor-power broadcast).
++  explicit HostPowerKeepalive(bool enabled) : enabled_(enabled) {
++    if (enabled_) Apply(false);
+   }
+ 
+   ~HostPowerKeepalive() {
+-    (void)SetThreadExecutionState(ES_CONTINUOUS);
++    if (enabled_) (void)SetThreadExecutionState(ES_CONTINUOUS);
+   }
+ 
++  HostPowerKeepalive(const HostPowerKeepalive&) = delete;
++  HostPowerKeepalive& operator=(const HostPowerKeepalive&) = delete;
++
+   void SetStreaming(bool streaming, bool wakeDisplay = false) {
+     // Only a real not-streaming -> streaming edge may wake the display. The wake injects
+     // actual mouse motion, and the previous condition re-ran it for any call that passed
+@@ -123,6 +128,7 @@ class HostPowerKeepalive {
+     const bool startedStreaming = streaming && !streaming_;
+     if (streaming_ == streaming) return;
+     streaming_ = streaming;
++    if (!enabled_) return;  // old-ref r1: the local policy is OFF -- a call site's request changes nothing here
+     Apply(streaming);
+     if (startedStreaming && wakeDisplay) wake_display_for_remote_session();
+   }
+@@ -134,6 +140,7 @@ class HostPowerKeepalive {
+     (void)SetThreadExecutionState(flags);
+   }
+ 
++  const bool enabled_;
+   bool streaming_ = false;
+ };
+ 
+diff --git a/apps/native_poc/src/host_power_policy.hpp b/apps/native_poc/src/host_power_policy.hpp
+new file mode 100644
+index 0000000..d2696f4
+--- /dev/null
++++ b/apps/native_poc/src/host_power_policy.hpp
+@@ -0,0 +1,42 @@
++// The host's power management policy (2026-10-28, Codex codex_test_injection_finding.md Finding-3, decision (1)):
++// ONE local, startup-only switch for everything HostPowerKeepalive does to this machine's power -- the
++// execution-state requests (ES_SYSTEM_REQUIRED from the start, ES_DISPLAY_REQUIRED while streaming, their release
++// at the end) and the display wake at a stream start (a synthetic relative mouse move +1/-1 and the SC_MONITORPOWER
++// broadcast). Default ON: the product's behaviour is unchanged.
++//
++//   --host-power-management on|off     (the command line only)
++//
++// Read by parse_args (host_args.cpp) with the same token / arity rules as every other switch -- an operand of another
++// switch (e.g. a window title "--host-power-management") is never taken for it (r5 P2-1) -- and bound once, before
++// the power object exists and before any of its effects (native_video_host_main.cpp parses first); immutable after
++// that. Nothing remote -- the directory, the control channel, a viewer, a runtime tune, a stream restart -- can
++// change it: there is no setter. A value other than on/off refuses the start (no silent default). The bound value
++// is said in one line at startup ("host power management=on|off ...").
++#ifndef REMOTE60_NATIVE_POC_HOST_POWER_POLICY_HPP
++#define REMOTE60_NATIVE_POC_HOST_POWER_POLICY_HPP
++
++#include <string>
++
++namespace remote60::native_poc {
++
++struct HostPowerPolicy {
++  bool enabled = true;            // the product default
++  bool fromCommandLine = false;   // said explicitly on this launch's command line
++  bool ok = true;                 // false: an unknown value -- the host refuses to start
++  std::string bad;                // that value
++};
++
++// The one startup line (the harness matches it whole).
++inline std::string host_power_policy_line(const HostPowerPolicy& p) {
++  if (p.enabled) {
++    return std::string("host power management=on (local startup policy, ") +
++           (p.fromCommandLine ? "--host-power-management on" : "default") +
++           "): execution state kept, display wake at a stream start";
++  }
++  return "host power management=off (local startup policy, --host-power-management off): no execution-state "
++         "request, no display wake, no monitor-power broadcast";
++}
++
++}  // namespace remote60::native_poc
++
++#endif
+diff --git a/apps/native_poc/src/native_video_host_main.cpp b/apps/native_poc/src/native_video_host_main.cpp
+index 9c01298..0c06110 100644
+--- a/apps/native_poc/src/native_video_host_main.cpp
++++ b/apps/native_poc/src/native_video_host_main.cpp
+@@ -248,14 +248,22 @@ int main(int argc, char** argv) {
+   } drainWorkerLogAtReturn;
+   // A remote host cannot wake itself after Windows enters S3. Keep the machine reachable
+   // while the host is running; the display requirement is enabled only for an active stream.
+-  HostPowerKeepalive powerKeepalive;
++  // old-ref r1 safety port (53fced4): the ONE parser first -- it reads arguments and a --config profile only -- so
++  // the power policy is bound before the keepalive object exists and before any of its effects.
++  const Args args = parse_args(argc, argv);
++  const remote60::native_poc::HostPowerPolicy& powerPolicy = args.hostPower;
++  if (!powerPolicy.ok) {
++    std::cerr << "[native-video-host] invalid --host-power-management value: " << powerPolicy.bad
++              << " (on|off) -- not started\n";
++    return 65;
++  }
++  std::cout << "[native-video-host] " << remote60::native_poc::host_power_policy_line(powerPolicy) << "\n";
++  HostPowerKeepalive powerKeepalive(powerPolicy.enabled);
+   // Outlive every capture/encoder/session owner, including their destructors after shutdown_host.
+   // A GPU resource Release may block too; disarming before those destructors left a teardown gap.
+   WatchdogState watchdog;
+   MainLoopWatchdogThread mainLoopWatchdog;
+   startup_process_setup();
+-
+-  const Args args = parse_args(argc, argv);
+ #ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+   {
+     // TEST BUILD ONLY (r2 K6): fail-closed -- this host never starts without its pinned window.

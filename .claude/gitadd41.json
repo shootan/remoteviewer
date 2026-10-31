@@ -1,0 +1,11 @@
+{
+  "repo_path": "D:/remote/remote",
+  "files": [
+    "apps/native_poc/src/directory_client.cpp",
+    "apps/native_poc/src/directory_rendezvous.cpp",
+    "apps/native_poc/src/directory_retry_test.cpp",
+    "docs/history.md",
+    "docs/구현계획.md",
+    "docs/작업목록.md"
+  ]
+}

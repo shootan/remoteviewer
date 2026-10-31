@@ -1,0 +1,236 @@
+[product client: StandbyLease + ClientSessionController at a real host]
+PASS  the fake directory starts
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  a real GNLinkStream starts
+PASS  the host registers  4646879409630-0\punch_standby-1\host_cache.json (--directory-cache)
+10-28 01:34:32.764 [native-video-host] directory agent started url=http://127.0.0.1:60614
+10-28 01:34:32.764 [native-video-host][dir-cycle] n=1 start cause=first
+10-28 01:34:32.766 [native-video-host] directory registered hostId=h-standby name=SHOTAN
+10-28 01:34:32.766 [native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+
+PASS  A's and B's leases open (one socket each)
+PASS  A parks (its StandbyHello admitted)
+PASS  B parks, its own entry
+PASS  ...and NEITHER started a session  -host] directory capability endpoint translated expected=211.218.222.1:60420 actual=127.0.0.1:61565
+10-28 01:34:33.312 [native-video-host][standby] hello admitted entries=1 active=0
+10-28 01:34:33.435 [native-video-host] directory capability endpoint translated expected=211.218.222.1:60420 actual=127.0.0.1:61566
+10-28 01:34:33.435 [native-video-host][standby] hello admitted entries=2 active=0
+
+PASS  A's activation arguments: its lease's socket and the activation handshake
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=22 stop=0
+PASS  A's ClientSessionController connects THROUGH the activation (no Hello)   | activated gen=2; 
+PASS  ...the host admitted it as the first session by activation  eo-host] control waiting port=60615
+10-28 01:34:33.534 [native-video-host][connection-version] localProcess=GNLinkStream localVersion=0.2.163 localPid=25164 peerProcess=GNLinkViewer peerVersion=unknown-awaiting-exchange
+10-28 01:34:33.539 [native-video-host][control] window-list seq=1 count=10 selectedId=0
+10-28 01:34:33.539 [native-video-host][control] monitor-list seq=1 count=1 selectedId=0
+
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  ...video reaches A's sink
+PASS  ...and A's control works (its window list arrives)
+  -- B, parked, pings for 12 s; A must not notice --
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=28 sinceDatagramMs=456 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=59 sinceDatagramMs=55 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=92 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=124 sinceDatagramMs=52 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=155 sinceDatagramMs=55 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=185 sinceDatagramMs=27 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=214 sinceDatagramMs=27 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=245 sinceDatagramMs=32 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=276 sinceDatagramMs=51 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=306 sinceDatagramMs=56 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=337 sinceDatagramMs=81 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=367 sinceDatagramMs=94 stop=0
+PASS  B stays parked (its Pings answered), no entry lost
+PASS  NO new session, NO control-session end while B pinged  .030 [native-video-host][capture-timing] hostCaptureUs=464701285089 hostCallbackUs=464701285089 hostPublishUs=464701286926 sourceIntervalUs=1016354 callbackIntervalUs=1016354 attachment=2
+10-28 01:34:46.045 [native-video-host] wire seq=28 key=0 bytes=14429 chunks=15 wireIntUs=505063 targetIntUs=33333 queueWaitUs=10 sendDurUs=8763 queueDepth=0 epoch=1 clampBurst=0 burstWin2s=170798 cap2r=2000000
+
+PASS  A is still connected
+  -- B takes over explicitly; A's session ends; A parks again; A takes it back --
+PASS  B's activation arguments
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=28 stop=0
+PASS  B connects through ITS activation   | activated gen=2; 
+PASS  ...a takeover: a new epoch for B  n-awaiting-exchange
+10-28 01:34:46.065 [native-video-host][control] window-list seq=1 count=10 selectedId=0
+10-28 01:34:46.065 [native-video-host][control] monitor-list seq=1 count=1 selectedId=0
+10-28 01:34:46.071 [native-video-host] udp peer updated; media barrier armed epoch=2 forcing keyframe
+10-28 01:34:46.071 [native-video-host][control] backend-owner epoch=2 requested=dxgi active=dxgi
+
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  ...video reaches B
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=398 sinceDatagramMs=775 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=27 sinceDatagramMs=50 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=431 sinceDatagramMs=1806 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=58 sinceDatagramMs=56 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=464 sinceDatagramMs=2835 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=89 sinceDatagramMs=60 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=497 sinceDatagramMs=3860 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=120 sinceDatagramMs=59 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=530 sinceDatagramMs=4885 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=149 sinceDatagramMs=62 stop=0
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=563 sinceDatagramMs=5914 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=179 sinceDatagramMs=54 stop=0
+PASS  A's session ends (the host moved on)  error
+PASS  A's session over (its own operation)
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=210 sinceDatagramMs=55 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=240 sinceDatagramMs=58 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=269 sinceDatagramMs=55 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=299 sinceDatagramMs=61 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=329 sinceDatagramMs=56 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=357 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=386 sinceDatagramMs=30 stop=0
+PASS  A parks again on its lease's own socket: its entry answers its Pings  activated gen=2; 
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=376 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=27 stop=0
+PASS  A takes it back (a larger generation)   | activated gen=2; activated gen=3; 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  ...video reaches A again
+PASS  no ordinary Hello made a session: the first by activation, every rollover by activation  first=1 epochs=2 byActivation=2
+  -- the app's StandbyRunner (a pump thread per PC): start, activate, session over, release --
+PASS  the runner starts a lease for the PC (its own thread)
+PASS  ...it waits for a capability (none of its own), nothing sent
+PASS  the app hands one in (Provide)
+PASS  ...it parks without anyone pumping it here
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=396 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=29 stop=0
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  TakeActivation + Connect: the runner's PC takes the session by activation (video)
+PASS  ...while handed off the runner reports it so (the pump leaves the socket alone)
+PASS  ...the runner takes the session-over of its operation
+PASS  the host sees the session end (the grant ends with it)  1:35:00.537 [native-video-host][keyframe] seq=64 bytes=81755 reasons=peer|barrier_kick sinceLastKeyMs=949 enqueueDurUs=5 skipsSincePrevKeyAccepted=0 kick=1 size=1920x1080 bitrate=8000000
+10-28 01:35:00.630 [native-video-host] wire seq=64 key=1 bytes=81755 chunks=84 wireIntUs=489386 targetIntUs=33333 queueWaitUs=11 sendDurUs=93005 queueDepth=0 epoch=4 clampBurst=0 burstWin2s=356414 cap2r=2000000
+
+PASS  session over: parked again by the runner's own pings
+  -- the product's activation of a session entry (standby_session_link.hpp: its gate + the link) --
+PASS  an operation stale before its connect: not adopted, the arguments abandoned, the lease keeps its socket  stale_operation
+PASS  Connect refused before its worker: abandoned (the handle closed by the lease), parked again  connect_failed
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=428 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=27 stop=0
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  the entry's own operation: adopted, connected by activation, video   | 
+PASS  ...while it runs the lease is handed off (the pump leaves the socket to the session)
+PASS  closed as the bridge closes it: the lease is parked again on its own socket (SessionOver after Disconnect)
+PASS  ...a second Over says nothing
+PASS  ...the host sees that session end  path=h264-udp streamGen=1 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> sendQpcUs=464723004761 captureQpcUs=464722992015 size=1920x1080 auEpoch=2 curEpoch=2 holdUs=12746
+10-28 01:35:07.748 [native-video-host][keyframe] seq=81 bytes=134689 reasons=peer|stream_active|barrier_kick sinceLastKeyMs=7210 enqueueDurUs=8 skipsSincePrevKeyAccepted=0 kick=1 size=1920x1080 bitrate=8000000
+
+PASS  ...and the lease stays parked by its own pings
+PASS  Release: the lease is gone here and released at the host (one StandbyRelease)  th=0 epoch=5 clampBurst=0 burstWin2s=356414 cap2r=2000000
+10-28 01:35:14.772 [native-video-host][control] udp control session ended epoch=5 resumed=0 reason=peer-lost
+10-28 01:35:14.777 [native-video-host] capture-pipeline-flushed reason=stream-inactive streamGen=1 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=44
+10-28 01:35:14.777 [native-video-host] stream inactive
+
+
+[product client through the REAL server.js relay: support from /api/hosts, standby connects, a lease each]
+PASS  the real directory server starts (relay on, loopback)
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  a real GNLinkStream starts against it
+PASS  the host is online  -socket] media bind=127.0.0.1:60082 pid=36768
+10-28 01:35:15.297 [native-video-host] directory cache path=C:\work\gnlink-wt\ka-r3\build-verify\test-scratch\run-42032-4646879409630-0\punch_realdir-3\host_cache.json (--directory-cache)
+10-28 01:35:15.298 [native-video-host] directory agent started url=http://127.0.0.1:58769
+10-28 01:35:15.298 [native-video-host][dir-cycle] n=1 start cause=first
+
+PASS  a client signs in (the product's directory_login)
+PASS  standby support is read from /api/hosts (no side effect): supported, with a relay
+PASS  two leases open
+PASS  each standby connect reserved its own relay lease  reserved
+PASS  A and B park THROUGH the relay, each its own entry   |  target=127.0.0.1:60081
+PASS  ...two relay leases bound and ready, no session  ve-video-host] directory capability endpoint translated expected=127.0.0.1:60083 actual=127.0.0.1:60085
+10-28 01:35:16.163 [native-video-host][standby] hello admitted entries=1 active=0
+10-28 01:35:16.287 [native-video-host] directory capability endpoint translated expected=127.0.0.1:60084 actual=127.0.0.1:60086
+10-28 01:35:16.287 [native-video-host][standby] hello admitted entries=2 active=0
+
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=21 stop=0
+PASS  A's session through its relay lease, by activation   | activated gen=2; 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  ...video through the relay
+PASS  ...the relay marks A's lease active
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=28 sinceDatagramMs=335 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=60 sinceDatagramMs=401 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=93 sinceDatagramMs=428 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=125 sinceDatagramMs=33 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=156 sinceDatagramMs=34 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=187 sinceDatagramMs=53 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=217 sinceDatagramMs=60 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=248 sinceDatagramMs=123 stop=0
+PASS  B pings through its own lease: parked, A untouched
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=27 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=281 sinceDatagramMs=1149 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=33 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=314 sinceDatagramMs=2173 stop=0
+[native-video-client-session] video delivered=1 keyReq=3 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  B takes over through ITS relay lease (a new epoch, video)   | activated gen=2; 
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=61 sinceDatagramMs=52 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=347 sinceDatagramMs=3204 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=92 sinceDatagramMs=52 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=380 sinceDatagramMs=4230 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=122 sinceDatagramMs=55 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=413 sinceDatagramMs=5253 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=152 sinceDatagramMs=61 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=446 sinceDatagramMs=6281 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=183 sinceDatagramMs=62 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=479 sinceDatagramMs=7304 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=214 sinceDatagramMs=51 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=512 sinceDatagramMs=8328 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=244 sinceDatagramMs=62 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=544 sinceDatagramMs=9331 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=273 sinceDatagramMs=58 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=576 sinceDatagramMs=10337 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=303 sinceDatagramMs=64 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=609 sinceDatagramMs=11366 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=333 sinceDatagramMs=84 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=642 sinceDatagramMs=12396 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=362 sinceDatagramMs=60 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=675 sinceDatagramMs=13424 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=389 sinceDatagramMs=60 stop=0
+[native-video-client-session] udp recv drop sock=436 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=708 sinceDatagramMs=14451 stop=0
+PASS  A's relay session over (its own operation)
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=418 sinceDatagramMs=62 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=448 sinceDatagramMs=61 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=478 sinceDatagramMs=60 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=508 sinceDatagramMs=61 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=537 sinceDatagramMs=63 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=566 sinceDatagramMs=60 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=594 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=622 sinceDatagramMs=28 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=649 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=680 sinceDatagramMs=28 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=709 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=739 sinceDatagramMs=32 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=769 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=799 sinceDatagramMs=28 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=829 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=860 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=888 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=915 sinceDatagramMs=28 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=940 sinceDatagramMs=58 stop=0
+[native-video-client-session] udp recv drop sock=416 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=967 sinceDatagramMs=147 stop=0
+PASS  through the relay, A's lease after its session: still parked on the same socket -- no loss, no new connect  activated gen=2; 
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=408 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retry=1 sinceDatagramMs=28 stop=0
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  ...and takes the session back through the same relay lease (video)   | activated gen=2; activated gen=3; 
+
+[product client at an OLDER host: Unsupported, no Hello]
+PASS  the fake directory starts
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  the older GNLinkStream starts
+PASS  a lease opens at the older host
+PASS  no answer: Unsupported (no automatic connect to it)  unsupported: no answer to StandbyHello; 
+PASS  ...and its session table untouched: no session, no Hello admission  64 [native-video-host] directory punch -> 211.218.222.1:60420
+10-28 01:36:00.264 [native-video-host] directory punch -> 211.218.222.1:60420
+10-28 01:36:00.264 [native-video-host] directory punch -> 211.218.222.1:60420
+10-28 01:36:00.264 [native-video-host] directory punch -> 211.218.222.1:60420
+10-28 01:36:00.264 [native-video-host][punch-reply] window open for 10000ms (capability collected)
+
+
+RESULT: ALL PASS  (74 checks, 0 failed)

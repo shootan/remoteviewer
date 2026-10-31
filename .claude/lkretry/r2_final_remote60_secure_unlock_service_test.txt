@@ -1,0 +1,16 @@
+﻿the sealed unlock, bound to its own caller (prelogin-ui r15, R14-2)
+
+PASS  R14-2: A's challenge is issued for A's session and A's account -- not the last-connected B's  session 2
+PASS  R14-2: ...and A's password reconnects A's session (WTSConnectSession(2 -> console 1), once)  1 calls
+PASS  R14-2: B active (not eligible): B is refused, A is issued -- each by its own state
+PASS  same session, another instance: its own challenge
+PASS  R14-2: ...after the other connection of that session ended, A still unlocks (nothing shared was wiped)
+PASS  R14-2: the caller left the pipe before the final step: refused, WTSConnectSession never called
+PASS  a real topology change in between still refuses (the WTS fence is kept)
+PASS  a caller whose session could not be read is refused
+PASS  R15-3: the caller process exited before the final step (its handle still open, metadata readable): refused, WTSConnectSession 0 times  0 calls
+PASS  R15-3: no handle: not alive
+PASS  R16-2: the client closed only its pipe handle (process alive, its pid still answered on the pipe): refused, WTSConnectSession 0 times  pidStill=1 stage=2 wts=0
+PASS  R16-2: control -- the connection kept: the unlock goes through, WTSConnectSession once  stage=9 wts=1
+
+RESULT: ALL PASS  (12 checks, 0 failed)

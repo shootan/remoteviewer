@@ -1,0 +1,132 @@
+{
+ "off": {
+  "x0": 275,
+  "A_text_edge": 18.197,
+  "B_lowcontrast_edge": 1.818,
+  "C_lines_edge": 115.757,
+  "D_flat_edge": 0.0,
+  "E_checker_edge": 124.029,
+  "F_colourtext_edge": 6.212,
+  "D_flat_std": 109.608,
+  "E_clip_frac": 0.8353,
+  "border_top_rgb": [
+   146,
+   15,
+   31
+  ],
+  "border_bottom_rgb": [
+   101,
+   239,
+   96
+  ],
+  "border_right_rgb": [
+   255,
+   255,
+   145
+  ]
+ },
+ "weak": {
+  "x0": 275,
+  "A_text_edge": 22.999,
+  "B_lowcontrast_edge": 3.418,
+  "C_lines_edge": 116.232,
+  "D_flat_edge": 0.0,
+  "E_checker_edge": 124.72,
+  "F_colourtext_edge": 7.133,
+  "D_flat_std": 109.608,
+  "E_clip_frac": 0.8985,
+  "border_top_rgb": [
+   124,
+   1,
+   1
+  ],
+  "border_bottom_rgb": [
+   87,
+   236,
+   82
+  ],
+  "border_right_rgb": [
+   255,
+   255,
+   131
+  ]
+ },
+ "strong": {
+  "x0": 275,
+  "A_text_edge": 24.686,
+  "B_lowcontrast_edge": 4.678,
+  "C_lines_edge": 116.234,
+  "D_flat_edge": 0.0,
+  "E_checker_edge": 124.752,
+  "F_colourtext_edge": 7.548,
+  "D_flat_std": 109.608,
+  "E_clip_frac": 0.8985,
+  "border_top_rgb": [
+   107,
+   1,
+   1
+  ],
+  "border_bottom_rgb": [
+   76,
+   233,
+   71
+  ],
+  "border_right_rgb": [
+   255,
+   255,
+   117
+  ]
+ },
+ "off2": {
+  "x0": 275,
+  "A_text_edge": 18.185,
+  "B_lowcontrast_edge": 1.788,
+  "C_lines_edge": 115.757,
+  "D_flat_edge": 0.0,
+  "E_checker_edge": 124.029,
+  "F_colourtext_edge": 6.206,
+  "D_flat_std": 109.608,
+  "E_clip_frac": 0.8353,
+  "border_top_rgb": [
+   146,
+   15,
+   31
+  ],
+  "border_bottom_rgb": [
+   101,
+   239,
+   96
+  ],
+  "border_right_rgb": [
+   255,
+   255,
+   145
+  ]
+ },
+ "weak2": {
+  "x0": 275,
+  "A_text_edge": 23.004,
+  "B_lowcontrast_edge": 3.44,
+  "C_lines_edge": 116.232,
+  "D_flat_edge": 0.0,
+  "E_checker_edge": 124.72,
+  "F_colourtext_edge": 7.143,
+  "D_flat_std": 109.608,
+  "E_clip_frac": 0.8985,
+  "border_top_rgb": [
+   124,
+   1,
+   1
+  ],
+  "border_bottom_rgb": [
+   87,
+   236,
+   82
+  ],
+  "border_right_rgb": [
+   255,
+   255,
+   131
+  ]
+ }
+}

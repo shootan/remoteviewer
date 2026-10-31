@@ -1,0 +1,108 @@
+﻿the unlock relay: per-transaction pipe, per-session results, bounded I/O (lockscreen-cred r1/r2)
+
+[Q2: held only for a transaction]
+remote60_host_unlock_relay_ondemand_test.exe : [secure-pipe] trust[unlock]=trusted stage=none win32=0 serverPid=29804 s
+vcPid=29804 finalConsistent=1
+At line:4 char:3
++   & $exe > "$out\unit_$t.txt" 2>&1; $rc=$LASTEXITCODE
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([secure-pipe] t...nalConsistent=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[native-video-host][lock-cred] service capability supported
+PASS  A: the capability query is answered (LockCredV1)
+PASS  A: ...and the pipe is let go at once (no idle hold)
+[native-video-host][lock-cred] service capability supported
+PASS  B: after A's probe, B's challenge goes through (the pipe was free)  status=3
+PASS  B: ...an issued challenge HOLDS the pipe (bound to this connection until its seal)
+[secure-pipe] trust[unlock]=unavailable stage=open win32=231 serverPid=0 svcPid=0 finalConsistent=0
+PASS  NEGATIVE: while B (another host) holds the pipe for its transaction, A's challenge does not get through  status=16
+PASS  UX-R: ...and A is told BUSY (16), within the control thread's 3 s wait -- not a general error  status=16 in 1145 ms
+PASS  UX-R: ...A's 'supported' is not dropped because another host is busy
+PASS  B: typed (Injected, not final) -- the pipe stays held for the unlock to be seen
+PASS  B: the final answer (unlocked) arrives ...
+PASS  B: ...and the pipe is let go
+
+[L1: results belong to (control session, requestId)]
+[secure-pipe] trust[unlock]=trusted stage=none win32=0 serverPid=29804 svcPid=29804 finalConsistent=1
+[native-video-host][lock-cred] service capability supported
+PASS  L1: X's request 2 ended final (TargetNotReady)
+PASS  L1: Y's request 2 (another session) knows nothing of X's before its own seal  earlyKnown=0
+PASS  L1: ...its seal IS sent to the service (not skipped as 'already final')  1 sealed sent
+PASS  L1: ...and Y gets ITS answer (typed, waiting), not X's
+PASS  L1: X's own result is still X's
+PASS  L1/UX-R: while Y's transaction holds the pipe, Z's request is answered BUSY (stage 16) at once (not run on Y's connection)  0 ms, status=16
+PASS  UX-R: ...the disconnected-session unlock challenge too (Busy, purpose kept)  status=16
+PASS  UX-R: ...and a sealed request: Busy, final, ERROR_BUSY -- not sent to the service  stage=16
+PASS  L1: ...Y's transaction was not disturbed: it ends unlocked
+PASS  L1: X's session ended -> nothing of it is kept
+
+[L5: bounded, cancellable exchanges]
+[native-video-host][lock-cred] service capability supported
+PASS  L5: a silent service: the challenge exchange ends at its deadline (not hung), as a failure -- NOT busy (UX-R)  809 ms, status=12
+PASS  L5: ...the relay let the pipe go (the next host can connect)
+PASS  L5: ...and a failed exchange makes 'supported' unknown again (not advertised stale)
+[native-video-host][lock-cred] service capability supported
+PASS  L5: EndSession during a silent sealed exchange: cancelled and the pipe let go at once (not at the 1.5 s deadline)  0 ms
+PASS  L5: ...and its late result is kept for nobody
+[native-video-host][lock-cred] service capability supported
+PASS  L5: the next host's request goes through
+
+[r3 UX-R control: no service at all is a failure, not 'busy']
+[secure-pipe] trust[unlock]=unavailable stage=open win32=2 serverPid=0 svcPid=0 finalConsistent=0
+PASS  UX-R control: the service's pipe does not exist -> InternalError, NOT Busy  status=12
+
+[r3 L5-R: the hold's end holds however full the queue is]
+[secure-pipe] trust[unlock]=trusted stage=none win32=0 serverPid=29804 svcPid=29804 finalConsistent=1
+[native-video-host][lock-cred] service capability supported
+[native-video-host][lock-cred] service capability supported
+PASS  L5-R typed: a never-empty queue (own status + another session's busy) past the hold's end: the next host gets through  status=3 at 2356 ms after typed
+PASS  L5-R typed: ...Y's transaction ended with the hold as UnlockUnconfirmed (final), not success  stage=15
+PASS  L5-R typed: ...and its queued status questions were NOT asked on a new connection  0 asked after the end
+[native-video-host][lock-cred] service capability supported
+PASS  L5-R challenge: past the challenge hold's end, with the queue busy, the next host gets through  status=3 (Y's own challenge status=3)
+PASS  L5-R challenge: ...Y's seal after its hold ended: Timeout (final), not sent on another connection  stage=11
+PASS  L5-R: EndSession of the holder lets the pipe go at once (well before the hold's end)  0 ms
+
+[r4 R1: a repeated sealed request never restarts the typed hold]
+[native-video-host][lock-cred] service capability supported
+[native-video-host][lock-cred] service capability supported
+PASS  R1: three repeats of the same sealed request reached the service (answered 'typed' again)  3 repeats sent
+PASS  R1: ...the hold still ended at the FIRST typed deadline: the next host gets through (not 'busy')  status=3 at 2348 ms after typed
+PASS  R1: ...and the transaction ended with it as UnlockUnconfirmed (final)  stage=15
+PASS  R1 control: a repeat after the FINAL answer is not sent at all (idempotent, as before)  0 sent
+
+[r3 L1-R: an exchange that completes after its session ended keeps nothing]
+[native-video-host][lock-cred] service capability supported
+PASS  L1-R: EndSession during the challenge exchange -> nothing of that session is kept afterwards  0 entries
+[native-video-host][lock-cred] service capability supported
+PASS  L1-R: EndSession during the status exchange -> nothing of that session is kept afterwards  0 entries
+PASS  L1-R: ...the other live session's result is untouched
+[native-video-host][lock-cred] service capability supported
+PASS  L1-R: ...and the next host gets through
+
+[lk-ux-retry r1: the same session's explicit retry, on the pipe its typed credential holds]
+[native-video-host][lock-cred] service capability supported
+PASS  retry: a service listing LockCredRetryV1 -> the host says it can (pong 0x80000 follows this)
+PASS  retry: X's first password typed and waiting (the 10-22 state)
+PASS  retry: ANOTHER control session's retry naming X's request -> Busy, no supersede, no challenge sent  status=16
+PASS  retry: ...X's wait untouched
+[native-video-host][lock-cred] retry requestId=53 supersedes=51 cleared=0 stage=8
+PASS  retry: the service does not confirm the end -> SupersedeRefused (18), NO new challenge asked  status=18
+PASS  retry: ...and the earlier wait is kept as it was (its pipe still held)
+[native-video-host][lock-cred] retry requestId=54 supersedes=51 cleared=1 stage=17
+PASS  retry: X's own retry -> the earlier wait ended (1 supersede), then a NEW challenge (purpose LockCred)  status=3
+PASS  retry: ...on the SAME service connection (no reconnect of the pipe)  0 new connections
+PASS  retry: the earlier request's result is now final: Superseded (its poll ends)  stage=0
+PASS  retry: ...and it is never asked about again (no status to the service for it)  0 asked
+PASS  retry: the new password typed and waiting
+PASS  retry: a retry naming the OLD (ended) request while the new one waits -> SupersedeRefused, no supersede, no challenge -- the new typed wait is not ended by it  status=18
+PASS  retry: ...and the new attempt ends unlocked
+[native-video-host][lock-cred] retry requestId=62 supersedes=61 cleared=0 stage=0
+PASS  retry: a service silent on the supersede -> SupersedeRefused within the deadline, no new challenge  800 ms, status=18
+[native-video-host][lock-cred] service capability supported
+PASS  retry: a service WITHOUT LockCredRetryV1 -> the host does not say it can (no 0x80000)
+PASS  retry: ...and a retry to it is refused here (SupersedeRefused, 18: the viewer keeps following the earlier wait) -- nothing sent, never 'replaced'  status=18
+
+connections served: 35
+RESULT: ALL PASS  (57 checks, 0 failed)

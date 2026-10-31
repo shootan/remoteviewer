@@ -1,0 +1,34 @@
+ok D:\remote\remote\apps\native_poc\src\viewer_video_receiver.cpp (1 edits, crlf=False, bom=False)
+N3 confirmed-rule product edits ok
+BUILD_EXIT=0
+SHARED_CORE_EXIT=0 [shared-core-test] PASS
+/usr/bin/bash: line 17:  1905 Segmentation fault      ./build-local/apps/native_poc/Release/remote60_viewer_udp_recovery_test.exe > .claude/n3_rule_recovery_run$i.log 2>&1
+run1 EXIT=139  fails=0
+[native-video-client] stuck head given up seq=21 gen=1 missing=1 of=47 reason=nack-spent ageUs=253046 sinceProgressUs=252724 hasTail=1 chased=1 rttUs=0(stale) replyAllowanceUs=50000 terminalMinUs=245000 hardCapUs=5000000 waitForKe
+  S17: seq=21 nacks=3 keyReq=+2 waitForKey=1
+[native-video-client] stuck head given up seq=21 gen=1 missing=1 of=48 reason=nack-spent ageUs=254628 sinceProgressUs=254183 hasTail=1 chased=1 rttUs=0(stale) replyAllowanceUs=50000 terminalMinUs=245000 hardCapUs=5000000 waitForKe
+  S18: seq=21 nacks=3 keyReq=+2 waitForKey=1
+/usr/bin/bash: line 17:  1913 Segmentation fault      ./build-local/apps/native_poc/Release/remote60_viewer_udp_recovery_test.exe > .claude/n3_rule_recovery_run$i.log 2>&1
+run2 EXIT=139  fails=0
+[native-video-client] stuck head given up seq=21 gen=1 missing=1 of=47 reason=nack-spent ageUs=252584 sinceProgressUs=252150 hasTail=1 chased=1 rttUs=0(stale) replyAllowanceUs=50000 terminalMinUs=245000 hardCapUs=5000000 waitForKe
+  S17: seq=21 nacks=3 keyReq=+2 waitForKey=1
+[native-video-client] stuck head given up seq=21 gen=1 missing=1 of=48 reason=nack-spent ageUs=253181 sinceProgressUs=252732 hasTail=1 chased=1 rttUs=0(stale) replyAllowanceUs=50000 terminalMinUs=245000 hardCapUs=5000000 waitForKe
+  S18: seq=21 nacks=3 keyReq=+2 waitForKey=1
+/usr/bin/bash: line 17:  1918 Segmentation fault      ./build-local/apps/native_poc/Release/remote60_viewer_udp_recovery_test.exe > .claude/n3_rule_recovery_run$i.log 2>&1
+run3 EXIT=139  fails=0
+[native-video-client] stuck head given up seq=21 gen=1 missing=1 of=47 reason=nack-spent ageUs=254334 sinceProgressUs=253924 hasTail=1 chased=1 rttUs=0(stale) replyAllowanceUs=50000 terminalMinUs=245000 hardCapUs=5000000 waitForKe
+  S17: seq=21 nacks=3 keyReq=+2 waitForKey=1
+[native-video-client] stuck head given up seq=21 gen=1 missing=1 of=48 reason=nack-spent ageUs=253177 sinceProgressUs=252849 hasTail=1 chased=1 rttUs=0(stale) replyAllowanceUs=50000 terminalMinUs=245000 hardCapUs=5000000 waitForKe
+  S18: seq=21 nacks=3 keyReq=+2 waitForKey=1
+/usr/bin/bash: line 17:  1943 Segmentation fault      ./build-local/apps/native_poc/Release/remote60_viewer_udp_recovery_test.exe > .claude/n3_rule_recovery_run$i.log 2>&1
+run4 EXIT=139  fails=0
+[native-video-client] stuck head given up seq=21 gen=1 missing=1 of=47 reason=nack-spent ageUs=255482 sinceProgressUs=254844 hasTail=1 chased=1 rttUs=0(stale) replyAllowanceUs=50000 terminalMinUs=245000 hardCapUs=5000000 waitForKe
+  S17: seq=21 nacks=3 keyReq=+2 waitForKey=1
+[native-video-client] stuck head given up seq=21 gen=1 missing=1 of=48 reason=nack-spent ageUs=252555 sinceProgressUs=252156 hasTail=1 chased=1 rttUs=0(stale) replyAllowanceUs=50000 terminalMinUs=245000 hardCapUs=5000000 waitForKe
+  S18: seq=21 nacks=3 keyReq=+2 waitForKey=1
+/usr/bin/bash: line 17:  1979 Segmentation fault      ./build-local/apps/native_poc/Release/remote60_viewer_udp_recovery_test.exe > .claude/n3_rule_recovery_run$i.log 2>&1
+run5 EXIT=139  fails=0
+[native-video-client] stuck head given up seq=21 gen=1 missing=1 of=47 reason=nack-spent ageUs=253030 sinceProgressUs=252655 hasTail=1 chased=1 rttUs=0(stale) replyAllowanceUs=50000 terminalMinUs=245000 hardCapUs=5000000 waitForKe
+  S17: seq=21 nacks=3 keyReq=+2 waitForKey=1
+[native-video-client] stuck head given up seq=21 gen=1 missing=1 of=48 reason=nack-spent ageUs=255201 sinceProgressUs=254541 hasTail=1 chased=1 rttUs=0(stale) replyAllowanceUs=50000 terminalMinUs=245000 hardCapUs=5000000 waitForKe
+  S18: seq=21 nacks=3 keyReq=+2 waitForKey=1

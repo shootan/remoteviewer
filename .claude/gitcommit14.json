@@ -1,0 +1,4 @@
+{
+ "repo_path": "D:/remote/remote",
+ "message": "docs(update): record the fourth acknowledgement case\n\nThe regression list in #478 named three; there are four. An unwritable\nchannel and an absent one reach the same outcome by different routes, and\nthe entry said so nowhere.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+}

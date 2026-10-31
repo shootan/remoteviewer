@@ -1,0 +1,79 @@
+a working address later in the list is still found immediately
+  ok   observe prepared the socket (127.0.0.1:61889)
+  ok   a candidate answered ()
+  ok   the reachable candidate was chosen
+  ok   the winner's kind is reported for the log
+  ok   found in 0ms, not after the dead ones
+every address blocked fails within the budget rather than hanging
+  ok   reported failure
+  ok   stayed within the budget (706ms)
+one unusable entry does not cost the others their chance
+  ok   the resolvable candidate still won ()
+  ok   chose the reachable address
+errors that come back at once do not make the rounds faster (150 ms cadence)
+  ok   nobody answered (no candidate answered)
+  ok   the budget ended it: 1504 ms of 1500
+  ok   rounds sent in 1.5 s: 10 (150 ms cadence: 10-11)
+a stream of unrelated and empty datagrams does not make the rounds faster
+  ok   a stranger is not a candidate: nobody answered (no candidate answered)
+  ok   the budget ended it: 1510 ms
+  ok   rounds sent in 1.5 s: 10 (10-11)
+an answer that comes later is taken when it comes, with errors around it
+  ok   the late candidate won ()
+  ok   taken at 627 ms (opens at 500)
+a stop ends the punch promptly, errors or not
+  ok   reported as cancelled (cancelled)
+  ok   within one interval of the stop: 314 ms (stop at 300)
+a TTL expiry on one path does not end the punch: the answering candidate is still taken
+  ok   the TTL report was actually delivered (14 times)
+  ok   the answering candidate was taken ()
+  ok   after the TTL reports, within a round: 214 ms
+a failure of the socket itself (WSAENOTSOCK) ends the punch at once
+  ok   reported as a receive failure with its code (punch receive failed (error 10038))
+  ok   at once, not after the budget: 13 ms
+TTL reports that keep coming do not speed up the rounds, and the budget/stop still hold
+  ok   the budget ended it (no candidate answered)
+  ok   on time: 1514 ms of 1500
+  ok   rounds in 1.5 s: 10 (10-11)
+  ok   a stop during them ends it: 325 ms (cancelled)
+early race: the commit point on a scripted clock (999 / 1000 / 1001, relay first/late/lost)
+  ok   observe
+  ok   relay at 20, direct at 999: direct at 999 (answered=1 kind=public decision=direct chosenMs=999 err=)
+  ok   relay at 20, direct at 1000: relay at 1000 (answered=1 kind=relay decision=relay chosenMs=1000 err=)
+  ok   relay at 20, direct at 1001: relay at 1000 (answered=1 kind=relay decision=relay chosenMs=1000 err=)
+  ok   no relay, direct at 1001: direct at 1001 -- nothing ends at the commit point (answered=1 kind=public decision=direct chosenMs=1001 err=)
+  ok   relay only at 2500: relay at 2500 (answered=1 kind=relay decision=relay-after-commit chosenMs=2500 err=)
+  ok   direct at 1500, relay at 2500: direct at 1500 (answered=1 kind=public decision=direct chosenMs=1500 err=)
+  ok   nothing answers: no answer at the budget (answered=0 kind= decision=none chosenMs=-1 err=no candidate answered)
+  ok   relay at 10, private at 30: private (answered=1 kind=private decision=direct chosenMs=30 err=)
+  ok   commit beyond the budget: the held relay is taken at the budget (answered=1 kind=relay decision=relay chosenMs=4000 err=)
+legacy race (no relayEarly): first valid answer wins, the relay included -- as before
+  ok   observe
+  ok   direct at 360, relay at 2500: direct at 360 (answered=1 kind=public decision=direct chosenMs=360 err=)
+  ok   relay only at 2500: relay at 2500 (answered=1 kind=relay decision=relay chosenMs=2500 err=)
+  ok   legacy, relay at 20, direct at 300: relay at 20 (the reason the server keeps its grace) (answered=1 kind=relay decision=relay chosenMs=20 err=)
+answers are checked for shape: garbage from a candidate is not ready (contract 5)
+  ok   observe
+  ok   legacy: five malformed answers ignored, the valid one at 1500 taken (answered=1 kind=public decision=direct chosenMs=1500 err= invalid=5)
+  ok   early: five malformed answers ignored, the valid one at 1500 taken (answered=1 kind=public decision=direct chosenMs=1500 err= invalid=5)
+  ok   a real Punch is valid
+  ok   zero bytes are not
+  ok   no buffer is not
+  ok   a declared size that is not 49 is not
+datagrams from no candidate: counted per tuple, bounded, never chosen (contract 1)
+  ok   observe
+  ok   a valid Punch from 127.0.0.1:42000 is recorded (n=2 punch=2 firstMs=100), the relay is still chosen at 1000 (answered=1 kind=relay decision=relay chosenMs=1000 err=)
+  ok   20 strangers: 8 tracked, 12 untracked, none chosen (answered=0 kind= decision=none chosenMs=-1 err=no candidate answered)
+a cancel outranks any choice, at the commit point too (contract 4)
+  ok   observe
+  ok   relay held, stop at 1000: cancelled, nothing chosen (answered=0 kind= decision=cancelled chosenMs=-1 err=cancelled)
+  ok   stop at 600 before any answer: cancelled (answered=0 kind= decision=cancelled chosenMs=-1 err=cancelled)
+early race on real sockets: direct at ~300 beats an immediate relay; no direct -> relay at ~1000
+  ok   direct chosen at 311 ms with the relay held since 0 ms
+  ok   relay chosen at 1009 ms (call 1009 ms)
+field samples replayed: every measured direct answer still wins; relay-won ones take ~1000 not ~2502
+  ok   observe
+  ok   9 of 9 PC-viewer samples (281..415 ms, the race's own T0) chosen direct, at their own time
+  ok   reference only (other measurements: host wake-to-punch 482, phone 554/626): also direct
+  ok   synthetic (direct left out), 9 runs: relay chosen at 1000, where the server grace made it ~2502
+punch_any_test: PASS

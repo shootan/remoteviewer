@@ -1,0 +1,20 @@
+﻿.\gradlew.bat : 
+At line:1 char:861
++ ... ect_client; .\gradlew.bat testDebugUnitTest --console=plain -q --test ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+20 tests completed, 1 failed
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:testDebugUnitTest'.
+> There were failing tests. See the report at: file:///C:/work/gnlink-wt/feat-apk-0233/apps/android_direct_client/app/b
+uild/reports/tests/testDebugUnitTest/index.html
+
+* Try:
+> Run with --scan to get full insights.
+
+BUILD FAILED in 2s

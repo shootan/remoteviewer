@@ -1,0 +1,12 @@
+﻿a screen offering 80/s still yields an even 30 at a 30 fps request
+  offered=800 accepted=300 (30.0/s) gapSpread=1.00
+the same screen yields an even 60 at a 60 fps request
+  offered=1100 accepted=600 (60.0/s) gapSpread=1.00
+a 30 fps request is never exceeded, however much the screen offers
+  offered=960 accepted=240 (30.0/s)
+a 60 fps request against a desktop swinging 7..52 offers a second
+  accepted=492 (30.8/s) gapSpread=2.75
+a long still stretch does not drag the cadence to a crawl
+  accepted in the last 4 seconds: 119
+a pointer-only offer never drops the content frame that follows it
+capture_cadence_gate_test: PASS

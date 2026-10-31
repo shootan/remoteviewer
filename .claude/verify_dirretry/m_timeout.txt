@@ -1,0 +1,818 @@
+test root: D:\remote\remote\.claude\test-tmp\verify-dirretry
+PASS  the fake directory starts (punch reply)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h-1 name=Punch PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=256
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=1 ms=15 capabilities=1
+[native-video-host] directory online public=127.0.0.1:57411
+[native-video-host] directory punch -> 211.218.222.1:60420
+[native-video-host][punch-reply] window open for 10000ms (capability collected)
+PASS  the host agent starts and collects a capability
+[native-video-host] directory peer punch; refreshing capability
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=1 replied=1 reason=ok
+PASS  a punch from a LAN client is answered  1 datagrams
+PASS  ...with one datagram of exactly the same size  49 bytes
+PASS  ...addressed back to the source that punched
+PASS  ...and it is a punch, carrying nothing
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=2 replied=1 reason=ok
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=3 replied=1 reason=ok
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=4 replied=1 reason=ok
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=5 replied=1 reason=ok
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=6 replied=1 reason=ok
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=7 replied=1 reason=ok
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=8 replied=1 reason=ok
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=9 replied=1 reason=ok
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=10 replied=1 reason=ok
+PASS  one source is answered at most its allowance  25 of 25
+PASS  two hundred punches do not become two hundred heartbeats  0 heartbeats
+[native-video-host] directory capability endpoint translated expected=211.218.222.1:60420 actual=192.168.20.16:60420
+PASS  a capability issued for the public tuple is accepted from the private one
+PASS  ...and is reported as an endpoint that moved
+PASS  ...and the capability is single use
+PASS  ...and a token nobody issued is refused
+[native-video-host][dir-cycle] n=1 sleep planMs=4320 workMs=680
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=0
+  (harness: 27 datagram(s) addressed off this machine, recorded but not sent)
+PASS  the fake directory starts (no window)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h-2 name=Punch PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=251
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=1 ms=15 capabilities=0
+[native-video-host] directory online public=127.0.0.1:57413
+[native-video-host][dir-cycle] n=1 sleep planMs=4717 workMs=283
+PASS  the host agent starts without a capability
+[native-video-host] directory peer punch; refreshing capability
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=1 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=2 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=3 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=4 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=5 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=6 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=7 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=8 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=9 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=1 total=10 replied=0 reason=closed
+PASS  a host with no connection in progress answers nothing
+PASS  ...and receiving punches does not arm it
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=214
+  (harness: 0 datagram(s) addressed off this machine, recorded but not sent)
+PASS  the fake directory starts (e2e)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h-e2e name=Punch PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=14
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=250
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=1 ms=2 capabilities=1
+[native-video-host] directory online public=127.0.0.1:57415
+[native-video-host] directory punch -> 211.218.222.1:60420
+[native-video-host][punch-reply] window open for 10000ms (capability collected)
+PASS  the host is up with a capability (e2e)
+PASS  ...and the host socket has a port for the client to punch
+PASS  the late-answering relay starts
+PASS  the client observes itself through the directory
+[native-video-host] directory peer punch; refreshing capability
+[native-video-host][dir-punch] from=127.0.0.1:57417 refreshWasPending=0 total=1 replied=1 reason=ok
+PASS  the client picks a candidate
+PASS  ...and it is the private one, not the relay  private at 0ms
+PASS  ...well before the relay's grace period  0ms of the relay's 2500ms
+[native-video-host][dir-cycle] n=1 sleep planMs=4505 workMs=495
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=0
+  (harness: 1 datagram(s) addressed off this machine, recorded but not sent)
+PASS  the fake directory starts (e2e control)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h-e2e2 name=Punch PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=264
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=1 ms=3 capabilities=0
+[native-video-host] directory online public=127.0.0.1:57419
+[native-video-host][dir-cycle] n=1 sleep planMs=4731 workMs=269
+PASS  the host is up without a capability (e2e control)
+PASS  ...and its socket has a port
+PASS  the late-answering relay starts (control)
+PASS  the client observes itself (control)
+[native-video-host] directory peer punch; refreshing capability
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=1 replied=0 reason=closed
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=1 total=2 replied=0 reason=closed
+[native-video-host][dir-cycle] n=1 wake cause=refresh sleptMs=213
+[native-video-host][dir-cycle] n=2 start cause=refresh
+[native-video-host][dir-cycle] n=2 step=health ok=1 ms=0
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=3 replied=0 reason=closed
+[native-video-host][dir-cycle] n=2 step=observe ok=1 ms=264
+[native-video-host][dir-cycle] n=2 step=heartbeat ok=1 ms=2 capabilities=0
+[native-video-host][dir-cycle] n=2 sleep planMs=4733 workMs=267
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=4 replied=0 reason=closed
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=5 replied=0 reason=closed
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=6 replied=0 reason=closed
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=7 replied=0 reason=closed
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=8 replied=0 reason=closed
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=9 replied=0 reason=closed
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=10 replied=0 reason=closed
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=11 replied=0 reason=closed
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=12 replied=0 reason=closed
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=13 replied=0 reason=closed
+[native-video-host] directory peer punch; refreshing capability
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=14 replied=0 reason=closed
+[native-video-host][dir-cycle] n=2 wake cause=refresh sleptMs=1634
+[native-video-host][dir-cycle] n=3 start cause=refresh
+[native-video-host][dir-cycle] n=3 step=health ok=1 ms=0
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=15 replied=0 reason=closed
+[native-video-host][dir-cycle] n=3 step=observe ok=1 ms=265
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=16 replied=0 reason=closed
+[native-video-host][dir-cycle] n=3 step=heartbeat ok=1 ms=2 capabilities=0
+[native-video-host][dir-cycle] n=3 sleep planMs=4733 workMs=267
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=17 replied=0 reason=closed
+[native-video-host][dir-punch] from=127.0.0.1:57421 refreshWasPending=0 total=18 replied=0 reason=closed
+PASS  a silent host loses to the relay  relay at 2647ms
+PASS  ...and it takes the relay's grace period to get there  2647ms
+[native-video-host][dir-cycle] n=3 wake cause=stop sleptMs=403
+  (harness: 0 datagram(s) addressed off this machine, recorded but not sent)
+PASS  the fake directory starts (refresh rate)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h-rate name=Punch PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=1
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=261
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=1 ms=16 capabilities=0
+[native-video-host] directory online public=127.0.0.1:57423
+[native-video-host][dir-cycle] n=1 sleep planMs=299720 workMs=280
+PASS  the host is up (refresh rate)
+[native-video-host] directory peer punch; refreshing capability
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=1 replied=0 reason=closed
+[native-video-host][dir-cycle] n=1 wake cause=refresh sleptMs=202
+[native-video-host][dir-cycle] n=2 start cause=refresh
+[native-video-host][dir-cycle] n=2 step=health ok=1 ms=0
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=2 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=3 replied=0 reason=closed
+[native-video-host][dir-cycle] n=2 step=observe ok=1 ms=250
+[native-video-host][dir-cycle] n=2 step=heartbeat ok=1 ms=3 capabilities=0
+[native-video-host][dir-cycle] n=2 sleep planMs=299746 workMs=254
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=4 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=5 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=6 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=7 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=8 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=9 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=10 replied=0 reason=closed
+[native-video-host] directory peer punch; refreshing capability
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=11 replied=0 reason=closed
+[native-video-host][dir-cycle] n=2 wake cause=refresh sleptMs=1623
+[native-video-host][dir-cycle] n=3 start cause=refresh
+[native-video-host][dir-cycle] n=3 step=health ok=1 ms=0
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=12 replied=0 reason=closed
+[native-video-host][dir-cycle] n=3 step=observe ok=1 ms=263
+[native-video-host][dir-cycle] n=3 step=heartbeat ok=1 ms=2 capabilities=0
+[native-video-host][dir-cycle] n=3 sleep planMs=299735 workMs=265
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=13 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=14 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=15 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=16 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=17 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=18 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=19 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=20 replied=0 reason=closed
+[native-video-host] directory peer punch; refreshing capability
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=21 replied=0 reason=closed
+[native-video-host][dir-cycle] n=3 wake cause=refresh sleptMs=1824
+[native-video-host][dir-cycle] n=4 start cause=refresh
+[native-video-host][dir-cycle] n=4 step=health ok=1 ms=0
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=22 replied=0 reason=closed
+[native-video-host][dir-cycle] n=4 step=observe ok=1 ms=264
+[native-video-host][dir-cycle] n=4 step=heartbeat ok=1 ms=2 capabilities=0
+[native-video-host][dir-cycle] n=4 sleep planMs=299733 workMs=267
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=23 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=24 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=25 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=26 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=27 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=28 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=29 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=30 replied=0 reason=closed
+[native-video-host] directory peer punch; refreshing capability
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=31 replied=0 reason=closed
+[native-video-host][dir-cycle] n=4 wake cause=refresh sleptMs=1824
+[native-video-host][dir-cycle] n=5 start cause=refresh
+[native-video-host][dir-cycle] n=5 step=health ok=1 ms=0
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=32 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16[native-video-host][dir-cycle] n=5 step=observe ok=1 ms=265
+:60420 refreshWasPending=0 total=33 replied=0 reason=closed
+[native-video-host][dir-cycle] n=5 step=heartbeat ok=1 ms=15 capabilities=0
+[native-video-host][dir-cycle] n=5 sleep planMs=299720 workMs=280
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=34 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=35 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=36 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=37 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=38 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=39 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=40 replied=0 reason=closed
+[native-video-host] directory peer punch; refreshing capability
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=41 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16[native-video-host][dir-cycle] n=5 wake cause=refresh sleptMs=:1822
+60420[native-video-host][dir-cycle] n=6 start cause=refresh
+ refreshWasPending=1 total=42 replied=0 reason=closed
+[native-video-host][dir-cycle] n=6 step=health ok=1 ms=0
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=43 replied=0 reason=closed
+[native-video-host][dir-cycle] n=6 step=observe ok=1 ms=264
+[native-video-host][dir-cycle] n=6 step=heartbeat ok=1 ms=16 capabilities=0
+[native-video-host][dir-cycle] n=6 sleep planMs=299720 workMs=280
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=44 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=45 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=46 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=47 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=48 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=49 replied=0 reason=closed
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=50 replied=0 reason=closed
+PASS  ten seconds of punches cost at most one directory cycle every two seconds  5 heartbeats from 50 punches, bound 7
+PASS  ...and at least one, so the interrupt still works at all  5 heartbeats
+[native-video-host][dir-cycle] n=6 wake cause=stop sleptMs=2035
+  (harness: 0 datagram(s) addressed off this machine, recorded but not sent)
+PASS  the fake directory starts (malformed refresh)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h-bad name=Punch PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=260
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=1 ms=15 capabilities=0
+[native-video-host] directory online public=127.0.0.1:55625
+[native-video-host][dir-cycle] n=1 sleep planMs=299708 workMs=292
+PASS  the host is up (malformed refresh)
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=1 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=2 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=3 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=4 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=5 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=6 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=7 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=8 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=9 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=10 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=11 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=12 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=13 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=14 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=15 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=16 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=17 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=18 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=19 replied=0 reason=bad
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=20 replied=0 reason=bad
+[native-video-host][dir-punch] from=239.1.2.3:60420 refreshWasPending=0 total=21 replied=0 reason=src
+[native-video-host][dir-punch] from=239.1.2.3:60420 refreshWasPending=0 total=22 replied=0 reason=src
+[native-video-host][dir-punch] from=239.1.2.3:60420 refreshWasPending=0 total=23 replied=0 reason=src
+[native-video-host][dir-punch] from=239.1.2.3:60420 refreshWasPending=0 total=24 replied=0 reason=src
+[native-video-host][dir-punch] from=239.1.2.3:60420 refreshWasPending=0 total=25 replied=0 reason=src
+[native-video-host][dir-punch] from=239.1.2.3:60420 refreshWasPending=0 total=26 replied=0 reason=src
+[native-video-host][dir-punch] from=239.1.2.3:60420 refreshWasPending=0 total=27 replied=0 reason=src
+[native-video-host][dir-punch] from=239.1.2.3:60420 refreshWasPending=0 total=28 replied=0 reason=src
+[native-video-host][dir-punch] from=239.1.2.3:60420 refreshWasPending=0 total=29 replied=0 reason=src
+[native-video-host][dir-punch] from=239.1.2.3:60420 refreshWasPending=0 total=30 replied=0 reason=src
+PASS  a malformed punch, or one from an address we would not answer, asks the directory nothing  0 heartbeats
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=5494
+  (harness: 0 datagram(s) addressed off this machine, recorded but not sent)
+PASS  the fake directory starts (wake not throttled)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h-wake name=Punch PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=14
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=263
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=1 ms=2 capabilities=0
+[native-video-host] directory online public=127.0.0.1:61600
+[native-video-host][dir-cycle] n=1 sleep planMs=299704 workMs=296
+PASS  the host is up (wake not throttled)
+[native-video-host] directory peer punch; refreshing capability
+[native-video-host][dir-punch] from=192.168.20.16:60420 refreshWasPending=0 total=1 replied=0 reason=closed
+[native-video-host][dir-cycle] n=1 wake cause=refresh sleptMs=212
+[native-video-host][dir-cycle] n=2 start cause=refresh
+[native-video-host][dir-cycle] n=2 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=2 step=observe ok=1 ms=264
+[native-video-host][dir-cycle] n=2 step=heartbeat ok=1 ms=15 capabilities=0
+[native-video-host][dir-cycle] n=2 sleep planMs=299720 workMs=280
+PASS  a client punch asks the directory once
+PASS  ...and the wake below is sent while that floor is still in force  494ms of 2000ms
+PASS  the directory can send from the socket the host observes through
+[native-video-host] directory peer punch; refreshing capability
+[native-video-host][punch-reply] window open for 10000ms (directory wake)
+[native-video-host][dir-punch] from=127.0.0.1:61599 refreshWasPending=0 total=2 replied=0 reason=src
+[native-video-host][dir-cycle] n=2 wake cause=refresh sleptMs=202
+[native-video-host][dir-cycle] n=3 start cause=refresh
+[native-video-host][dir-cycle] n=3 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=3 step=observe ok=1 ms=263
+[native-video-host][dir-cycle] n=3 step=heartbeat ok=1 ms=16 capabilities=0
+[native-video-host][dir-cycle] n=3 sleep planMs=299721 workMs=279
+PASS  a directory wake is not made to wait for the client cooldown  497ms after the wake
+[native-video-host][dir-cycle] n=3 wake cause=stop sleptMs=202
+  (harness: 0 datagram(s) addressed off this machine, recorded but not sent)
+PASS  an already-cancelled Observe gives up  cancelled
+PASS  ...saying it was cancelled rather than that it timed out  cancelled
+PASS  ...without spending its attempts  0ms of the ~1800ms it would otherwise take
+PASS  the fake directory starts (cancel)
+PASS  the client observes itself (cancel)
+PASS  a punch in flight stops when it is cancelled  cancelled
+PASS  ...saying so  cancelled
+PASS  ...within a pass of being told, not at the end of the budget  468ms of a 4000ms budget
+PASS  the fake directory starts (no stop)
+PASS  the client observes itself (no stop)
+PASS  a caller that passes no stop still runs its whole budget  702ms of 700ms
+PASS  the fake directory starts
+PASS  the health route carries the observe endpoint
+PASS  ...with the port the server named  29181
+PASS  ...and the host when there is one  obs.example
+PASS  a directory that says nothing leaves the endpoint unknown
+PASS  ...and does not invent a port  0
+PASS  a server error is an error
+PASS  ...and it says something  the server answered 500
+PASS  a directory that is not there is reported as unreachable  cannot reach the server
+[native-video-client][attempt] connect=- candidates=1 kinds=public capability=1 reobserved=1
+[native-video-client][attempt] connect=- punch answered=0 kind=- ms=309 why=no candidate answered
+[native-video-client][race] connect=- mode=legacy commitMs=0 decision=none chosenMs=-1 firstDirectMs=-1 firstRelayMs=-1 relayHeld=0 rounds=2 resolved=1 invalidFromCandidate=0 strangers=0 untracked=0 openMs=311
+PASS  a 409 on connect is repaired rather than reported
+PASS  ...by asking exactly twice  2
+PASS  ...and by observing again first  2
+PASS  ...and without signing in again  0
+PASS  a directory that keeps refusing is not retried forever  observation_required
+PASS  ...and it stopped at two attempts  2
+PASS  a 404 is not treated as a missing observation  host not found
+PASS  ...and is asked once  1
+PASS  the host agent starts (409-then-200)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=262
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=1 ms=268 capabilities=0
+[native-video-host] directory online public=127.0.0.1:61615
+[native-video-host][dir-cycle] n=1 sleep planMs=4468 workMs=532
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=415
+PASS  the host heartbeats again after a 409  2
+PASS  ...and does not register again, so the cached token survives  1
+PASS  ...and it observed more than once  2
+PASS  the host agent starts (401)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=262
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=0 ms=15 capabilities=0
+[native-video-host] directory host token rejected; re-registering
+[native-video-host][dir-cycle] n=1 sleep planMs=4721 workMs=279
+[native-video-host][dir-cycle] n=1 wake cause=elapsed sleptMs=4804
+[native-video-host][dir-cycle] n=2 start cause=elapsed
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=2 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=2 step=observe ok=1 ms=265
+[native-video-host][dir-cycle] n=2 step=heartbeat ok=1 ms=3 capabilities=0
+[native-video-host] directory online public=127.0.0.1:61617
+[native-video-host][dir-cycle] n=2 sleep planMs=4715 workMs=285
+[native-video-host][dir-cycle] n=2 wake cause=stop sleptMs=213
+PASS  a 401 does register again  2
+PASS  the host agent starts (staged inactive)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=250
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host] directory host token rejected: the account is not active; asking again in 2 cycles
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=0 ms=3 capabilities=0
+[native-video-host] directory host token rejected: the account is not active
+PASS  [inactive] cycle 1 completed  n=1 health=0 asked=0 aim=1 observe=1 hb=0 skip=0 status=host token rejected: the account is not active public=127.0.0.1:61619
+PASS  [inactive] cycle 1: the 401 for an account that is not active -- one heartbeat, one registration, no re-registration  inactive 1/1
+PASS  [inactive] ...it says so in the words the window reads as SIGN IN AGAIN  host token rejected: the account is not active public=127.0.0.1:61619
+[native-video-host][dir-cycle] n=1 sleep planMs=4732 workMs=268
+[native-video-host][dir-cycle] n=1 wake cause=elapsed sleptMs=4821
+[native-video-host][dir-cycle] n=2 start cause=elapsed
+[native-video-host][dir-cycle] n=2 step=skip reason=inactive cyclesLeft=1
+[native-video-host][dir-cycle] n=2 sleep planMs=5000 workMs=0
+[native-video-host][dir-cycle] n=2 wake cause=elapsed sleptMs=5150
+[native-video-host][dir-cycle] n=3 start cause=elapsed
+[native-video-host][dir-cycle] n=3 step=skip reason=inactive cyclesLeft=0
+PASS  [inactive] cycles 2 and 3 wait it out: skipped, and no heartbeat was sent  inactive n=3 health=0 asked=0 aim=1 observe=0 hb=0 skip=1 status=host token rejected: the account is not active public=127.0.0.1:61619 heartbeats=1
+[native-video-host][dir-cycle] n=3 sleep planMs=5000 workMs=0
+[native-video-host][dir-cycle] n=3 wake cause=elapsed sleptMs=5082
+[native-video-host][dir-cycle] n=4 start cause=elapsed
+[native-video-host][dir-cycle] n=4 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=4 step=observe ok=1 ms=264
+[native-video-host][dir-cycle] n=4 step=heartbeat ok=1 ms=16 capabilities=0
+[native-video-host] directory online public=127.0.0.1:61619
+PASS  [inactive] cycle 4 asks again: re-enabled, the same token is taken back -- online  n=4 health=0 asked=0 aim=1 observe=1 hb=1 skip=0 status=online public=127.0.0.1:61619
+PASS  [inactive] ...with exactly one more heartbeat and nothing re-registered  inactive 2/1
+[native-video-host][dir-cycle] n=4 sleep planMs=4720 workMs=280
+[native-video-host][dir-cycle] n=4 wake cause=stop sleptMs=0
+PASS  [inactive] the cycle barrier was never left by its timeout
+PASS  the host agent starts (staged inactive-slow)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=265
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host] directory host token rejected: the account is not active; asking again in 2 cycles
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=0 ms=2 capabilities=0
+[native-video-host] directory host token rejected: the account is not active
+PASS  [inactive] cycle 1 completed  n=1 health=0 asked=0 aim=1 observe=1 hb=0 skip=0 status=host token rejected: the account is not active public=127.0.0.1:64792
+PASS  [inactive] cycle 1: the 401 for an account that is not active -- one heartbeat, one registration, no re-registration  inactive-slow 1/1
+PASS  [inactive] ...it says so in the words the window reads as SIGN IN AGAIN  host token rejected: the account is not active public=127.0.0.1:64792
+[native-video-host][dir-cycle] n=1 sleep planMs=-12296 workMs=17296
+[native-video-host][dir-cycle] n=1 wake cause=elapsed sleptMs=0
+[native-video-host][dir-cycle] n=2 start cause=elapsed
+[native-video-host][dir-cycle] n=2 step=skip reason=inactive cyclesLeft=1
+[native-video-host][dir-cycle] n=2 sleep planMs=5000 workMs=0
+[native-video-host][dir-cycle] n=2 wake cause=elapsed sleptMs=5078
+[native-video-host][dir-cycle] n=3 start cause=elapsed
+[native-video-host][dir-cycle] n=3 step=skip reason=inactive cyclesLeft=0
+PASS  [inactive] cycles 2 and 3 wait it out: skipped, and no heartbeat was sent  inactive-slow n=3 health=0 asked=0 aim=1 observe=0 hb=0 skip=1 status=host token rejected: the account is not active public=127.0.0.1:64792 heartbeats=1
+[native-video-host][dir-cycle] n=3 sleep planMs=5000 workMs=0
+[native-video-host][dir-cycle] n=3 wake cause=elapsed sleptMs=5069
+[native-video-host][dir-cycle] n=4 start cause=elapsed
+[native-video-host][dir-cycle] n=4 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=4 step=observe ok=1 ms=263
+[native-video-host][dir-cycle] n=4 step=heartbeat ok=1 ms=2 capabilities=0
+[native-video-host] directory online public=127.0.0.1:64792
+PASS  [inactive] cycle 4 asks again: re-enabled, the same token is taken back -- online  n=4 health=0 asked=0 aim=1 observe=1 hb=1 skip=0 status=online public=127.0.0.1:64792
+PASS  [inactive] ...with exactly one more heartbeat and nothing re-registered  inactive-slow 2/1
+[native-video-host][dir-cycle] n=4 sleep planMs=4734 workMs=266
+[native-video-host][dir-cycle] n=4 wake cause=stop sleptMs=0
+PASS  [inactive-slow] the cycle barrier was never left by its timeout
+PASS  the host agent starts (inactive-stays)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=262
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host] directory host token rejected: the account is not active; asking again in 2 cycles
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=0 ms=15 capabilities=0
+[native-video-host] directory host token rejected: the account is not active
+[native-video-host][dir-cycle] n=1 sleep planMs=4710 workMs=290
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=402
+PASS  [inactive] ...while stopped it says so in the words the window reads as SIGN IN AGAIN  host token rejected: the account is not active public=127.0.0.1:57542
+PASS  [inactive] ...and still has not registered again
+PASS  the host agent starts (register-403)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registration refused: fixture: waiting for approval; asking again in 2 cycles
+[native-video-host][dir-cycle] n=1 sleep planMs=5000 workMs=0
+[native-video-host][dir-cycle] n=1 wake cause=elapsed sleptMs=5147
+[native-video-host][dir-cycle] n=2 start cause=elapsed
+[native-video-host][dir-cycle] n=2 step=skip reason=inactive cyclesLeft=1
+[native-video-host][dir-cycle] n=2 sleep planMs=5000 workMs=0
+[native-video-host][dir-cycle] n=2 wake cause=elapsed sleptMs=5098
+[native-video-host][dir-cycle] n=3 start cause=elapsed
+[native-video-host][dir-cycle] n=3 step=skip reason=inactive cyclesLeft=0
+[native-video-host][dir-cycle] n=3 sleep planMs=5000 workMs=0
+[native-video-host][dir-cycle] n=3 wake cause=elapsed sleptMs=5089
+[native-video-host][dir-cycle] n=4 start cause=elapsed
+[native-video-host] directory registration refused: fixture: waiting for approval; asking again in 4 cycles
+[native-video-host][dir-cycle] n=4 sleep planMs=5000 workMs=0
+[native-video-host][dir-cycle] n=4 wake cause=stop sleptMs=1429
+PASS  [403] a refused registration is not retried every heartbeat  2
+PASS  [403] ...the directory's own sentence is what the host says  registration refused: fixture: waiting for approval
+PASS  [403] ...and nothing was heartbeated
+PASS  the host agent starts (bad-port)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=1548
+[native-video-host][dir-cycle] n=1 sleep planMs=3436 workMs=1564
+[native-video-host][dir-cycle] n=1 wake cause=elapsed sleptMs=3508
+[native-video-host][dir-cycle] n=2 start cause=elapsed
+[native-video-host][dir-cycle] n=2 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=2 step=observe ok=0 ms=1571
+[native-video-host][dir-cycle] n=2 sleep planMs=3429 workMs=1571
+[native-video-host][dir-cycle] n=2 wake cause=elapsed sleptMs=3503
+[native-video-host][dir-cycle] n=3 start cause=elapsed
+[native-video-host][dir-cycle] n=3 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=3 step=observe ok=0 ms=1580
+[native-video-host][dir-cycle] n=3 sleep planMs=3420 workMs=1580
+[native-video-host][dir-cycle] n=3 wake cause=elapsed sleptMs=3499
+[native-video-host][dir-cycle] n=4 start cause=elapsed
+[native-video-host][dir-cycle] n=4 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=4 step=observe ok=0 ms=1573
+[native-video-host][dir-cycle] n=4 sleep planMs=3427 workMs=1573
+[native-video-host][dir-cycle] n=4 wake cause=stop sleptMs=0
+PASS  nothing is published for {"ip":"1.2.3.4","port":65537}  address observation timed out
+PASS  the host agent starts (bad-port)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=1564
+[native-video-host][dir-cycle] n=1 sleep planMs=3435 workMs=1565
+[native-video-host][dir-cycle] n=1 wake cause=elapsed sleptMs=3503
+[native-video-host][dir-cycle] n=2 start cause=elapsed
+[native-video-host][dir-cycle] n=2 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=2 step=observe ok=0 ms=1571
+[native-video-host][dir-cycle] n=2 sleep planMs=3429 workMs=1571
+[native-video-host][dir-cycle] n=2 wake cause=elapsed sleptMs=3472
+[native-video-host][dir-cycle] n=3 start cause=elapsed
+[native-video-host][dir-cycle] n=3 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=3 step=observe ok=0 ms=1570
+[native-video-host][dir-cycle] n=3 sleep planMs=3430 workMs=1570
+[native-video-host][dir-cycle] n=3 wake cause=elapsed sleptMs=3495
+[native-video-host][dir-cycle] n=4 start cause=elapsed
+[native-video-host][dir-cycle] n=4 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=4 step=observe ok=0 ms=1546
+[native-video-host][dir-cycle] n=4 sleep planMs=3454 workMs=1546
+[native-video-host][dir-cycle] n=4 wake cause=stop sleptMs=0
+PASS  nothing is published for {"ip":"1.2.3.4","port":65536}  address observation timed out
+PASS  the host agent starts (bad-port)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=1573
+[native-video-host][dir-cycle] n=1 sleep planMs=3412 workMs=1588
+[native-video-host][dir-cycle] n=1 wake cause=elapsed sleptMs=3483
+[native-video-host][dir-cycle] n=2 start cause=elapsed
+[native-video-host][dir-cycle] n=2 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=2 step=observe ok=0 ms=1554
+[native-video-host][dir-cycle] n=2 sleep planMs=3446 workMs=1554
+[native-video-host][dir-cycle] n=2 wake cause=elapsed sleptMs=3504
+[native-video-host][dir-cycle] n=3 start cause=elapsed
+[native-video-host][dir-cycle] n=3 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=3 step=observe ok=0 ms=1527
+[native-video-host][dir-cycle] n=3 sleep planMs=3473 workMs=1527
+[native-video-host][dir-cycle] n=3 wake cause=elapsed sleptMs=3532
+[native-video-host][dir-cycle] n=4 start cause=elapsed
+[native-video-host][dir-cycle] n=4 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=4 step=observe ok=0 ms=1557
+[native-video-host][dir-cycle] n=4 sleep planMs=3443 workMs=1557
+[native-video-host][dir-cycle] n=4 wake cause=stop sleptMs=0
+PASS  nothing is published for {"ip":"1.2.3.4","port":0}  address observation timed out
+PASS  the host agent starts (bad-port)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=1560
+[native-video-host][dir-cycle] n=1 sleep planMs=3439 workMs=1561
+[native-video-host][dir-cycle] n=1 wake cause=elapsed sleptMs=3491
+[native-video-host][dir-cycle] n=2 start cause=elapsed
+[native-video-host][dir-cycle] n=2 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=2 step=observe ok=0 ms=1573
+[native-video-host][dir-cycle] n=2 sleep planMs=3427 workMs=1573
+[native-video-host][dir-cycle] n=2 wake cause=elapsed sleptMs=3498
+[native-video-host][dir-cycle] n=3 start cause=elapsed
+[native-video-host][dir-cycle] n=3 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=3 step=observe ok=0 ms=1535
+[native-video-host][dir-cycle] n=3 sleep planMs=3465 workMs=1535
+[native-video-host][dir-cycle] n=3 wake cause=elapsed sleptMs=3546
+[native-video-host][dir-cycle] n=4 start cause=elapsed
+[native-video-host][dir-cycle] n=4 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=4 step=observe ok=0 ms=1560
+[native-video-host][dir-cycle] n=4 sleep planMs=3440 workMs=1560
+[native-video-host][dir-cycle] n=4 wake cause=stop sleptMs=0
+PASS  nothing is published for {"ip":"1.2.3.4","port":29181.5}  address observation timed out
+PASS  the host agent starts (bad-port)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=1543
+[native-video-host][dir-cycle] n=1 sleep planMs=3441 workMs=1559
+[native-video-host][dir-cycle] n=1 wake cause=elapsed sleptMs=3512
+[native-video-host][dir-cycle] n=2 start cause=elapsed
+[native-video-host][dir-cycle] n=2 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=2 step=observe ok=0 ms=1543
+[native-video-host][dir-cycle] n=2 sleep planMs=3457 workMs=1543
+[native-video-host][dir-cycle] n=2 wake cause=elapsed sleptMs=3504
+[native-video-host][dir-cycle] n=3 start cause=elapsed
+[native-video-host][dir-cycle] n=3 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=3 step=observe ok=0 ms=1530
+[native-video-host][dir-cycle] n=3 sleep planMs=3470 workMs=1530
+[native-video-host][dir-cycle] n=3 wake cause=elapsed sleptMs=3552
+[native-video-host][dir-cycle] n=4 start cause=elapsed
+[native-video-host][dir-cycle] n=4 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=4 step=observe ok=0 ms=1530
+[native-video-host][dir-cycle] n=4 sleep planMs=3470 workMs=1530
+[native-video-host][dir-cycle] n=4 wake cause=stop sleptMs=0
+PASS  nothing is published for {"ip":"1.2.3.4","port":-1}  address observation timed out
+PASS  the host agent starts (bad-port)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=1571
+[native-video-host][dir-cycle] n=1 sleep planMs=3414 workMs=1586
+[native-video-host][dir-cycle] n=1 wake cause=elapsed sleptMs=3479
+[native-video-host][dir-cycle] n=2 start cause=elapsed
+[native-video-host][dir-cycle] n=2 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=2 step=observe ok=0 ms=1523
+[native-video-host][dir-cycle] n=2 sleep planMs=3477 workMs=1523
+[native-video-host][dir-cycle] n=2 wake cause=elapsed sleptMs=3549
+[native-video-host][dir-cycle] n=3 start cause=elapsed
+[native-video-host][dir-cycle] n=3 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=3 step=observe ok=0 ms=1572
+[native-video-host][dir-cycle] n=3 sleep planMs=3428 workMs=1572
+[native-video-host][dir-cycle] n=3 wake cause=elapsed sleptMs=3504
+[native-video-host][dir-cycle] n=4 start cause=elapsed
+[native-video-host][dir-cycle] n=4 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=4 step=observe ok=0 ms=1547
+[native-video-host][dir-cycle] n=4 sleep planMs=3453 workMs=1547
+[native-video-host][dir-cycle] n=4 wake cause=stop sleptMs=0
+PASS  nothing is published for {"ip":"1.2.3.4","port":"29181"}  address observation timed out
+PASS  the host agent starts (bad-port)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=1528
+[native-video-host][dir-cycle] n=1 sleep planMs=3457 workMs=1543
+[native-video-host][dir-cycle] n=1 wake cause=elapsed sleptMs=3518
+[native-video-host][dir-cycle] n=2 start cause=elapsed
+[native-video-host][dir-cycle] n=2 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=2 step=observe ok=0 ms=1524
+[native-video-host][dir-cycle] n=2 sleep planMs=3476 workMs=1524
+[native-video-host][dir-cycle] n=2 wake cause=elapsed sleptMs=3533
+[native-video-host][dir-cycle] n=3 start cause=elapsed
+[native-video-host][dir-cycle] n=3 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=3 step=observe ok=0 ms=1552
+[native-video-host][dir-cycle] n=3 sleep planMs=3448 workMs=1552
+[native-video-host][dir-cycle] n=3 wake cause=elapsed sleptMs=3524
+[native-video-host][dir-cycle] n=4 start cause=elapsed
+[native-video-host][dir-cycle] n=4 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=4 step=observe ok=0 ms=1548
+[native-video-host][dir-cycle] n=4 sleep planMs=3452 workMs=1548
+[native-video-host][dir-cycle] n=4 wake cause=stop sleptMs=0
+PASS  nothing is published for {"ip":"1.2.3.4","port":99999999999999}  address observation timed out
+PASS  the host agent starts (bad-port)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=1560
+[native-video-host][dir-cycle] n=1 sleep planMs=3439 workMs=1561
+[native-video-host][dir-cycle] n=1 wake cause=elapsed sleptMs=3499
+[native-video-host][dir-cycle] n=2 start cause=elapsed
+[native-video-host][dir-cycle] n=2 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=2 step=observe ok=0 ms=1549
+[native-video-host][dir-cycle] n=2 sleep planMs=3451 workMs=1549
+[native-video-host][dir-cycle] n=2 wake cause=elapsed sleptMs=3515
+[native-video-host][dir-cycle] n=3 start cause=elapsed
+[native-video-host][dir-cycle] n=3 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=3 step=observe ok=0 ms=1535
+[native-video-host][dir-cycle] n=3 sleep planMs=3465 workMs=1535
+[native-video-host][dir-cycle] n=3 wake cause=elapsed sleptMs=3538
+[native-video-host][dir-cycle] n=4 start cause=elapsed
+[native-video-host][dir-cycle] n=4 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=4 step=observe ok=0 ms=1534
+[native-video-host][dir-cycle] n=4 sleep planMs=3466 workMs=1534
+[native-video-host][dir-cycle] n=4 wake cause=stop sleptMs=0
+PASS  nothing is published for {"ip":"","port":29181}  address observation timed out
+PASS  the host agent starts (port-65535)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host] directory registered hostId=h1 name=Fixture PC
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=263
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=1 ms=2 capabilities=0
+[native-video-host] directory online public=1.2.3.4:65535
+[native-video-host][dir-cycle] n=1 sleep planMs=4719 workMs=281
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=403
+PASS  65535 is a port and is published  online public=1.2.3.4:65535
+PASS  the viewer refuses an out-of-range observed port  directory did not answer the address probe
+PASS  ...and never asks to connect on it  0
+PASS  a fractional observed port is not a port on the viewer's side either  directory did not answer the address probe
+PASS  the host agent starts (cached-advertised)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=21
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=263
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=1 ms=2 capabilities=0
+[native-video-host] directory online public=127.0.0.1:62970
+[native-video-host][dir-cycle] n=1 sleep planMs=4713 workMs=287
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=403
+PASS  a cached host asks the health route  1
+PASS  ...and heartbeats using the advertised port  1
+PASS  ...without registering again  0
+PASS  ...and reports itself online  online public=127.0.0.1:62970
+PASS  the host agent starts (staged cached-silent)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host][dir-cycle] n=1 step=health ok=0 ms=23
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=1561
+PASS  cached-silent: cycle 1 completed  n=1 health=2 asked=1 aim=3 observe=0 hb=0 skip=0 status=address observation timed out
+PASS  cycle 1: the health route was asked once and said nothing about observations  cached-silent n=1 health=2 asked=1 aim=3 observe=0 hb=0 skip=0 status=address observation timed out healthz=1
+PASS  ...the legacy default was still tried (aimed there, probes sent to httpPort+1) and got no answer  legacySends=6
+PASS  ...so nothing is published and no heartbeat is sent  address observation timed out
+FAIL  ...and the status says BOTH: the directory gave no observe address, and the default timed out  address observation timed out
+[native-video-host][dir-cycle] n=1 sleep planMs=3415 workMs=1585
+[native-video-host][dir-cycle] n=1 wake cause=elapsed sleptMs=3475
+[native-video-host][dir-cycle] n=2 start cause=elapsed
+[native-video-host][dir-cycle] n=2 step=health ok=0 ms=0
+[native-video-host][dir-cycle] n=2 step=observe ok=0 ms=1526
+PASS  cycle 2 (health cooldown): not asked again, the default tried again, the same two facts  n=2 health=2 asked=0 aim=3 observe=0 hb=0 skip=0 status=address observation timed out
+[native-video-host][dir-cycle] n=2 sleep planMs=3474 workMs=1526
+[native-video-host][dir-cycle] n=2 wake cause=elapsed sleptMs=3534
+[native-video-host][dir-cycle] n=3 start cause=elapsed
+[native-video-host][dir-cycle] n=3 step=health ok=0 ms=0
+[native-video-host][dir-cycle] n=3 step=observe ok=0 ms=1524
+[native-video-host][dir-cycle] n=3 sleep planMs=3476 workMs=1524
+[native-video-host][dir-cycle] n=3 wake cause=elapsed sleptMs=3544
+[native-video-host][dir-cycle] n=4 start cause=elapsed
+[native-video-host][dir-cycle] n=4 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=4 step=observe ok=1 ms=262
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=4 step=heartbeat ok=1 ms=15 capabilities=0
+[native-video-host] directory online public=127.0.0.1:62972
+PASS  cycle 4: asked again, the advertisement is used, the observation answers and the heartbeat goes  n=4 health=1 asked=1 aim=2 observe=1 hb=1 skip=0 status=online public=127.0.0.1:62972
+PASS  ...online, published, nothing registered (the cached token)  cached-silent online public=127.0.0.1:62972 healthz=2
+[native-video-host][dir-cycle] n=4 sleep planMs=4721 workMs=279
+[native-video-host][dir-cycle] n=4 wake cause=stop sleptMs=0
+PASS  [cached-silent] the cycle barrier was never left by its timeout
+PASS  the host agent starts (staged cached-silent-slow)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host][dir-cycle] n=1 step=health ok=0 ms=13
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=1560
+PASS  cached-silent-slow: cycle 1 completed  n=1 health=2 asked=1 aim=3 observe=0 hb=0 skip=0 status=address observation timed out
+PASS  cycle 1: the health route was asked once and said nothing about observations  cached-silent-slow n=1 health=2 asked=1 aim=3 observe=0 hb=0 skip=0 status=address observation timed out healthz=1
+PASS  ...the legacy default was still tried (aimed there, probes sent to httpPort+1) and got no answer  legacySends=6
+PASS  ...so nothing is published and no heartbeat is sent  address observation timed out
+FAIL  ...and the status says BOTH: the directory gave no observe address, and the default timed out  address observation timed out
+[native-video-host][dir-cycle] n=1 sleep planMs=3426 workMs=1574
+[native-video-host][dir-cycle] n=1 wake cause=elapsed sleptMs=3483
+[native-video-host][dir-cycle] n=2 start cause=elapsed
+[native-video-host][dir-cycle] n=2 step=health ok=0 ms=0
+[native-video-host][dir-cycle] n=2 step=observe ok=0 ms=1536
+PASS  cycle 2 (health cooldown): not asked again, the default tried again, the same two facts  n=2 health=2 asked=0 aim=3 observe=0 hb=0 skip=0 status=address observation timed out
+[native-video-host][dir-cycle] n=2 sleep planMs=-13547 workMs=18547
+[native-video-host][dir-cycle] n=2 wake cause=elapsed sleptMs=0
+[native-video-host][dir-cycle] n=3 start cause=elapsed
+[native-video-host][dir-cycle] n=3 step=health ok=0 ms=0
+[native-video-host][dir-cycle] n=3 step=observe ok=0 ms=1585
+[native-video-host][dir-cycle] n=3 sleep planMs=3415 workMs=1585
+[native-video-host][dir-cycle] n=3 wake cause=elapsed sleptMs=3471
+[native-video-host][dir-cycle] n=4 start cause=elapsed
+[native-video-host][dir-cycle] n=4 step=health ok=1 ms=16
+[native-video-host][dir-cycle] n=4 step=observe ok=1 ms=263
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=4 step=heartbeat ok=1 ms=2 capabilities=0
+[native-video-host] directory online public=127.0.0.1:53770
+PASS  cycle 4: asked again, the advertisement is used, the observation answers and the heartbeat goes  n=4 health=1 asked=1 aim=2 observe=1 hb=1 skip=0 status=online public=127.0.0.1:53770
+PASS  ...online, published, nothing registered (the cached token)  cached-silent-slow online public=127.0.0.1:53770 healthz=2
+[native-video-host][dir-cycle] n=4 sleep planMs=4718 workMs=282
+[native-video-host][dir-cycle] n=4 wake cause=stop sleptMs=0
+PASS  [cached-silent-slow] the cycle barrier was never left by its timeout
+PASS  rule: a pinned aim that does not answer reads exactly as before
+PASS  rule: an advertised aim that does not answer reads exactly as before
+PASS  rule: legacy default + no advertisement keeps both facts  this directory does not say where to send address observations; the observation via the legacy default (port 8081) timed out
+PASS  rule: legacy default + a health route that could not be asked keeps both, with its error  could not ask the directory where observations go (http 500); the observation via the legacy default (port 8081) timed out
+PASS  rule: legacy default, health never asked: still says it was the default that timed out  address observation via the legacy default (port 8081) timed out
+PASS  the host agent starts (staged pinned-silent)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=1546
+PASS  pinned, no answer: aimed at the pin, not the legacy default, health not asked  n=1 health=0 asked=0 aim=1 observe=0 hb=0 skip=0 status=address observation timed out
+PASS  ...and it reads exactly "address observation timed out"  address observation timed out
+[native-video-host][dir-cycle] n=1 sleep planMs=3454 workMs=1546
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=0
+PASS  [pinned-silent] the cycle barrier was never left by its timeout
+PASS  the host agent starts (staged advertised-silent)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=1541
+PASS  advertised, no answer: aimed at the advertisement, which did not answer  n=1 health=1 asked=1 aim=2 observe=0 hb=0 skip=0 status=address observation timed out
+PASS  ...and it reads exactly "address observation timed out"  address observation timed out
+[native-video-host][dir-cycle] n=1 sleep planMs=3458 workMs=1542
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=0
+PASS  [advertised-silent] the cycle barrier was never left by its timeout
+PASS  the host agent starts (staged https-unaimed)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host][dir-cycle] n=1 step=health ok=0 ms=8007
+[native-video-host][dir-cycle] n=1 step=observe ok=0 ms=0
+PASS  https, no advertisement: not aimed, nothing sent anywhere  n=1 health=3 asked=1 aim=0 observe=0 hb=0 skip=0 status=could not ask the directory where observations go: cannot reach the server sends=0
+PASS  ...and the status is the reason, not a timeout  could not ask the directory where observations go: cannot reach the server
+[native-video-host][dir-cycle] n=1 sleep planMs=-3007 workMs=8007
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=0
+PASS  [https-unaimed] the cycle barrier was never left by its timeout
+PASS  the host agent starts (cached-pinned)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=265
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=1 ms=16 capabilities=0
+[native-video-host] directory online public=127.0.0.1:63819
+[native-video-host][dir-cycle] n=1 sleep planMs=4719 workMs=281
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=402
+PASS  a pinned port is used and the advertisement is not needed  online public=127.0.0.1:63819
+PASS  ...so the health route is not asked at all  0
+PASS  the host agent starts (legacy-health-500)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host][dir-cycle] n=1 step=health ok=0 ms=0
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=257
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=1 ms=16 capabilities=0
+[native-video-host] directory online public=127.0.0.1:63820
+[native-video-host][dir-cycle] n=1 sleep planMs=4725 workMs=275
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=405
+PASS  a health route that fails leaves the http fallback working  1
+PASS  ...and the observation really went to httpPort+1  1
+PASS  ...without registering again  0
+PASS  ...and the address is published  online public=127.0.0.1:63820
+PASS  the host agent starts (legacy-health-silent)
+[native-video-host][dir-cycle] n=1 start cause=first
+[native-video-host][dir-cycle] n=1 step=health ok=0 ms=23
+[native-video-host][dir-cycle] n=1 step=observe ok=1 ms=260
+[directory] advertising localPort=0 altPort=0 localIps=192.168.0.76,172.22.224.1
+[native-video-host][dir-cycle] n=1 step=heartbeat ok=1 ms=15 capabilities=0
+[native-video-host] directory online public=127.0.0.1:63821
+[native-video-host][dir-cycle] n=1 sleep planMs=4701 workMs=299
+[native-video-host][dir-cycle] n=1 wake cause=stop sleptMs=406
+PASS  a health route that says nothing leaves the http fallback working  1
+PASS  ...and the observation really went to httpPort+1  1
+PASS  ...without registering again  0
+PASS  ...and the address is published  online public=127.0.0.1:63821
+
+2 FAILED  (177 checks, 2 failed)

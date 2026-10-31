@@ -1,0 +1,94 @@
+{
+ "A_off": {
+  "lines": 12,
+  "drawWallUs": [],
+  "window_p95us": [
+   83196,
+   92745,
+   92570,
+   92711,
+   87943,
+   92974,
+   91445,
+   94581,
+   83469,
+   86298,
+   86668,
+   84754
+  ],
+  "glDrawn": 0,
+  "glSkipped": 0,
+  "glRedraws": 0,
+  "sample": "[sh_latency] seg=1 level=off path=direct gen=0 surface=1 requested=off fps=30 window: n=100 p50us=64341 p95us=84754 p99us=88491 maxus=93908 warmup=0 stale=0 unmatched=0 redraws=2 overflow=0 ms=60408 | segment: n=1212 p95us=87780 | glAvail=0 glDrawn=0 glSkipped=0 glRedraws=0 drawWallUs=0 src=- stepFromOutput=0 srcNeOut=0"
+ },
+ "A_s60": {
+  "lines": 12,
+  "drawWallUs": [
+   11626,
+   15205,
+   12056,
+   14227,
+   15512,
+   19957,
+   19810,
+   14339,
+   17074,
+   11209,
+   11588,
+   12101
+  ],
+  "window_p95us": [
+   100029,
+   106905,
+   99676,
+   100850,
+   104343,
+   96839,
+   104456,
+   100093,
+   98925,
+   100699,
+   100149,
+   100939
+  ],
+  "glDrawn": 1272,
+  "glSkipped": 0,
+  "glRedraws": 0,
+  "sample": "[sh_latency] seg=1 level=strong path=sharpen gen=1 surface=1 requested=strong fps=30 window: n=106 p50us=78417 p95us=100939 p99us=109798 maxus=117273 warmup=0 stale=0 unmatched=0 redraws=0 overflow=0 ms=60384 | segment: n=1224 p95us=101056 | glAvail=107 glDrawn=107 glSkipped=0 glRedraws=0 drawWallUs=12101 src=1440x810 out=1440x810 turn=0 m=1.000,0.000,0.000,-1.000 stepFromOutput=0 srcNeOut=0"
+ },
+ "B_s60": {
+  "lines": 12,
+  "drawWallUs": [
+   18421,
+   26066,
+   20439,
+   16480,
+   16292,
+   16674,
+   24848,
+   15876,
+   20780,
+   19690,
+   17307,
+   16567
+  ],
+  "window_p95us": [
+   124818,
+   111515,
+   113497,
+   114732,
+   111340,
+   114353,
+   118080,
+   110544,
+   111399,
+   113527,
+   114156,
+   115378
+  ],
+  "glDrawn": 1263,
+  "glSkipped": 0,
+  "glRedraws": 0,
+  "sample": "[sh_latency] seg=1 level=strong path=sharpen gen=1 surface=1 requested=strong fps=30 window: n=96 p50us=88500 p95us=115378 p99us=121580 maxus=121580 warmup=0 stale=0 unmatched=0 redraws=0 overflow=0 ms=60400 | segment: n=1147 p95us=113425 | glAvail=107 glDrawn=106 glSkipped=0 glRedraws=0 drawWallUs=16567 src=1440x810 out=1970x1080 turn=0 m=1.000,0.000,0.000,-1.000 place=25.0,0.0,1920.0x1080.0 step"
+ }
+}

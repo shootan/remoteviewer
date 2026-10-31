@@ -1,0 +1,83 @@
+  // ---- capture-lifecycle r1 (PS, Codex §2/§3): a STILL logon screen, picked from the picker. The 10-22
+  // field case end to end: the viewer starts in its picker (stream off), waits there, then picks the
+  // desktop -- and must SEE the logon screen within 1 s, keep seeing it refreshed (500 ms), and the worker
+  // must live through a pick after the idle detach (10-22: exit 15). Judged on DECODED frames that the
+  // product's receiver (VideoReceiver: assembler, FrameGate, MF decoder, FrameBuffer) published -- not on
+  // datagrams. What differs from the product, said once: the worker serves "Winlogon" on this test user's
+  // "Default" desktop (GNLINK_STREAM_TEST_DESKTOP_ALIAS -- the name it is shown, desktop_name_seam.hpp), so
+  // the pixels are this desktop's; the present thread stamps what the renderer would show (no window).
+  if (stillScreen && connected) {
+    std::cout << "\n--- PS: a still logon screen, picked after the picker ---\n";
+    const auto frames_since = [&](uint64_t fromUs) {
+      std::lock_guard<std::mutex> lk(shownMu);
+      return static_cast<size_t>(std::count_if(shown.begin(), shown.end(), [&](const Shown& s) { return s.us >= fromUs; }));
+    };
+    const auto first_since = [&](uint64_t fromUs, Shown* out) {
+      std::lock_guard<std::mutex> lk(shownMu);
+      for (const Shown& s : shown) {
+        if (s.us >= fromUs) {
+          *out = s;
+          return true;
+        }
+      }
+      return false;
+    };
+    const auto worker_alive = [&] { return host.pi.hProcess && WaitForSingleObject(host.pi.hProcess, 0) == WAIT_TIMEOUT; };
+    const auto pick_after = [&](const char* name, int pickerMs) {
+      std::cout << "\n--- PS " << name << ": " << pickerMs << " ms in the picker (stream off), then the desktop ---\n";
+      ctx.control.streamState.Request(false);
+      Sleep(static_cast<DWORD>(pickerMs));
+      const uint64_t t0 = qpc_now_us();
+      ctx.control.streamState.Request(true);
+      Shown first{};
+      const bool got = wait_until([&] { return first_since(t0, &first); }, 4000);
+      const uint64_t latencyMs = got ? (first.us - t0) / 1000 : 0;
+      check((std::string("PS ") + name + ": THE LOGON SCREEN IS SHOWN WITHIN 1 s OF THE PICK (a decoded frame)").c_str(),
+            got && latencyMs <= 1000, got ? std::to_string(latencyMs) + " ms" : std::string("no decoded frame in 4 s"));
+      check((std::string("PS ") + name + ": ...and it is a picture, not a blank (luma spread)").c_str(),
+            got && first.lumaSpread >= 8,
+            got ? "spread=" + std::to_string(first.lumaSpread) + " " + std::to_string(first.w) + "x" +
+                      std::to_string(first.h) + (first.synthetic ? " (re-served cached frame)" : " (captured frame)")
+                : std::string());
+      Sleep(3000);
+      const size_t refreshed = frames_since(t0 + 1000000ULL);
+      check((std::string("PS ") + name + ": THE STILL SCREEN KEEPS BEING REFRESHED (>= 4 frames in the next 3 s, 500 ms cadence)").c_str(),
+            refreshed >= 4, std::to_string(refreshed) + " frames");
+      check((std::string("PS ") + name + ": the worker is still serving (no exit 15 / 14)").c_str(), worker_alive());
+    };
+    // The viewer started in its picker; the worker's capture comes up behind it.
+    Sleep(1500);
+    StillCover cover;
+    const bool covered = !noCover && cover.Start();
+    check("PS: the primary monitor is covered by a still window for this run (--no-cover: the desktop as it is)",
+          noCover || covered);
+    Sleep(1500);  // the cover is composed; whatever moved before is behind it now
+    pick_after("A (still attached)", 3000);
+    pick_after("B (after the idle detach)", 10000);
+    pick_after("B2 (after the idle detach, again)", 10000);
+    cover.Stop();
+    check("PS: the worker never asked for WGC before login (r10 T2 path not taken)",
+          host.log().find("capture cannot continue on the logon desktop") == std::string::npos &&
+              host.log().find("wgc requested") == std::string::npos,
+          host.log().find("capture cannot continue") == std::string::npos ? std::string()
+                                                                           : host.log().substr(host.log().find("capture cannot continue"), 200));
+    std::cout << "    host: full-frame asks=" << host.Count("full-frame ask=") << " dxgi reacquire delivered="
+              << host.Count("full-frame reacquire: delivered") << " cache-cleared=" << host.Count("bootstrap-cache cleared")
+              << " idle-detach=" << host.Count("capture detached (idle)") << "\n";
+    // The host's own account of the run, for the evidence (stillness: content acquires per second).
+    {
+      std::istringstream lines(host.log());
+      std::string line;
+      while (std::getline(lines, line)) {
+        for (const char* key : {"dxgi-acquire", "full-frame", "[desktop]", "bootstrap-cache", "stream-state", "capture detached",
+                                "capture reattached", "stream active", "stream inactive", "trailing-edge kick",
+                                "capture cannot continue", "desktop_backend="}) {
+          if (line.find(key) != std::string::npos) {
+            std::cout << "    host| " << line << "\n";
+            break;
+          }
+        }
+      }
+    }
+  }
+

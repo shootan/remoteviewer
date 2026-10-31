@@ -1,0 +1,8 @@
+﻿remote60_native_video_client_shared_core_test.exe : [shared-core-test] FAIL: backend: Request then Query -> the WGC cha
+nge goes out (asking for the status)
+At D:\remote\remote\.claude\caplife\r2_mutants.ps1:29 char:83
++ ... me.txt" 2>&1 } else { & "$rel\$($m[2]).exe" > "$out\$name.txt" 2>&1 }
++                           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([shared-core-te...for the status):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 

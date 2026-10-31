@@ -1,0 +1,61 @@
+{
+  "accounts": {
+    "tester": {
+      "id": "tester",
+      "salt": "c51512ccdc975a3d868cceca3b7508a3",
+      "hash": "f4101752e93b84563db7a4fcb2ee904db6ff1662a74adfc9fec951ba26a36069",
+      "status": "active",
+      "createdAt": 1793112833960,
+      "updatedAt": 1793112833960,
+      "approvedAt": 1793112833960,
+      "memo": "",
+      "lastLoginAt": 1793112835650
+    },
+    "outsider": {
+      "id": "outsider",
+      "salt": "4545dddc33b08d7e9e1826b8b3f18942",
+      "hash": "b82d0a5f798d4f81e878a91b70ffa35e0649c8accf6c2e49b386263d12178ae4",
+      "status": "active",
+      "createdAt": 1793112834055,
+      "updatedAt": 1793112834055,
+      "approvedAt": 1793112834055,
+      "memo": "",
+      "lastLoginAt": 1793112837451
+    }
+  },
+  "hosts": {
+    "4cd3fe807f93d80d": {
+      "hostId": "4cd3fe807f93d80d",
+      "accountId": "tester",
+      "machineId": "machine-early",
+      "hostName": "early-host",
+      "tokenHash": "88eb52d0e189cb510e6ffae6cfed0946bea51e4bc30c8cd48c519949f586b914",
+      "lastSeen": 1793112835703,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 55712,
+      "wireIp": "127.0.0.1",
+      "wirePort": 55712,
+      "localIps": [
+        "192.168.20.51"
+      ],
+      "localUdpPort": 55712,
+      "alternateUdpPort": 0
+    },
+    "29f0ec5c5836bb32": {
+      "hostId": "29f0ec5c5836bb32",
+      "accountId": "outsider",
+      "machineId": "machine-early-o",
+      "hostName": "early-other",
+      "tokenHash": "727f6fd98bd7b4e8595c5b511c8ae97ae419e13d04ee2146c0a366e3292f347f",
+      "lastSeen": 1793112837489,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 55712,
+      "wireIp": "127.0.0.1",
+      "wirePort": 55712,
+      "localIps": [],
+      "localUdpPort": 0,
+      "alternateUdpPort": 0
+    }
+  },
+  "devices": {}
+}

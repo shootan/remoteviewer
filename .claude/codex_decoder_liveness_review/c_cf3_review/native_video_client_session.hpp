@@ -1,0 +1,585 @@
+#pragma once
+
+#include <cstddef>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <unordered_map>
+#include <vector>
+
+#include "client_liveness_trace.hpp"
+#include "clipboard_sync.hpp"
+#include "native_socket.hpp"
+#include "client_park_state.hpp"
+#include "client_mouse_xbutton_fence.hpp"
+#include "client_telemetry_window.hpp"
+#include "client_host_role_gate.hpp"
+#include "decoder_key_request.hpp"
+#include "native_video_client_shared_core.hpp"
+#include "udp_control_channel.hpp"
+
+namespace remote60::native_poc {
+
+class ClientEncodedFrameSink {
+ public:
+  virtual ~ClientEncodedFrameSink() = default;
+  /** The decoder's valid measurement in progress (mobile-abr r1; r6: cumulative since it began, with its
+   *  time -- reading consumes nothing). false when the sink does not decode at all (the session then
+   *  reports no decode-side field, as before) or when its decoder state means nothing right now -- no
+   *  surface, a startup grace (the session then reports nothing for that window rather than "0 fps").
+   *  A valid 0 is a real stall and is reported. */
+  virtual bool DrainDecodeStats(ClientDecodeStats* /* out */) { return false; }
+  /** The decode generation now (r3 R2): it changes whenever the sink's decode state stops or starts being
+   *  meaningful (surface, selection). Lock-free; read on every control pass. 0 for a sink without one. */
+  virtual uint64_t DecodeGeneration() { return 0; }
+  /** r5 (Codex F1 contract): an explicit start of active viewing -- the connection starting, or the
+   *  viewer resuming a paused stream. The sink may hold its count back for one bounded startup grace
+   *  from here (until its first picture). Called from the session's caller threads. */
+  virtual void OnDecodeEpisodeStart() {}
+  /** Drains the presentation stats accumulated since the last call; false when the sink does
+   *  not present frames itself (a decode-only sink has nothing to report). */
+  virtual bool DrainPresentationStats(ClientPresentationStats* /* out */) { return false; }
+  virtual void OnEncodedH264Frame(UdpH264AssembledFrame&& frame) = 0;
+  virtual void OnVideoStreamReset() = 0;
+  // Called when a compressed reference frame was lost. Implementations that retain decoder
+  // state should flush it before the next IDR; the default keeps lightweight test sinks valid.
+  virtual void OnVideoDiscontinuity() {}
+  // A decoder can be forced to discard a delta of its own accord -- typically when the
+  // hardware codec has no free input buffer -- which silently breaks the reference chain for
+  // everything that follows. Returning true asks the session for an IDR; the flag is consumed
+  // so one drop produces one request and the session's own rate limiter still applies.
+  virtual bool ConsumeDecoderKeyframeRequest() { return false; }
+  // apk-inbox C (design r3 §3-§4 D8): the same want with its descriptor -- why it is asked (a cause set) and the sink
+  // state it was asked in. The session keeps the descriptor with the request while it is HELD (the limiter refused)
+  // or ACCEPTED (pending a send), asks DecoderKeyRequestValidCauses before it goes on at either point and does not send
+  // a request none of whose causes are valid any more; OnDecoderKeyRequestSent when the control exchange for it
+  // started (the sink's retry clock runs from real sends, not from wants). The defaults keep a sink that only answers
+  // ConsumeDecoderKeyframeRequest exactly as before (a legacy cause, always valid).
+  virtual bool TakeDecoderKeyRequest(DecoderKeyRequest* out) {
+    if (!ConsumeDecoderKeyframeRequest()) return false;
+    if (out) {
+      out->Clear();
+      out->causes = kKeyCauseLegacy;
+    }
+    return true;
+  }
+  virtual uint32_t DecoderKeyRequestValidCauses(const DecoderKeyRequest& request) { return request.causes; }
+  virtual void OnDecoderKeyRequestSent(const DecoderKeyRequest& /* request */, uint64_t /* nowUs */) {}
+  // C r2 (Codex codex_apk_inbox_c_src_r1.md §8 (a)): the session's asks for the owed IDR `owedToken` are used up (8 taken
+  // by the limiter -- queued, not "8 on the wire") and the last of them has left or been dropped. The sink records the
+  // duty as covered-and-spent: no recovery asks of its own on top, a final answer window, then exhausted -- a late IDR
+  // still decodes and ends it. A stale token (the duty re-armed or paid since) changes nothing.
+  virtual void OnDecoderKeyOwedExhausted(uint64_t /* owedToken */, uint64_t /* nowUs */) {}
+  virtual void OnWindowSelectionControlResult(const ControlWindowSelectedMessage& /* msg */) {}
+  // t-970r4zgo: the local selection a select request belongs to -- read when the request is
+  // queued (the Android sink: the generation PrepareForWindowSelection armed). 0 = not tracked.
+  virtual uint64_t CurrentSelectionTag() { return 0; }
+  // r4 M1-A / r5 N1: non-zero while a selection is still owed an IDR of its answered generation --
+  // until such an IDR is handed to the decoder. An opaque token: it changes when the duty is
+  // re-armed (the decoder became able again), and the session's bounded retries start over.
+  virtual uint64_t KeyframeOwedFor() { return 0; }
+  // The answer to a select request, with the tag that request was queued under. A sink that
+  // tracks selections applies it only to that selection; the default ignores the tag.
+  virtual void OnWindowSelectionControlResultFor(const ControlWindowSelectedMessage& msg, uint64_t /* requestTag */) {
+    OnWindowSelectionControlResult(msg);
+  }
+  // apk-0232 r1: a desktop pick at a host known to be at the logon screen (kCaptureFlagPreloginV1) gets no answer.
+  // The selection `tag` (still waiting for one) continues as a LOCAL selection: bound by its own first IDR, not by
+  // an answer (SelectionAckGate::BeginLocal). False = not that selection any more (or a sink that cannot) -- then
+  // nothing is selected. LocalSelectionBoundFor: the generation that bound it, 0 while unbound. RefuseSelectionFor:
+  // the selection `tag` cannot be made there (a window pick): it opens nothing.
+  virtual bool BeginLocalSelectionFor(uint64_t /* tag */) { return false; }
+  virtual uint64_t LocalSelectionBoundFor(uint64_t /* tag */) { return 0; }
+  virtual void RefuseSelectionFor(uint64_t /* tag */) {}
+  // apk-0232 r3 (Codex N1, the last boundary): the local selection `tag`'s completion, judged and recorded in ONE
+  // step against the sink's own selection state. If `tag` is still the selection and its IDR bound it, `commit`
+  // runs with that generation WHILE the sink holds its state -- a cancel (Abort) or a new Prepare, which take the
+  // same state, lands wholly before (nothing completes) or wholly after (a completion already recorded, which it
+  // then supersedes). `commit` must not call back into the sink. Abandoned: `tag` is no longer the selection.
+  enum class LocalCommit : uint8_t { Abandoned = 0, Unbound = 1, Committed = 2 };
+  virtual LocalCommit CommitLocalSelectionFor(uint64_t /* tag */, const std::function<void(uint64_t generation)>& /* commit */) {
+    return LocalCommit::Abandoned;
+  }
+};
+
+enum class ClientSessionState : uint8_t {
+  Disconnected = 0,
+  Connecting = 1,
+  Connected = 2,
+  Error = 3,
+};
+
+struct ClientSessionTransportStatus {
+  bool tcpControlConnected = false;
+  bool udpVideoReady = false;
+};
+
+struct ClientSessionConnectArgs {
+  std::string host;
+  int videoPort = 0;
+  int controlPort = 0;
+  bool requireUdpHello = true;
+  bool requireTcpControl = true;
+  // Tunnels control through the video socket instead of opening a TCP connection. Required
+  // when the host was reached by hole punching, since only that one socket has a path.
+  bool controlOverUdp = false;
+  std::string peerAuthToken;
+  // An already-punched socket to adopt instead of opening a new one. It must be the socket the
+  // punch was performed with: a fresh one would sit behind a different NAT mapping and the
+  // host's packets would be dropped. The session takes ownership.
+  SocketHandle preparedUdpSocket = kInvalidSocket;
+  // keepalive-r2 ② e: preparedUdpSocket is a DUPLICATE of a socket someone else keeps using (a standby lease's own,
+  // StandbyLease::ActivationArgs). The session then never shuts it down: on POSIX shutdown() acts on the shared socket
+  // itself (not on this descriptor), so the lease would lose its endpoint for good (AVD ke_r3: the next activation and
+  // every observe after it went nowhere). Its reader leaves on its own receive tick; the descriptor is only closed.
+  bool preparedSocketShared = false;
+  // The uplink keepalive interval; see kClientControlIntervalMsDefault.
+  uint32_t controlIntervalMs = kClientControlIntervalMsDefault;
+  uint32_t udpHandshakeTimeoutMs = 800;
+  ClientEncodedFrameSink* encodedFrameSink = nullptr;
+  // keepalive-r2 (2): the UDP handshake to run on the (prepared) socket INSTEAD of the Hello -- a standby entry's
+  // activation (StandbyLease): it returns true once the host admitted this session, with the HelloAck's features.
+  // Empty = the ordinary authenticated Hello (udp_hello_handshake), as before.
+  std::function<bool(SocketHandle socket, const std::atomic<bool>& stop, std::string* error, uint32_t* ackFeatures)>
+      udpHandshake;
+};
+
+struct ClientSessionSnapshot {
+  ClientSessionState state = ClientSessionState::Disconnected;
+  std::string status = "disconnected";
+  std::string lastError;
+  std::string host;
+  int videoPort = 0;
+  int controlPort = 0;
+  ClientSessionTransportStatus transport{};
+  bool sessionThreadActive = false;
+  bool controlLoopActive = false;
+  uint32_t latestWindowListCount = 0;
+  uint64_t selectedWindowId = 0;
+  std::string selectedWindowTitle = "desktop";
+};
+
+class ClientSessionController {
+ public:
+  ClientSessionController();
+  ~ClientSessionController();
+
+  bool Connect(const ClientSessionConnectArgs& args);
+  void Disconnect();
+  ClientSessionSnapshot Snapshot() const;
+  WindowPanelSnapshot WindowPanelSnapshotCopy() const;
+  // apk-decoder-liveness r2: the progress trace (client_liveness_trace.hpp) plus the control transport's counters, as
+  // one line. Empty unless the build records it (GNLINK_LIVENESS_TRACE). Lock-free but for the channel's own short lock.
+  std::string LivenessTraceLine();
+  bool RequestWindowList();
+  // apk-0232 r1: at a host KNOWN to be at the logon screen a desktop pick is a local selection (nothing sent; see
+  // ClientEncodedFrameSink::BeginLocalSelectionFor) and a window pick is refused (false). A pick made before the
+  // role is known is queued and decided when it would go out (the control loop), the same way.
+  bool RequestWindowSelect(uint64_t windowId);
+  bool RequestDesktopMode();
+  bool RequestMonitorList();
+  // listRevision: the WindowPanelSnapshot::monitorListRevision the index was read from (~0 = the
+  // current list). A pick made from a list that has since been replaced is refused at once.
+  bool RequestMonitorSelect(uint32_t monitorId, uint64_t listRevision = ~0ULL);
+  bool HostSecureDesktopActive() const {
+    return hostSecureDesktopActive_.load(std::memory_order_relaxed);
+  }
+  // The connected host's Pong capture flags (0 until the first pong). The Android viewer's menu rules
+  // read them (prelogin-ui r1: 0x2000 prelogin now, 0x4000 remote reboot, 0x8000 durable prelogin).
+  uint32_t HostCaptureFlags() const { return hostRole_.Load().flags; }
+  uint64_t PreloginInputHeldBack() const { return preloginInputHeldBack_.load(std::memory_order_relaxed); }
+  // keepalive-r2 e (client_mouse_xbutton_fence.hpp): X edges not sent to a host without kCaptureFlagMouseXButtonsV1
+  // (refused when queued, or dropped right before sending).
+  uint64_t MouseXButtonsHeldBack() const { return mouseXButtonsHeldBack_.load(std::memory_order_relaxed); }
+  // Remote reboot (prelogin-ui r1, item 8): one confirm -> one request. Returns the request id (never
+  // 0), or 0 when nothing is sent: not connected, the host lacks 0x4000, or one is already out. The
+  // control thread sends ControlRebootRequest (84) once; an answer that does not come is NOT asked for
+  // again -- the user decides (Codex r4 R3).
+  uint32_t RequestReboot();
+  // The answer for the request, once: outcome = RebootResult (0..3), or kRebootOutcomeNoReply when the
+  // link gave none (closed / desynchronised). False while there is nothing new.
+  static constexpr int kRebootOutcomeNoReply = 100;
+  bool TakeRebootOutcome(uint32_t* requestId, int* outcome, uint32_t* win32);
+  // r9 R5: Ctrl+Alt+Del at a pre-login host (0x20000). The request id, or 0 when nothing is sent. The answer,
+  // once: outcome = PreloginSasResult (0..4), or kRebootOutcomeNoReply when the link gave none.
+  uint32_t RequestSas();
+  // *flags (optional): kPreloginStatusFlag* -- e.g. the PC's logon needs no Ctrl+Alt+Del (DisableCAD).
+  bool TakeSasOutcome(uint32_t* requestId, int* outcome, uint32_t* win32, uint8_t* flags = nullptr);
+  bool RequestStreamActive(bool active);
+
+  // --- keepalive r1: park (Codex .claude/codex_keepalive_r1.md, client_park_state.hpp) ----------
+  //
+  // BeginPark: from now on no new input, clipboard, preview, selection or stream request is taken;
+  // unsent actions are dropped, the release of everything the host still holds from this client is
+  // queued, and the control loop then pauses the stream and fences the pause with a Ping. false = not
+  // connected, or a park already running. ParkPhase says how far it got (Parked = confirmed; Failed /
+  // Expired = the app disconnects). ResumeFromPark: the park ends and the session takes requests
+  // again, the clipboard re-baselined (nothing from the parked time travels); false if not parked.
+  // EndPark drops a park without resuming (the app disconnects next).
+  bool BeginPark();
+  bool ResumeFromPark();
+  void EndPark();
+  // keepalive-multi r1: this connection's park limit (the policy's TTL), enforced by its own control loop.
+  // keepalive r2: unlimited (the product policy) or a finite limit in ms (tests).
+  void SetParkLimit(bool unlimited, uint64_t ms) {
+    std::lock_guard<std::mutex> lk(parkMu_);
+    park_.SetParkedUnlimited(unlimited);
+    park_.SetParkedLimitUs(ms * 1000ull);
+  }
+  ClientParkPhase ParkPhase() const;
+  // How many held keys / buttons the park released, and unsent actions it dropped (diagnostics).
+  uint32_t ParkReleasedCount() const { return parkReleased_.load(std::memory_order_relaxed); }
+  uint32_t ParkDroppedActionCount() const { return parkDroppedActions_.load(std::memory_order_relaxed); }
+  // r2 K5: whether this connection's host is known to stop sending when paused (see BeginPark).
+  bool HostHonorsStreamPause() const;
+  // The phone's clipboard as it is when a parked session resumes: recorded as already sent.
+  void SeedClipboardBaseline(const std::u16string& text);
+#ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+  // TEST BUILD ONLY (keepalive r3 R1): called by the control loop right after its park step at each pass
+  // boundary, with the park state that step read -- a test stops the loop there to put a resume between.
+  void SetTestPassBoundaryHook(std::function<void(bool parking)> hook) {
+    std::lock_guard<std::mutex> lk(testHookMu_);
+    testPassHook_ = std::move(hook);
+  }
+  // TEST BUILD ONLY (apk-inbox C, D8): called at the session's two key-request points -- "held" (before a request the
+  // limiter refused goes to it again) and "accepted" (before a KeyframeRequest exchange starts) -- right before the
+  // sink is asked which causes still hold: a test changes the sink's state there (another binding, a pick).
+  void SetTestKeyRequestHook(std::function<void(const char* point)> hook) {
+    std::lock_guard<std::mutex> lk(testHookMu_);
+    testKeyHook_ = std::move(hook);
+  }
+  // ("publish", C r2: INSIDE the request's publish section, between the limiter taking it and its descriptor -- the
+  // hook may only call the sink, never this session.)
+  // TEST BUILD ONLY (apk-inbox C): the keyframe limiter's parameters, so a test can make it refuse (a HELD request).
+  void TestConfigureKeyframeLimiter(uint64_t minIntervalUs, uint64_t tokenRefillUs, uint32_t tokenCapacity) {
+    keyframeRequests_.Configure(minIntervalUs, tokenRefillUs, tokenCapacity);
+  }
+  // TEST BUILD ONLY (apk-inbox C r3): a whole descriptor (epoch / episode / token as a producer took it) published
+  // through the same section every path uses -- e.g. an older one published after a newer one.
+  bool TestPublishKey(const DecoderKeyRequest& r) {
+    return RequestKey(r, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                   std::chrono::steady_clock::now().time_since_epoch()).count()));
+  }
+  // TEST BUILD ONLY (apk-inbox C r2): one key request with these causes, through the same section every path uses.
+  bool TestRequestKey(uint32_t causes) {
+    DecoderKeyRequest r;
+    r.causes = causes;
+    return RequestKey(r, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+                                                     std::chrono::steady_clock::now().time_since_epoch()).count()));
+  }
+  // TEST BUILD ONLY (apk-0232 r2 N1): called when a queued desktop pick has just been turned local in the sink,
+  // before the panel and the tracked tag follow -- a test holds it there and makes a newer pick.
+  void SetTestAfterLocalSinkBeginHook(std::function<void(uint64_t tag)> hook) {
+    std::lock_guard<std::mutex> lk(testHookMu_);
+    testAfterLocalSinkBeginHook_ = std::move(hook);
+  }
+  // TEST BUILD ONLY (apk-0232 r3 N1): called by the poll once the local selection is found bound to `generation`,
+  // right before the panel records it -- a test cancels or prepares a newer pick there.
+  void SetTestBeforeLocalCommitHook(std::function<void(uint64_t tag, uint64_t generation)> hook) {
+    std::lock_guard<std::mutex> lk(testHookMu_);
+    testBeforeLocalCommitHook_ = std::move(hook);
+  }
+#endif
+  // Which authenticated connection this is: bumps on every Connect (a reconnect is a new one), so a
+  // parked connection is told from one opened since. Counters of the expensive steps, for the
+  // "no directory / punch / Hello on reuse" check.
+  uint64_t ConnectionGeneration() const { return connectionGeneration_.load(std::memory_order_acquire); }
+  uint64_t ConnectCount() const { return connectCount_.load(std::memory_order_relaxed); }
+  uint64_t UdpHelloCount() const { return udpHelloCount_.load(std::memory_order_relaxed); }
+
+  // The viewer abandoned a switch (nativeAbortVideoSwitch): an IDR it was still owed is not asked for.
+  void ClearPendingDecoderKeyframe() { ClearKeyLedger(); }  // C r2: the ledger and the limiter's pending together
+  // apk-inbox C (D8): requests not sent because no cause of theirs was valid any more (held / at the send point).
+  uint64_t KeyRequestsDroppedStale() const { return keyDroppedStale_.load(std::memory_order_relaxed); }
+  // C r2: KeyframeRequest actions whose descriptor was cancelled (a new pick / reset) -- not sent.
+  uint64_t KeyRequestsDroppedCancelled() const { return keyDroppedCancelled_.load(std::memory_order_relaxed); }
+  bool RequestRuntimeConfig(uint32_t bitrate, uint32_t fps);
+  bool RequestDesktopCaptureBackend(uint16_t backend);
+  // capture-lifecycle r1 (UA-2): what the host said runs for THIS connection's session (its answer to a
+  // request or a question; a host without kCaptureFlagDesktopBackendStatusV1 answers neither -- then
+  // valid stays false and the app must not claim "this connection only"). Query asks again, changing nothing.
+  bool QueryDesktopCaptureBackend();
+  DesktopBackendStatusSnapshot DesktopCaptureBackendStatus() const;
+  bool HostAnswersDesktopBackendStatus() const { return desktopBackend_.HostAnswers(); }
+  // ua2-apk r2: the app's backend intent on this connection (N1), and whether the host's role -- its first pong, which
+  // carries the backend-status capability -- is known yet (N3: unknown is not "unsupported").
+  DesktopBackendControl::Intent DesktopCaptureBackendIntent() const { return desktopBackend_.CurrentIntent(); }
+  bool HostRoleKnown() const { return hostRole_.Load().known; }
+  // ua2-apk r3 (Codex codex_ua2_apk_src_r2.md N3): the host's backend-status capability from ONE read of its role --
+  // known (its first pong came) and, from the same pong's flags, whether it answers. Never "known" from one moment and
+  // "answers" from another (a first pong between two reads made a new host look like an older one). `stopPoint`
+  // (tests) runs after the read: a pong arriving there changes nothing of this snapshot.
+  struct DesktopBackendCapabilitySnapshot {
+    bool known = false;
+    bool answers = false;
+  };
+  DesktopBackendCapabilitySnapshot DesktopBackendCapability(const std::function<void()>& stopPoint = {}) const {
+    const auto role = hostRole_.Load();
+    if (stopPoint) stopPoint();
+    return {role.known, role.known && (role.flags & kCaptureFlagDesktopBackendStatusV1) != 0};
+  }
+  bool QueueInputEvent(uint16_t kind, int32_t x, int32_t y, int32_t wheelDelta,
+                       uint32_t keyCode, uint16_t buttons);
+  bool QueueInputText(const uint16_t* text, size_t count);
+
+  // --- clipboard text sync (K1) ---------------------------------------------------------------
+  //
+  // Text is UTF-16 code units, which is what Java strings already are (jchar) and what the wire
+  // carries -- see clipboard_sync.hpp for why this is u16string and not wstring.
+  //
+  // The phone cannot watch its clipboard the way the Windows viewer does: from Android 10 an app
+  // may only read the clipboard while it holds focus. So the app calls QueueClipboardText when it
+  // is in the foreground and sees a change, and the control thread sends it. The echo guard still
+  // applies, so text that just arrived from the host is not sent straight back.
+  //
+  // Returns false when the session cannot take it (not connected, sync off, host without the
+  // capability) or when the core judged it not worth sending (empty, duplicate, echo, oversize).
+  bool QueueClipboardText(const uint16_t* text, size_t count);
+
+  // Drains clipboard text that arrived from the host, if any. The app polls this from the ticker
+  // it already runs, because the bridge has no native->Java callback, and applies it to the
+  // Android clipboard itself (which likewise requires the foreground).
+  bool TakeIncomingClipboardText(std::u16string* out);
+
+  /**
+   * True once per session, when the session wants the app to push the phone's current clipboard.
+   *
+   * A request rather than a call because only the app can read the clipboard on Android, and only
+   * while it is in the foreground. Consumed as it is read.
+   */
+  bool TakeClipboardPushRequest() {
+    return clipInitialPushWanted_.exchange(false, std::memory_order_acq_rel);
+  }
+
+  void SetClipboardSyncEnabled(bool enabled);
+  bool ClipboardSyncEnabled() const { return clipboardEnabled_.load(std::memory_order_relaxed); }
+  // Whether the connected host advertised kCaptureFlagClipboardTextV1, so the UI can show the
+  // toggle as unavailable rather than appearing to work while doing nothing.
+  bool HostSupportsClipboard() const {
+    return hostSupportsClipboard_.load(std::memory_order_relaxed);
+  }
+
+  struct WindowThumbnail {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint64_t version = 0;  // host timestamp; changes when the preview content changes
+    std::vector<uint8_t> rgba;
+  };
+  // Copies the cached preview for a window id (0 = desktop). Returns false if none yet.
+  bool CopyWindowThumbnail(uint64_t windowId, WindowThumbnail* out) const;
+  // Cheap change marker so the UI can skip re-decoding unchanged previews.
+  uint64_t WindowThumbnailVersion(uint64_t windowId) const;
+  /** Total UDP video bytes received this session, for the on-screen data meter. */
+  uint64_t SessionBytesReceived() const;
+
+  // udp-recv-exit r1/r2 test seams. Precisely (r2 U wording): the hook MEMBER and the
+  // `if (udpRecvHookForTest_)` branch in VideoReceiveMain DO ship -- they are a null-default runtime
+  // check that is simply never true in production (no code path, env, message or user option sets the
+  // hook), so the shipped loop always calls the real recv; they are NOT claimed removed by /OPT:REF. The
+  // test-only METHODS below are unreferenced by the product and are what /OPT:REF can strip. They let a
+  // test drive the REAL VideoReceive loop with scripted recv results deterministically.
+  void SetUdpRecvHookForTest(std::function<int(uint8_t*, size_t, int&)> hook) { udpRecvHookForTest_ = std::move(hook); }
+  void RunVideoReceiveForTest(SocketHandle udpSocket, ClientEncodedFrameSink* sink);
+  void RequestStopForTest() { stopRequested_.store(true, std::memory_order_release); }
+  // Enable the NACK/hold receive policy for a test so the loop's maintenance tick (NACK rounds, hold
+  // expiry, stuck-head give-up) is exercised while recv results are being discarded.
+  void SetHostSupportsNackForTest(bool v) { hostSupportsNack_.store(v, std::memory_order_release); }
+  // Enable the control-over-UDP branch, and reach the control channel, so a test can leave a control
+  // message outstanding and observe the loop's udpControl_.Tick() retransmit -> PeerLost during drops.
+  void SetControlOverUdpForTest(bool v) { controlOverUdp_.store(v, std::memory_order_release); }
+  UdpControlChannel& ControlChannelForTest() { return udpControl_; }
+
+ private:
+  ClientSessionController(const ClientSessionController&) = delete;
+  ClientSessionController& operator=(const ClientSessionController&) = delete;
+
+  void WorkerMain(ClientSessionConnectArgs args);
+  void VideoReceiveMain();
+  void StopWorker();
+  void FinalizeWorkerExit();
+  void FailWorker(const std::string& error);
+  void SignalRuntimeFailure(const std::string& error);
+  bool ConnectTcpControlWithRetry(const ClientSessionConnectArgs& args, std::string* error);
+  bool ConnectTcpControl(const ClientSessionConnectArgs& args, std::string* error);
+  bool ConnectUdpVideo(const ClientSessionConnectArgs& args, std::string* error);
+  bool CanQueueControlRequestLocked() const;
+  void UpdateConnectedStatusLocked(const std::string& detail);
+  void SyncWindowPanelSnapshotLocked(const WindowPanelSnapshot& panelSnapshot);
+  void CloseSocketsUnlocked();
+  void ResetUnlocked();
+  static bool IsValidPort(int port);
+
+  mutable std::mutex mu_;
+  ClientSessionSnapshot snapshot_;
+  WindowPanelStateModel windowPanel_;
+  StreamStateControl streamState_;
+  CaptureModeRequestState captureMode_;
+  KeyframeRequestState keyframeRequests_;
+  RuntimeTuneState runtimeTune_;
+  DesktopBackendControl desktopBackend_;
+  mutable std::mutex backendStatusMu_;
+  DesktopBackendStatusSnapshot backendStatus_;  // capture-lifecycle r1: under backendStatusMu_
+  ClientInputQueue inputQueue_;
+  ClientControlScheduler controlScheduler_;
+  ClientEncodedFrameSink* encodedFrameSink_ = nullptr;
+  std::function<int(uint8_t*, size_t, int&)> udpRecvHookForTest_;  // null in production -> real recv
+  std::thread workerThread_;
+  std::thread videoThread_;
+  std::atomic<bool> stopRequested_{false};
+  SocketHandle tcpControlSocket_ = kInvalidSocket;
+  SocketHandle udpVideoSocket_ = kInvalidSocket;
+  bool udpVideoSocketShared_ = false;  // ClientSessionConnectArgs::preparedSocketShared (under mu_)
+  void ShutdownVideoSocketLocked();
+  UdpControlChannel udpControl_;
+  std::atomic<bool> controlOverUdp_{false};
+  ClientLivenessTrace livenessTrace_;  // apk-decoder-liveness r2: written only with GNLINK_LIVENESS_TRACE
+
+  int FetchOneThumbnailLocked(ControlLink& link);
+  // Clipboard text sync (K1), run on the control thread's idle turns like the thumbnail fetch:
+  // sends a queued local clipboard, otherwise polls the host on an interval.
+  // Returns: 1 did work, 0 nothing to do, -1 link failure (the session must drop).
+  int PumpClipboardSync(ControlLink& link);
+  void QueueThumbnailFetchesFromPanel();
+  mutable std::mutex thumbMu_;
+  std::unordered_map<uint64_t, WindowThumbnail> thumbs_;
+  // When each window was last asked about and whether that produced pixels. Separate from thumbs_
+  // for the reason given in thumbnail_fetch_policy.hpp: thumbs_ holds successes only, so it cannot
+  // throttle the window that never succeeds -- the one the host is skipping.
+  struct ThumbAttempt {
+    uint64_t lastAttemptUs = 0;
+    bool failed = false;
+  };
+  std::unordered_map<uint64_t, ThumbAttempt> thumbAttempts_;
+  std::deque<uint64_t> thumbFetchQueue_;
+  std::atomic<bool> hostSupportsThumbnails_{false};
+  std::atomic<bool> hostSupportsNack_{false};  // host advertised kUdpFeatureVideoNack (video NACK.)
+  // Set while a UAC prompt or the lock screen is in front of the desktop. Nothing can capture
+  // that, so the picture stops; saying so beats a frozen rectangle nobody can explain.
+  std::atomic<bool> hostSecureDesktopActive_{false};
+  std::atomic<uint64_t> preloginInputHeldBack_{0};  // r5 G8: inputs not sent to a host at the logon screen
+  std::atomic<uint64_t> mouseXButtonsHeldBack_{0};  // keepalive-r2 e: X edges not sent to a host without X
+  // r7 H6 / r10 / r11 U5: what the host is (the pong's flags, and whether a pong of this session said so) and
+  // the window-list request asked before that -- one state, changed by one transition at a time.
+  HostRoleGate hostRole_;
+  // Remote reboot (under rebootMu_): the request waiting for the control thread, and its answer.
+  std::mutex rebootMu_;
+  uint32_t rebootPendingId_ = 0;
+  bool rebootInFlight_ = false;
+  bool rebootHasOutcome_ = false;
+  uint32_t rebootOutcomeId_ = 0;
+  int rebootOutcome_ = 0;
+  uint32_t rebootWin32_ = 0;
+  // r9 R5: the same for Ctrl+Alt+Del (under rebootMu_).
+  uint32_t sasPendingId_ = 0;
+  bool sasHasOutcome_ = false;
+  uint32_t sasOutcomeId_ = 0;
+  int sasOutcome_ = 0;
+  uint32_t sasWin32_ = 0;
+  uint8_t sasFlags_ = 0;
+  std::atomic<uint64_t> sessionBytesReceived_{0};
+
+  // Clipboard text sync (K1). clipMu_ guards the core and the two one-slot mailboxes: the app
+  // thread produces outgoing text and drains incoming, the control thread does the opposite.
+  // knownGeneration / lastPoll are control-thread only.
+  mutable std::mutex clipMu_;
+  ClipboardSyncCore clipCore_;
+  bool clipHasPending_ = false;
+  std::u16string clipPendingText_;
+  uint64_t clipPendingHash_ = 0;
+  uint32_t clipNextSeq_ = 0;
+  bool clipHasIncoming_ = false;
+  std::u16string clipIncomingText_;
+  // The session-boundary rules (baseline poll, one-shot initial push, poll interval), shared with
+  // the Windows viewer so both clients behave the same. Control thread only.
+  ClipboardClientPolicy clipPolicy_;
+  std::atomic<bool> clipboardEnabled_{true};
+  std::atomic<bool> hostSupportsClipboard_{false};
+  // r3 M1: an IDR the decoder asked for (its selection's IDR beat the answer, or a delta had to
+  // be dropped) that the keyframe limiter refused for now. Kept until the limiter takes it, and
+  // tried on every control-loop pass, so it does not wait for the next frame -- after a dropped
+  // lone IDR there may be none.
+  std::atomic<bool> decoderRekeyPending_{false};
+  // apk-inbox C (design r3 §4 D8): the descriptors of the key request HELD (refused by the limiter, decoderRekeyPending_)
+  // and of the one ACCEPTED (the limiter took it; the scheduler's next KeyframeRequest action sends it). Coalesced
+  // (DecoderKeyRequest::Merge); under keyLedgerMu_ (RX and control threads), never held across a sink call or a send.
+  // C r2 (Codex N2): the limiter's pending flag and the accepted descriptor are published together (RequestKey: the
+  // limiter's Request and the merge in ONE section of keyLedgerMu_) and consumed together (the scheduler's NextAction
+  // and the take, in one section). A KeyframeRequest action with no descriptor was cancelled (ClearKeyLedger consumes
+  // the pending flag too) -- it is not sent. keyHeldVersion_ moves with every change of keyHeld_: the held check returns
+  // only its own snapshot. Lock order: parkMu_ before keyLedgerMu_; the limiter's own lock inside; no sink call and no
+  // network under it.
+  std::mutex keyLedgerMu_;
+  DecoderKeyRequest keyHeld_;
+  DecoderKeyRequest keyAccepted_;
+  uint64_t keyHeldVersion_ = 0;
+  std::atomic<uint64_t> keyDroppedStale_{0};
+  std::atomic<uint64_t> keyDroppedCancelled_{0};
+  bool RequestKey(const DecoderKeyRequest& request, uint64_t nowUs);
+  void ClearKeyLedger();
+  // C r2 (§8 (a)): the owed duty whose 8th ask was taken; told to the sink once that ask has left or been dropped.
+  uint64_t owedExhaustToken_ = 0;
+  // r4 M1-A: asking for the IDR a selection is owed (ClientEncodedFrameSink::KeyframeOwedFor).
+  // Control-loop thread only.
+  uint64_t owedSelection_ = 0;
+  uint32_t owedAttempts_ = 0;
+  // apk-0232 r1: the local selection (logon screen) whose generation the panel is still waiting to show; 0 = none.
+  std::atomic<uint64_t> localSelectTag_{0};
+  // apk-0232 r2 (Codex codex_apk_prelogin_select_src_r1.md N1): a local selection's start -- the sink, the panel and
+  // localSelectTag_ -- and the poll that completes it are one step each under this lock, so a queued pick turned
+  // local late cannot publish its tag over a newer pick's (nor clear it). Taken after parkMu_, never before it; no
+  // network under it.
+  std::mutex localSelectMu_;
+  void PollLocalSelection();
+  void ResolveUnsendableSelect(const ControlOutboundAction& action);
+  uint64_t owedNextUs_ = 0;
+  std::atomic<bool> clipInitialPushWanted_{false};
+  // mobile-abr r1: the once-a-second report. The AUs and their payload bytes the receive pipeline
+  // handed to the sink (video thread; cumulative, never reset) -- every assembled AU, the ones of an old
+  // generation the sink then drops included, as the PC viewer's recvFrames counts every AU it processes
+  // (FEC parity, NACK retransmits and control are not AUs); and the control loop's report window
+  // with its pending snapshot (client_telemetry_window.hpp; control-loop thread only).
+  // r5: the viewer asked the host to pause the stream (RequestStreamActive(false)) -- intended
+  // inactivity, not measured -- until it asks for the stream again.
+  std::atomic<bool> streamPaused_{false};
+  std::atomic<uint64_t> sinkFrames_{0};
+  std::atomic<uint64_t> sinkPayloadBytes_{0};
+  ClientTelemetryWindow telemetry_;
+  // keepalive r1. parkMu_ guards the fence and the held-input record (the control loop and the app's
+  // calls); parkInhibit_ is read on every request without it.
+  mutable std::mutex parkMu_;
+  ClientParkFence park_;
+  ClientHeldInput heldInput_;
+  // keepalive-r2 e r2: what became of each X button's press on this connection (refused / dropped / sent); under
+  // parkMu_, reset with the connection (client_mouse_xbutton_fence.hpp)
+  ClientMouseXPressLedger mouseXLedger_;
+  std::atomic<bool> parkInhibit_{false};
+  std::atomic<uint32_t> parkReleased_{0};
+  std::atomic<uint32_t> parkDroppedActions_{0};
+  void CollectForParkLocked(uint64_t nowUs, bool releasesOnly);
+  void ParkWatchdog();
+#ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+  std::mutex testHookMu_;
+  std::function<void(bool)> testPassHook_;
+  std::function<void(const char*)> testKeyHook_;  // apk-inbox C
+  void RunTestKeyHook(const char* point) {
+    std::function<void(const char*)> hook;
+    {
+      std::lock_guard<std::mutex> lk(testHookMu_);
+      hook = testKeyHook_;
+    }
+    if (hook) hook(point);
+  }
+  std::function<void(uint64_t)> testAfterLocalSinkBeginHook_;
+  std::function<void(uint64_t, uint64_t)> testBeforeLocalCommitHook_;
+#endif
+  std::atomic<uint64_t> connectionGeneration_{0};
+  std::atomic<uint64_t> connectCount_{0};
+  std::atomic<uint64_t> udpHelloCount_{0};
+};
+
+}  // namespace remote60::native_poc

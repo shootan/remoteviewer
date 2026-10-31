@@ -1,0 +1,93 @@
+#pragma once
+
+// Target picker and selection gate glue of the viewer.
+//
+// Role:    window/monitor list + select requests, apply_window_list_snapshot / apply_window_selected_result,
+//          the picker show/hide + stream sync (set_picker_visible_and_sync_stream), the PC-side selection
+//          gate (begin/clear/post_pc_selection_reveal), thumbnail fetch queueing, card grid scroll and
+//          hit test, capture-mode requests, push_session_toolbar_state, the control metrics snapshot.
+// Thread:  UI begins/commits selections and scrolls; control applies lists/acks and fetches thumbnails;
+//          recv posts the reveal. The pre-refactor rules are in the comments on each function.
+// Input:   control replies, UI gestures, selection state.
+// Output:  request state consumed by the control scheduler, picker state read by paint/hit-test.
+// Callers: WndProc, control thread, recv thread, main() toolbar callbacks.
+//
+// Extracted verbatim from native_video_client_main.cpp (viewer split refactor Phase 0-10).
+
+#include "viewer_common.hpp"
+#include "viewer_state.hpp"
+#include "viewer_layout.hpp"
+
+namespace remote60::native_poc::viewer {
+
+// The desktop viewer's picker lists the desktop and nothing else.
+//
+// Per-window capture still exists on the wire and the mobile client still offers it; on a PC
+// nobody picks a single window, so the card grid was cost without a use -- a thumbnail per window
+// (~33ms each on the host's control thread) plus grid scrolling. What the picker is actually for
+// here is the pause before the stream starts: it lets you size the window before the picture
+// appears. That is the part worth keeping. (Viewer ledger F-21.)
+// Re-enabled 2026-09-02 at the user's request: the PC picker lists windows again so a text window
+// (GMux, an editor) can be captured directly and stay sharp, instead of showing as a small region
+// of the whole desktop. F-21 disabled it for two reasons -- a flip-model overlay bug and the user's
+// own "desktop only" request. Only the listing was gated here. (history #347)
+// ⚠️ That overlay bug's "fix" was release_swapchain() on picker entry, and it did not work: a
+// flip-model swapchain that has presented leaves GDI unable to reach the window whether it is
+// released or not. The picker is now presented through the swapchain instead
+// (viewer_present.cpp present_picker_frame, history #532).
+inline constexpr bool kPickerListsWindows = true;
+
+ClientControlMetricsSnapshot capture_client_control_metrics_snapshot(ViewerState& ctx);
+
+void queue_thumbnail_fetches_from_panel(ViewerState& ctx);
+
+void queue_window_list_request(ViewerState& ctx, const char* statusText = nullptr);
+
+
+void set_window_panel_status(ViewerState& ctx, const std::string& status);
+
+void apply_window_list_snapshot(ViewerState& ctx, const ControlWindowListMessage& msg);
+
+/** Mirrors the session state into the toolbar window. Cheap enough to call on every change. */
+void push_session_toolbar_state(ViewerState& ctx);
+
+void set_picker_visible_and_sync_stream(ViewerState& ctx, bool visible);
+
+// Clears the in-flight selection state. Safe to call from any thread; touches only atomics and
+// the stream request (itself atomic-backed).
+void clear_pc_target_selection(ViewerState& ctx);
+
+// UI-thread entry for picking a target from the picker. Orders the control traffic so the host's
+// "!streamActive" continue-gate is already passed when the select arrives: the scheduler always
+// sends StreamState ahead of WindowSelect, so requesting stream-on here (before or after the
+// select is queued) still reaches the host first. Desktop is sent as an explicit WindowSelect(0)
+// -- one clean restart -- rather than the "already selected, just hide" shortcut, for mobile
+// parity. Ignores clicks while a selection is already in flight, which is the double-click guard.
+// Returns true only when the select request was actually accepted for sending, so callers can
+// log/refresh on real selections instead of refused attempts (disconnected, locked target).
+bool begin_pc_target_selection(ViewerState& ctx, uint64_t windowId, const char* statusText);
+// rel-0163 r3: a pick held until the host's role was known, run once (UI thread).
+void run_deferred_pc_selection(ViewerState& ctx);
+// rel-0163 r4: the role just became known (control thread) -- posts the held pick's run (R1 handshake).
+void note_host_role_known(ViewerState& ctx, bool firstTime);
+// rel-0163 r3: a WindowSelect the control thread could not send to a logon-screen host (UI thread).
+void resolve_unsendable_pc_selection(ViewerState& ctx, uint64_t windowId, uint64_t opEpoch);
+
+// Video-thread half of the reveal. It only *records* the candidate (the generation and epoch of
+// the first decoded frame) and posts the reveal once; it deliberately touches none of the live
+// selection state. The UI-thread handler revalidates against that state before committing, so a
+// cancel / new selection / disconnect that races the post cannot wrongly close the picker.
+void post_pc_selection_reveal(ViewerState& ctx, uint64_t readyGeneration, uint64_t readyEpoch);
+
+void apply_window_selected_result(ViewerState& ctx, const ControlWindowSelectedMessage& msg);
+
+void scroll_window_list(ViewerState& ctx, HWND hwnd, int deltaSteps);
+
+// Hit-test a grid card. Card index 0 is the pinned Desktop card; window items follow.
+bool try_hit_window_list_item(ViewerState& ctx, HWND hwnd, int x, int y, uint64_t* outWindowId);
+
+void enqueue_capture_mode_request(ViewerState& ctx, uint16_t mode, uint32_t xPermille, uint32_t yPermille);
+
+void request_capture_overview_mode(ViewerState& ctx);
+
+}  // namespace remote60::native_poc::viewer

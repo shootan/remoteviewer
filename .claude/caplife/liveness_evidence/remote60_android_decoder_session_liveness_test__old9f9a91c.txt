@@ -1,0 +1,41 @@
+﻿exe=C:\work\gnlink-wt\apk-decoder-liveness\build-neg-old\apps\native_poc\Release\remote60_android_decoder_session_liveness_test.exe
+exe_sha256=6175D944978BB3BC738F113A964D44F5A76E3AA395D479F29BB07DADD357775E
+exit=1
+remote60_android_decoder_session_liveness_test.exe : [native-video-client-session] video receive nack=0 holdUs=0 nonblo
+cking=1
+At line:1 char:1045
++ ... est-Path $exe)){ "missing $exe"; continue }; $o = & $exe 2>&1 | Out-S ...
++                                                       ~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([native-video-c...0 nonblocking=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+android_decoder_session_liveness_test  hold=8000 ms  control budget=24 x 250 ms = 6000 ms
+      [decoder I] updated codec config csd0=9 csd1=8
+PASS  [A] healthy: host -> client control flows (longest silence < 600 ms)  gap=252ms n=12
+PASS  [A] healthy: client -> host control flows (longest silence < 600 ms)  gap=252ms n=12
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] delta before the codec's first IDR dropped streamGen=0 drops=1
+PASS  [B] the codec's create was really held, longer than the control budget  held 8003 ms
+      [decoder I] pts reanchor reason=init streamGen=0 remoteUs=3999970 localUs=618199151229 stepUs=33333 count=1
+FAIL  [B] host -> client control kept flowing while the codec was held (longest silence < 1000 ms)  gap=8003ms n=0
+      [decoder I] queued h264 frame count=1 bytes=25 key=1 ptsUs=618199234561
+FAIL  [B] client -> host control kept flowing (its ACKs came back: longest silence < 1000 ms)  gap=8003ms n=0
+FAIL  [B] no peer-lost on the host
+PASS  [B] no peer-lost on the client
+      [decoder I] queued h264 frame count=31 bytes=25 key=1 ptsUs=618200117903
+      [decoder I] queued h264 frame count=61 bytes=25 key=1 ptsUs=618200992913
+      [decoder I] queued h264 frame count=91 bytes=25 key=1 ptsUs=618201867923
+      [decoder I] queued h264 frame count=121 bytes=25 key=1 ptsUs=618202742933
+      [decoder I] queued h264 frame count=151 bytes=25 key=1 ptsUs=618203617943
+      [decoder I] queued h264 frame count=181 bytes=25 key=1 ptsUs=618204492953
+      [decoder I] queued h264 frame count=211 bytes=25 key=1 ptsUs=618205367963
+      [decoder I] queued h264 frame count=241 bytes=25 key=1 ptsUs=618206242973
+      [decoder I] queued h264 frame count=271 bytes=25 key=1 ptsUs=618207117983
+PASS  [C] after the hold the codec takes frames, and its FIRST input is an IDR  queued=278 first=131
+FAIL  [C] control still open on both ends
+      [decoder I] video surface cleared
+
+android_decoder_session_liveness_test: 9 checks, 4 failed
+RESULT: FAIL
+

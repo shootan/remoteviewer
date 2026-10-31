@@ -1,0 +1,4 @@
+{
+  "repo_path": "D:/remote/remote",
+  "message": "docs: the bad rollback points are legacy, and the same either way\n\nThe verifier audited every backup directory and the picture holds across updater\ngenerations. The old updater needs nine files (the seven stop targets including\nSetup, plus the two data files); the new one needs ten, adding the updater\nitself. Both bare-version backups lack Setup, so neither generation can roll back\nto them -- the list shows three and offers one, whichever updater is installed.\n\nBut it is a leftover rather than an ongoing fault. The next publish backs up the\n0.2.110 pair, which has all ten, so a bare name will be a valid rollback point\nagain; and gate 7 now stops a manifest missing Setup from being published at all,\nso this shape cannot recur. Priority stays below the in-app update work and the\nserver files stay untouched."
+}

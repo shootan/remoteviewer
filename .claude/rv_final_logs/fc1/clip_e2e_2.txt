@@ -1,0 +1,204 @@
+    [t0 1953006.805] submit
+    [client 1953006.917] package ready 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde buildMs=110
+[native-video-host][clip-image] offer id=2692 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde verdict=0
+    [client 1953006.930] accepted gen=1 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=b73d6bde bytes=5251399 ms=4749
+    [client 1953012.044] outcome=1 detail=0
+    [client 1953012.045] end state=4 reason=0 bytes=5251399 served=5251399 ms=5115 sha=b73d6bde rateBps=16000000
+    decisions: evaluations=36 raises=6 lowers=0 pauses=0 lossEvents=0 sameEventHolds=0 channelFragRetransmits=0 srttMs=0.1
+  5 MiB, LAN, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) published in 4.9 s  png=5251399  lastRate=16000000 bps  resends=0  proxyDropped=0
+MEASURE  cfg="agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)" size=5 MiB path=LAN published=1 seconds=4.9 gate=5 verdict=within target30=n/a lastRateBps=16000000 resends=0
+PASS  agreed gate: 5 MiB, LAN, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) <= 5 s (measured 4.9 s)
+PASS  intact (every pixel and alpha): 5 MiB, LAN, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)
+    [t0 1953012.066] submit
+    [client 1953012.172] package ready 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde buildMs=104
+[native-video-host][clip-image] offer id=43526 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde verdict=0
+    [client 1953012.189] accepted gen=1 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=b73d6bde bytes=5251399 ms=31869
+    [client 1953044.550] outcome=1 detail=0
+    [client 1953044.550] end state=4 reason=0 bytes=5251399 served=5251399 ms=32361 sha=b73d6bde rateBps=10137342
+    decisions: evaluations=234 raises=30 lowers=4 pauses=0 lossEvents=56 sameEventHolds=52 channelFragRetransmits=60 srttMs=48.8
+  5 MiB, 40ms/1%/8M seed1, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) published in 32.0 s  png=5251399  lastRate=10137342 bps  resends=120  proxyDropped=72
+MEASURE  cfg="agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)" size=5 MiB path=40ms/1%/8M seed1 published=1 seconds=32.0 gate=45 verdict=within target30=missed lastRateBps=10137342 resends=120
+PASS  agreed gate: 5 MiB, 40ms/1%/8M seed1, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) <= 45 s (measured 32.0 s)
+PASS  intact (every pixel and alpha): 5 MiB, 40ms/1%/8M seed1, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)
+    [t0 1953044.598] submit
+    [client 1953044.705] package ready 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde buildMs=105
+[native-video-host][clip-image] offer id=36503 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde verdict=0
+    [client 1953044.723] accepted gen=1 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=b73d6bde bytes=5251399 ms=29261
+    [client 1953073.993] outcome=1 detail=0
+    [client 1953073.993] end state=4 reason=0 bytes=5251399 served=5251399 ms=29270 sha=b73d6bde rateBps=13327284
+    decisions: evaluations=221 raises=31 lowers=3 pauses=0 lossEvents=48 sameEventHolds=45 channelFragRetransmits=61 srttMs=51.5
+  5 MiB, 40ms/1%/8M seed2, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) published in 29.4 s  png=5251399  lastRate=13327284 bps  resends=76  proxyDropped=55
+MEASURE  cfg="agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)" size=5 MiB path=40ms/1%/8M seed2 published=1 seconds=29.4 gate=45 verdict=within target30=met lastRateBps=13327284 resends=76
+PASS  agreed gate: 5 MiB, 40ms/1%/8M seed2, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) <= 45 s (measured 29.4 s)
+PASS  intact (every pixel and alpha): 5 MiB, 40ms/1%/8M seed2, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)
+    [t0 1953074.039] submit
+    [client 1953074.150] package ready 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde buildMs=109
+[native-video-host][clip-image] offer id=15376 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde verdict=0
+    [client 1953074.164] accepted gen=1 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=b73d6bde bytes=5251399 ms=30650
+    [client 1953105.101] outcome=1 detail=0
+    [client 1953105.101] end state=4 reason=0 bytes=5251399 served=5251399 ms=30937 sha=b73d6bde rateBps=10635981
+    decisions: evaluations=225 raises=27 lowers=3 pauses=0 lossEvents=48 sameEventHolds=45 channelFragRetransmits=52 srttMs=54.3
+  5 MiB, 40ms/1%/8M seed3, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) published in 30.8 s  png=5251399  lastRate=10635981 bps  resends=82  proxyDropped=64
+MEASURE  cfg="agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)" size=5 MiB path=40ms/1%/8M seed3 published=1 seconds=30.8 gate=45 verdict=within target30=missed lastRateBps=10635981 resends=82
+PASS  agreed gate: 5 MiB, 40ms/1%/8M seed3, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) <= 45 s (measured 30.8 s)
+PASS  intact (every pixel and alpha): 5 MiB, 40ms/1%/8M seed3, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)
+    [t0 1953105.357] submit
+    [client 1953105.867] package ready 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde buildMs=408
+[native-video-host][clip-image] offer id=55630 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde verdict=0
+    [client 1953105.876] accepted gen=1 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=b73d6bde bytes=5251399 ms=54887
+    [client 1953160.821] outcome=1 detail=0
+    [client 1953160.821] end state=4 reason=0 bytes=5251399 served=5251399 ms=54945 sha=b73d6bde rateBps=1308401
+    decisions: evaluations=285 raises=54 lowers=9 pauses=0 lossEvents=48 sameEventHolds=41 channelFragRetransmits=53 srttMs=42.5
+  5 MiB, 40ms/1%/8M seed4, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) published in 55.4 s  png=5251399  lastRate=1308401 bps  resends=158  proxyDropped=61
+MEASURE  cfg="agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)" size=5 MiB path=40ms/1%/8M seed4 published=1 seconds=55.4 gate=45 verdict=OVER target30=missed lastRateBps=1308401 resends=158
+FAIL  agreed gate: 5 MiB, 40ms/1%/8M seed4, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) <= 45 s (measured 55.4 s)
+PASS  intact (every pixel and alpha): 5 MiB, 40ms/1%/8M seed4, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)
+    [t0 1953160.869] submit
+    [client 1953161.078] package ready 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde buildMs=204
+[native-video-host][clip-image] offer id=4719 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde verdict=0
+    [client 1953161.079] accepted gen=1 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=b73d6bde bytes=5251399 ms=29206
+    [client 1953190.340] outcome=1 detail=0
+    [client 1953190.340] end state=4 reason=0 bytes=5251399 served=5251399 ms=29261 sha=b73d6bde rateBps=10854302
+    decisions: evaluations=226 raises=25 lowers=3 pauses=0 lossEvents=43 sameEventHolds=40 channelFragRetransmits=47 srttMs=50.2
+  5 MiB, 40ms/1%/8M seed5, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) published in 29.4 s  png=5251399  lastRate=10854302 bps  resends=92  proxyDropped=54
+MEASURE  cfg="agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)" size=5 MiB path=40ms/1%/8M seed5 published=1 seconds=29.4 gate=45 verdict=within target30=met lastRateBps=10854302 resends=92
+PASS  agreed gate: 5 MiB, 40ms/1%/8M seed5, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) <= 45 s (measured 29.4 s)
+PASS  intact (every pixel and alpha): 5 MiB, 40ms/1%/8M seed5, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)
+    [t0 1953190.388] submit
+    [client 1953190.525] package ready 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde buildMs=135
+[native-video-host][clip-image] offer id=46304 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde verdict=0
+    [client 1953190.532] accepted gen=1 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=b73d6bde bytes=5251399 ms=29820
+    [client 1953220.810] outcome=1 detail=0
+    [client 1953220.810] end state=4 reason=0 bytes=5251399 served=5251399 ms=30278 sha=b73d6bde rateBps=8540513
+    decisions: evaluations=227 raises=25 lowers=3 pauses=0 lossEvents=45 sameEventHolds=42 channelFragRetransmits=52 srttMs=47.0
+  5 MiB, 40ms/1%/8M seed11, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) published in 30.0 s  png=5251399  lastRate=8540513 bps  resends=82  proxyDropped=64
+MEASURE  cfg="agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)" size=5 MiB path=40ms/1%/8M seed11 published=1 seconds=30.0 gate=45 verdict=within target30=met lastRateBps=8540513 resends=82
+PASS  agreed gate: 5 MiB, 40ms/1%/8M seed11, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) <= 45 s (measured 30.0 s)
+PASS  intact (every pixel and alpha): 5 MiB, 40ms/1%/8M seed11, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)
+    [t0 1953220.862] submit
+    [client 1953220.977] package ready 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde buildMs=114
+[native-video-host][clip-image] offer id=46059 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde verdict=0
+    [client 1953220.985] accepted gen=1 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=b73d6bde bytes=5251399 ms=31272
+    [client 1953252.276] outcome=1 detail=0
+    [client 1953252.276] end state=4 reason=0 bytes=5251399 served=5251399 ms=31292 sha=b73d6bde rateBps=12192508
+    decisions: evaluations=231 raises=26 lowers=3 pauses=0 lossEvents=52 sameEventHolds=49 channelFragRetransmits=55 srttMs=50.0
+  5 MiB, 40ms/1%/8M seed12, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) published in 31.4 s  png=5251399  lastRate=12192508 bps  resends=115  proxyDropped=68
+MEASURE  cfg="agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)" size=5 MiB path=40ms/1%/8M seed12 published=1 seconds=31.4 gate=45 verdict=within target30=missed lastRateBps=12192508 resends=115
+PASS  agreed gate: 5 MiB, 40ms/1%/8M seed12, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) <= 45 s (measured 31.4 s)
+PASS  intact (every pixel and alpha): 5 MiB, 40ms/1%/8M seed12, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)
+    [t0 1953252.312] submit
+    [client 1953252.423] package ready 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde buildMs=109
+[native-video-host][clip-image] offer id=24428 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde verdict=0
+    [client 1953252.438] accepted gen=1 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=b73d6bde bytes=5251399 ms=29600
+    [client 1953282.200] outcome=1 detail=0
+    [client 1953282.200] end state=4 reason=0 bytes=5251399 served=5251399 ms=29763 sha=b73d6bde rateBps=8138449
+    decisions: evaluations=229 raises=45 lowers=6 pauses=0 lossEvents=53 sameEventHolds=47 channelFragRetransmits=56 srttMs=48.2
+  5 MiB, 40ms/1%/8M seed13, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) published in 29.7 s  png=5251399  lastRate=8138449 bps  resends=71  proxyDropped=67
+MEASURE  cfg="agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)" size=5 MiB path=40ms/1%/8M seed13 published=1 seconds=29.7 gate=45 verdict=within target30=met lastRateBps=8138449 resends=71
+PASS  agreed gate: 5 MiB, 40ms/1%/8M seed13, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) <= 45 s (measured 29.7 s)
+PASS  intact (every pixel and alpha): 5 MiB, 40ms/1%/8M seed13, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)
+    [t0 1953282.246] submit
+    [client 1953282.359] package ready 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde buildMs=111
+[native-video-host][clip-image] offer id=61369 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde verdict=0
+    [client 1953282.370] accepted gen=1 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=b73d6bde bytes=5251399 ms=30083
+    [client 1953312.626] outcome=1 detail=0
+    [client 1953312.626] end state=4 reason=0 bytes=5251399 served=5251399 ms=30257 sha=b73d6bde rateBps=16000000
+    decisions: evaluations=226 raises=34 lowers=3 pauses=0 lossEvents=46 sameEventHolds=43 channelFragRetransmits=54 srttMs=53.4
+  5 MiB, 40ms/1%/8M seed14, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) published in 30.2 s  png=5251399  lastRate=16000000 bps  resends=114  proxyDropped=65
+MEASURE  cfg="agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)" size=5 MiB path=40ms/1%/8M seed14 published=1 seconds=30.2 gate=45 verdict=within target30=missed lastRateBps=16000000 resends=114
+PASS  agreed gate: 5 MiB, 40ms/1%/8M seed14, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) <= 45 s (measured 30.2 s)
+PASS  intact (every pixel and alpha): 5 MiB, 40ms/1%/8M seed14, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)
+    [t0 1953312.659] submit
+    [client 1953312.766] package ready 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde buildMs=106
+[native-video-host][clip-image] offer id=17389 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde verdict=0
+    [client 1953312.783] accepted gen=1 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=b73d6bde bytes=5251399 ms=29740
+    [client 1953343.036] outcome=1 detail=0
+    [client 1953343.036] end state=4 reason=0 bytes=5251399 served=5251399 ms=30253 sha=b73d6bde rateBps=8530798
+    decisions: evaluations=223 raises=27 lowers=3 pauses=0 lossEvents=44 sameEventHolds=41 channelFragRetransmits=47 srttMs=47.5
+  5 MiB, 40ms/1%/8M seed15, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) published in 29.9 s  png=5251399  lastRate=8530798 bps  resends=92  proxyDropped=60
+MEASURE  cfg="agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)" size=5 MiB path=40ms/1%/8M seed15 published=1 seconds=29.9 gate=45 verdict=within target30=met lastRateBps=8530798 resends=92
+PASS  agreed gate: 5 MiB, 40ms/1%/8M seed15, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) <= 45 s (measured 29.9 s)
+PASS  intact (every pixel and alpha): 5 MiB, 40ms/1%/8M seed15, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)
+    [t0 1953343.084] submit
+    [client 1953343.106] package ready 512x512 png=1050650 textUtf16=0 sha=a10429d9 buildMs=20
+[native-video-host][clip-image] offer id=13308 512x512 png=1050650 textUtf16=0 sha=a10429d9 verdict=0
+    [client 1953343.127] accepted gen=1 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=a10429d9 bytes=1050650 ms=2563
+    [client 1953345.699] outcome=1 detail=0
+    [client 1953345.699] end state=4 reason=0 bytes=1050650 served=1050650 ms=2573 sha=a10429d9 rateBps=16000000
+    decisions: evaluations=14 raises=6 lowers=0 pauses=0 lossEvents=0 sameEventHolds=0 channelFragRetransmits=0 srttMs=0.1
+  1 MiB, LAN, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) published in 2.6 s  png=1050650  lastRate=16000000 bps  resends=0  proxyDropped=0
+MEASURE  cfg="agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)" size=1 MiB path=LAN published=1 seconds=2.6 gate=5 verdict=within target30=n/a lastRateBps=16000000 resends=0
+PASS  agreed gate: 1 MiB, LAN, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) <= 5 s (measured 2.6 s)
+PASS  intact (every pixel and alpha): 1 MiB, LAN, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)
+    [t0 1953345.736] submit
+    [client 1953345.758] package ready 512x512 png=1050650 textUtf16=0 sha=a10429d9 buildMs=21
+[native-video-host][clip-image] offer id=63973 512x512 png=1050650 textUtf16=0 sha=a10429d9 verdict=0
+    [client 1953345.779] accepted gen=1 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=a10429d9 bytes=1050650 ms=7636
+    [client 1953353.488] outcome=1 detail=0
+    [client 1953353.488] end state=4 reason=0 bytes=1050650 served=1050650 ms=7709 sha=a10429d9 rateBps=11844104
+    decisions: evaluations=51 raises=10 lowers=1 pauses=0 lossEvents=14 sameEventHolds=13 channelFragRetransmits=15 srttMs=49.3
+  1 MiB, 40ms/1%/8M seed1, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) published in 7.7 s  png=1050650  lastRate=11844104 bps  resends=15  proxyDropped=17
+MEASURE  cfg="agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)" size=1 MiB path=40ms/1%/8M seed1 published=1 seconds=7.7 gate=45 verdict=within target30=met lastRateBps=11844104 resends=15
+PASS  agreed gate: 1 MiB, 40ms/1%/8M seed1, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue) <= 45 s (measured 7.7 s)
+PASS  intact (every pixel and alpha): 1 MiB, 40ms/1%/8M seed1, agreed-3 (agreed-2 + a lost pull's head-of-line follower is not a queue)
+    [client 1953353.536] package ready 40x30 png=4948 textUtf16=10 sha=0b4914a2 buildMs=0
+[native-video-host][clip-image] offer id=45048 40x30 png=4948 textUtf16=10 sha=0b4914a2 verdict=0
+    [client 1953353.556] accepted gen=1 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=0b4914a2 bytes=4968 ms=433
+    [client 1953354.070] outcome=1 detail=0
+    [client 1953354.070] end state=4 reason=0 bytes=4968 served=4968 ms=514 sha=0b4914a2 rateBps=256000
+PASS  image + same-copy text: both published together
+    [client 1953354.197] package ready 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde buildMs=105
+[native-video-host][clip-image] offer id=24858 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde verdict=0
+    [client 1953354.215] accepted gen=1 window=2
+    [client 1953354.716] stopped here, cancel sent reason=10 bytes=5251399 served=32768 ms=501 sha=b73d6bde
+[native-video-host][clip-image] end state=cancelled reason=10 at=cancel sha=b73d6bde bytes=5251399 ms=502
+    [client 1953354.716] cancel answered reason=10 hostState=6 hostReason=10 seqOk=1 idOk=1
+    [client 1953354.716] outcome=2 detail=10
+    [client 1953354.717] package ready 64x48 png=12454 textUtf16=0 sha=9a23fe9f buildMs=0
+[native-video-host][clip-image] offer id=5107 64x48 png=12454 textUtf16=0 sha=9a23fe9f verdict=0
+    [client 1953354.737] accepted gen=2 window=2
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=9a23fe9f bytes=12454 ms=675
+    [client 1953355.769] outcome=1 detail=0
+    [client 1953355.769] end state=4 reason=0 bytes=12454 served=12454 ms=1032 sha=9a23fe9f rateBps=256000
+PASS  the newer copy is published, the older one cancelled and never published
+    [client 1953355.840] package ready 512x512 png=1050650 textUtf16=0 sha=a10429d9 buildMs=21
+[native-video-host][clip-image] offer id=2482 512x512 png=1050650 textUtf16=0 sha=a10429d9 verdict=0
+    [client 1953355.859] accepted gen=1 window=2
+[native-video-host][clip-image] end state=superseded reason=10 at=publish sha=a10429d9 bytes=1050650 ms=2548
+    [client 1953358.424] outcome=5 detail=10
+    [client 1953358.424] end state=7 reason=10 bytes=1050650 served=1050650 ms=2565 sha=a10429d9 rateBps=16000000
+PASS  host copy after accept: superseded, and the host clipboard untouched
+    [client 1953358.564] package ready 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde buildMs=108
+[native-video-host][clip-image] offer id=26828 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde verdict=0
+    [client 1953358.581] accepted gen=1 window=2
+[native-video-host][clip-image] end state=cancelled reason=7 at=session sha=b73d6bde bytes=5251399 ms=1001
+    [client 1953359.581] outcome=2 detail=7
+    [client 1953359.581] end state=6 reason=7 bytes=5251399 served=49152 ms=1001 sha=b73d6bde rateBps=512000
+PASS  session end: both sides idle in 0.7 ms (<= 1000), nothing published
+    [client 1953359.745] package ready 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde buildMs=115
+[native-video-host][clip-image] offer id=25223 1280x1024 png=5251399 textUtf16=0 sha=b73d6bde verdict=0
+    [client 1953359.754] accepted gen=1 window=2
+PASS  a budget drop mid-transfer applies at once: 4096000 -> 1000000 bps in 21 ms (<= 100)
+PASS  ④ a budget of 0: 0 bulk datagrams reached the host in 1.5 s (acknowledgements only, no data)
+[native-video-host][clip-image] end state=published reason=0 at=publish sha=b73d6bde bytes=5251399 ms=25342
+    [client 1953385.483] outcome=1 detail=0
+    [client 1953385.483] end state=4 reason=0 bytes=5251399 served=5251399 ms=25730 sha=b73d6bde rateBps=16000000
+PASS  ...and the transfer still completes intact once the budget returns
+    [client 1953385.557] package ready 512x512 png=1050650 textUtf16=0 sha=a10429d9 buildMs=22
+PASS  feature not negotiated: no offer, no bulk datagram
+
+RESULT: FAILED  (34 checks, 1 failed)

@@ -1,0 +1,44 @@
+D:/remote/remote/.claude/caplife/ka_e2e_r3b/hostlog.txt | {'enabled mode=background_message': 8} | kinds={} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/b3_touch_ab/host.log | {'enabled mode=background_message': 1} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/b3_touch_ab/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/m33b_layout_b/host.log | {'enabled mode=background_message': 1} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/m33b_layout_b/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/m33b_touch_ab/host.log | {'enabled mode=background_message': 1} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/m33b_touch_ab/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/r4_layout/host.log | {'enabled mode=background_message': 1} | kinds={'2': 10, '3': 10} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/r4_layout/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 10, '3': 10} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/r4_layout2/host.log | {'enabled mode=background_message': 1} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/r4_layout2/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/r4mut_Mc/host.log | {'enabled mode=background_message': 1} | kinds={'2': 12, '3': 12} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/r4mut_Mc/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 12, '3': 12} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/r5_layout_b/host.log | {'enabled mode=background_message': 1} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/r5_layout_b/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/r5_layout_b2/host.log | {'enabled mode=background_message': 1} | kinds={'2': 10, '3': 10} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/r5_layout_b2/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 10, '3': 10} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/r5_layout_b3/host.log | {'enabled mode=background_message': 1} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/r5_layout_b3/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/r5_touch_ab/host.log | {'enabled mode=background_message': 1} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/r5_touch_ab/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/rel4_layout_b/host.log | {'enabled mode=background_message': 1} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/rel4_layout_b/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/rel4_touch_ab/host.log | {'enabled mode=background_message': 1} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/rel4_touch_ab/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/rel5_layout_b/host.log | {'enabled mode=background_message': 1} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/rel5_layout_b/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/rel5_touch_ab/host.log | {'enabled mode=background_message': 1} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/rel5_touch_ab/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/rel6b_layout_b/host.log | {'enabled mode=background_message': 1} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/rel6b_layout_b/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/rel6b_touch_ab/host.log | {'enabled mode=background_message': 1} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/rel6b_touch_ab/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/touch1/host.log | {'enabled mode=background_message': 1} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/touch1/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/v6_layout/host.log | {'enabled mode=background_message': 1} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/v6_layout/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/v6_touch/host.log | {'enabled mode=background_message': 1} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/v6_touch/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/vv_layout/host.log | {'enabled mode=background_message': 1} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/vv_layout/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 11, '3': 11} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/vv_touch/host.log | {'enabled mode=background_message': 1} | kinds={'2': 8, '3': 8} osConfirmed=0
+D:/remote/remote/.claude/caplife/sh_r2/vv_touch/host/localappdata/remote60/diagnostics/stream-slot-0.0.log | {} | kinds={'2': 8, '3': 8} osConfirmed=0
+TOTAL {'confirmed': 0, '2': 400, '3': 400} files 43

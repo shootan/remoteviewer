@@ -1,0 +1,4 @@
+[T2] pick -> ack -> first frame of the acked generation -> commit; stragglers filtered afterwards
+[T2] a failed ack leaves the transaction to the caller to clear; no transaction -> NotPending
+[T2] reveal race: cancel / new pick / disconnect between the post and the commit -> no commit, latch released
+viewer_selection_gate_test: PASS

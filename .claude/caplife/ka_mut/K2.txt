@@ -1,0 +1,67 @@
+﻿host_standby_table_test (keepalive-r2 A, r3)
+
+PASS  device A admitted
+PASS  device B admitted -- from the SAME address (a relay): its own entry
+PASS  A's Hello again (same generation, same capability, same endpoint): a REPLAY, same entry and secret
+PASS  S1: same device + generation with ANOTHER capability: not a replay (a fresh proof is needed)
+PASS  S1: same device + generation + capability from ANOTHER endpoint: not a replay
+
+[ping]
+PASS  ping with the wrong secret: unknown
+PASS  ping with the right secret: ok, and the entry follows a moved endpoint
+PASS  pinging is all it did: no entry is active
+
+[one entry per device]
+PASS  A again, a NEW admission (fresh capability): replaces A's entry
+PASS  ...the old entry is gone
+
+[activation -- S2]
+PASS  S2: gen 0 is never a generation: SUPERSEDED, nothing changes
+PASS  A activates (gen 2): ok, a NEW session
+PASS  A's Activate again (same gen, its Ack lost): ok, NOT a new session, the same grant
+PASS  S2: A's LATE gen 1 while A is active: SUPERSEDED -- the high-water does not go down
+PASS  B activates (gen 1): ok, a new session -- A is parked, not dropped
+PASS  S2: A's OLD gen 2 again (2 -> 1 -> B -> 2): SUPERSEDED, B stays
+PASS  S2: A's gen 0 after B took it (0 -> B -> 0): SUPERSEDED, B stays
+PASS  A's NEW explicit activation (gen 3): ok, takes it
+PASS  activation with the wrong secret: unknown, nothing changes
+
+[the grant ends with its session -- S3]
+PASS  S3: a late end of an EARLIER session leaves the current grant alone
+PASS  S3: the device holding the live session is not re-admitted underneath it (Live)
+PASS  S3: ...nor released underneath it (Live)
+PASS  S3: its session's real end ends the grant: no entry is active
+PASS  S3: ...and the same generation no longer answers (no Ack of an ended session)
+PASS  S3: not pinged after its session ended, A lapses like any parked entry
+
+[lease]
+PASS  after the lease, the parked entry (B, not pinged) lapses; the LIVE one (A) stays  1 left
+PASS  an ordinary Hello took the session: no entry is active
+PASS  ...and A, no longer the session and not pinged, lapses too
+FAIL  S1: a replay after the lease (20-30 s, not swept yet) is NOT a replay -- the entry is gone
+
+[bounds]
+PASS  eight devices fill the host
+PASS  a ninth: BUSY, nothing changes
+PASS  ...but a device already holding an entry may renew it (replace), not Busy
+PASS  release frees a place
+PASS  release with the wrong secret: unknown
+PASS  a full host whose entries have lapsed admits again (swept first)
+
+[random draw -- S3]
+PASS  S3: the random draw fails: no entry at all (Failed), and it returns (no loop)
+PASS  S3: a draw that always gives 0 (no usable id): Failed after a bounded number of tries  4 draws
+PASS  S3: an id collision is retried (a second device still gets its own id)
+PASS  S3: a secret draw that fails after the id: still no entry
+
+[Standby* handling -- S1, activation result]
+PASS  a StandbyHello with a valid capability: admitted, a secret issued
+PASS  its Ack lost, the same Hello again (same socket, same capability): the SAME Ack, no capability spent
+PASS  S1: ANOTHER socket + the right device/generation + a wrong token: no secret, no reply, the entry unchanged
+PASS  S1: the same Hello replayed from ANOTHER endpoint: not answered with the secret (the capability is spent)
+PASS  S1: an authenticated endpoint move is a Ping (with the secret): ok, the entry follows it
+PASS  an accepted activation: its result names the operation (Pong: entry, gen 4, granted flag)
+PASS  a stale activation: refused, and the refusal names ITS generation (3), not the grant's
+PASS  S3: the session's end reaches the handling first: the same activation is then refused (Superseded)
+
+RESULT: FAILED  (47 checks, 1 failed)

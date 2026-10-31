@@ -1,0 +1,79 @@
+﻿[1] measured snapshots and what the product scheduler actually sends (60 s, 10 ms passes)
+    ping-aligned  118420f local: 0 of 59 windows sent | pending: 59 of 59
+PASS  [1] ping-aligned: the pending snapshot sends every measured window  59 of 59
+PASS  [1] ping-aligned: NEGATIVE CONTROL -- the 118420f local loses windows  0 of 59
+    list-on-tick  118420f local: 0 of 59 windows sent | pending: 59 of 59
+PASS  [1] list-on-tick: the pending snapshot sends every measured window  59 of 59
+PASS  [1] list-on-tick: NEGATIVE CONTROL -- the 118420f local loses windows  0 of 59
+    input-stream  118420f local: 0 of 59 windows sent | pending: 59 of 59
+PASS  [1] input-stream: the pending snapshot sends every measured window  59 of 59
+PASS  [1] input-stream: NEGATIVE CONTROL -- the 118420f local loses windows  0 of 59
+[2] present / decode separation (one 1 s window each)
+PASS  [2] decode 30, present 0-1 samples: reported, with decode 30 and recv 30 as measured  decodedFpsX100=3000 recvFpsX100=3000 presentSamples=0
+PASS  [2] decode 30, view latched 0: reported, with decode 30 and recv 30 as measured  decodedFpsX100=3000 recvFpsX100=3000 presentSamples=29
+PASS  [2] recv 30, decode 0 (decoder stall): reported, with decode 0 and recv 30 as measured  decodedFpsX100=0 recvFpsX100=3000 presentSamples=0
+PASS  [2] recv 3, decode 3 (thin): reported, with decode 3 and recv 3 as measured  decodedFpsX100=300 recvFpsX100=300 presentSamples=0
+PASS  [2] recv 0, decode 0 (video stopped, control alive): reported, with decode 0 and recv 0 as measured  decodedFpsX100=0 recvFpsX100=0 presentSamples=0
+[3] real elapsed windows
+PASS  [3] a 500 ms window of 30 fps reports 30 fps, 0.96 Mbps  dec=3000 recv=3000 mbpsX1000=960
+PASS  [3] a 1000 ms window of 30 fps reports 30 fps, 0.96 Mbps  dec=3000 recv=3000 mbpsX1000=960
+PASS  [3] a 2000 ms window of 30 fps reports 30 fps, 0.96 Mbps  dec=3000 recv=3000 mbpsX1000=960
+PASS  [3] a 37000 ms window of 30 fps reports 30 fps, 0.96 Mbps  dec=3000 recv=3000 mbpsX1000=960
+PASS  [3] a 5 s late close is one report of 30 fps
+PASS  [3] ...and the next window is due 1 s after it, not at once
+[4] counter reset
+PASS  [4] a counter that went backwards reports 0 recv, no negative delta / burst  recv=0
+PASS  [4] ...and the next window counts from the new base
+[5] decode validity
+PASS  [5] before the sink gives a valid count: no report
+PASS  [5] ...a present-only report then carries no decode field (as before)
+PASS  [5] the first valid count turns decode fields on
+PASS  [5] a not-valid window after it is withheld -- not reported as 0, and the unsent one before it is dropped  pending updatedQpcUs=0
+PASS  [5] a new connection drops pending and seen
+[6] two windows
+PASS  [6] two connections' windows do not share counts
+[7] r3 R2: an unsent snapshot does not outlive a not-valid window (product scheduler)
+PASS  [7] A was measured but not sent on its own pass  sent=0 lists=0
+PASS  [7] A IS NOT SENT AFTER THE NOT-VALID WINDOW (the host would take it as fresh on arrival)  0 metrics sent
+PASS  [7] a healthy window preempted by a Ping is still sent on the next pass  1 metrics sent, 4 pings
+[8] r3 R2: generation and age
+PASS  [8] the same generation keeps the unsent snapshot
+PASS  [8] a generation change on any pass drops it
+PASS  [8] a snapshot is handed out within 1.5 s of its measurement
+PASS  [8] ...and not after (the host would stamp it fresh on arrival)
+PASS  [8] a new connection hands out nothing old
+[9] r5: a decoder that never produces anything still reaches the host as 0
+PASS  [9] A VALID 0 IS REPORTED even before any positive decode in this connection  made=1 recvFpsX100=3000
+[10] r5: a paused stream is not measured
+PASS  [10] paused: no report (no 0 fps), and the unsent one is dropped
+PASS  [10] resumed: reported again
+[11] r5: a window over a generation change reports its measured part as a rate
+PASS  [11] 15 pictures over the measured 0.5 s = 30 fps, not 15  decodedFpsX100=3000
+[13] r6: Hold -- the minimum sample, its bound, what it leaves alone
+PASS  [13] the same measurement a second on is not held, and is its own second
+PASS  [13] a measurement 50 ms old is held; due again at 250 ms, not before, not a second later
+PASS  [13] ...the unsent snapshot is left as it was
+PASS  [13] at 250 ms it closes, over the measurement's own time (8 in 0.25 s = 32 fps)  3200
+PASS  [13] ...and the next window is due a second after that close
+PASS  [13] RESTARTING EVERY PASS DOES NOT HOLD IT FOR EVER: closed 250 ms past the first hold  closed at 4450000 us, limited 1
+PASS  [13] paused ends a hold: no hold, Close then withholds
+PASS  [13] not valid ends a hold too
+[12] r6 S1: sink -> window -> product scheduler -> host snapshot (3 s fresh) -> host ABR
+    Codex order (first picture 9.985 s, close 9.995 s, next report 11.005 s): no demotion, min fps after the transition 30.00, host ticks on a fresh low report 0, held passes 1, max stale s 0
+PASS  [12] S1-a Codex order: NO high_to_mid_severe FROM ONE PICTURE AFTER A GRACE (one low report, two host ticks)  no demotion, min fps after the transition 30.00, host ticks on a fresh low report 0, held passes 1, max stale s 0
+PASS  [12] S1-a sweep (report phase x first picture before the close, 40 runs): no demotion, every report after the switch >= 20 fps, no stale_active from the hold
+PASS  [12] S1-a first picture just after a close (12 runs): no demotion, >= 20 fps
+    S1-b answer 10.990 s, close 10.995 s, first picture 11.010 s: no demotion, min fps after the transition 30.00, host ticks on a fresh low report 0, held passes 1, max stale s 1
+PASS  [12] S1-b: NO high_to_mid_severe FROM A 0 OVER THE FIRST ms OF A GENERATION  no demotion, min fps after the transition 30.00, host ticks on a fresh low report 0, held passes 1, max stale s 1
+PASS  [12] S1-b sweep (phase x answer before the close x first picture, 45 runs): no demotion, >= 20 fps
+    quality-first, Codex order: no demotion, min fps after the transition 30.00, host ticks on a fresh low report 0, held passes 1, max stale s 0
+PASS  [12] quality-first (3 ticks) keeps its margin: no demotion  no demotion, min fps after the transition 30.00, host ticks on a fresh low report 0, held passes 1, max stale s 0
+    fault B (abandoned switch at 8.3 s, no picture ever): DEMOTED at 12.000 s high_to_mid_severe(severe_client), min fps after the transition 0.000, host ticks on a fresh low report 10, held passes 0, max stale s 0
+PASS  [12] kept: no picture after the grace (deadline 10.3 s) is a valid 0 and demotes (severe_client)  DEMOTED at 12.000 s high_to_mid_severe(severe_client), min fps after the transition 0.000, host ticks on a fresh low report 10, held passes 0, max stale s 0
+    normal loss at 8.3 s (no grace): DEMOTED at 11.000 s high_to_mid_severe(severe_client), min fps after the transition 0.000, host ticks on a fresh low report 11, held passes 0, max stale s 0
+PASS  [12] kept: a stall in normal streaming is a valid 0 at once (no grace) and demotes  DEMOTED at 11.000 s high_to_mid_severe(severe_client), min fps after the transition 0.000, host ticks on a fresh low report 11, held passes 0, max stale s 0
+    steady 60 s: no demotion, min fps after the transition 30.00, host ticks on a fresh low report 0, held passes 0, max stale s 0, 58 reports
+PASS  [12] kept: steady streaming is reported once a second at ~30 fps, nothing held  no demotion, min fps after the transition 30.00, host ticks on a fresh low report 0, held passes 0, max stale s 0, 58 reports, max/s 1
+
+client_telemetry_window_test: 54 passed, 0 failed
+RESULT: PASS

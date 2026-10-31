@@ -1,0 +1,22 @@
+[
+  {
+    "arg": "Apk",
+    "rc": 2,
+    "output": "FAIL  SETUP slot: -Apk must be an absolute path (relative/path)\nRESULT: INVALID"
+  },
+  {
+    "arg": "BuildDir",
+    "rc": 2,
+    "output": "FAIL  SETUP slot: -BuildDir must be an absolute path (relative/path)\nRESULT: INVALID"
+  },
+  {
+    "arg": "ServerJs",
+    "rc": 2,
+    "output": "FAIL  SETUP slot: -ServerJs must be an absolute path (relative/path)\nRESULT: INVALID"
+  },
+  {
+    "arg": "JobRun",
+    "rc": 2,
+    "output": "FAIL  SETUP slot: -JobRun must be an absolute path (relative/path)\nRESULT: INVALID"
+  }
+]

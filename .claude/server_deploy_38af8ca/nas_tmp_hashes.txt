@@ -1,0 +1,9 @@
+>>> remote: cd /opt/gnlink/remote60-directory && sha256sum server.js.tmp relay_diag.js.tmp accounts.js.tmp device_credentials.js.tmp update_manifest.js.tmp version_compare.js.tmp wake_target.js.tmp package.json.tmp 
+fdc9cbe8cdfc0015005a2074f90893099751bae45997429c4542c672dea4af7a  server.js
+0fe629172bf9caf8dfc7b66734b01159c6d9f5e98268b43384609322e9edb199  relay_diag.js
+e69e862e9b53d0144e49fdbcacd8084a9011bd73a7ee89195303b41849514ad3  accounts.js
+d5ca2991250013159594282a93f1d703d9718f8492804e5a7e84237c58f186f5  device_credentials.js
+a11254aa3fb007b6c00f184d6ad7aaa36f1a1e181ae083ad238e2eb658b641bf  update_manifest.js
+5117b0a4a825c85c5da07ab3b09ef96a591d3cf62e3a9ba70423e775f54139d3  version_compare.js
+48d3b480ffe710976b94c40eb0148cb6771d7c906255fac2e2eee494f8936c45  wake_target.js
+ceafbdf2a1d14a4fab07701427cb760aee7e9f1cdc2e373211f741fe0da40680  package.json

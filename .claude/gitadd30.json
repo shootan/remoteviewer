@@ -1,0 +1,10 @@
+{
+  "repo_path": "D:/remote/remote",
+  "files": [
+    "apps/android_direct_client/app/build.gradle.kts",
+    "apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/DirectoryClient.kt",
+    "apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/LogUploader.kt",
+    "apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/MainActivity.kt",
+    "apps/android_direct_client/app/src/test/java/com/remote60/androiddirect/DirectoryObserveTest.kt"
+  ]
+}

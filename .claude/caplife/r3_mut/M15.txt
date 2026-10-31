@@ -1,0 +1,31 @@
+﻿PASS readback ring initialised (WARP)
+PASS the live attachment cookie starts at 1 -- 1
+[native-video-host][desktop] adopted first frame attachment=1 desktopGen=0 captureUs=346249056307
+[native-video-host] capture-switch first-callback streamGen=1 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> callbackUs=346249056307 captureUs=346249056307
+PASS [A] a frame stamped with the live cookie reaches the frame state -- version=1 pixel=1
+PASS [A] no stale drop so far
+[native-video-host] readback publish dropped reason=stale-attachment frameCookie=1 liveCookie=2 drops=1
+PASS [B] the old attachment's frame published after the detach was DROPPED (old publish 0) -- version=1 pixel=1
+PASS [B] the drop was counted as stale-attachment -- drops=1
+PASS [B] the ring slot was freed (nothing left pending)
+[native-video-host][capture-timing] hostCaptureUs=346249493370 hostCallbackUs=346249493370 hostPublishUs=346249508797 sourceIntervalUs=437063 callbackIntervalUs=437063 attachment=2
+[native-video-host][desktop] adopted first frame attachment=2 desktopGen=0 captureUs=346249493370
+PASS [B-neg] negative control: the same old frame stamped with the LIVE cookie (pre-r13 behaviour) walks past the guard -- version=2
+PASS [C] the new attachment's frame is published under its cookie -- version=3
+PASS [C] no further stale drops
+FAIL [D] cookie 0 (no identity) is refused (never published) -- version=4
+PASS [D] ...and the live cookie's frame right after it is published
+[native-video-host] bootstrap-cache cleared reason=desktop-unknown
+[native-video-host][capture-timing] hostCaptureUs=346249961410 hostCallbackUs=346249961410 hostPublishUs=346249992490 sourceIntervalUs=406025 callbackIntervalUs=406025 attachment=2
+PASS [E] the held frame (same cookie, same gen) still reaches the encoder
+PASS [E] ...but is NOT cached: it was taken before the invalidation (continuity token)
+PASS [E] a frame taken after it is cached
+[native-video-host] bootstrap-cache cleared reason=test
+[native-video-host] readback publish dropped reason=stale-attachment frameCookie=2 liveCookie=3 drops=2
+PASS [F] the old attachment's held frame is not published
+PASS [F] ...nor cached
+PASS [F] ...and the full-frame episode stays open (a refused frame closes nothing)
+[native-video-host][capture-timing] hostCaptureUs=346250471745 hostCallbackUs=346250471745 hostPublishUs=346250487104 sourceIntervalUs=464136 callbackIntervalUs=464136 attachment=3
+[native-video-host][desktop] adopted first frame attachment=3 desktopGen=0 captureUs=346250471745
+PASS [F] the new attachment's frame passes and closes the episode
+capture_attachment_test: 18 PASS, 1 FAIL (NV12 lease path not exercised: WARP has no video processor)

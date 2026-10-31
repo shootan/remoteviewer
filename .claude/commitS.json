@@ -1,0 +1,4 @@
+{
+  "repo_path": "D:/remote/remote",
+  "message": "docs(history): the build commit for 0.2.111 is f195ce8\n\nI wrote a hash into the entry before the commit existed, so the number in it was\ninvented. Corrected to the real one. A commit hash is not something to预 fill --\nit is either read back or left out."
+}

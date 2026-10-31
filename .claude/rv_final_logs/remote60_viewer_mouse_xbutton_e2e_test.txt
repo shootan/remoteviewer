@@ -1,0 +1,80 @@
+mode: host that advertises X buttons
+host port 63467 (picked at run time)
+PASS  a host and a never-answering helper could be staged
+PASS  a window of this process is up for the host to inject into
+PASS  the launched process is isolated from the user's files
+PASS  the host started
+PASS  the product's window procedure owns a window
+PASS  the viewer's Hello is answered
+PASS  video is arriving  58 media datagrams
+[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=0.2.142 peerProcess=GNLinkStream peerVersion=unknown-awaiting-pong eventQpcUs=1906453250949
+[native-video-client][control] seq=1 rttUs=285 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=1 rttUs=285 clockOffsetUs=-28 clientSendUs=1906453251004 hostRecvUs=1906453251118 hostSendUs=1906453251118 clientRecvUs=1906453251289 eventQpcUs=1906453251651
+[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=0.2.142 peerProcess=GNLinkStream peerVersion=0.2.142 peerVersionSource=peer-report eventQpcUs=1906453251814
+PASS  the worker completes a round trip with the host  rttUs=285
+PASS  ...and control is up
+
+--- the host says it takes X buttons ---
+PASS  THE PONG ADVERTISES kCaptureFlagMouseXButtonsV1
+
+--- X1 (back) goes down and up, through the product's own path ---
+PASS  the window procedure answers TRUE to WM_XBUTTONDOWN (the documented contract)  returned 1
+PASS  ...and holds X1 (wire bit 0x8)  mouseButtons=0x8
+[native-video-client][input-timing] timingSchema=2 seq=1 actionKind=10 eventKind=2 clientGeneratedUs=1906453266098 clientSendUs=1906453266113 clientDoneUs=1906453267078 queueAgeUs=15 exchangeUs=965 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1906453267087
+PASS  X1 DOWN REACHES THE HOST AND ARRIVES AS WM_XBUTTONDOWN NAMING XBUTTON1  1 WM_XBUTTONDOWN(XBUTTON1)
+PASS  ...with MK_XBUTTON1 (0x20) held and no MK_LBUTTON  wParam=0x10020
+PASS  ...inside the target's client area  26,24
+PASS  ...and no LEFT press was made of it  0 WM_LBUTTONDOWN
+PASS  the window procedure answers TRUE to WM_XBUTTONUP
+PASS  ...and lets go of X1
+[native-video-client][input-timing] timingSchema=2 seq=2 actionKind=10 eventKind=3 clientGeneratedUs=1906453281990 clientSendUs=1906453282003 clientDoneUs=1906453282898 queueAgeUs=13 exchangeUs=895 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1906453282913
+PASS  X1 UP ARRIVES AS WM_XBUTTONUP NAMING XBUTTON1  1 WM_XBUTTONUP(XBUTTON1)
+PASS  ...with MK_XBUTTON1 no longer held  wParam=0x10000
+
+--- X2 (forward) ---
+[native-video-client][input-timing] timingSchema=2 seq=3 actionKind=10 eventKind=2 clientGeneratedUs=1906453297595 clientSendUs=1906453297608 clientDoneUs=1906453298745 queueAgeUs=13 exchangeUs=1137 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1906453298763
+PASS  X2 DOWN ARRIVES AS WM_XBUTTONDOWN NAMING XBUTTON2  1 WM_XBUTTONDOWN(XBUTTON2)
+PASS  ...with MK_XBUTTON2 (0x40) held  wParam=0x20040
+[native-video-client][input-timing] timingSchema=2 seq=4 actionKind=10 eventKind=3 clientGeneratedUs=1906453313669 clientSendUs=1906453313686 clientDoneUs=1906453315048 queueAgeUs=17 exchangeUs=1362 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1906453315062
+PASS  X2 UP ARRIVES AS WM_XBUTTONUP NAMING XBUTTON2  1 WM_XBUTTONUP(XBUTTON2)
+PASS  no X message named anything but XBUTTON1 / XBUTTON2
+
+--- a left click still is one (regression) ---
+[native-video-client][input-timing] timingSchema=2 seq=5 actionKind=10 eventKind=2 clientGeneratedUs=1906453349368 clientSendUs=1906453349382 clientDoneUs=1906453350179 queueAgeUs=14 exchangeUs=797 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1906453350192
+PASS  THE LEFT DOWN ARRIVES AS WM_LBUTTONDOWN  1 WM_LBUTTONDOWN
+[native-video-client][input-timing] timingSchema=2 seq=6 actionKind=10 eventKind=3 clientGeneratedUs=1906453362171 clientSendUs=1906453362183 clientDoneUs=1906453362930 queueAgeUs=12 exchangeUs=747 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1906453362943
+PASS  ...and the up as WM_LBUTTONUP  1 WM_LBUTTONUP
+[native-video-client][control] seq=2 rttUs=288 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=2 rttUs=288 clockOffsetUs=17 clientSendUs=1906453766022 hostRecvUs=1906453766183 hostSendUs=1906453766183 clientRecvUs=1906453766310 eventQpcUs=1906453766459
+[native-video-client][input-p0] windowUs=1010981 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=3 rttUs=397 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=3 rttUs=397 clockOffsetUs=-17 clientSendUs=1906454277847 hostRecvUs=1906454278028 hostSendUs=1906454278028 clientRecvUs=1906454278244 eventQpcUs=1906454278334
+[native-video-client][control] seq=4 rttUs=716 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=4 rttUs=716 clockOffsetUs=-180 clientSendUs=1906454786293 hostRecvUs=1906454786471 hostSendUs=1906454786471 clientRecvUs=1906454787009 eventQpcUs=1906454787104
+PASS  ...with no X message made of either
+
+--- X1 held, then mouse capture is really lost: the release-all lets go ---
+[native-video-client][input-timing] timingSchema=2 seq=7 actionKind=10 eventKind=2 clientGeneratedUs=1906455019077 clientSendUs=1906455019087 clientDoneUs=1906455020106 queueAgeUs=10 exchangeUs=1019 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1906455020119
+PASS  [held] the X1 down landed
+PASS  [held] the window procedure took mouse capture for it
+PASS  [held] the viewer is holding X1
+[native-video-client][input-timing] timingSchema=2 seq=8 actionKind=10 eventKind=3 clientGeneratedUs=1906455037044 clientSendUs=1906455037054 clientDoneUs=1906455037957 queueAgeUs=10 exchangeUs=903 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1906455037969
+PASS  [held] ...and after WM_CAPTURECHANGED no X bit is held  mouseButtons=0x0
+PASS  THE X1 UP ARRIVES AT THE HOST WITHOUT ANYONE PRESSING UP  1 WM_XBUTTONUP(XBUTTON1)
+[native-video-client][input-p0] windowUs=1006897 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=5 rttUs=924 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=5 rttUs=924 clockOffsetUs=-272 clientSendUs=1906455300347 hostRecvUs=1906455300537 hostSendUs=1906455300537 clientRecvUs=1906455301271 eventQpcUs=1906455301348
+[native-video-client][control] seq=6 rttUs=280 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=6 rttUs=280 clockOffsetUs=7 clientSendUs=1906455807202 hostRecvUs=1906455807349 hostSendUs=1906455807349 clientRecvUs=1906455807482 eventQpcUs=1906455807563
+[native-video-client][input-p0] windowUs=1003854 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=7 rttUs=288 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=7 rttUs=288 clockOffsetUs=12 clientSendUs=1906456319370 hostRecvUs=1906456319526 hostSendUs=1906456319526 clientRecvUs=1906456319658 eventQpcUs=1906456319749
+PASS  ...EXACTLY ONCE  1 WM_XBUTTONUP(XBUTTON1)
+PASS  ...and the down was not repeated
+PASS  the host is gone when the job closes
+PASS  host log: X1 edges injected (down, up, held down, released up)  4
+PASS  host log: X2 edges injected (down, up)  2
+PASS  host log: no X edge was refused as unsupported (none reached a host that lacks them)  0
+PASS  the scratch directory is cleaned up
+
+RESULT: ALL PASS  (39 checks, 0 failed)

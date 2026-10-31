@@ -1,0 +1,20 @@
+cmake_minimum_required(VERSION 3.20)
+cmake_policy(SET CMP0091 NEW)
+project(gnlink_audit_probes CXX)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(REPO "D:/remote/remote")
+set(SRC "${REPO}/apps/native_poc/src")
+add_compile_options(/utf-8 /EHsc)
+
+add_executable(probe_uploader_spin probe_uploader_spin.cpp ${SRC}/log_upload.cpp ${SRC}/directory_client.cpp)
+target_include_directories(probe_uploader_spin PRIVATE ${SRC} ${REPO}/libs/common/include)
+target_link_libraries(probe_uploader_spin PRIVATE ${REPO}/build-local/libs/common/Release/common.lib winhttp ws2_32 iphlpapi shell32)
+
+add_executable(probe_fifo_model probe_fifo_model.cpp)
+target_include_directories(probe_fifo_model PRIVATE ${SRC} ${REPO}/libs/common/include)
+
+add_executable(probe_nack_trace probe_nack_trace.cpp ${SRC}/native_video_client_shared_core.cpp)
+target_include_directories(probe_nack_trace PRIVATE ${SRC} ${REPO}/libs/common/include)
+target_link_libraries(probe_nack_trace PRIVATE ${REPO}/build-local/libs/common/Release/common.lib winhttp ws2_32)

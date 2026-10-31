@@ -1,0 +1,7 @@
+I/remote60_android_direct(27397): 2026-10-26 14:25:19.595 [desktop_backend_session_reset] reason=connect
+I/remote60_android_direct(27397): 2026-10-26 14:25:20.415 [desktop_backend_ui] state=CHECKING lit=none asked=none window=false scoped=false enabled=true seq=0 sentSeq=0
+I/remote60_android_direct(27397): 2026-10-26 14:25:48.135 [desktop_backend_ui] state=IDLE lit=DXGI asked=none window=true scoped=true enabled=true seq=1 sentSeq=0
+I/remote60_android_direct(27397): 2026-10-26 14:25:59.665 [desktop_backend_tap] backend=gdi connected=true parked=false
+I/remote60_android_direct(27397): 2026-10-26 14:25:59.666 [desktop_backend_request] backend=gdi scope=connection
+I/remote60_android_direct(27397): 2026-10-26 14:25:59.668 [desktop_backend_ui] state=APPLYING lit=none asked=GDI window=true scoped=true enabled=true seq=6 sentSeq=0
+I/remote60_android_direct(27397): 2026-10-26 14:26:00.358 [desktop_backend_ui] state=STORED_FOR_DESKTOP lit=GDI asked=GDI window=true scoped=true enabled=true seq=7 sentSeq=7

@@ -1,0 +1,84 @@
+    if (stillScreen) {
+      // capture-lifecycle r1 (PS): the product's receive chain instead of a datagram counter -- set up with the
+      // calls viewer_stats_chain_e2e_test makes (VideoReceiver::Run: assembler, FrameGate, MF decoder,
+      // FrameBuffer; it also feeds the control tunnel). NACK off (not asked in this Hello).
+      using namespace remote60::native_poc::viewer;
+      static Args rxArgs;
+      rxArgs.codec = "h264";
+      rxArgs.transport = "udp";
+      rxArgs.fpsHint = 30;
+      rxArgs.udpMtu = 1200;
+      rxArgs.inputLogEvery = 0;
+      static DecoderState dec;
+      dec.useH264 = true;
+      dec.transport = VideoTransport::Udp;
+      static FrameGateState gate;
+      gate.catchupReenterMinIntervalUs = kCatchupReenterMinIntervalUsDefault;
+      gate.staleCaptureDropUs = kStaleCaptureDropUs;
+      gate.staleReferenceRecoveryMinIntervalUs = kStaleRecoveryMinIntervalUsDefault;
+      gate.congestionRecoverMinUs = kCongestionRecoverMinUsDefault;
+      gate.congestionRecoveryTimeoutUs = kCongestionRecoveryTimeoutUsDefault;
+      gate.decodeQueueLagDropUs = kDecodeQueueLagDropUs;
+      gate.catchupLagDropUs = kCatchupLagDropUs;
+      gate.denseArrivalMaxGapUs = kDenseArrivalMaxGapUsDefault;
+      gate.lagTriggerStreakMin = kLagTriggerStreakMinDefault;
+      gate.recoveryRetryIntervalUs = kKeyRecoveryRetryUsDefault;
+      gate.recoveryRetryMaxIntervalUs = kKeyRecoveryRetryMaxUsDefault;
+      gate.recoveryRetryDeferMaxUs = kKeyRecoveryDeferMaxUsDefault;
+      gate.waitForKeyFrame = true;
+      ctx.picker.visible.store(false);
+      ctx.control.keyframeRequests.Reset();
+      VideoReceiver::NackOptions nack;
+      nack.enabled = false;
+      receiver.emplace(ctx, rxArgs, dec, gate, qpc_now_us(), 0, 0, nack);
+      ingress = std::thread([&] { receiver->Run(); });
+      // What the renderer would show: each newly published frame, stamped, with its luma spread (max - min
+      // of a sparse sample of the visible picture).
+      presentThread = std::thread([&] {
+        uint64_t seen = 0;
+        while (!ingressStop.load() && ctx.session.running.load()) {
+          Shown s{};
+          bool fresh = false;
+          {
+            std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+            auto& f = ctx.frameBuf.frame;
+            if (f.version != seen && f.bytes && !f.bytes->empty() && f.width > 0 && f.height > 0) {
+              seen = f.version;
+              fresh = true;
+              ctx.frameBuf.lastPresentedVersion.store(f.version, std::memory_order_relaxed);
+              if (!f.synthetic) ctx.frameBuf.lastPresentedCaptureUs.store(f.captureUs, std::memory_order_relaxed);
+              s.synthetic = f.synthetic;
+              s.w = f.width;
+              s.h = f.height;
+              const uint8_t* b = f.bytes->data();
+              const size_t n = f.bytes->size();
+              int lo = 255, hi = 0;
+              for (uint32_t y = 0; y < f.height; y += 17) {
+                for (uint32_t x = 0; x < f.width; x += 23) {
+                  int luma = -1;
+                  if (f.format == SharedFrame::PixelFormat::Bgra32) {
+                    const size_t at = static_cast<size_t>(f.visibleTop + y) * f.stride + static_cast<size_t>(f.visibleLeft + x) * 4;
+                    if (at + 2 < n) luma = (b[at] * 29 + b[at + 1] * 150 + b[at + 2] * 77) >> 8;
+                  } else {
+                    const size_t at = static_cast<size_t>(f.visibleTop + y) * f.stride + (f.visibleLeft + x);
+                    if (at < n) luma = b[at];
+                  }
+                  if (luma >= 0) {
+                    lo = (std::min)(lo, luma);
+                    hi = (std::max)(hi, luma);
+                  }
+                }
+              }
+              s.lumaSpread = hi >= lo ? static_cast<uint32_t>(hi - lo) : 0;
+            }
+          }
+          if (fresh) {
+            s.us = qpc_now_us();
+            std::lock_guard<std::mutex> lk(shownMu);
+            shown.push_back(s);
+          }
+          Sleep(2);
+        }
+      });
+      connected = true;  // the viewer starts in its picker: no picture is owed yet
+    } else {

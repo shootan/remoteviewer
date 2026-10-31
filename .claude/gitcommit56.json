@@ -1,0 +1,4 @@
+{
+ "repo_path": "D:/remote/remote",
+ "message": "docs(release): the candidate cannot have come from the commit it names\n\nThe build commit was recorded as 6973354. That tree has kProductVersion =\n0.2.105, and the installer contains 0.2.106 three times as UTF-16 and 0.2.105\nnot at all -- so it is not a binary that tree can produce. The version bump\nlanded in e32b656, and that is the tree the artifacts came from.\n\nNot a claim from a string, an exclusion by one: the compiled constant\ndiffers, so that commit is ruled out. Provenance on a release candidate is\nthe thing that lets someone find the code later, and a wrong one costs\nexactly that.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+}

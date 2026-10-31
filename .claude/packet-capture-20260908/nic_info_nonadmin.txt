@@ -1,0 +1,108 @@
+﻿== Get-NetAdapter (Up) 2026-09-08 11:42:30
+
+
+Name                 : vEthernet (Default Switch)
+ifIndex              : 15
+InterfaceDescription : Hyper-V Virtual Ethernet Adapter
+DriverVersion        : 
+DriverProvider       : 
+MacAddress           : 00-15-5D-7E-CC-A8
+LinkSpeed            : 10 Gbps
+InterfaceGuid        : {D41ACCF1-ABE3-4F5C-91E0-C635FE25809B}
+
+Name                 : 이더넷
+ifIndex              : 12
+InterfaceDescription : Realtek PCIe GbE Family Controller
+DriverVersion        : 10.79.50.1003
+DriverProvider       : Realtek
+MacAddress           : E8-9C-25-3E-10-70
+LinkSpeed            : 1 Gbps
+InterfaceGuid        : {8B4BA226-3672-4F2F-BD61-FB99BA05D813}
+
+Name                 : vEthernet (WSL (Hyper-V firewall))
+ifIndex              : 25
+InterfaceDescription : Hyper-V Virtual Ethernet Adapter #2
+DriverVersion        : 
+DriverProvider       : 
+MacAddress           : 00-15-5D-9A-50-5B
+LinkSpeed            : 10 Gbps
+InterfaceGuid        : {7EE2C85C-4ADA-42FA-9B2D-533C6E40A1DB}
+
+Name                 : Tailscale
+ifIndex              : 6
+InterfaceDescription : Tailscale Tunnel
+DriverVersion        : 0.14.0.0
+DriverProvider       : WireGuard LLC
+MacAddress           : 
+LinkSpeed            : 100 Gbps
+InterfaceGuid        : {37217669-42DA-4657-A55B-0D995D328250}
+
+
+
+
+== Get-NetAdapterHardwareInfo (Realtek)
+
+
+Name                        : 이더넷
+InterfaceDescription        : Realtek PCIe GbE Family Controller
+DeviceType                  : PCI Express treated as PCI
+SegmentNumber               : 0
+BusNumber                   : 6
+DeviceNumber                : 0
+FunctionNumber              : 0
+SlotNumber                  : 
+NumaNode                    : 
+PciCurrentSpeedAndMode      : 
+PciExpressCurrentLinkSpeed  : 2.5 GT/s
+PciExpressCurrentLinkWidth  : 1
+PciExpressMaxLinkSpeed      : 2.5 GT/s
+PciExpressMaxLinkWidth      : 1
+PciExpressVersion           : 1.1+
+LineBasedInterruptSupported : True
+MsiInterruptSupported       : True
+MsiXInterruptSupported      : True
+
+
+
+
+== Get-NetAdapterAdvancedProperty (Realtek: offload/RSS/USO related)
+
+DisplayName                  DisplayValue
+-----------                  ------------
+Large Send Offload v2 (IPv4) 사용          
+Large Send Offload v2 (IPv6) 사용          
+RSS 대기행렬의 최대 수               4개의 대기행렬    
+
+
+
+== Get-NetAdapterBinding (Realtek)
+
+ComponentID DisplayName                              
+----------- -----------                              
+ms_l2bridge 브리지 드라이버                                 
+ms_l1vhlwf  중첩된 네트워크 가상화                             
+ms_tcpip    인터넷 프로토콜 버전 4(TCP/IPv4)                  
+ms_rspndr   Link-Layer Topology Discovery 응답기        
+ms_lltdio   Link-Layer Topology Discovery 매퍼 I/O 드라이버
+ms_lldp     Microsoft LLDP 프로토콜 드라이버                 
+ms_tcpip6   인터넷 프로토콜 버전 6(TCP/IPv6)                  
+ms_msclient Microsoft Networks용 클라이언트                
+ms_server   Microsoft 네트워크용 파일 및 프린터 공유              
+ms_pacer    QoS 패킷 스케줄러                              
+
+
+
+== Get-NetAdapterStatistics (Realtek)
+
+
+SentUnicastPackets       : 7693029
+ReceivedUnicastPackets   : 4083227
+OutboundDiscardedPackets : 0
+OutboundPacketErrors     : 0
+SentBytes                : 8125604551
+
+
+
+
+== vSwitch binding? (Get-VMSwitch needs Hyper-V module; skip if absent)
+Get-VMSwitch unavailable: You do not have the required permission to complete this task. Contact the administrator of the authorization policy for the computer 'SHOTAN'.

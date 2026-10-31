@@ -1,0 +1,81 @@
+{
+  "archived_at": "2026-10-31T22:09:12.340116",
+  "links": [
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\apk-decoder-liveness-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    },
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\apk-inbox-c-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    },
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\dirretry-r2-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    },
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\feat-apk-0233-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    },
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\feat-keepalive-multi-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    },
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\feat-keepalive-r2-apk-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    },
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\fix-directory-retry-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    },
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\ka-pc-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    },
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\ka-r3-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    },
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\maint-r1-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    },
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\np-impl-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    },
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\old-apk-lane-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    },
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\old-ref-163-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    },
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\spike-host-admission-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    },
+    {
+      "path": "C:\\work\\remote\\.claude\\storage-migration\\junction-backups\\verify-dirretry-webview2",
+      "old_target": "\\\\?\\D:\\remote\\remote\\third_party\\webview2",
+      "reason": "Original D target explicitly removed by user; retain metadata instead of broken junction"
+    }
+  ],
+  "target_followed": false
+}

@@ -1,0 +1,53 @@
+    // ---- lk-ux-retry r3 (Codex N2-a): the new password LEFT (the host took its seal) but its answer did not come
+    // within the exchange (the test-only GNLINK_VIEWER_TEST_STATUS_POLLS=0: the viewer stops asking right after
+    // the host accepted it -- the 10 s give-up of the field case, on demand). It must stay followed: the host
+    // types it a moment later, and the user's next press is a retry that NAMES it (the host ends its wait first)
+    // -- not an ordinary request refused as "the earlier one still waits". Nothing re-sent by itself.
+    std::cout << "\n--- lk-ux-retry r3 (N2-a): sent, its answer not come -> followed; the next press names it ---\n";
+    {
+      Sleep(700);  // the service's challenge rate limit
+      SetEnvironmentVariableW(L"GNLINK_VIEWER_TEST_STATUS_POLLS", L"0");
+      OperatorRun runH;
+      std::wstring boxH;
+      std::thread opH([&] {
+        operate_prompt(&runH, kPreloginPromptClass, false, kSecret2);
+        Sleep(300);
+        bring_front(targets.main);
+        take_box(&boxH, L"lock_screen_retry_sent_unanswered");
+      });
+      click_item();
+      pump_until([&] { return !boxH.empty(); }, 30000);
+      join_pumping(opH);
+      SetEnvironmentVariableW(L"GNLINK_VIEWER_TEST_STATUS_POLLS", nullptr);
+      check("N2-a: a retry (the earlier wait ended), its new password sent, its answer not come",
+            host.Count("[lock-cred] retry requestId=") == 3 && host.Count(" cleared=1 stage=17") == 3,
+            std::to_string(host.Count("[lock-cred] retry requestId=")) + " retries");
+      check("N2-a: THE WINDOW SAYS it was sent and is being followed -- not \"typed\", not \"not sent\", not \"2 minutes\"",
+            boxH.find(L"계속 확인합니다") != std::wstring::npos && boxH.find(L"입력했습니다") == std::wstring::npos &&
+                boxH.find(L"2분") == std::wstring::npos,
+            utf8(boxH));
+      check("N2-a: ...AND IT IS FOLLOWED (the viewer still waits on it)", ctx.session.lockCredPending.load());
+      check("N2-a: ...the host types it a moment later (the field now holds the new password)",
+            pump_until([&] { return Targets::text(targets.edit) == kSecret2; }, 8000), hexw(Targets::text(targets.edit)));
+      // The user presses again: a retry naming THAT password -- its wait ended first -- and the field replaced.
+      Sleep(700);
+      OperatorRun runI;
+      std::wstring boxI;
+      std::thread opI([&] {
+        operate_prompt(&runI, kPreloginPromptClass, false, kSecret);
+        Sleep(300);
+        bring_front(targets.main);
+        take_box(&boxI, L"lock_screen_retry_after_unanswered");
+      });
+      click_item();
+      pump_until([&] { return !boxI.empty(); }, 30000);
+      join_pumping(opI);
+      check("N2-a: THE NEXT PRESS IS A RETRY OF IT -- ended first (17), then typed: field replaced, no 'pending' refusal",
+            host.Count("[lock-cred] retry requestId=") == 4 && host.Count(" cleared=1 stage=17") == 4 &&
+                boxI.find(L"입력했습니다") != std::wstring::npos && Targets::text(targets.edit) == kSecret &&
+                ctx.session.lockCredPending.load(),
+            utf8(boxI) + " | retries=" + std::to_string(host.Count("[lock-cred] retry requestId=")));
+      check("N2-a: ...on the same connection (reconnect 0) and nothing was re-sent by itself (typed once per press)",
+            ctx.session.controlRunGen.load() == genBeforeRetry);
+    }
+

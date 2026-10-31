@@ -1,0 +1,11 @@
+day client direct relay none   (host homePC .76; direct = control session <1s after host punch, relay = ~2.1s)
+('10-22', 'mobile:118.235') 1 0 0
+('10-22', 'mobile:175.209') 0 5 0
+('10-22', 'office') 8 14 2
+('10-23', 'office') 14 1 0
+('10-25', 'mobile:175.209') 0 2 0
+('10-26', 'office') 10 9 0
+('10-27', 'office') 0 1 0
+wake->host punch ms relay n=32 min=264 med=375 max=482
+wake->host punch ms none n=2 min=345 med=451 max=451
+wake->host punch ms direct n=33 min=262 med=331 max=463

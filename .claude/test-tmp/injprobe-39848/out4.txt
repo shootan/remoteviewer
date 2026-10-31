@@ -1,0 +1,5 @@
+10-28 08:54:50.197 [native-video-host] latency-priority processAboveNormal=1 mainThreadAboveNormal=1
+10-28 08:54:50.199 [native-video-host] waiting client bindPort=47811 transport=udp fps=30 bitrate=8000000 seconds=4
+10-28 08:54:50.199 [native-video-host] wireCap=on wireCapBps=8000000 wireCapMtu=1200
+10-28 08:54:50.200 [native-video-host] h264 pacing=on udpPacePeakPercent=500 udpPacePeakBps=40000000 udpPacePeakFloorBps=40000000 udpKeyframePacePeakBps=100000000 fecSingleChunkStride=tight stalePreEncodeGuard=0 capturePoolBuffers=2 encoderTuneMode=low_latency abr=on abrMode=default frameGating=on staticSceneFps=8 gatingStaticPm=6 m9=off m9Mode=dry-run keyReqMinUs=120000 keyReqBucketCap=3 captureInputMinPushPerSec=10 captureInputStallSec=3 captureInputWarmupSec=4 captureIdlePollIntervalUs=33333 queueWaitTimeoutUs=8333
+10-28 08:54:50.200 [native-video-host] input injection disabled (enableInputInjection=false)

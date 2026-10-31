@@ -1,0 +1,31 @@
+﻿start 2026-10-27T11:09:38
+hash-before GNLinkStream.exe OK
+hash-before app-shseam.apk OK
+hash-before GNLinkStreamMigrationTest.exe OK
+hash-before remote60_client_session_prelogin_select_test.exe OK
+hash-before GNLink-0.2.32.apk OK
+hash-before remote60_viewer_prelogin_login_e2e_test.exe OK
+noseam-copy 1D4A05F4F318496A895AC748BE5705365598C3DE677C6F4652988034BD3DEEBD
+vv_A rc=0
+vv_A_trip rc=0
+vv_A_ctl rc=0
+vv_ua2d rc=0
+vv_method rc=0
+vv_ua2 rc=0
+vv_ua2old rc=0
+vv_layout rc=0
+vv_ab rc=0
+vv_cmp rc=0
+vv_touch rc=0
+vv_lat rc=0
+vv_sel rc=0
+picker_unit rc=0
+gate_apk rc=0
+gate_self rc=0
+hash-after GNLinkStream.exe OK
+hash-after app-shseam.apk OK
+hash-after GNLinkStreamMigrationTest.exe OK
+hash-after remote60_client_session_prelogin_select_test.exe OK
+hash-after GNLink-0.2.32.apk OK
+hash-after remote60_viewer_prelogin_login_e2e_test.exe OK
+end 2026-10-27T11:41:32

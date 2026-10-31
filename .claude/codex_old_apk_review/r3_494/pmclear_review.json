@@ -1,0 +1,62 @@
+[
+  {
+    "arm": "P",
+    "mode": "rc1",
+    "ok": true,
+    "rc": 2,
+    "started": false,
+    "taps": 0,
+    "clears": 1
+  },
+  {
+    "arm": "P",
+    "mode": "failed",
+    "ok": true,
+    "rc": 2,
+    "started": false,
+    "taps": 0,
+    "clears": 1
+  },
+  {
+    "arm": "P",
+    "mode": "empty",
+    "ok": true,
+    "rc": 2,
+    "started": false,
+    "taps": 0,
+    "clears": 1
+  },
+  {
+    "arm": "P",
+    "mode": "timeout",
+    "ok": true,
+    "rc": 2,
+    "started": false,
+    "taps": 0,
+    "clears": 1
+  },
+  {
+    "arm": "P",
+    "mode": "installbad",
+    "ok": true,
+    "rc": 2,
+    "started": false,
+    "taps": 0,
+    "clears": 0
+  },
+  {
+    "arm": "S",
+    "mode": "rc1",
+    "ok": true,
+    "rc": 2,
+    "started": false,
+    "taps": 0,
+    "clears": 1
+  },
+  {
+    "arm": "P",
+    "mode": "ok",
+    "ok": true,
+    "started": true
+  }
+]

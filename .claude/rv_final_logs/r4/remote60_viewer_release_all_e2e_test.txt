@@ -1,0 +1,164 @@
+ports host 65209 proxy 65210 (picked at run time)
+PASS  a host and a never-answering helper could be staged
+PASS  a window of this process is up for the host to inject into
+PASS  the control seam is listening
+PASS  the launched process is isolated from the user's files
+PASS  the host started
+PASS  the product's window procedure owns a window
+PASS  the viewer's Hello is answered
+PASS  video is arriving  116 media datagrams
+[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=0.2.142 peerProcess=GNLinkStream peerVersion=unknown-awaiting-pong eventQpcUs=1908221549816
+[native-video-client][control] seq=1 rttUs=376 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=1 rttUs=376 clockOffsetUs=-26 clientSendUs=1908221549860 hostRecvUs=1908221550022 hostSendUs=1908221550022 clientRecvUs=1908221550236 eventQpcUs=1908221550602
+[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=0.2.142 peerProcess=GNLinkStream peerVersion=0.2.142 peerVersionSource=peer-report eventQpcUs=1908221550819
+PASS  the worker completes a round trip with the host  rttUs=376
+PASS  ...and control is up
+
+--- a key goes down, through the product's own path ---
+[native-video-client][input-timing] timingSchema=2 seq=1 actionKind=10 eventKind=5 clientGeneratedUs=1908221565141 clientSendUs=1908221565161 clientDoneUs=1908221566678 queueAgeUs=20 exchangeUs=1517 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908221566695
+PASS  THE KEY DOWN REACHES THE HOST AND IS INJECTED INTO THIS PROCESS  1 WM_KEYDOWN
+PASS  ...and the viewer is holding it  this is the state that would strand on the host
+PASS  ...and no up has been sent  0 WM_KEYUP so far
+
+--- case 1: control is cut; the key-up is never generated ---
+[native-video-client][control] slow action kind=1 tookUs=6539396 ok=0
+[native-video-client][control] action failed kind=1 transport=udp-tunnel closed=1 reason=peer-lost sent=5 received=4 retx=0 nacks=0
+    [control-resume] break resumeId=28929
+    [control-resume] send resumeId=28929 attempt=1 ok=1
+PASS  [held] the worker notices the control channel is gone
+    [control-resume] send resumeId=28929 attempt=2 ok=1
+    [control-resume] send resumeId=28929 attempt=3 ok=1
+    [control-resume] send resumeId=28929 attempt=4 ok=1
+    [control-resume] ack served=1 resumeId=28929 rekeyed=1
+[native-video-client][control-resume] resumed resumeId=28929 attempts=4 breakToFirstSendUs=59 breakToRunningUs=1684116 eventQpcUs=1908230285890
+[native-video-client][control-resume] dropped 0 input actions queued during the break, kept 0 releases
+    [control-resume] resumed resumeId=28929 attempts=4
+[native-video-client][input-p0] windowUs=8736136 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=3 rttUs=360 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=3 rttUs=360 clockOffsetUs=62 clientSendUs=1908230285996 hostRecvUs=1908230286238 hostSendUs=1908230286238 clientRecvUs=1908230286356 eventQpcUs=1908230286422
+[native-video-client][control-resume] release: sent modifierUps=11 heldKeysBefore=1 heldButtonsBefore=0x0
+PASS  [held] THE CHANNEL IS REPAIRED WITHOUT A RECONNECT
+PASS  AND THE KEY-UP ARRIVES AT THE HOST WITHOUT ANYONE SENDING ONE  1 WM_KEYUP for the key -- nobody generated an up for it
+[native-video-client][input-timing] timingSchema=2 seq=2 actionKind=10 eventKind=6 clientGeneratedUs=1908230301961 clientSendUs=1908230302071 clientDoneUs=1908230303883 queueAgeUs=110 exchangeUs=1812 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908230303898
+[native-video-client][input-timing] timingSchema=2 seq=3 actionKind=10 eventKind=6 clientGeneratedUs=1908230301965 clientSendUs=1908230303922 clientDoneUs=1908230304790 queueAgeUs=1957 exchangeUs=868 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908230304799
+[native-video-client][input-timing] timingSchema=2 seq=4 actionKind=10 eventKind=6 clientGeneratedUs=1908230301971 clientSendUs=1908230304815 clientDoneUs=1908230305556 queueAgeUs=2844 exchangeUs=741 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908230305566
+[native-video-client][input-timing] timingSchema=2 seq=5 actionKind=10 eventKind=6 clientGeneratedUs=1908230301972 clientSendUs=1908230305628 clientDoneUs=1908230306326 queueAgeUs=3656 exchangeUs=698 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908230306336
+[native-video-client][input-timing] timingSchema=2 seq=6 actionKind=10 eventKind=6 clientGeneratedUs=1908230301973 clientSendUs=1908230306356 clientDoneUs=1908230307259 queueAgeUs=4383 exchangeUs=903 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908230307268
+[native-video-client][input-timing] timingSchema=2 seq=7 actionKind=10 eventKind=6 clientGeneratedUs=1908230301974 clientSendUs=1908230307286 clientDoneUs=1908230308173 queueAgeUs=5312 exchangeUs=887 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908230308213
+[native-video-client][input-timing] timingSchema=2 seq=8 actionKind=10 eventKind=6 clientGeneratedUs=1908230301975 clientSendUs=1908230308235 clientDoneUs=1908230309053 queueAgeUs=6260 exchangeUs=818 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908230309064
+[native-video-client][input-timing] timingSchema=2 seq=9 actionKind=10 eventKind=6 clientGeneratedUs=1908230301978 clientSendUs=1908230309081 clientDoneUs=1908230309910 queueAgeUs=7103 exchangeUs=829 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908230309921
+[native-video-client][input-timing] timingSchema=2 seq=10 actionKind=10 eventKind=6 clientGeneratedUs=1908230301981 clientSendUs=1908230309946 clientDoneUs=1908230310592 queueAgeUs=7965 exchangeUs=646 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908230310599
+[native-video-client][input-timing] timingSchema=2 seq=11 actionKind=10 eventKind=6 clientGeneratedUs=1908230301982 clientSendUs=1908230310612 clientDoneUs=1908230311454 queueAgeUs=8630 exchangeUs=842 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908230311465
+[native-video-client][input-timing] timingSchema=2 seq=12 actionKind=10 eventKind=6 clientGeneratedUs=1908230301982 clientSendUs=1908230311481 clientDoneUs=1908230312344 queueAgeUs=9499 exchangeUs=863 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908230312353
+[native-video-client][input-timing] timingSchema=2 seq=13 actionKind=10 eventKind=6 clientGeneratedUs=1908230301983 clientSendUs=1908230312367 clientDoneUs=1908230312622 queueAgeUs=10384 exchangeUs=255 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908230312633
+[native-video-client][control] seq=4 rttUs=431 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=4 rttUs=431 clockOffsetUs=29 clientSendUs=1908230798529 hostRecvUs=1908230798774 hostSendUs=1908230798774 clientRecvUs=1908230798960 eventQpcUs=1908230799056
+[native-video-client][input-p0] windowUs=1008750 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=5 rttUs=445 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=5 rttUs=445 clockOffsetUs=50 clientSendUs=1908231311525 hostRecvUs=1908231311798 hostSendUs=1908231311798 clientRecvUs=1908231311970 eventQpcUs=1908231312068
+[native-video-client][control] seq=6 rttUs=363 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=6 rttUs=363 clockOffsetUs=-2 clientSendUs=1908231824531 hostRecvUs=1908231824710 hostSendUs=1908231824710 clientRecvUs=1908231824894 eventQpcUs=1908231824989
+[native-video-client][input-p0] windowUs=1009424 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=7 rttUs=435 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=7 rttUs=435 clockOffsetUs=48 clientSendUs=1908232336459 hostRecvUs=1908232336725 hostSendUs=1908232336725 clientRecvUs=1908232336894 eventQpcUs=1908232336996
+PASS  ...EXACTLY ONE: the host's release and the viewer's are not both injected  1 WM_KEYUP for the key
+PASS  ...so the viewer is no longer holding it
+PASS  NO DUPLICATE RE-EXECUTION: the down happened exactly once  0 further WM_KEYDOWN after the cut
+
+--- case 2: Shift goes down, control is cut, Shift comes up during the cut ---
+[native-video-client][input-timing] timingSchema=2 seq=14 actionKind=10 eventKind=5 clientGeneratedUs=1908232491418 clientSendUs=1908232491430 clientDoneUs=1908232492954 queueAgeUs=12 exchangeUs=1524 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908232492968
+PASS  [shift] THE SHIFT DOWN REACHES THE HOST  1 WM_KEYDOWN VK_SHIFT
+[native-video-client][control] slow action kind=1 tookUs=6495917 ok=0
+[native-video-client][control] action failed kind=1 transport=udp-tunnel closed=1 reason=peer-lost sent=29 received=27 retx=0 nacks=0
+    [control-resume] break resumeId=28930
+    [control-resume] send resumeId=28930 attempt=1 ok=1
+PASS  [shift] the worker notices the control channel is gone
+    [control-resume] send resumeId=28930 attempt=2 ok=1
+    [control-resume] send resumeId=28930 attempt=3 ok=1
+    [control-resume] send resumeId=28930 attempt=4 ok=1
+    [control-resume] ack served=1 resumeId=28930 rekeyed=1
+[native-video-client][control-resume] resumed resumeId=28930 attempts=4 breakToFirstSendUs=34 breakToRunningUs=1732495 eventQpcUs=1908241075917
+[native-video-client][control-resume] dropped 0 input actions queued during the break, kept 1 releases
+    [control-resume] resumed resumeId=28930 attempts=4
+[native-video-client][input-p0] windowUs=8771820 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=9 rttUs=314 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=9 rttUs=314 clockOffsetUs=56 clientSendUs=1908241075990 hostRecvUs=1908241076203 hostSendUs=1908241076203 clientRecvUs=1908241076304 eventQpcUs=1908241076384
+[native-video-client][input-timing] timingSchema=2 seq=15 actionKind=10 eventKind=6 clientGeneratedUs=1908239360022 clientSendUs=1908241076394 clientDoneUs=1908241076654 queueAgeUs=1716372 exchangeUs=260 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908241076664
+[native-video-client][control-resume] release: sent modifierUps=11 heldKeysBefore=0 heldButtonsBefore=0x0
+[native-video-client][input-timing] timingSchema=2 seq=16 actionKind=10 eventKind=6 clientGeneratedUs=1908241090563 clientSendUs=1908241090581 clientDoneUs=1908241092420 queueAgeUs=18 exchangeUs=1839 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908241092430
+PASS  [shift] THE CHANNEL IS REPAIRED WITHOUT A RECONNECT
+PASS  [shift] ...and the viewer let go of it during the cut
+PASS  [shift] THE SHIFT UP MADE DURING THE CUT ARRIVES AT THE HOST  1 WM_KEYUP VK_SHIFT
+[native-video-client][input-timing] timingSchema=2 seq=17 actionKind=10 eventKind=6 clientGeneratedUs=1908241090569 clientSendUs=1908241092446 clientDoneUs=1908241093356 queueAgeUs=1877 exchangeUs=910 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908241093365
+[native-video-client][input-timing] timingSchema=2 seq=18 actionKind=10 eventKind=6 clientGeneratedUs=1908241090570 clientSendUs=1908241093379 clientDoneUs=1908241094144 queueAgeUs=2809 exchangeUs=765 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908241094151
+[native-video-client][input-timing] timingSchema=2 seq=19 actionKind=10 eventKind=6 clientGeneratedUs=1908241090570 clientSendUs=1908241094162 clientDoneUs=1908241094892 queueAgeUs=3592 exchangeUs=730 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908241094900
+[native-video-client][input-timing] timingSchema=2 seq=20 actionKind=10 eventKind=6 clientGeneratedUs=1908241090570 clientSendUs=1908241094910 clientDoneUs=1908241095627 queueAgeUs=4340 exchangeUs=717 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908241095635
+[native-video-client][input-timing] timingSchema=2 seq=21 actionKind=10 eventKind=6 clientGeneratedUs=1908241090571 clientSendUs=1908241095646 clientDoneUs=1908241096398 queueAgeUs=5075 exchangeUs=752 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908241096405
+[native-video-client][input-timing] timingSchema=2 seq=22 actionKind=10 eventKind=6 clientGeneratedUs=1908241090571 clientSendUs=1908241096421 clientDoneUs=1908241096607 queueAgeUs=5850 exchangeUs=186 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908241096614
+[native-video-client][input-timing] timingSchema=2 seq=23 actionKind=10 eventKind=6 clientGeneratedUs=1908241090571 clientSendUs=1908241096627 clientDoneUs=1908241097402 queueAgeUs=6056 exchangeUs=775 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908241097410
+[native-video-client][input-timing] timingSchema=2 seq=24 actionKind=10 eventKind=6 clientGeneratedUs=1908241090571 clientSendUs=1908241097425 clientDoneUs=1908241098183 queueAgeUs=6854 exchangeUs=758 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908241098192
+[native-video-client][input-timing] timingSchema=2 seq=25 actionKind=10 eventKind=6 clientGeneratedUs=1908241090571 clientSendUs=1908241098208 clientDoneUs=1908241098881 queueAgeUs=7637 exchangeUs=673 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908241098891
+[native-video-client][input-timing] timingSchema=2 seq=26 actionKind=10 eventKind=6 clientGeneratedUs=1908241090572 clientSendUs=1908241098908 clientDoneUs=1908241099509 queueAgeUs=8336 exchangeUs=601 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908241099516
+[native-video-client][control] seq=10 rttUs=429 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=10 rttUs=429 clockOffsetUs=-66 clientSendUs=1908241584576 hostRecvUs=1908241584724 hostSendUs=1908241584724 clientRecvUs=1908241585005 eventQpcUs=1908241585102
+[native-video-client][input-p0] windowUs=1003537 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=11 rttUs=831 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=11 rttUs=831 clockOffsetUs=-212 clientSendUs=1908242094779 hostRecvUs=1908242094982 hostSendUs=1908242094982 clientRecvUs=1908242095610 eventQpcUs=1908242095683
+[native-video-client][control] seq=12 rttUs=341 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=12 rttUs=341 clockOffsetUs=18 clientSendUs=1908242605387 hostRecvUs=1908242605576 hostSendUs=1908242605576 clientRecvUs=1908242605728 eventQpcUs=1908242605869
+[native-video-client][input-p0] windowUs=1003700 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=13 rttUs=392 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=13 rttUs=392 clockOffsetUs=22 clientSendUs=1908243115453 hostRecvUs=1908243115671 hostSendUs=1908243115671 clientRecvUs=1908243115845 eventQpcUs=1908243115927
+PASS  [shift] ...EXACTLY ONCE  1 WM_KEYUP VK_SHIFT
+PASS  [shift] ...and the down was not repeated  1 WM_KEYDOWN VK_SHIFT
+
+--- case 3: the left button goes down, control is cut, it comes up during the cut ---
+[native-video-client][input-timing] timingSchema=2 seq=27 actionKind=10 eventKind=2 clientGeneratedUs=1908243287885 clientSendUs=1908243287901 clientDoneUs=1908243288870 queueAgeUs=16 exchangeUs=969 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908243288882
+PASS  [button] THE LEFT BUTTON DOWN REACHES THE HOST  1 WM_LBUTTONDOWN
+[native-video-client][control] slow action kind=1 tookUs=6640875 ok=0
+[native-video-client][control] action failed kind=1 transport=udp-tunnel closed=1 reason=peer-lost sent=53 received=50 retx=0 nacks=0
+    [control-resume] break resumeId=28931
+    [control-resume] send resumeId=28931 attempt=1 ok=1
+PASS  [button] the worker notices the control channel is gone
+    [control-resume] send resumeId=28931 attempt=2 ok=1
+    [control-resume] send resumeId=28931 attempt=3 ok=1
+    [control-resume] send resumeId=28931 attempt=4 ok=1
+    [control-resume] ack served=1 resumeId=28931 rekeyed=1
+[native-video-client][control-resume] resumed resumeId=28931 attempts=4 breakToFirstSendUs=43 breakToRunningUs=1735309 eventQpcUs=1908251992235
+[native-video-client][control-resume] dropped 0 input actions queued during the break, kept 1 releases
+    [control-resume] resumed resumeId=28931 attempts=4
+[native-video-client][input-p0] windowUs=8909082 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=15 rttUs=297 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=15 rttUs=297 clockOffsetUs=52 clientSendUs=1908251992309 hostRecvUs=1908251992510 hostSendUs=1908251992510 clientRecvUs=1908251992606 eventQpcUs=1908251992684
+[native-video-client][input-timing] timingSchema=2 seq=28 actionKind=10 eventKind=3 clientGeneratedUs=1908250273838 clientSendUs=1908251992691 clientDoneUs=1908251992901 queueAgeUs=1718853 exchangeUs=210 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908251992909
+[native-video-client][control-resume] release: sent modifierUps=11 heldKeysBefore=0 heldButtonsBefore=0x0
+PASS  [button] THE CHANNEL IS REPAIRED WITHOUT A RECONNECT
+PASS  [button] ...and the viewer let go of it during the cut
+PASS  [button] THE BUTTON UP MADE DURING THE CUT ARRIVES AT THE HOST  1 WM_LBUTTONUP
+[native-video-client][input-timing] timingSchema=2 seq=29 actionKind=10 eventKind=6 clientGeneratedUs=1908252008172 clientSendUs=1908252008187 clientDoneUs=1908252009604 queueAgeUs=15 exchangeUs=1417 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908252009614
+[native-video-client][input-timing] timingSchema=2 seq=30 actionKind=10 eventKind=6 clientGeneratedUs=1908252008179 clientSendUs=1908252009628 clientDoneUs=1908252010418 queueAgeUs=1449 exchangeUs=790 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908252010426
+[native-video-client][input-timing] timingSchema=2 seq=31 actionKind=10 eventKind=6 clientGeneratedUs=1908252008180 clientSendUs=1908252010437 clientDoneUs=1908252011043 queueAgeUs=2257 exchangeUs=606 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908252011051
+[native-video-client][input-timing] timingSchema=2 seq=32 actionKind=10 eventKind=6 clientGeneratedUs=1908252008180 clientSendUs=1908252011064 clientDoneUs=1908252011625 queueAgeUs=2884 exchangeUs=561 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908252011635
+[native-video-client][input-timing] timingSchema=2 seq=33 actionKind=10 eventKind=6 clientGeneratedUs=1908252008180 clientSendUs=1908252011653 clientDoneUs=1908252012199 queueAgeUs=3473 exchangeUs=546 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908252012206
+[native-video-client][input-timing] timingSchema=2 seq=34 actionKind=10 eventKind=6 clientGeneratedUs=1908252008181 clientSendUs=1908252012216 clientDoneUs=1908252012731 queueAgeUs=4035 exchangeUs=515 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908252012737
+[native-video-client][input-timing] timingSchema=2 seq=35 actionKind=10 eventKind=6 clientGeneratedUs=1908252008181 clientSendUs=1908252012747 clientDoneUs=1908252012903 queueAgeUs=4566 exchangeUs=156 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908252012909
+[native-video-client][input-timing] timingSchema=2 seq=36 actionKind=10 eventKind=6 clientGeneratedUs=1908252008181 clientSendUs=1908252012919 clientDoneUs=1908252013436 queueAgeUs=4738 exchangeUs=517 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908252013443
+[native-video-client][input-timing] timingSchema=2 seq=37 actionKind=10 eventKind=6 clientGeneratedUs=1908252008181 clientSendUs=1908252013457 clientDoneUs=1908252013977 queueAgeUs=5276 exchangeUs=520 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908252013984
+[native-video-client][input-timing] timingSchema=2 seq=38 actionKind=10 eventKind=6 clientGeneratedUs=1908252008181 clientSendUs=1908252013995 clientDoneUs=1908252014571 queueAgeUs=5814 exchangeUs=576 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908252014578
+[native-video-client][input-timing] timingSchema=2 seq=39 actionKind=10 eventKind=6 clientGeneratedUs=1908252008182 clientSendUs=1908252014592 clientDoneUs=1908252015116 queueAgeUs=6410 exchangeUs=524 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=1908252015123
+[native-video-client][control] seq=16 rttUs=407 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=16 rttUs=407 clockOffsetUs=33 clientSendUs=1908252506193 hostRecvUs=1908252506430 hostSendUs=1908252506430 clientRecvUs=1908252506600 eventQpcUs=1908252506704
+[native-video-client][input-p0] windowUs=1007743 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=17 rttUs=336 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=17 rttUs=336 clockOffsetUs=17 clientSendUs=1908253015760 hostRecvUs=1908253015945 hostSendUs=1908253015945 clientRecvUs=1908253016096 eventQpcUs=1908253016187
+[native-video-client][control] seq=18 rttUs=388 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=18 rttUs=388 clockOffsetUs=3 clientSendUs=1908253525921 hostRecvUs=1908253526118 hostSendUs=1908253526118 clientRecvUs=1908253526309 eventQpcUs=1908253526409
+[native-video-client][input-p0] windowUs=1008148 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=19 rttUs=871 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=19 rttUs=871 clockOffsetUs=-239 clientSendUs=1908254039463 hostRecvUs=1908254039659 hostSendUs=1908254039659 clientRecvUs=1908254040334 eventQpcUs=1908254040416
+PASS  [button] ...EXACTLY ONCE  1 WM_LBUTTONUP
+PASS  [button] ...and the down was not repeated  1 WM_LBUTTONDOWN
+PASS  the host is gone when the job closes
+PASS  the scratch directory is cleaned up
+
+RESULT: ALL PASS  (35 checks, 0 failed)

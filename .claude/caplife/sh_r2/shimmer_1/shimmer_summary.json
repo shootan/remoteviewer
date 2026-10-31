@@ -1,0 +1,50 @@
+[
+ {
+  "segment": "off",
+  "level": "off",
+  "method": "default",
+  "mp4": "shimmer_off.mp4",
+  "bytes": 529047,
+  "recordSeconds": 6.84,
+  "sourceFrames": null,
+  "sourceFrameCount": 0,
+  "sourceFps": 0.0,
+  "appPathLog": []
+ },
+ {
+  "segment": "A_weak_s20",
+  "level": "weak",
+  "method": "default",
+  "mp4": "shimmer_A_weak_s20.mp4",
+  "bytes": 795481,
+  "recordSeconds": 5.32,
+  "sourceFrames": null,
+  "sourceFrameCount": 0,
+  "sourceFps": 0.0,
+  "appPathLog": []
+ },
+ {
+  "segment": "A_strong_s60",
+  "level": "strong",
+  "method": "default",
+  "mp4": "shimmer_A_strong_s60.mp4",
+  "bytes": 1099238,
+  "recordSeconds": 5.86,
+  "sourceFrames": null,
+  "sourceFrameCount": 0,
+  "sourceFps": 0.0,
+  "appPathLog": []
+ },
+ {
+  "segment": "B_display_s60",
+  "level": "strong",
+  "method": "display",
+  "mp4": "shimmer_B_display_s60.mp4",
+  "bytes": 748305,
+  "recordSeconds": 5.11,
+  "sourceFrames": null,
+  "sourceFrameCount": 0,
+  "sourceFps": 0.0,
+  "appPathLog": []
+ }
+]

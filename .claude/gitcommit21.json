@@ -1,0 +1,4 @@
+{
+ "repo_path": "D:/remote/remote",
+ "message": "docs(release): the content 1408252 described\n\n1408252 is empty. Its message describes the ACL hardening and two\ncorrections, and the tree it committed contains none of them: the script\nwriting those edits asserted out on an anchor that no longer matched and\nnever reached its write, and I staged and committed without looking at the\ndiff. A commit whose message claims work it does not carry is worse than no\ncommit, so this one carries it and says where it went.\n\nContents, as described there: the key folder no longer inherits, three\nexplicit principals remain, and two things I asserted in #480 are corrected\n-- that an unresolvable SID meant a deleted account, and that losing the key\nwould mean simply signing again with a new one.\n\nLeft in place rather than amended. The empty commit is part of what\nhappened.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+}

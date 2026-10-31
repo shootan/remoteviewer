@@ -1,0 +1,33 @@
+PASS  bounded length: a short text is its length
+PASS  bounded length: over the limit reports limit + 1 without reading further
+PASS  bounded length: no NUL within a small allocation stops at the allocation
+PASS  bounded length: exactly the limit is kept
+[native-video-host][clipboard] monitor started
+PASS  the child ran on the private station
+  child: PASS  an image copy (CF_DIBV5 + text) is put on the private clipboard
+  child: PASS  an image is available
+  child: PASS  the snapshot reads the DIB, the same-copy text and the sequence number
+  child: PASS  an image copy with text one unit over the limit is put on the private clipboard
+  child: PASS  ...the image is read and the over-limit text is left out
+  child: PASS  text exactly at the limit is put on the private clipboard
+  child: PASS  ...comes along whole
+  child: PASS  the image copy with the short text is put back for the steps below
+  child: PASS  the clipboard is closed again after the snapshot (another open succeeds at once)
+  child: PASS  the snapshot's DIB encodes to PNG
+  child: PASS  an application's own "PNG" format is preferred over its DIB
+  child: PASS  text alone is not an image
+  child: PASS  the clipboard hub starts on the private station
+  child: PASS  PublishImage: published
+  child: PASS  "PNG" on the clipboard is the transferred PNG, byte for byte
+  child: PASS  CF_DIBV5 on the clipboard has every pixel and alpha
+  child: PASS  the same-copy text was published with it
+  child: PASS  echo guard: the publish did not raise the hub's generation (not served back as the host's copy)
+  child: PASS  a publish whose sequence is stale is superseded
+  child: PASS  ...and the clipboard is exactly as it was (sequence unchanged)
+  child: PASS  a genuine local copy afterwards does raise the generation
+  child: 
+  child: CHILD RESULT: PASSED  (21 checks, 0 failed)
+PASS  the child exited 0
+PASS  the interactive clipboard (WinSta0) did not move: 4473 -> 4473
+
+RESULT: PASSED  (28 checks, 0 failed)

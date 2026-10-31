@@ -1,0 +1,16 @@
+{
+  "recorded_targets": [
+    "D:\\remote\\remote\\.claude\\codex_ka_e_review\\gate_T_8a84198\\junction-probe-1793165314310100200\\run\\own-af49.txt"
+  ],
+  "result": [
+    1,
+    0,
+    [
+      "D:\\remote\\remote\\.claude\\codex_ka_e_review\\gate_T_8a84198\\junction-probe-1793165314310100200\\run\\link",
+      "D:\\remote\\remote\\.claude\\codex_ka_e_review\\gate_T_8a84198\\junction-probe-1793165314310100200\\run"
+    ]
+  ],
+  "sentinel_preserved": true,
+  "junction_preserved": true,
+  "own_file_removed": true
+}

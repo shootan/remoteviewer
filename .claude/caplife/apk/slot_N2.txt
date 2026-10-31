@@ -1,0 +1,14 @@
+﻿decoder_pending_slot_test (apk-0232 r2)
+
+PASS  G (an IDR of the unbound local selection) is held: no input buffer
+PASS  ...its retry fails too
+FAIL  G never reaches the codec -- only H does  200 100 
+PASS  ...and the selection is bound to H
+FAIL  after the bind a delta of G is refused at the gate
+FAIL  a frame held from before a pick is not queued while its answer is awaited  300 
+FAIL  ...the answered generation's IDR goes in  300 400 
+FAIL  the drops at the moment of queueing are counted  0
+FAIL  a delta never overtakes the held IDR (it is dropped, an IDR asked for)  500 
+FAIL  ...the held IDR goes in at the next pump
+
+RESULT: FAILED  (10 checks, 7 failed)

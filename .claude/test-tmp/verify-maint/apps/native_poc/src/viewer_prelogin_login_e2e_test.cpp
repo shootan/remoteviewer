@@ -1,0 +1,3079 @@
+// "Windows 로그인", end to end (prelogin-ui r3, item 5).
+//
+// The chain, with nothing in it written by the test except the user's own actions:
+//
+//   the session toolbar's "Windows 로그인" item (rendered by the product toolbar, clicked with a mouse
+//   press/release on it) or Ctrl+Alt+U in the product's window procedure
+//   -> request_prelogin_login -> the product's password window (typed into, character by character,
+//   then its 입력 button clicked) -> the control thread (ControlClient) -> sealed under the PRELOGIN
+//   purpose -> 40/41/42/43/44/45 over a directory-authenticated session -> a real host started here in
+//   --prelogin mode -> PreloginCredReceiver opens it -> waits for the input target -> SendInput Unicode
+//   -> the focused EDIT of a window THIS PROCESS owns, byte for byte -> the result window on the viewer.
+//
+// Negative controls in the same run:
+//   * the input target is NOT the test window (another window of this process has the focus): the
+//     host answers RejectedPolicy and NEITHER window received a character;
+//   * the run with --not-prelogin starts the same host without --prelogin: no 0x2000 in the pong, no
+//     toolbar item, Ctrl+Alt+U opens the existing lock-screen unlock prompt (not this one), and a forced
+//     request is answered locally without one prelogin-cred message reaching the host.
+// (An unlock-purpose blob refused by the receiver is in prelogin_cred_host_test.)
+//
+// What differs from the product, said once:
+//   * The host is GNLinkStreamMigrationTest (the product's sources; REMOTE60_STREAM_TEST_SEAM swaps the
+//     server for a loopback fake directory, and lets the receiver's "is the input target the logon UI"
+//     question name a window title, GNLINK_STREAM_TEST_CRED_TARGET_TITLE, instead of LogonUI.exe). It
+//     runs as this user on this desktop (Default), not as SYSTEM on Winlogon, with SeShutdownPrivilege
+//     deleted from its token. The real LogonUI and the real password provider are the G check.
+//   * The viewer is the product's window procedure, toolbar, prompt and ControlClient in this process;
+//     the toolbar state is pushed when the pong arrives (the product pushes it on its own timer).
+//   * The typing is real SendInput on this desktop: the window that receives it is this test's own,
+//     brought to the foreground only for the moment of the test. REMOTE60_ALLOW_UI_TEST=1 is required
+//     on top of REMOTE60_ALLOW_HOST_E2E=1. The secret is a test string, never a real password.
+//   * LOCALAPPDATA of this process points into the scratch directory, so the viewer's credential store
+//     (the existing unlock path's) is never the user's.
+
+#include "e2e_isolation.hpp"
+#include "selection_ack_gate.hpp"
+#include "control_resume_e2e_support.hpp"
+#include "directory_fake_server.hpp"
+
+#include <sddl.h>
+
+#include <fstream>
+#include <memory>
+#include <set>
+#include <sstream>
+
+#include "client_session_toolbar.hpp"
+#include "control_resume.hpp"
+#include "native_video_client_shared_core.hpp"
+#include "native_video_client_tcp_control.hpp"
+#include "time_utils.hpp"
+#include "udp_control_channel.hpp"
+#include "prelogin_admin_pipe.hpp"
+#include "viewer_control_client.hpp"
+#include "viewer_control_resume.hpp"
+#include "viewer_input_forward.hpp"
+#include "viewer_picker.hpp"
+#include "viewer_state.hpp"
+#include "viewer_unlock.hpp"
+#include "viewer_constants.hpp"
+#include "secure_unlock_ipc.hpp"
+#include "viewer_window_proc.hpp"
+#include "e2e_window_capture.hpp"  // rel-0163 r2 E1: what DWM composes for the viewer window
+#include "viewer_layout.hpp"  // rel-0163 r2 E1: the picker's desktop card, as the product lays it out
+#include "viewer_decoder_state.hpp"  // capture-lifecycle r1 (PS): the product receive chain
+#include "viewer_frame_gate_state.hpp"
+#include "viewer_video_receiver.hpp"
+#include <optional>
+#include <mfapi.h>
+#include "viewer_reboot_prompt.hpp"
+#include "native_video_client_session.hpp"
+#include "prelogin_machine_record.hpp"
+#include "prelogin_owner_floor.hpp"
+#include "prelogin_worker_launch.hpp"
+#include "stream_child_env.hpp"
+#include <wincrypt.h>
+
+using namespace remote60::native_poc;
+using namespace remote60::native_poc::e2e;
+using remote60::native_poc::test_support::FakeDirectory;
+using remote60::native_poc::test_support::Reply;
+using remote60::native_poc::viewer::ViewerState;
+using remote60::native_poc::viewer::kPreloginPromptClass;
+using remote60::native_poc::viewer::kPreloginPromptTitle;
+using remote60::native_poc::viewer::kPreloginResultTitle;
+using remote60::native_poc::viewer::kPreloginResultClass;
+using remote60::native_poc::viewer::kPreloginResultTextId;
+
+// The one stand-in, and it is not in the chain: the macro window is a WebView2 window.
+namespace remote60::native_poc {
+bool macro_window_visible() { return false; }
+void macro_window_toggle(HINSTANCE, HWND, const MacroWindowHooks&) {}
+}  // namespace remote60::native_poc
+
+namespace {
+
+// A test string, not anybody's password: ASCII, a quote, a space, Latin-1 and a Hangul syllable.
+const std::wstring kSecret = L"Pw-7Qz \"!ä가x";
+// lk-ux-retry r1: the second password of the same connection's explicit retry (the first stands for the wrong one).
+// The same "Pw-7Qz" head, so every "no password in any log" check below covers it too.
+const std::wstring kSecret2 = L"Pw-7Qz-retry 나2";
+
+std::string utf8(const std::wstring& w) {
+  if (w.empty()) return {};
+  const int n = WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), nullptr, 0, nullptr, nullptr);
+  std::string s(static_cast<size_t>(n), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, w.data(), static_cast<int>(w.size()), s.data(), n, nullptr, nullptr);
+  return s;
+}
+
+std::string hexw(const std::wstring& w) {
+  std::string out;
+  char b[8];
+  for (wchar_t c : w) {
+    std::snprintf(b, sizeof(b), "%04X ", static_cast<unsigned>(c));
+    out += b;
+  }
+  return out;
+}
+
+HANDLE token_without_shutdown_privilege() {
+  HANDLE self = nullptr;
+  if (!OpenProcessToken(GetCurrentProcess(), TOKEN_DUPLICATE | TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY, &self)) return nullptr;
+  LUID_AND_ATTRIBUTES del{};
+  LookupPrivilegeValueW(nullptr, L"SeShutdownPrivilege", &del.Luid);
+  HANDLE restricted = nullptr;
+  const BOOL ok = CreateRestrictedToken(self, 0, 0, nullptr, 1, &del, 0, nullptr, &restricted);
+  CloseHandle(self);
+  return ok ? restricted : nullptr;
+}
+
+int process_has_shutdown_privilege(HANDLE process) {
+  HANDLE tok = nullptr;
+  if (!OpenProcessToken(process, TOKEN_QUERY, &tok)) return -1;
+  DWORD need = 0;
+  GetTokenInformation(tok, TokenPrivileges, nullptr, 0, &need);
+  std::vector<uint8_t> buf(need ? need : 1);
+  int result = -1;
+  if (GetTokenInformation(tok, TokenPrivileges, buf.data(), need, &need)) {
+    LUID shutdown{};
+    LookupPrivilegeValueW(nullptr, L"SeShutdownPrivilege", &shutdown);
+    const auto* tp = reinterpret_cast<const TOKEN_PRIVILEGES*>(buf.data());
+    result = 0;
+    for (DWORD i = 0; i < tp->PrivilegeCount; ++i) {
+      if (tp->Privileges[i].Luid.LowPart == shutdown.LowPart && tp->Privileges[i].Luid.HighPart == shutdown.HighPart) result = 1;
+    }
+  }
+  CloseHandle(tok);
+  return result;
+}
+
+// ------------------------------------------------------------------ the windows the typing may reach
+// Two windows on their own thread: the one the host is told to type into (by title), and a decoy that
+// holds the focus in the negative control. Both have a focused EDIT that records what it receives. r7 H5:
+// the target is shaped like a logon box -- a user-name EDIT and a password EDIT (ES_PASSWORD); the typing
+// may reach only the password field, so which child gets the focus on activation is set per case.
+HWND focus_child(HWND w) {
+  HWND c = static_cast<HWND>(GetPropW(w, L"r60focus"));
+  return c ? c : GetWindow(w, GW_CHILD);
+}
+struct Targets {
+  std::wstring title, decoyTitle;
+  HWND main = nullptr, edit = nullptr, userEdit = nullptr, decoy = nullptr, decoyEdit = nullptr;
+  std::thread t;
+  std::atomic<bool> ready{false};
+  DWORD tid = 0;
+
+  static LRESULT CALLBACK Proc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_SETFOCUS || (m == WM_ACTIVATE && LOWORD(w) != WA_INACTIVE)) {
+      HWND child = focus_child(h);
+      if (child) SetFocus(child);
+      return 0;
+    }
+    if (m == WM_CLOSE) return 0;  // only Stop() ends them
+    return DefWindowProcW(h, m, w, l);
+  }
+  bool Start() {
+    title = e2e_unique_window_title(L"remote60 prelogin login target");
+    decoyTitle = e2e_unique_window_title(L"remote60 prelogin login decoy");
+    t = std::thread([this] {
+      tid = GetCurrentThreadId();
+      WNDCLASSEXW wc{sizeof(wc)};
+      wc.lpfnWndProc = Proc;
+      wc.hInstance = GetModuleHandleW(nullptr);
+      wc.lpszClassName = L"Remote60PreloginLoginTarget";
+      wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+      RegisterClassExW(&wc);
+      main = CreateWindowExW(0, wc.lpszClassName, title.c_str(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, 40, 40, 420, 130,
+                             nullptr, nullptr, wc.hInstance, nullptr);
+      userEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 10, 6, 380, 26, main,
+                                 nullptr, wc.hInstance, nullptr);
+      edit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | ES_PASSWORD, 10, 38, 380,
+                             26, main, nullptr, wc.hInstance, nullptr);
+      SetPropW(main, L"r60focus", edit);  // the password field, as the logon UI focuses it
+      decoy = CreateWindowExW(0, wc.lpszClassName, decoyTitle.c_str(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, 40, 170, 420,
+                              110, nullptr, nullptr, wc.hInstance, nullptr);
+      decoyEdit = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL, 10, 10, 380, 26,
+                                  decoy, nullptr, wc.hInstance, nullptr);
+      ready = true;
+      MSG m;
+      while (GetMessageW(&m, nullptr, 0, 0) > 0) {
+        TranslateMessage(&m);
+        DispatchMessageW(&m);
+      }
+      DestroyWindow(decoy);
+      DestroyWindow(main);
+    });
+    return wait_until([this] { return ready.load(); }, 5000) && main && edit && userEdit && decoy && decoyEdit;
+  }
+  static std::wstring text(HWND e) {
+    wchar_t b[256] = {};
+    GetWindowTextW(e, b, 255);
+    return b;
+  }
+  void FocusOn(HWND child) { SetPropW(main, L"r60focus", child); }
+  void Clear() {
+    SetWindowTextW(userEdit, L"");
+    SetWindowTextW(edit, L"");
+    SetWindowTextW(decoyEdit, L"");
+  }
+  void Stop() {
+    if (tid) PostThreadMessageW(tid, WM_QUIT, 0, 0);
+    if (t.joinable()) t.join();
+  }
+};
+
+// r9 R5: the service's side of Ctrl+Alt+Del, served by this test on the host's test pipe for one step:
+// the product's admin server and decision, with the OS call (SendSAS) standing in as a counter that
+// answers what the test sets.
+struct SasService {
+  std::mutex mu;
+  int calls = 0;
+  int reboots = 0;  // r13: the service's OS restart seam (a counter here -- nothing restarts)
+  uint32_t callerSession = 0;
+  uint8_t answer = 0;      // PreloginSasResult to give
+  uint32_t answerWin32 = 0;
+  bool answerCad = false;  // DisableCAD
+  remote60::native_poc::prelogin::RebootLedger ledger;
+  std::atomic<bool> run{false};
+  std::thread t;
+  void start(const std::wstring& pipe, const std::wstring& hostImage) {
+    run = true;
+    t = std::thread([this, pipe, hostImage] {
+      namespace pl = remote60::native_poc::prelogin;
+      pl::AdminPrimitives p;
+      p.recordPath = [] { return std::wstring(); };
+      p.readFloor = [](uint64_t* out) { *out = 0; return true; };
+      p.featureEnabled = [] { return true; };
+      p.requestSas = [this](uint32_t session, uint32_t* win32, bool* cad) -> uint8_t {
+        std::lock_guard<std::mutex> l(mu);
+        ++calls;
+        callerSession = session;
+        *win32 = answerWin32;
+        *cad = answerCad;
+        return answer;
+      };
+      p.requestOsReboot = [this]() -> uint32_t {
+        std::lock_guard<std::mutex> l(mu);
+        ++reboots;
+        return 0;
+      };
+      HANDLE tok = nullptr;
+      OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok);
+      DWORD need = 0;
+      GetTokenInformation(tok, TokenUser, nullptr, 0, &need);
+      std::string buf(need, '\0');
+      GetTokenInformation(tok, TokenUser, buf.data(), need, &need);
+      CloseHandle(tok);
+      LPWSTR sid = nullptr;
+      ConvertSidToStringSidW(reinterpret_cast<TOKEN_USER*>(buf.data())->User.Sid, &sid);
+      const std::wstring sddl = L"D:P(A;;GA;;;SY)(A;;GA;;;" + std::wstring(sid) + L")";
+      LocalFree(sid);
+      pl::RunPreloginAdminServer(p, [this] { return run.load(); }, pipe.c_str(), sddl.c_str(), [](void*) { return true; },
+                                 [hostImage](void* h) { return pl::ClientImageIs(h, hostImage); }, &ledger);
+    });
+    Sleep(200);
+  }
+  void stop() {
+    run = false;
+    if (t.joinable()) t.join();
+  }
+};
+
+// Brings `w` to the front with its EDIT focused (this process is the foreground one at that moment:
+// its own prompt just closed). True when it is the foreground window.
+bool bring_front(HWND w) {
+  for (int i = 0; i < 20; ++i) {
+    HWND fg = GetForegroundWindow();
+    const DWORD ft = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
+    const DWORD wt = GetWindowThreadProcessId(w, nullptr);
+    const DWORD me = GetCurrentThreadId();
+    if (ft && ft != me) AttachThreadInput(me, ft, TRUE);
+    if (wt != me) AttachThreadInput(me, wt, TRUE);
+    ShowWindow(w, SW_SHOWNORMAL);
+    BringWindowToTop(w);
+    SetForegroundWindow(w);
+    SetFocus(focus_child(w));
+    if (wt != me) AttachThreadInput(me, wt, FALSE);
+    if (ft && ft != me) AttachThreadInput(me, ft, FALSE);
+    if (GetForegroundWindow() == w) return true;
+    Sleep(50);
+  }
+  return GetForegroundWindow() == w;
+}
+
+// ------------------------------------------------------------------------------ evidence pictures
+std::wstring gCaptureDir;
+bool save_capture(HWND w, const std::wstring& name) {
+  if (gCaptureDir.empty() || !w) return false;
+  RECT r{};
+  GetWindowRect(w, &r);
+  const int cw = r.right - r.left, ch = r.bottom - r.top;
+  if (cw <= 0 || ch <= 0) return false;
+  HDC screen = GetDC(nullptr);
+  HDC mem = CreateCompatibleDC(screen);
+  BITMAPINFO bi{};
+  bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+  bi.bmiHeader.biWidth = cw;
+  bi.bmiHeader.biHeight = -ch;
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  void* bits = nullptr;
+  HBITMAP bmp = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+  HGDIOBJ old = SelectObject(mem, bmp);
+  const BOOL printed = PrintWindow(w, mem, PW_RENDERFULLCONTENT);
+  bool ok = false;
+  if (printed && bits) {
+    const DWORD imageBytes = static_cast<DWORD>(cw) * static_cast<DWORD>(ch) * 4;
+    BITMAPFILEHEADER fh{};
+    fh.bfType = 0x4D42;
+    fh.bfOffBits = sizeof(fh) + sizeof(BITMAPINFOHEADER);
+    fh.bfSize = fh.bfOffBits + imageBytes;
+    BITMAPINFOHEADER ih = bi.bmiHeader;
+    ih.biHeight = -ch;
+    std::ofstream out(gCaptureDir + name + L".bmp", std::ios::binary);
+    out.write(reinterpret_cast<const char*>(&fh), sizeof(fh));
+    out.write(reinterpret_cast<const char*>(&ih), sizeof(ih));
+    out.write(static_cast<const char*>(bits), imageBytes);
+    ok = out.good();
+  }
+  SelectObject(mem, old);
+  DeleteObject(bmp);
+  DeleteDC(mem);
+  ReleaseDC(nullptr, screen);
+  return ok;
+}
+
+// ----------------------------------------------------------------------------------- the host
+struct Host {
+  PROCESS_INFORMATION pi{};
+  HANDLE job = nullptr;
+  HANDLE readEnd = nullptr;
+  std::thread reader;
+  std::mutex mu;
+  std::string output;
+  std::wstring dir;
+  std::string log() {
+    std::lock_guard<std::mutex> l(mu);
+    return output;
+  }
+  int Count(const std::string& marker) {
+    const std::string all = log();
+    int n = 0;
+    for (size_t at = all.find(marker); at != std::string::npos; at = all.find(marker, at + marker.size())) ++n;
+    return n;
+  }
+  void Stop() {
+    if (job) {
+      CloseHandle(job);
+      job = nullptr;
+    }
+    if (pi.hProcess) {
+      WaitForSingleObject(pi.hProcess, 20000);
+      CloseHandle(pi.hProcess);
+      CloseHandle(pi.hThread);
+      pi = PROCESS_INFORMATION{};
+    }
+    if (reader.joinable()) reader.join();
+    if (readEnd) {
+      CloseHandle(readEnd);
+      readEnd = nullptr;
+    }
+  }
+};
+
+// lockscreen-cred r1: the SYSTEM service's stand-in -- the product service's own code in its lifecycle test
+// build (GNLinkInputServiceLifecycleTest --lifecycle-test: service_main, its unlock worker and the lock-screen
+// agent it starts, with per-run pipe names and a DACL for this user, no SCM). What differs from the product,
+// said once: it runs as this user in this session, not SYSTEM; its "locked" is this session standing in until
+// REMOTE60_SIS_TEST_UNLOCK_EVENT (then one session event and "unlocked"); its agent is a child as this user on
+// this desktop, and types into the window titled GNLINK_SIS_TEST_CRED_TARGET_TITLE (focused password field, the
+// same UIA rule) instead of LogonUI.exe on Winlogon. The real LogonUI / Winlogon / SYSTEM is the field check.
+struct SeamService {
+  PROCESS_INFORMATION pi{};
+  std::wstring suffix, stopEvent, unlockEvent, diag;
+  HANDLE stop = nullptr, unlock = nullptr;
+  std::wstring unlockPipe() const { return L"\\\\.\\pipe\\GNLinkSisTest-" + suffix + L"-unlock"; }
+  bool Start(const std::wstring& dir, const std::wstring& targetTitle) {
+    const std::wstring tag = std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(GetTickCount64());
+    suffix = L"lockcred-" + tag;
+    stopEvent = L"GNLinkSisTestStop-" + tag;
+    unlockEvent = L"GNLinkSisTestUnlock-" + tag;
+    diag = dir + L"sis_diag.log";
+    stop = CreateEventW(nullptr, TRUE, FALSE, stopEvent.c_str());
+    unlock = CreateEventW(nullptr, TRUE, FALSE, unlockEvent.c_str());
+    std::vector<wchar_t> env;
+    LPWCH cur = GetEnvironmentStringsW();
+    for (const wchar_t* p = cur; p && *p; p += wcslen(p) + 1) {
+      if (_wcsnicmp(p, L"REMOTE60_SIS_TEST_", 18) == 0 || _wcsnicmp(p, L"GNLINK_SIS_TEST_", 16) == 0) continue;
+      env.insert(env.end(), p, p + wcslen(p) + 1);
+    }
+    if (cur) FreeEnvironmentStringsW(cur);
+    for (const std::wstring& kv : {L"REMOTE60_SIS_TEST_SUFFIX=" + suffix, L"REMOTE60_SIS_TEST_DIAG=" + diag,
+                                   L"REMOTE60_SIS_TEST_STOP_EVENT=" + stopEvent, std::wstring(L"REMOTE60_SIS_TEST_FAKE_LOCK=1"),
+                                   L"REMOTE60_SIS_TEST_UNLOCK_EVENT=" + unlockEvent,
+                                   L"GNLINK_SIS_TEST_CRED_TARGET_TITLE=" + targetTitle}) {
+      env.insert(env.end(), kv.begin(), kv.end());
+      env.push_back(L'\0');
+    }
+    env.push_back(L'\0');
+    std::wstring cmd = L"\"" + directory_of(self_path()) + L"GNLinkInputServiceLifecycleTest.exe\" --lifecycle-test";
+    std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
+    mutableCmd.push_back(L'\0');
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    if (!CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                        env.data(), dir.c_str(), &si, &pi)) {
+      return false;
+    }
+    const std::wstring pipe = unlockPipe();
+    return wait_until([&] { return WaitNamedPipeW(pipe.c_str(), 50) != FALSE || GetLastError() == ERROR_PIPE_BUSY; }, 10000);
+  }
+  void Unlock() {
+    if (unlock) SetEvent(unlock);
+  }
+  void Stop() {
+    if (stop) SetEvent(stop);
+    if (pi.hProcess) {
+      if (WaitForSingleObject(pi.hProcess, 8000) == WAIT_TIMEOUT) TerminateProcess(pi.hProcess, 1);  // this test's own child
+      CloseHandle(pi.hProcess);
+      CloseHandle(pi.hThread);
+      pi = PROCESS_INFORMATION{};
+    }
+    if (stop) CloseHandle(stop);
+    if (unlock) CloseHandle(unlock);
+    stop = unlock = nullptr;
+  }
+  std::string DiagLog() const {
+    std::ifstream in(diag, std::ios::binary);
+    std::stringstream ss;
+    ss << in.rdbuf();
+    return ss.str();
+  }
+};
+
+// A machine record for this PC, as the service writes one (prelogin_machine_store.cpp: the product's
+// format, sealed with machine-scope DPAPI), naming the fixture directory. Its owner generation is above
+// the durable floor this PC has now, so the worker's binding check (machine id + floor) accepts it.
+bool seal_machine_record(const std::wstring& path, const std::string& url) {
+  namespace pl = remote60::native_poc::prelogin;
+  char guid[128] = {};
+  DWORD size = sizeof(guid);
+  if (RegGetValueA(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Cryptography", "MachineGuid",
+                   RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY, nullptr, guid, &size) != ERROR_SUCCESS) {
+    return false;
+  }
+  uint64_t floor = 0;
+  if (!pl::ReadPreloginOwnerFloor(&floor)) return false;
+  pl::MachineRecord rec;
+  rec.accountId = 0x7E57;
+  rec.hostId = 0x7E58;
+  rec.ownerGeneration = floor + 1;
+  rec.enabled = true;
+  rec.directoryOrigin = url;
+  rec.machineId = guid;
+  pl::DirectoryCredential dc;
+  dc.accountId = "tester";
+  dc.hostId = "h-prelogin";
+  dc.hostToken = std::string(32, 'e');
+  rec.credential = pl::PackDirectoryCredential(dc);
+  std::vector<uint8_t> plain = pl::SerializeMachineRecord(rec);
+  DATA_BLOB in{static_cast<DWORD>(plain.size()), plain.data()};
+  DATA_BLOB out{0, nullptr};
+  const bool sealed = CryptProtectData(&in, L"GNLink prelogin machine credential (e2e)", nullptr, nullptr, nullptr,
+                                       CRYPTPROTECT_LOCAL_MACHINE | CRYPTPROTECT_UI_FORBIDDEN, &out) != FALSE;
+  SecureZeroMemory(plain.data(), plain.size());
+  if (!sealed) return false;
+  std::ofstream f(path, std::ios::binary);
+  f.write(reinterpret_cast<const char*>(out.pbData), out.cbData);
+  LocalFree(out.pbData);
+  return f.good();
+}
+
+enum class Start { Service, OldServiceEnvironment, LoggedIn, ServiceRecordForAnotherServer };
+
+// The environment the test starts from: its own, without a single REMOTE60_ switch (only the starter
+// under test may state those), with LOCALAPPDATA and ProgramData inside the staging directory, and the
+// test build's declared fixtures (GNLINK_STREAM_TEST_*). Nothing else.
+std::vector<wchar_t> test_base_environment(const std::wstring& dir, const std::vector<std::wstring>& fixtures) {
+  std::vector<wchar_t> out;
+  LPWCH env = GetEnvironmentStringsW();
+  for (const wchar_t* p = env; p && *p; p += wcslen(p) + 1) {
+    if (_wcsnicmp(p, L"REMOTE60_", 9) == 0 || _wcsnicmp(p, L"LOCALAPPDATA=", 13) == 0 ||
+        _wcsnicmp(p, L"ProgramData=", 12) == 0 || _wcsnicmp(p, L"GNLINK_", 7) == 0) {
+      continue;
+    }
+    out.insert(out.end(), p, p + wcslen(p) + 1);
+  }
+  if (env) FreeEnvironmentStringsW(env);
+  std::vector<std::wstring> mine = {L"LOCALAPPDATA=" + dir + L"host_localappdata", L"ProgramData=" + dir + L"programdata"};
+  mine.insert(mine.end(), fixtures.begin(), fixtures.end());
+  for (const std::wstring& kv : mine) {
+    out.insert(out.end(), kv.begin(), kv.end());
+    out.push_back(L'\0');
+  }
+  out.push_back(L'\0');
+  return out;
+}
+
+bool start_host(Host* host, const std::wstring& dir, const std::string& url, uint16_t port, Start how,
+                const std::wstring& targetTitle, HANDLE restricted, const std::wstring& extraEnv = std::wstring(),
+                const std::wstring& extraEnv2 = std::wstring(), const std::wstring& extraEnv3 = std::wstring(),
+                const std::wstring& extraEnv4 = std::wstring()) {
+  host->dir = dir;
+  const std::wstring myDir = directory_of(self_path());
+  // r13 negative control: REMOTE60_E2E_OLD_BIN names a streaming TEST build without the udp-control-peer
+  // gate (feat/prelogin-ui adfa892, before main 89155e4 was merged). Unset: the one built beside this test.
+  std::wstring streamSrc = myDir + L"GNLinkStreamMigrationTest.exe";
+  {
+    wchar_t oldBin[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"REMOTE60_E2E_OLD_BIN", oldBin, MAX_PATH) != 0 && oldBin[0] != L'\0') streamSrc = oldBin;
+  }
+  if (!CopyFileW(streamSrc.c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) ||
+      !CopyFileW(self_path().c_str(), (dir + L"GNLinkCapture.exe").c_str(), FALSE)) {
+    return false;
+  }
+  CreateDirectoryW((dir + L"host_localappdata").c_str(), nullptr);
+  CreateDirectoryW((dir + L"programdata").c_str(), nullptr);
+  SECURITY_ATTRIBUTES sa{};
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+  HANDLE writeEnd = nullptr;
+  if (!CreatePipe(&host->readEnd, &writeEnd, &sa, 1 << 20)) return false;
+  SetHandleInformation(host->readEnd, HANDLE_FLAG_INHERIT, 0);
+  host->job = CreateJobObjectW(nullptr, nullptr);
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  SetInformationJobObject(host->job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+  const std::wstring wurl(url.begin(), url.end());
+  std::vector<std::wstring> fixtures = {
+      L"GNLINK_STREAM_TEST_DIRECTORY=" + wurl, L"GNLINK_STREAM_TEST_CRED_TARGET_TITLE=" + targetTitle,
+      // a test pipe nobody serves (except this test, for the Ctrl+Alt+Del step): never this PC's service
+      L"GNLINK_STREAM_TEST_ADMIN_PIPE=\\\\.\\pipe\\GNLinkTest-prelogin-login-" + std::to_wstring(GetCurrentProcessId()),
+      L"GNLINK_STREAM_TEST_ADMIN_SERVER_PID=" + std::to_wstring(GetCurrentProcessId())};
+  if (!extraEnv.empty()) fixtures.push_back(extraEnv);
+  if (!extraEnv2.empty()) fixtures.push_back(extraEnv2);
+  if (!extraEnv3.empty()) fixtures.push_back(extraEnv3);
+  if (!extraEnv4.empty()) fixtures.push_back(extraEnv4);
+  std::wstring cmd;
+  std::vector<wchar_t> env;
+  if (how == Start::LoggedIn) {
+    // A logged-in host, the way GNLinkHost starts one (its switches from ProductStreamChildEnv).
+    cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264 --bind-address 127.0.0.1" + L" --bind-port " +
+          std::to_wstring(port) + L" --directory-url " + wurl + L" --directory-id tester --directory-pw e2e-pass-1234" +
+          L" --seconds 150 --directory-cache \"" + dir + L"host_cache.json\"";
+    const std::vector<wchar_t> base = test_base_environment(dir, fixtures);
+    env = remote60::native_poc::BuildEnvironmentBlock(base.data(), remote60::native_poc::ProductStreamChildEnv(false));
+  } else {
+    // r6 V2: the pre-login worker exactly as the service starts it -- its argument list and its
+    // environment from prelogin_worker_launch.hpp, the functions the service calls. The test adds only
+    // its declared fixtures: the machine record's path, a loopback address/free port/lifetime (the
+    // product port may be the real GNLink's on this PC), and the directory fixture.
+    const std::wstring record = dir + L"programdata\\machine.cred";
+    // ServiceRecordForAnotherServer: a record that names some other address (r6 V7 negative).
+    if (!seal_machine_record(record, how == Start::ServiceRecordForAnotherServer ? std::string("http://127.0.0.1:1") : url)) {
+      return false;
+    }
+    fixtures.push_back(L"GNLINK_STREAM_TEST_MACHINE_RECORD=" + record);
+    fixtures.push_back(L"GNLINK_STREAM_TEST_BIND_ADDRESS=127.0.0.1");
+    fixtures.push_back(L"GNLINK_STREAM_TEST_BIND_PORT=" + std::to_wstring(port));
+    fixtures.push_back(L"GNLINK_STREAM_TEST_SECONDS=150");
+    // prelogin-field r2: the WinRT trap / IsSupported answer / worker-log root, when the runner set them, reach the worker.
+    for (const wchar_t* name : {L"GNLINK_STREAM_TEST_WINRT_TRAP", L"GNLINK_STREAM_TEST_WGC_SUPPORTED", L"GNLINK_STREAM_TEST_LOG_ROOT"}) {
+      wchar_t v[MAX_PATH] = {};
+      if (GetEnvironmentVariableW(name, v, MAX_PATH) > 0) fixtures.push_back(std::wstring(name) + L"=" + v);
+    }
+    // r9 W2: this worker runs in the test user's session, whose input desktop is "Default" -- the stand-in
+    // for the logon desktop it serves here (the product's worker serves "Winlogon" only).
+    if (extraEnv.rfind(L"GNLINK_STREAM_TEST_LOGON_DESKTOP=", 0) != 0) {
+      fixtures.push_back(L"GNLINK_STREAM_TEST_LOGON_DESKTOP=Default");
+    }
+    cmd = L"\"" + dir + L"GNLinkStream.exe\" " + remote60::native_poc::prelogin::PreloginWorkerArgs();
+    const std::vector<wchar_t> base = test_base_environment(dir, fixtures);
+    // OldServiceEnvironment: what the service handed the worker before r6 -- its own environment, no
+    // product switches (the V1 counter-example).
+    env = how == Start::OldServiceEnvironment ? base : remote60::native_poc::prelogin::PreloginWorkerEnvironment(base.data());
+  }
+  std::string why;
+  const bool isolated = e2e_command_is_isolated(cmd, dir, &why);
+  check("the host command is isolated from the user's files", isolated, why);
+  if (!isolated) return false;
+  std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
+  mutableCmd.push_back(L'\0');
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdOutput = writeEnd;
+  si.hStdError = writeEnd;
+  const bool launched = CreateProcessAsUserW(restricted, nullptr, mutableCmd.data(), nullptr, nullptr, TRUE,
+                                             CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT, env.data(),
+                                             dir.c_str(), &si, &host->pi) != FALSE;
+  CloseHandle(writeEnd);
+  if (!launched) return false;
+  AssignProcessToJobObject(host->job, host->pi.hProcess);
+  // Nothing runs until the token is known to be unable to restart this PC.
+  const int priv = process_has_shutdown_privilege(host->pi.hProcess);
+  check("SAFETY: the host's token holds no SeShutdownPrivilege at all", priv == 0, std::to_string(priv));
+  if (priv != 0) return false;
+  ResumeThread(host->pi.hThread);
+  host->reader = std::thread([host] {
+    char buf[4096];
+    DWORD got = 0;
+    while (ReadFile(host->readEnd, buf, sizeof(buf), &got, nullptr) && got > 0) {
+      std::lock_guard<std::mutex> l(host->mu);
+      host->output.append(buf, got);
+    }
+  });
+  return true;
+}
+
+// Everything the viewer prints, kept, so "the password is in no log" can be checked.
+struct Tee : std::streambuf {
+  std::streambuf* real;
+  std::mutex mu;
+  std::string kept;
+  explicit Tee(std::streambuf* r) : real(r) {}
+  int overflow(int c) override {
+    if (c == EOF) return 0;
+    {
+      std::lock_guard<std::mutex> l(mu);
+      kept.push_back(static_cast<char>(c));
+    }
+    return real->sputc(static_cast<char>(c));
+  }
+  std::streamsize xsputn(const char* s, std::streamsize n) override {
+    {
+      std::lock_guard<std::mutex> l(mu);
+      kept.append(s, static_cast<size_t>(n));
+    }
+    return real->sputn(s, n);
+  }
+  std::string all() {
+    std::lock_guard<std::mutex> l(mu);
+    return kept;
+  }
+};
+
+bool file_contains(const std::wstring& path, const std::string& needle) {
+  std::ifstream in(path, std::ios::binary);
+  std::stringstream ss;
+  ss << in.rdbuf();
+  return ss.str().find(needle) != std::string::npos;
+}
+
+// Any file under `root` holding the secret, as UTF-8 or as UTF-16LE.
+std::wstring find_secret_on_disk(const std::wstring& root) {
+  const std::string u8 = utf8(kSecret);
+  const std::string u16(reinterpret_cast<const char*>(kSecret.data()), kSecret.size() * sizeof(wchar_t));
+  const std::string u8b = utf8(kSecret2);  // lk-ux-retry r1
+  const std::string u16b(reinterpret_cast<const char*>(kSecret2.data()), kSecret2.size() * sizeof(wchar_t));
+  std::vector<std::wstring> stack{root};
+  while (!stack.empty()) {
+    const std::wstring d = stack.back();
+    stack.pop_back();
+    WIN32_FIND_DATAW fd{};
+    HANDLE h = FindFirstFileW((d + L"*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) continue;
+    do {
+      const std::wstring n = fd.cFileName;
+      if (n == L"." || n == L"..") continue;
+      if (n == L"GNLinkCapture.exe") continue;  // the staged copy of THIS test's image, which holds the test string
+      if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+        stack.push_back(d + n + L"\\");
+      } else if (file_contains(d + n, u8) || file_contains(d + n, u16) || file_contains(d + n, u8b) ||
+                 file_contains(d + n, u16b)) {
+        FindClose(h);
+        return d + n;
+      }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+  }
+  return {};
+}
+
+// The result window the viewer shows (owned by the viewer window): its text, once it has one.
+std::wstring result_box_text(HWND box) {
+  wchar_t b[1024] = {};
+  wait_until([&] {
+    HWND s = GetDlgItem(box, kPreloginResultTextId);
+    return s && GetWindowTextW(s, b, 1023) > 0;
+  }, 3000);
+  Sleep(300);  // painted before anyone takes its picture
+  return b;
+}
+
+// lk-ux-retry r1: whether the result window shows ALL of its text -- the text's wrapped height in the label's
+// own font against the label's height, and the label inside the window's client area (a 64 px label cut the
+// retry guidance off mid-sentence). Measured the way the STATIC draws it.
+bool result_box_text_fits(HWND box, std::string* detail) {
+  HWND s = GetDlgItem(box, kPreloginResultTextId);
+  if (!s) return false;
+  wchar_t b[1024] = {};
+  GetWindowTextW(s, b, 1023);
+  RECT lr{}, cr{};
+  GetClientRect(s, &lr);
+  HDC dc = GetDC(s);
+  HFONT font = reinterpret_cast<HFONT>(SendMessageW(s, WM_GETFONT, 0, 0));
+  HGDIOBJ old = font ? SelectObject(dc, font) : nullptr;
+  RECT tr{0, 0, lr.right, 0};
+  DrawTextW(dc, b, -1, &tr, DT_CALCRECT | DT_WORDBREAK | DT_EXPANDTABS);
+  if (old) SelectObject(dc, old);
+  ReleaseDC(s, dc);
+  RECT sw{};
+  GetWindowRect(s, &sw);
+  MapWindowPoints(nullptr, box, reinterpret_cast<POINT*>(&sw), 2);
+  GetClientRect(box, &cr);
+  HWND ok = GetDlgItem(box, 1);
+  RECT okr{};
+  if (ok) {
+    GetWindowRect(ok, &okr);
+    MapWindowPoints(nullptr, box, reinterpret_cast<POINT*>(&okr), 2);
+  }
+  if (detail) {
+    *detail = "text " + std::to_string(tr.bottom) + " px in a " + std::to_string(lr.bottom) + " px label; label bottom " +
+              std::to_string(sw.bottom) + ", button " + std::to_string(okr.top) + ".." + std::to_string(okr.bottom) +
+              ", client " + std::to_string(cr.bottom);
+  }
+  return tr.bottom <= lr.bottom && sw.bottom <= cr.bottom && (!ok || (okr.top >= sw.bottom && okr.bottom <= cr.bottom));
+}
+
+// Presses its 확인 button until it is gone.
+void close_result(HWND box) {
+  for (int i = 0; i < 30 && IsWindow(box); ++i) {
+    PostMessageW(GetDlgItem(box, 1), BM_CLICK, 0, 0);
+    Sleep(100);
+  }
+}
+
+HWND wait_window(const wchar_t* cls, const wchar_t* title, int ms) {
+  HWND w = nullptr;
+  wait_until([&] { return (w = FindWindowW(cls, title)) != nullptr && IsWindowVisible(w); }, ms);
+  return w;
+}
+
+}  // namespace
+
+int wmain(int argc, wchar_t** argv) {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  bool notPrelogin = false;
+  bool lockScreen = false;
+  bool sessionEnds = false;
+  bool androidSession = false;
+  bool androidSelect = false;  // apk-0232 r1: the app's desktop pick at the logon screen
+  bool captureFallback = false;
+  bool foreignPeer = false;
+  bool stillScreen = false;  // capture-lifecycle r1 (PS): a still logon screen picked after the picker
+  bool stillNoFirst = false;  // capture-lifecycle r2: ...that gives no frame at all (the bounded reacquire gives up)
+  bool stillPointerFirst = false;  // capture-lifecycle r3: ...whose remade duplication's first acquire is pointer-only
+  bool renderE1 = false;  // rel-0163 r2 E1: --still-screen through the PRODUCT renderer (window procedure -> D3D present)
+  std::wstring shotsDir;  // ...where its window captures go (--shots <dir>)
+  bool noAlias = false;      // ...served as "Default" (a host build without desktop_name_seam.hpp)
+  for (int i = 1; i < argc; ++i) {
+    const std::wstring a = argv[i];
+    if (a == L"--thumbnail") {  // staged as GNLinkCapture.exe: a helper that never answers
+      Sleep(300000);
+      return 0;
+    }
+    if (a == L"--not-prelogin") notPrelogin = true;
+    if (a == L"--lock-screen") {  // lockscreen-cred r1: a logged-on host whose own session stands in as locked
+      lockScreen = true;
+      notPrelogin = true;  // the host is started logged in, as in --not-prelogin; its own steps below
+    }
+    if (a == L"--session-ends") sessionEnds = true;    // r5 G7: the viewer goes away while its password waits
+    if (a == L"--android-session") androidSession = true;  // r5 G8: the shared session the Android app drives
+    if (a == L"--android-select") {  // apk-0232 r1: the same shared-session setup; its own steps below
+      androidSelect = true;
+      androidSession = true;
+    }
+    if (a == L"--capture-fallback") captureFallback = true;  // r10 T2: DXGI gives up mid-stream
+    if (a == L"--still-screen") stillScreen = true;
+    if (a == L"--still-nofirst") stillNoFirst = true;  // r2: not even a new duplication's first frame
+    if (a == L"--still-pointerfirst") stillPointerFirst = true;  // r3: a remade duplication's first acquire is pointer-only
+    if (a == L"--render") renderE1 = true;
+    if (a == L"--shots" && i + 1 < argc) shotsDir = argv[++i];
+    if (a == L"--no-alias") noAlias = true;
+    if (a == L"--foreign-peer") {  // r13: main's udp-control-peer gate in front of the pre-login control
+      foreignPeer = true;
+      androidSession = true;  // the same shared-session setup; its own steps below
+    }
+  }
+  if (!host_e2e_allowed() || GetEnvironmentVariableW(L"REMOTE60_ALLOW_UI_TEST", nullptr, 0) == 0) {
+    std::printf("SKIP  viewer_prelogin_login_e2e_test (starts a listening host and types into its own window)\n");
+    std::printf("      Set REMOTE60_ALLOW_HOST_E2E=1 and REMOTE60_ALLOW_UI_TEST=1 to run it.\n\nRESULT: SKIPPED\n");
+    return kE2eSkippedExit;
+  }
+  Tee tee(std::cout.rdbuf());
+  std::cout.rdbuf(&tee);
+  std::cout.setf(std::ios::unitbuf);
+  std::cout << "mode: " << (lockScreen       ? "logged-on host at its own lock screen (lockscreen-cred: test stand-ins for the lock and the service)"
+                            : notPrelogin    ? "host WITHOUT --prelogin (negative: the existing unlock path)"
+                            : sessionEnds    ? "host in --prelogin; the viewer goes away while its password waits"
+                            : androidSession ? "host in --prelogin; the shared session (Android) types"
+                                             : "host in --prelogin (\"Windows 로그인\")")
+            << "\n";
+  {
+    wchar_t cap[MAX_PATH] = {};
+    if (GetEnvironmentVariableW(L"REMOTE60_E2E_CAPTURE_DIR", cap, MAX_PATH) > 0) {
+      gCaptureDir = cap;
+      if (gCaptureDir.back() != L'\\') gCaptureDir += L'\\';
+      CreateDirectoryW(gCaptureDir.c_str(), nullptr);
+    }
+  }
+
+  WSADATA wsa{};
+  if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+  if (stillScreen && FAILED(MFStartup(MF_VERSION))) return 1;  // capture-lifecycle r1 (PS): the product decoder
+
+  StagingDir staging;
+  if (!staging.Create(L"prelogin_login")) {
+    std::printf("FAIL  %s\n", staging.why().c_str());
+    return 1;
+  }
+  const std::wstring dir = staging.path();
+  // The viewer's credential store (the existing unlock path's) lives here for this run.
+  const std::wstring viewerAppData = dir + L"viewer_localappdata";
+  CreateDirectoryW(viewerAppData.c_str(), nullptr);
+  SetEnvironmentVariableW(L"LOCALAPPDATA", viewerAppData.c_str());
+
+  // The directory-authenticated client socket: the capability is issued for exactly this tuple.
+  SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  sockaddr_in local{};
+  local.sin_family = AF_INET;
+  InetPtonW(AF_INET, L"127.0.0.1", &local.sin_addr);
+  bind(sock, reinterpret_cast<sockaddr*>(&local), sizeof(local));
+  int len = sizeof(local);
+  getsockname(sock, reinterpret_cast<sockaddr*>(&local), &len);
+  const uint16_t clientPort = ntohs(local.sin_port);
+  const std::string token(32, 'p');
+
+  FakeDirectory directory;
+  check("the fake directory starts", directory.Start());
+  directory.Script("/healthz", {Reply{200, "{\"ok\":true,\"observe\":{\"port\":" + std::to_string(directory.udpPort()) + "}}"}});
+  directory.Script("/api/host/register",
+                   {Reply{200, "{\"ok\":true,\"hostId\":\"h-prelogin\",\"hostToken\":\"" + std::string(32, 'e') + "\"}"}});
+  directory.Script("/api/host/heartbeat", {Reply{200, "{\"ok\":true,\"pendingPunch\":[{\"ip\":\"127.0.0.1\",\"port\":" +
+                                                          std::to_string(clientPort) + ",\"punchToken\":\"" + token + "\"}]}"}});
+  SetEnvironmentVariableW(L"REMOTE60_DIRECTORY_HEARTBEAT_SEC", L"120");
+
+  Targets targets;
+  check("the test's own target and decoy windows are up", targets.Start());
+
+  HANDLE restricted = token_without_shutdown_privilege();
+  Host host;
+  const uint16_t hostPort = e2e_pick_free_udp_port();
+  if (!notPrelogin && !stillScreen && restricted && hostPort != 0) {
+    // r6 V1 counter-example, first: the worker started the way the service started it BEFORE r6 -- the
+    // same argument list, the service's own environment with none of the product's switches -- ends at
+    // once (rc 11: the h264 switch is missing). This is what every reboot did.
+    Host old;
+    const bool oldStarted = start_host(&old, dir, directory.url(), hostPort, Start::OldServiceEnvironment, targets.title, restricted);
+    DWORD rc = STILL_ACTIVE;
+    const bool ended = oldStarted && WaitForSingleObject(old.pi.hProcess, 15000) == WAIT_OBJECT_0 &&
+                       GetExitCodeProcess(old.pi.hProcess, &rc);
+    check("r6 V1 counter-example: with the service's old environment the worker exits at once, rc 11 (h264 refused)",
+          ended && rc == 11 && old.log().find("unsupported codec") != std::string::npos, std::to_string(rc));
+    old.Stop();
+    // r6 V7: a record naming any server but the product's (here: the fixture) is not used -- offline.
+    Host other;
+    const bool otherStarted = start_host(&other, dir, directory.url(), hostPort, Start::ServiceRecordForAnotherServer,
+                                         targets.title, restricted);
+    const bool refused = otherStarted &&
+                         wait_until([&] { return other.log().find("names another server -> staying offline") != std::string::npos; }, 15000);
+    check("r6 V7: a machine record naming another server is not used (the worker stays offline)",
+          refused && other.log().find("machine credential loaded") == std::string::npos);
+    other.Stop();
+    // r6 V5, isolated (r14): a worker given a directory in its environment -- the place a credential could be
+    // slipped in besides the machine record -- reaches the configuration step (it serves this desktop, so it
+    // does not leave first), says the directory is ignored, and never talks to it. Its record names another
+    // server, so it stays offline altogether and touches no part of the run that follows. Same thread, in
+    // order: the "ignored" line is written before "names another server", so waiting for the latter is no race.
+    {
+      FakeDirectory decoy;
+      check("r6 V5: a decoy directory starts", decoy.Start());
+      decoy.Script("/healthz", {Reply{200, "{\"ok\":true}"}});
+      decoy.Script("/api/host/register", {Reply{200, "{\"ok\":true,\"hostId\":\"h-decoy\",\"hostToken\":\"" + std::string(32, 'd') + "\"}"}});
+      decoy.Script("/api/host/heartbeat", {Reply{200, "{\"ok\":true}"}});
+      const std::string du = decoy.url();
+      Host ign;
+      const bool ignStarted = start_host(&ign, dir, directory.url(), hostPort, Start::ServiceRecordForAnotherServer, targets.title,
+                                         restricted, L"REMOTE60_DIRECTORY_URL=" + std::wstring(du.begin(), du.end()));
+      const bool reached = ignStarted && wait_until([&] {
+        return ign.log().find("names another server -> staying offline") != std::string::npos;
+      }, 15000);
+      Sleep(3000);  // a register that was going to happen
+      check("r6 V5: a worker given a directory in its environment reaches its configuration and says it is ignored",
+            reached && ign.log().find("directory arguments/environment ignored") != std::string::npos,
+            ign.log().substr(0, 800));
+      check("r6 V5: ...and never talks to that directory (0 register, 0 heartbeat)",
+            decoy.Count("/api/host/register") == 0 && decoy.Count("/api/host/heartbeat") == 0 && decoy.Count("/healthz") == 0,
+            std::to_string(decoy.Count("/api/host/register")) + " registrations");
+      ign.Stop();
+    }
+    // r9 W2: a worker whose input desktop is NOT the logon desktop it serves -- what a SYSTEM worker left
+    // running after a logon sees: the user's "Default". It must not serve it: it leaves at once (exit 14),
+    // never says it is serving, and never registers.
+    Host left;
+    const bool leftStarted = start_host(&left, dir, directory.url(), hostPort, Start::Service, targets.title, restricted,
+                                        L"GNLINK_STREAM_TEST_LOGON_DESKTOP=Winlogon");
+    DWORD leftRc = STILL_ACTIVE;
+    const bool leftEnded = leftStarted && WaitForSingleObject(left.pi.hProcess, 15000) == WAIT_OBJECT_0 &&
+                           GetExitCodeProcess(left.pi.hProcess, &leftRc);
+    check("r9 W2: a worker whose input desktop is a user's (not the logon desktop) leaves at once, exit 14",
+          leftEnded && leftRc == 14 && left.log().find("no longer the logon desktop") != std::string::npos,
+          std::to_string(leftRc));
+    check("...it never served it and never registered",
+          left.log().find("serving the logon desktop") == std::string::npos &&
+              left.log().find("step=heartbeat ok=1") == std::string::npos);
+    left.Stop();
+  }
+  SeamService seam;
+  if (lockScreen) {
+    check("lockscreen-cred: the service's stand-in (the product service code, lifecycle test build) serves its unlock pipe",
+          seam.Start(dir, targets.title), seam.DiagLog());
+  }
+  const bool started = restricted && hostPort != 0 &&
+                       start_host(&host, dir, directory.url(), hostPort, notPrelogin ? Start::LoggedIn : Start::Service,
+                                  targets.title, restricted,
+                                  lockScreen ? L"GNLINK_STREAM_TEST_FAKE_LOCK_UNTIL_EVENT=" + seam.unlockEvent
+                                  : sessionEnds ? L"GNLINK_STREAM_TEST_CRED_WAIT_MS=40000"
+                                  : captureFallback ? L"GNLINK_STREAM_TEST_FORCE_DXGI_FALLBACK_MS=8000"
+                                  : (stillScreen && !noAlias) ? L"GNLINK_STREAM_TEST_LOGON_DESKTOP=Winlogon"
+                                  : stillScreen ? L""
+                                  : notPrelogin ? L""
+                                                : L"GNLINK_STREAM_TEST_FIRST_PONG_DELAY_MS=3000",  // r7 H6
+                                  lockScreen ? L"GNLINK_STREAM_TEST_UNLOCK_PIPE=" + seam.unlockPipe()
+                                  : (stillScreen && !noAlias) ? std::wstring(L"GNLINK_STREAM_TEST_DESKTOP_ALIAS=Winlogon")
+                                                              : std::wstring(),
+                                  // capture-lifecycle r1 (PS): this PC's desktop is never still (60 content
+                                  // updates/s measured 10-26, a user at work on it) -- the test build stands
+                                  // it in for a still logon screen (host_capture_session.cpp).
+                                  stillScreen ? std::wstring(stillNoFirst        ? L"GNLINK_STREAM_TEST_STILL_SCREEN=nofirst"
+                                                             : stillPointerFirst ? L"GNLINK_STREAM_TEST_STILL_SCREEN=pointerfirst"
+                                                                                 : L"GNLINK_STREAM_TEST_STILL_SCREEN=1")
+                                              : std::wstring(),
+                                  // rel-0163 r3 E1: the first pong late, so the first pick is pressed before the host's
+                                  // role is known (the viewer must hold it, not send a WindowSelect blind).
+                                  renderE1 ? std::wstring(L"GNLINK_STREAM_TEST_FIRST_PONG_DELAY_MS=4000") : std::wstring());
+  check(notPrelogin ? "the host (test build, staged as GNLinkStream.exe) started"
+                    : "r6 V2: the worker started EXACTLY as the service starts it (--prelogin alone, the service's environment function)",
+        started);
+  if (!notPrelogin && started) {
+    check("r6 V2: ...it loaded the machine record (no directory argument exists to stand in for it)",
+          wait_until([&] { return host.log().find("machine credential loaded hostId=h-prelogin") != std::string::npos; }, 20000),
+          host.log().substr(0, 600));
+  }
+  const bool punched =
+      started && wait_until([&] { return host.log().find("directory punch ->") != std::string::npos; }, 30000);
+  check("the host registered and collected the viewer's capability from its heartbeat", punched);
+
+
+  if (punched && androidSession) {
+    // r5 G8 for the Android app's input: the shared session (ClientSessionController, what the app drives
+    // through JNI) against the same pre-login host, directory-authenticated.
+    std::cout << "\n--- r5 G8: the shared session the Android app drives ---\n";
+    struct Sink : remote60::native_poc::ClientEncodedFrameSink {
+      void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& f) override { (void)f; }
+      void OnVideoStreamReset() override {}
+    } plainSink;
+    // apk-0232 r1: the APK decoder sink's selection handling over the shared gate (see the --android-select steps).
+    struct GateSink : remote60::native_poc::ClientEncodedFrameSink {
+      std::mutex mu;
+      remote60::native_poc::SelectionAckGate gate;
+      uint64_t ready = 0, keysAfterPrepare = 0;
+      void OnEncodedH264Frame(remote60::native_poc::UdpH264AssembledFrame&& f) override {
+        std::lock_guard<std::mutex> l(mu);
+        const bool key = (f.header.flags & 1u) != 0;
+        if (key) ++keysAfterPrepare;
+        if (!gate.Admit(f.header.streamGeneration, key)) return;
+        if (key) gate.KeyDelivered(f.header.streamGeneration);
+        if (gate.pending() != 0 && ready != gate.pending()) ready = gate.pending();
+      }
+      void OnVideoStreamReset() override {}
+      uint64_t CurrentSelectionTag() override { std::lock_guard<std::mutex> l(mu); return gate.pending(); }
+      uint64_t KeyframeOwedFor() override { std::lock_guard<std::mutex> l(mu); return gate.OwedToken(); }
+      void OnWindowSelectionControlResultFor(const remote60::native_poc::ControlWindowSelectedMessage& m, uint64_t tag) override {
+        std::lock_guard<std::mutex> l(mu);
+        gate.OnAck((m.flags & 0x1u) != 0, m.streamGeneration, tag);
+      }
+      bool BeginLocalSelectionFor(uint64_t tag) override { std::lock_guard<std::mutex> l(mu); return gate.BeginLocal(tag); }
+      uint64_t LocalSelectionBoundFor(uint64_t tag) override { std::lock_guard<std::mutex> l(mu); return gate.LocalBoundFor(tag); }
+      void RefuseSelectionFor(uint64_t tag) override { std::lock_guard<std::mutex> l(mu); gate.Refuse(tag); }
+      // apk-0232 r3 (picker N1): as android_video_decoder.cpp -- judged and recorded under the sink's own lock
+      LocalCommit CommitLocalSelectionFor(uint64_t tag, const std::function<void(uint64_t)>& commit) override {
+        std::lock_guard<std::mutex> l(mu);
+        if (tag == 0 || gate.pending() != tag) return LocalCommit::Abandoned;
+        const uint64_t generation = gate.LocalBoundFor(tag);
+        if (generation == 0) return LocalCommit::Unbound;
+        commit(generation);
+        return LocalCommit::Committed;
+      }
+      void Prepare(uint64_t sel) { std::lock_guard<std::mutex> l(mu); gate.Prepare(sel); ready = 0; keysAfterPrepare = 0; }
+      uint64_t Ready() { std::lock_guard<std::mutex> l(mu); return ready; }
+      uint64_t Bound(uint64_t sel) { std::lock_guard<std::mutex> l(mu); return gate.LocalBoundFor(sel); }
+      uint64_t KeysAfterPrepare() { std::lock_guard<std::mutex> l(mu); return keysAfterPrepare; }
+    } gateSink;
+    remote60::native_poc::ClientEncodedFrameSink& sink =
+        androidSelect ? static_cast<remote60::native_poc::ClientEncodedFrameSink&>(gateSink) : plainSink;
+    u_long nb = 1;
+    ioctlsocket(sock, FIONBIO, &nb);
+    char drain[2048];
+    while (recv(sock, drain, sizeof(drain), 0) > 0) {
+    }
+    nb = 0;
+    ioctlsocket(sock, FIONBIO, &nb);
+    remote60::native_poc::ClientSessionController phone;
+    remote60::native_poc::ClientSessionConnectArgs a;
+    sockaddr_in phoneLocal{};  // A: the adopted endpoint (its port), for the record
+    {
+      int pl = sizeof(phoneLocal);
+      getsockname(sock, reinterpret_cast<sockaddr*>(&phoneLocal), &pl);
+    }
+    a.host = "127.0.0.1";
+    a.videoPort = hostPort;
+    a.controlPort = hostPort;
+    a.requireUdpHello = true;
+    a.requireTcpControl = false;
+    a.controlOverUdp = true;
+    a.controlIntervalMs = 200;
+    a.peerAuthToken = token;
+    a.udpHandshakeTimeoutMs = 4000;
+    a.preparedUdpSocket = static_cast<remote60::native_poc::SocketHandle>(sock);
+    a.encodedFrameSink = &sink;
+    sock = INVALID_SOCKET;  // the session owns it now
+    const bool up = phone.Connect(a) &&
+                    wait_until([&] { return phone.Snapshot().state == remote60::native_poc::ClientSessionState::Connected; }, 20000);
+    check("the session connects, directory-authenticated", up, phone.Snapshot().status);
+    if (androidSelect) {
+      // apk-0232 r1 (Codex codex_rel_0163_e1_decision.md, the shared session): the app's desktop pick at this
+      // REAL pre-login host, through the shared session and the selection gate the APK's decoder sink uses. The
+      // sink below is that sink's selection handling (android_video_decoder.cpp: Admit per frame, KeyDelivered
+      // for an IDR handed to the codec, the selection's first output) with the codec left out: every admitted
+      // frame "decodes". The frames are the host's real ones, through the session's real receive loop.
+      std::cout << "\n--- apk-0232: the app's desktop pick at the logon screen (shared session) ---\n";
+      check("...the session is up", up);
+      const auto status = [&] { return phone.WindowPanelSnapshotCopy().status; };
+      const auto acked = [&] { return status().rfind("window_selected", 0) == 0; };
+      // The app: stream on, prepare the decoder for selection 1, pick the desktop -- before the first pong
+      // (delayed 3 s here), so the host's role is not known yet and the pick is queued.
+      const bool roleUnknown = phone.HostCaptureFlags() == 0;
+      const bool streamOn = phone.RequestStreamActive(true);
+      gateSink.Prepare(1);
+      const bool picked = phone.RequestDesktopMode();
+      check("apk-0232: the pick is taken before the host's role is known (queued, not refused)",
+            roleUnknown && streamOn && picked, std::to_string(phone.HostCaptureFlags()));
+      check("apk-0232: ...the host's role arrives: the logon screen (0x2000)",
+            wait_until([&] { return (phone.HostCaptureFlags() & kCaptureFlagPreloginV1) != 0; }, 8000));
+      const bool selected1 = wait_until(acked, 8000);
+      const uint64_t gen1 = phone.WindowPanelSnapshotCopy().lastSelectStreamGeneration;
+      check("apk-0232: the SAME pick went local and the host's own IDR completed it: selected (APK: ACKED) with the "
+            "generation of that IDR",
+            selected1 && gen1 != 0 && gen1 == gateSink.Bound(1), status() + " gen=" + std::to_string(gen1));
+      check("apk-0232: ...its first picture came out (APK: select_ready)", wait_until([&] { return gateSink.Ready() == 1; }, 3000));
+      check("apk-0232: no WindowSelect reached the host (it would have closed the link): nothing rejected, still connected",
+            host.Count("[control][prelogin] rejected control type=") == 0 &&
+                phone.Snapshot().state == remote60::native_poc::ClientSessionState::Connected,
+            phone.Snapshot().status);
+      // Again, the role known now: the direct local path.
+      gateSink.Prepare(2);
+      const bool picked2 = phone.RequestDesktopMode();
+      const bool selected2 = wait_until([&] { return acked() && gateSink.Bound(2) != 0; }, 8000);
+      check("apk-0232: a second desktop pick (role known): local at once, completed by a NEW IDR",
+            picked2 && selected2 && wait_until([&] { return gateSink.Ready() == 2; }, 3000) && gateSink.KeysAfterPrepare() >= 1,
+            status() + " keys=" + std::to_string(gateSink.KeysAfterPrepare()));
+      // A window pick there: refused, nothing sent.
+      gateSink.Prepare(3);
+      check("apk-0232: a window pick at the logon screen is refused at once", !phone.RequestWindowSelect(1001));
+      Sleep(800);
+      check("apk-0232: ...the link is still up and the host rejected nothing",
+            host.Count("[control][prelogin] rejected control type=") == 0 &&
+                phone.Snapshot().state == remote60::native_poc::ClientSessionState::Connected);
+      phone.Disconnect();
+    } else if (foreignPeer) {
+      // r13: main's udp-control-peer gate (0.2.152) in front of what a pre-login host does for its session:
+      // Ctrl+Alt+Del (83 -> the service's SendSAS), a restart (84 -> the service's OS restart) and input.
+      // B is another endpoint (same IP, another port) sending VALID control datagrams on the host's
+      // client->host stream, ahead of A's sequence -- what the parser would take. Each carries an id only B
+      // uses; the host logs every 83/84 it handles and every key it drops, so B's ids in the host log, or a
+      // service seam reached, are the probe. (B's key is a CHARACTER key: a host that took it would drop it
+      // -- logged -- and inject nothing; nothing of B's can reach this desktop even on a build without the
+      // gate.) A then does the same through its own session: the positive control.
+      std::cout << "\n--- r13: a non-adopted endpoint's 83 / 84 / input at a pre-login host ---\n";
+      check("...and sees the host at the logon screen (0x2000)",
+            wait_until([&] { return (phone.HostCaptureFlags() & kCaptureFlagPreloginV1) != 0; }, 8000));
+      SasService svc;
+      svc.start(L"\\\\.\\pipe\\GNLinkTest-prelogin-login-" + std::to_wstring(GetCurrentProcessId()), dir + L"GNLinkStream.exe");
+      constexpr uint32_t kBSas = 0xB83B83u, kBReboot = 0xB84B84u, kBInputSeq = 0xB0B0B0u;
+      constexpr uint32_t kASasMin = 1;
+      SOCKET b = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+      sockaddr_in bl{};
+      bl.sin_family = AF_INET;
+      InetPtonW(AF_INET, L"127.0.0.1", &bl.sin_addr);
+      const bool bBound = b != INVALID_SOCKET && bind(b, reinterpret_cast<sockaddr*>(&bl), sizeof(bl)) == 0;
+      int bll = sizeof(bl);
+      getsockname(b, reinterpret_cast<sockaddr*>(&bl), &bll);
+      check("[foreign] B binds its own port (same IP as A, another port)", bBound && bl.sin_port != phoneLocal.sin_port,
+            std::to_string(ntohs(bl.sin_port)) + " vs A " + std::to_string(ntohs(phoneLocal.sin_port)));
+      sockaddr_in hostAddr{};
+      hostAddr.sin_family = AF_INET;
+      InetPtonW(AF_INET, L"127.0.0.1", &hostAddr.sin_addr);
+      hostAddr.sin_port = htons(hostPort);
+      auto send_control = [&](uint32_t messageSeq, const void* msg, size_t n) {
+        remote60::native_poc::UdpControlChunkHeader head{};
+        head.magic = remote60::native_poc::kMagic;
+        head.kind = static_cast<uint16_t>(remote60::native_poc::UdpPacketKind::ControlData);
+        head.size = static_cast<uint16_t>(sizeof(head));
+        head.streamId = remote60::native_poc::kUdpControlStreamClientToHost;
+        head.messageSeq = messageSeq;
+        head.totalSize = static_cast<uint32_t>(n);
+        head.fragIndex = 0;
+        head.fragCount = 1;
+        head.fragOffset = 0;
+        head.fragSize = static_cast<uint16_t>(n);
+        std::vector<uint8_t> dg(sizeof(head) + n);
+        std::memcpy(dg.data(), &head, sizeof(head));
+        std::memcpy(dg.data() + sizeof(head), msg, n);
+        sendto(b, reinterpret_cast<const char*>(dg.data()), static_cast<int>(dg.size()), 0,
+               reinterpret_cast<const sockaddr*>(&hostAddr), sizeof(hostAddr));
+      };
+      if (bBound) {
+        const remote60::native_poc::ControlPreloginControlMessage sas = remote60::native_poc::make_sas_request(kBSas);
+        const std::vector<uint8_t> reboot = remote60::native_poc::build_reboot_request(kBReboot);
+        remote60::native_poc::ControlInputEventMessage key{};
+        key.header.magic = remote60::native_poc::kMagic;
+        key.header.type = static_cast<uint16_t>(remote60::native_poc::MessageType::ControlInputEvent);
+        key.header.size = static_cast<uint16_t>(sizeof(key));
+        key.seq = kBInputSeq;
+        key.kind = 5;  // key_down
+        key.keyCode = 'Q';
+        for (int round = 0; round < 3; ++round) {  // in sequence, ahead of A
+          send_control(1000000u + round * 3 + 0, &sas, sizeof(sas));
+          send_control(1000000u + round * 3 + 1, reboot.data(), reboot.size());
+          send_control(1000000u + round * 3 + 2, &key, sizeof(key));
+          Sleep(150);
+        }
+      }
+      check("[foreign] the host logs dropping control from the non-session endpoint B",
+            wait_until([&] { return host.log().find("dropped control from non-session peer") != std::string::npos; }, 6000));
+      Sleep(1500);
+      const bool bSasSeen = host.log().find("[control][sas] requestId=" + std::to_string(kBSas)) != std::string::npos;
+      const bool bRebootSeen = host.log().find("[control][reboot] requestId=" + std::to_string(kBReboot)) != std::string::npos;
+      const bool bInputSeen = host.log().find("seq=" + std::to_string(kBInputSeq)) != std::string::npos;
+      int sasCalls = 0, reboots = 0;
+      {
+        std::lock_guard<std::mutex> l(svc.mu);
+        sasCalls = svc.calls;
+        reboots = svc.reboots;
+      }
+      check("[foreign] B's Ctrl+Alt+Del (83) never reached the host's handler, nor the service's SendSAS (0 calls)",
+            !bSasSeen && sasCalls == 0, std::to_string(sasCalls) + " calls");
+      check("[foreign] B's restart (84) never reached the host's handler, nor the service's OS restart (0)",
+            !bRebootSeen && reboots == 0, std::to_string(reboots) + " restarts");
+      check("[foreign] B's input never reached the host's input handler", !bInputSeen);
+      if (b != INVALID_SOCKET) closesocket(b);
+      // The positive control: A, the adopted endpoint, asks the same through its own session.
+      const uint32_t aSas = phone.RequestSas();
+      uint32_t gotSas = 0, sasWin32 = 0;
+      int sasOutcome = -1;
+      const bool aSasAnswered = aSas >= kASasMin && wait_until([&] { return phone.TakeSasOutcome(&gotSas, &sasOutcome, &sasWin32); }, 15000);
+      const uint32_t aReboot = phone.RequestReboot();
+      uint32_t gotReboot = 0, rebootWin32 = 0;
+      int rebootOutcome = -1;
+      const bool aRebootAnswered =
+          aReboot != 0 && wait_until([&] { return phone.TakeRebootOutcome(&gotReboot, &rebootOutcome, &rebootWin32); }, 15000);
+      {
+        std::lock_guard<std::mutex> l(svc.mu);
+        sasCalls = svc.calls;
+        reboots = svc.reboots;
+      }
+      check("[foreign] positive control: A's Ctrl+Alt+Del reaches the service once and is answered (Sent)",
+            aSasAnswered && gotSas == aSas && sasOutcome == 0 && sasCalls == 1, std::to_string(sasCalls) + " calls, outcome " + std::to_string(sasOutcome));
+      check("[foreign] positive control: A's restart reaches the service's OS seam once and is answered (Accepted)",
+            aRebootAnswered && gotReboot == aReboot && rebootOutcome == 0 && reboots == 1,
+            std::to_string(reboots) + " restarts, outcome " + std::to_string(rebootOutcome));
+      check("[foreign] A's session stays connected through B's injection",
+            phone.Snapshot().state == remote60::native_poc::ClientSessionState::Connected, phone.Snapshot().status);
+      svc.stop();
+      phone.Disconnect();
+    } else {
+    // r10: what the app does right after connecting (MainActivity): ask the window list -- before the first
+    // pong. It must wait for that pong, which answers it ("not here") without sending it.
+    const bool listAccepted = phone.RequestWindowList();
+    // r7 H6: the host's first pong is late (test seam, 3 s). Typed now, the role is not known yet -- and an
+    // unknown role is the logon screen: nothing is queued, and nothing reaches the host after the pong.
+    const bool roleUnknown = phone.HostCaptureFlags() == 0;
+    const std::u16string early = u"Hx";
+    const bool earlyText = phone.QueueInputText(reinterpret_cast<const uint16_t*>(early.data()), early.size());
+    const bool earlyKey = phone.QueueInputEvent(5, 0, 0, 0, 'Q', 0);
+    // lockscreen-cred r1 (Codex A6): a key UP is a release, never held back -- it goes, and the worker's own
+    // filter drops it (its down never reached the host). Nothing is typed by it.
+    const bool earlyKeyUp = phone.QueueInputEvent(6, 0, 0, 0, 'Q', 0);
+    const uint64_t heldEarly = phone.PreloginInputHeldBack();
+    check("...and sees the host at the logon screen (0x2000)",
+          wait_until([&] { return (phone.HostCaptureFlags() & kCaptureFlagPreloginV1) != 0; }, 8000));
+    Sleep(1500);
+    check("H6: typed before the first pong (the role not known yet)", roleUnknown, std::to_string(phone.HostCaptureFlags()));
+    check("H6: ...the text and the character key DOWN were not queued (unknown = the logon screen), 2 held back",
+          !earlyText && !earlyKey && heldEarly == 2, std::to_string(heldEarly));
+    check("lockscreen-cred: ...its key UP was queued (a release passes)", earlyKeyUp);
+    check("H6: ...and after the prelogin pong no character DOWN reached the host (only that release, dropped by its filter)",
+          host.Count("dropped non-navigation key") == 1 && host.Count("first pong delayed 3000 ms") == 1,
+          std::to_string(host.Count("dropped non-navigation key")));
+    const std::u16string text(kSecret.begin(), kSecret.end());
+    const bool textQueued = phone.QueueInputText(reinterpret_cast<const uint16_t*>(text.data()), text.size());
+    const bool letterQueued = phone.QueueInputEvent(5, 0, 0, 0, 'P', 0);
+    const bool letterUpQueued = phone.QueueInputEvent(6, 0, 0, 0, 'P', 0);
+    const bool tabQueued = phone.QueueInputEvent(5, 0, 0, 0, VK_TAB, 0) && phone.QueueInputEvent(6, 0, 0, 0, VK_TAB, 0);
+    const bool moveQueued = phone.QueueInputEvent(1, 10, 10, 0, 0, 0);
+    Sleep(2000);
+    check("G8: text is not queued for a host at the logon screen", !textQueued);
+    check("...nor a character key down", !letterQueued);
+    check("lockscreen-cred: ...while its key up (a release) is", letterUpQueued);
+    check("...and the session counted what it held back (2)", phone.PreloginInputHeldBack() - heldEarly == 2,
+          std::to_string(phone.PreloginInputHeldBack() - heldEarly));
+    check("...while a navigation key and the pointer still go", tabQueued && moveQueued);
+    check("...and no character down reached the host (the two releases only, dropped by its filter)",
+          host.Count("dropped non-navigation key") == 2, std::to_string(host.Count("dropped non-navigation key")));
+    // r9 R5: Ctrl+Alt+Del from the shared session (the Android app's). Nobody serves this run's admin pipe, so
+    // the worker's delegation cannot reach a service: Failed, ERROR_SERVICE_NOT_ACTIVE -- the request went the
+    // whole way to it and the answer came back.
+    const uint32_t sasId = phone.RequestSas();
+    uint32_t gotSas = 0, sasWin32 = 0;
+    int sasOutcome = -1;
+    const bool sasAnswered = sasId != 0 && wait_until([&] { return phone.TakeSasOutcome(&gotSas, &sasOutcome, &sasWin32); }, 15000);
+    check("r10: the app's window-list request made before the first pong was taken, then answered \"not here\"",
+          listAccepted && phone.WindowPanelSnapshotCopy().status.find("not available at the logon screen") != std::string::npos,
+          phone.WindowPanelSnapshotCopy().status);
+    check("r10: ...and asked again at the logon screen it is refused at once (not sent)", !phone.RequestWindowList());
+    check("r9: the shared session sent the pre-login host nothing outside its allowlist (the link stayed up)",
+          host.Count("[control][prelogin] rejected control type=") == 0, host.log().substr(host.log().size() > 600 ? host.log().size() - 600 : 0));
+    check("R5: the shared session asks Ctrl+Alt+Del of the pre-login host (0x20000) and gets its answer",
+          sasAnswered && gotSas == sasId && sasOutcome == 4 && sasWin32 == 1062,
+          "id " + std::to_string(sasId) + " flags " + std::to_string(phone.HostCaptureFlags()) + " outcome " + std::to_string(sasOutcome) + " win32 " + std::to_string(sasWin32) + (sasAnswered ? std::string() : " | host: " + host.log().substr(host.log().size() > 1500 ? host.log().size() - 1500 : 0)));
+    phone.Disconnect();
+    }  // r13: !foreignPeer
+  }
+
+  // ------------------------------------------------------------------ the viewer, for real
+  ViewerState ctx;
+  std::thread worker, ingress;
+  std::atomic<bool> ingressStop{false};
+  // capture-lifecycle r1 (PS): what the product receiver published, as the renderer would show it.
+  struct Shown {
+    uint64_t us = 0;
+    bool synthetic = false;
+    uint32_t lumaSpread = 0, w = 0, h = 0;
+  };
+  std::vector<Shown> shown;
+  std::mutex shownMu;
+  std::thread presentThread;
+  std::optional<remote60::native_poc::viewer::VideoReceiver> receiver;
+  std::atomic<uint64_t> media{0};
+  uint32_t nextResumeId = 0x7500;
+  uint64_t generation = 1;
+  HWND viewerWindow = nullptr;
+  bool connected = false;
+  std::vector<std::string> toolbarLines;
+  std::mutex toolbarMu;
+  if (punched && !androidSession) {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = remote60::native_poc::viewer::WndProc;  // the product's
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"Remote60PreloginLoginViewer";
+    RegisterClassExW(&wc);
+    // rel-0163 r2 E1: the viewer window is placed OFF every monitor -- it is presented and captured
+    // (PrintWindow, PW_RENDERFULLCONTENT) without covering any of the user's screen.
+    const int e1X = GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN) + 200;
+    viewerWindow = CreateWindowExW(0, wc.lpszClassName, L"remote60 prelogin login viewer", WS_OVERLAPPEDWINDOW,
+                                   renderE1 ? e1X : 500, 40, 800, 500, nullptr, nullptr, wc.hInstance, &ctx);
+    check("the product's window procedure owns a window", viewerWindow != nullptr);
+    ShowWindow(viewerWindow, SW_SHOWNOACTIVATE);
+    ctx.session.hwnd = viewerWindow;
+    ctx.session.running.store(true);
+    ctx.session.inputEnabled.store(true);
+    ctx.session.controlRequired = true;
+
+    // The product's toolbar, with the product's callback for the new item (viewer_startup.cpp's).
+    SessionToolbarCallbacks cb;
+    cb.onLog = [&](const std::string& line) {
+      std::lock_guard<std::mutex> l(toolbarMu);
+      toolbarLines.push_back(line);
+    };
+    cb.onPreloginLogin = [&ctx] { remote60::native_poc::viewer::request_prelogin_login(ctx, ctx.session.hwnd); };
+    // r9 R5: Ctrl+Alt+Del, as viewer_startup.cpp wires it.
+    cb.onSas = [&ctx] {
+      ctx.session.sasRequestedRunGen.store(ctx.session.controlRunGen.load(std::memory_order_acquire), std::memory_order_release);
+      ctx.session.sasRequested.store(true, std::memory_order_release);
+    };
+    // The restart item, as viewer_startup.cpp wires it (r5 G11: the confirm is bound to this connection).
+    cb.onReboot = [&ctx] {
+      const uint32_t f = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
+      const bool warn = (f & remote60::native_poc::kCaptureFlagPreloginEnabledV1) == 0;
+      if (remote60::native_poc::show_reboot_confirm(ctx.session.hwnd, warn)) {
+        ctx.session.rebootRequestedRunGen.store(ctx.session.controlRunGen.load(std::memory_order_acquire),
+                                                std::memory_order_release);
+        ctx.session.rebootRequested.store(true, std::memory_order_release);
+      }
+    };
+    check("the session toolbar is created", session_toolbar_create(viewerWindow, std::move(cb)));
+    session_toolbar_set_visible(true);
+
+    sockaddr_in hostAddr{};
+    hostAddr.sin_family = AF_INET;
+    hostAddr.sin_port = htons(hostPort);
+    InetPtonW(AF_INET, L"127.0.0.1", &hostAddr.sin_addr);
+    // Whatever the host's punch left on the socket is not the session's.
+    u_long nb = 1;
+    ioctlsocket(sock, FIONBIO, &nb);
+    char drain[2048];
+    while (recv(sock, drain, sizeof(drain), 0) > 0) {
+    }
+    nb = 0;
+    ioctlsocket(sock, FIONBIO, &nb);
+    connect(sock, reinterpret_cast<const sockaddr*>(&hostAddr), sizeof(hostAddr));
+    DWORD rcvTimeout = 50;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rcvTimeout), sizeof(rcvTimeout));
+    ctx.session.sock = sock;
+
+    UdpHelloOptions hello;
+    hello.authToken = token;  // the directory's capability: a prelogin host takes no other session
+    hello.budgetMs = 20000;
+    hello.sliceMaxMs = 250;
+    hello.retrySleepMs = 50;
+    std::string helloError;
+    uint32_t ackFeatures = 0;
+    check("the viewer's directory-authenticated Hello is answered",
+          udp_hello_handshake(sock, hello, nullptr, &helloError, &ackFeatures, nullptr), helloError);
+    ctx.control.udpControl.Configure(
+        [s = sock](const void* data, size_t n) { return send(s, static_cast<const char*>(data), static_cast<int>(n), 0) > 0; },
+        kUdpControlStreamClientToHost, kUdpControlStreamHostToClient, 1200);
+    ctx.control.overUdp.store(true, std::memory_order_release);
+    sockaddr_in peer{};
+    int peerLen = sizeof(peer);
+    getpeername(sock, reinterpret_cast<sockaddr*>(&peer), &peerLen);
+    ViewerControlResume::Config cfg;
+    cfg.decide.giveUpAfterUs = remote60::native_poc::viewer::SessionLivenessConfig{}.controlGoneWithVideoUs;
+    ctx.control.resume.Configure(
+        &ctx.control.udpControl,
+        [s = sock](const void* data, size_t n) { return send(s, static_cast<const char*>(data), static_cast<int>(n), 0) > 0; },
+        [](const std::string& line) { std::cout << "    " << line << "\n"; }, [&nextResumeId]() { return ++nextResumeId; },
+        [&generation]() { return generation; }, cfg, (ackFeatures & kUdpFeatureControlResume) != 0, peer.sin_addr.s_addr,
+        peer.sin_port);
+    if (stillScreen) {
+      // capture-lifecycle r1 (PS): the product's receive chain instead of a datagram counter -- set up with the
+      // calls viewer_stats_chain_e2e_test makes (VideoReceiver::Run: assembler, FrameGate, MF decoder,
+      // FrameBuffer; it also feeds the control tunnel). NACK off (not asked in this Hello).
+      using namespace remote60::native_poc::viewer;
+      static Args rxArgs;
+      rxArgs.codec = "h264";
+      rxArgs.transport = "udp";
+      rxArgs.fpsHint = 30;
+      rxArgs.udpMtu = 1200;
+      rxArgs.inputLogEvery = 0;
+      static DecoderState dec;
+      dec.useH264 = true;
+      dec.transport = VideoTransport::Udp;
+      static FrameGateState gate;
+      gate.catchupReenterMinIntervalUs = kCatchupReenterMinIntervalUsDefault;
+      gate.staleCaptureDropUs = kStaleCaptureDropUs;
+      gate.staleReferenceRecoveryMinIntervalUs = kStaleRecoveryMinIntervalUsDefault;
+      gate.congestionRecoverMinUs = kCongestionRecoverMinUsDefault;
+      gate.congestionRecoveryTimeoutUs = kCongestionRecoveryTimeoutUsDefault;
+      gate.decodeQueueLagDropUs = kDecodeQueueLagDropUs;
+      gate.catchupLagDropUs = kCatchupLagDropUs;
+      gate.denseArrivalMaxGapUs = kDenseArrivalMaxGapUsDefault;
+      gate.lagTriggerStreakMin = kLagTriggerStreakMinDefault;
+      gate.recoveryRetryIntervalUs = kKeyRecoveryRetryUsDefault;
+      gate.recoveryRetryMaxIntervalUs = kKeyRecoveryRetryMaxUsDefault;
+      gate.recoveryRetryDeferMaxUs = kKeyRecoveryDeferMaxUsDefault;
+      gate.waitForKeyFrame = true;
+      if (!renderE1) ctx.picker.visible.store(false);  // E1: the product's own picker, shown by its control client
+      ctx.control.keyframeRequests.Reset();
+      VideoReceiver::NackOptions nack;
+      nack.enabled = false;
+      receiver.emplace(ctx, rxArgs, dec, gate, qpc_now_us(), 0, 0, nack);
+      ingress = std::thread([&] { receiver->Run(); });
+      // What the renderer would show: each newly published frame, stamped, with its luma spread (max - min
+      // of a sparse sample of the visible picture). Not in E1: there the product's window procedure presents.
+      if (!renderE1) presentThread = std::thread([&] {
+        uint64_t seen = 0;
+        while (!ingressStop.load() && ctx.session.running.load()) {
+          Shown s{};
+          bool fresh = false;
+          {
+            std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+            auto& f = ctx.frameBuf.frame;
+            if (f.version != seen && f.bytes && !f.bytes->empty() && f.width > 0 && f.height > 0) {
+              seen = f.version;
+              fresh = true;
+              ctx.frameBuf.lastPresentedVersion.store(f.version, std::memory_order_relaxed);
+              if (!f.synthetic) ctx.frameBuf.lastPresentedCaptureUs.store(f.captureUs, std::memory_order_relaxed);
+              s.synthetic = f.synthetic;
+              s.w = f.width;
+              s.h = f.height;
+              const uint8_t* b = f.bytes->data();
+              const size_t n = f.bytes->size();
+              int lo = 255, hi = 0;
+              for (uint32_t y = 0; y < f.height; y += 17) {
+                for (uint32_t x = 0; x < f.width; x += 23) {
+                  int luma = -1;
+                  if (f.format == SharedFrame::PixelFormat::Bgra32) {
+                    const size_t at = static_cast<size_t>(f.visibleTop + y) * f.stride + static_cast<size_t>(f.visibleLeft + x) * 4;
+                    if (at + 2 < n) luma = (b[at] * 29 + b[at + 1] * 150 + b[at + 2] * 77) >> 8;
+                  } else {
+                    const size_t at = static_cast<size_t>(f.visibleTop + y) * f.stride + (f.visibleLeft + x);
+                    if (at < n) luma = b[at];
+                  }
+                  if (luma >= 0) {
+                    lo = (std::min)(lo, luma);
+                    hi = (std::max)(hi, luma);
+                  }
+                }
+              }
+              s.lumaSpread = hi >= lo ? static_cast<uint32_t>(hi - lo) : 0;
+            }
+          }
+          if (fresh) {
+            s.us = qpc_now_us();
+            std::lock_guard<std::mutex> lk(shownMu);
+            shown.push_back(s);
+          }
+          Sleep(2);
+        }
+      });
+      // The picker-first start, as viewer_startup.cpp:186 does it: "stream off" queued before the control
+      // link runs, so it is the first thing the host hears (10-22: 2 ms after the version exchange).
+      ctx.control.streamState.Request(false);
+      connected = true;  // the viewer starts in its picker: no picture is owed yet
+    } else {
+    ingress = std::thread([&] {
+      std::vector<uint8_t> buf(2048);
+      while (!ingressStop.load()) {
+        ctx.control.udpControl.Tick();
+        const int n = recv(ctx.session.sock, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
+        if (n <= 0) continue;
+        if (ctx.control.resume.OnDatagram(buf.data(), static_cast<size_t>(n))) continue;
+        if (ctx.control.udpControl.OnPacket(buf.data(), static_cast<size_t>(n))) continue;
+        media.fetch_add(1);
+        ctx.recvLive.lastPublishUs.store(qpc_now_us(), std::memory_order_relaxed);
+        ctx.recvLive.lastDatagramUs.store(qpc_now_us(), std::memory_order_relaxed);
+      }
+    });
+    connected = wait_until([&] { return media.load() > 0; }, 20000);
+    check("video is arriving", connected, std::to_string(media.load()) + " media datagrams");
+    }  // capture-lifecycle r1: !stillScreen
+    if (captureFallback) {
+      // r10 T2: mid-stream the DXGI worker finds the input desktop is not the one served and asks for a
+      // fallback. Before login there is none: the worker must stop serving and leave (exit 15) -- not move
+      // to WGC (which is bound to no desktop) and go on streaming.
+      std::cout << "\n--- r10 T2: DXGI gives up mid-stream (the desktop is no longer the logon desktop) ---\n";
+      DWORD rc = STILL_ACTIVE;
+      const bool left = WaitForSingleObject(host.pi.hProcess, 30000) == WAIT_OBJECT_0 && GetExitCodeProcess(host.pi.hProcess, &rc);
+      check("T2: the worker stopped serving and left, exit 15 -- no other capture before login", left && rc == 15,
+            std::to_string(rc));
+      check("...it said why (the desktop not served)", host.log().find("capture cannot continue on the logon desktop") != std::string::npos &&
+                                                         host.log().find("prelogin_desktop_not_served") != std::string::npos);
+      check("...and never started WGC", host.log().find("CreateForMonitor") == std::string::npos &&
+                                            host.log().find("desktop_backend=wgc") == std::string::npos);
+      connected = false;  // the worker is gone: nothing after this is asked of it
+    }
+    static remote60::native_poc::viewer::Args args;
+    args.inputLogEvery = 0;
+    static remote60::native_poc::viewer::ControlClient control(ctx, args, /*startInPicker=*/stillScreen);
+    ctx.control.scheduler.Reset(kClientControlIntervalMsDefault, qpc_now_us());
+    ctx.control.connected.store(true, std::memory_order_relaxed);
+    worker = std::thread([&] { control.Run(); });
+    // rel-0163 r2 E1: what viewer_startup.cpp does once control is up -- ask the host for its window list (the
+    // picker's cards, and the selection transaction a pick goes through).
+    if (renderE1) remote60::native_poc::viewer::queue_window_list_request(ctx, "window_list_request pending");
+    // r7 H6: the host's first pong is late (test seam, 3 s). Keys typed now -- the role not known yet --
+    // are held back at the keyboard as at the logon screen, without the notice (that is for a KNOWN logon
+    // screen), and nothing of them reaches the host after the pong. Only in the run that delays that pong
+    // (the main --prelogin run; the other modes start their host without the delay).
+    if (connected && !notPrelogin && !sessionEnds && !captureFallback && !stillScreen) {
+      {
+        std::lock_guard<std::mutex> lock(ctx.frameBuf.frame.mu);
+        ctx.frameBuf.frame.width = 320;
+        ctx.frameBuf.frame.height = 240;
+      }
+      ctx.picker.visible.store(false, std::memory_order_relaxed);
+      Sleep(300);  // the control thread is up and has sent its first ping
+      const bool roleUnknown = ctx.session.hostCaptureFlags.load() == 0;
+      const uint64_t sentBefore = ctx.session.inputEventsSent.load();
+      const uint64_t heldBefore = ctx.session.preloginInputHeldBack.load();
+      for (WPARAM vk : {static_cast<WPARAM>('Q'), static_cast<WPARAM>('Z')}) {
+        SendMessageW(viewerWindow, WM_KEYDOWN, vk, 1);
+        SendMessageW(viewerWindow, WM_KEYUP, vk, 0xC0000001);
+      }
+      const bool pong = wait_until([&] { return (ctx.session.hostCaptureFlags.load() & kCaptureFlagPreloginV1) != 0; }, 8000);
+      Sleep(1500);
+      check("H6 (PC): keys typed before the first pong (the role not known yet)", roleUnknown && pong,
+            std::to_string(ctx.session.hostCaptureFlags.load()));
+      // lockscreen-cred r1: the two downs are held back and forgotten, so their ups are not sent either (a
+      // release goes only for a down that went) -- 2 edges counted, none sent.
+      check("H6 (PC): ...held back at the keyboard (2 downs; their ups never sent), none sent",
+            ctx.session.preloginInputHeldBack.load() - heldBefore == 2 && ctx.session.inputEventsSent.load() == sentBefore,
+            std::to_string(ctx.session.preloginInputHeldBack.load() - heldBefore) + " held, " +
+                std::to_string(ctx.session.inputEventsSent.load() - sentBefore) + " sent");
+      check("H6 (PC): ...no notice yet (the role was not known), and the host received none of them",
+            !ctx.session.preloginHeldBackNoticed.load() && host.Count("dropped non-navigation key") == 0 &&
+                host.Count("first pong delayed 3000 ms") == 1);
+      // The bar shows itself for 2.5 s on entry, then collapses; this wait outlasted that. Shown again, as
+      // on entry, for the steps that click it.
+      session_toolbar_set_visible(true);
+    }
+  }
+
+  const auto pump_until = [&](const std::function<bool()>& done, int budgetMs) {
+    const DWORD deadline = GetTickCount() + static_cast<DWORD>(budgetMs);
+    for (;;) {
+      MSG msg;
+      while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+      }
+      if (done()) return true;
+      if (GetTickCount() >= deadline) return done();
+      Sleep(10);
+    }
+  };
+  HWND bar = nullptr;
+  // An operator thread works the windows of THIS thread (bring_front attaches to its input and moves the
+  // focus): this thread keeps pumping until the operator has finished, then joins -- never a bare join,
+  // which deadlocked the run when the operator was still in bring_front (r7: 2 of 12 sweep runs hung).
+  const auto join_pumping = [&](std::thread& t) {
+    pump_until([&] { return WaitForSingleObject(static_cast<HANDLE>(t.native_handle()), 0) == WAIT_OBJECT_0; }, 120000);
+    t.join();
+  };
+  // The x of the toolbar item with this id, found by pressing along the bar (the toolbar logs the id
+  // under the press). A press there and a release elsewhere fires nothing, so the sweep is inert.
+  const auto find_item = [&](const std::string& id) {
+    RECT rc{};
+    GetClientRect(bar, &rc);
+    const int midY = (rc.bottom - rc.top) / 2;
+    for (int x = 4; x < rc.right - 4; x += 5) {
+      {
+        std::lock_guard<std::mutex> l(toolbarMu);
+        toolbarLines.clear();
+      }
+      SendMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(x, midY));
+      SendMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(rc.right + 50, midY));  // released off it: no click
+      std::lock_guard<std::mutex> l(toolbarMu);
+      for (const std::string& line : toolbarLines) {
+        const size_t p = line.find("down id=");
+        if (p != std::string::npos && line.substr(p + 8, line.find(' ', p + 8) - (p + 8)) == id) return x;
+      }
+    }
+    return -1;
+  };
+
+  // The operator: what a user does with the password window, from another thread (the window is
+  // modal on the viewer's UI thread): type the secret into its edit key by key, then press 입력.
+  struct OperatorRun {
+    bool sawPrompt = false, typedAll = false, captured = false;
+    std::wstring promptTitle;
+  };
+  const auto operate_prompt = [&](OperatorRun* run, const wchar_t* cls, bool cancel, const std::wstring& secret = kSecret) {
+    HWND prompt = nullptr;
+    HWND wrong = nullptr;  // the other prompt: a wrong path must fail here, not hang the run in a modal
+    const wchar_t* other = (std::wstring(cls) == L"GNLinkUnlockPrompt") ? kPreloginPromptClass : L"GNLinkUnlockPrompt";
+    wait_until([&] {
+      prompt = FindWindowW(cls, nullptr);
+      wrong = FindWindowW(other, nullptr);
+      return (prompt && IsWindowVisible(prompt)) || (wrong && IsWindowVisible(wrong));
+    }, 8000);
+    if (!prompt && wrong) {
+      wchar_t t[128] = {};
+      GetWindowTextW(wrong, t, 127);
+      run->promptTitle = t;  // what opened instead
+      save_capture(wrong, L"wrong_prompt_opened");
+      PostMessageW(GetDlgItem(wrong, 2), BM_CLICK, 0, 0);  // 취소
+      wait_until([&] { return !IsWindow(wrong); }, 3000);
+      return;
+    }
+    run->sawPrompt = prompt != nullptr;
+    if (!prompt) return;
+    wchar_t t[128] = {};
+    GetWindowTextW(prompt, t, 127);
+    run->promptTitle = t;
+    HWND edit = FindWindowExW(prompt, nullptr, L"EDIT", nullptr);
+    if (!cancel && edit) {
+      for (wchar_t c : secret) PostMessageW(edit, WM_CHAR, c, 1);
+      run->typedAll = wait_until([&] { return GetWindowTextLengthW(edit) == static_cast<int>(secret.size()); }, 3000);
+    }
+    Sleep(150);
+    run->captured = save_capture(prompt, cancel ? L"unlock_prompt_old_path" : L"prelogin_prompt_typed");
+    HWND button = GetDlgItem(prompt, cancel ? 2 : 1);
+    PostMessageW(button, BM_CLICK, 0, 0);
+    wait_until([&] { return !IsWindow(prompt); }, 3000);
+  };
+
+  // ---- capture-lifecycle r1 (PS, Codex §2/§3): a STILL logon screen, picked from the picker. The 10-22
+  // field case end to end: the viewer starts in its picker (stream off), waits there, then picks the
+  // desktop -- and must SEE the logon screen within 1 s, keep seeing it refreshed (500 ms), and the worker
+  // must live through a pick after the idle detach (10-22: exit 15). Judged on DECODED frames that the
+  // product's receiver (VideoReceiver: assembler, FrameGate, MF decoder, FrameBuffer) published -- not on
+  // datagrams. What differs from the product, said once: the worker serves "Winlogon" on this test user's
+  // "Default" desktop (GNLINK_STREAM_TEST_DESKTOP_ALIAS -- the name it is shown, desktop_name_seam.hpp), so
+  // the pixels are this desktop's; that desktop is made STILL by the test build
+  // (GNLINK_STREAM_TEST_STILL_SCREEN: the capture library takes every acquire but a new duplication's first
+  // as a timeout -- so the full-frame reacquire runs its real duplication remake);
+  // the present thread stamps what the renderer would show (no window).
+  // rel-0163 r2 E1 (Codex codex_rel_0163_evidence_r1.md): the same still logon screen, through the PRODUCT
+  // renderer -- the viewer's window procedure (WndProc), request_video_paint -> WM_PAINT -> paint_video_frame ->
+  // the D3D swap chain's Present (viewer_present.cpp; ctx.present.d3dPresentSuccessCount counts the presents
+  // that succeeded). The product picker is shown for 10 s, its desktop card is pressed with the messages a
+  // mouse produces, and the window is captured with PrintWindow (PW_RENDERFULLCONTENT: what DWM composes for it).
+  // The window is OFF every monitor: nothing of the user's screen is covered or touched.
+  if (stillScreen && connected && renderE1) {
+    std::cout << "\n--- PS E1: the product renderer, picker 10 s -> desktop ---\n";
+    using namespace remote60::native_poc::viewer;
+    const auto worker_alive = [&] { return host.pi.hProcess && WaitForSingleObject(host.pi.hProcess, 0) == WAIT_TIMEOUT; };
+    const auto presents = [&] { return ctx.present.d3dPresentSuccessCount.load(std::memory_order_relaxed); };
+    struct Shot {
+      bool ok = false;
+      double pickerShare = 1.0;  // share of pixels that are exactly the picker background RGB(13,15,20)
+      uint32_t lumaSpread = 0;
+      size_t colors = 0;
+      int w = 0, h = 0;
+    };
+    // What DWM composes for the viewer window (Windows.Graphics.Capture on it, e2e_window_capture.hpp). PrintWindow
+    // cannot be used: for the D3D flip-model swap chain it returns the window's GDI background (measured 10-26).
+    const auto capture = [&](const std::wstring& name) {
+      Shot sh;
+      const remote60::native_poc::e2e::WindowCapture c = remote60::native_poc::e2e::e2e_capture_window(viewerWindow, [&] {
+        MSG msg;
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+          TranslateMessage(&msg);
+          DispatchMessageW(&msg);
+        }
+      });
+      if (!c.ok) return sh;
+      sh.w = c.w;
+      sh.h = c.h;
+      size_t picker = 0;
+      uint32_t lo = 255, hi = 0;
+      std::set<uint32_t> colors;
+      // The client area only (the capture includes the frame): the centre 80 %.
+      for (int y = c.h / 10; y < c.h * 9 / 10; ++y) {
+        for (int x = c.w / 10; x < c.w * 9 / 10; ++x) {
+          const uint32_t px = c.px[static_cast<size_t>(y) * c.w + x] & 0xFFFFFF;
+          if (px == 0x0D0F14) ++picker;
+          const uint32_t luma = (((px >> 16) & 0xFF) * 3 + ((px >> 8) & 0xFF) * 6 + (px & 0xFF)) / 10;
+          lo = std::min(lo, luma);
+          hi = std::max(hi, luma);
+          if (colors.size() < 5000) colors.insert(px);
+        }
+      }
+      const double area = static_cast<double>(c.w * 8 / 10) * (c.h * 8 / 10);
+      sh.pickerShare = area > 0 ? picker / area : 0;
+      sh.lumaSpread = hi - lo;
+      sh.colors = colors.size();
+      sh.ok = true;
+      if (!shotsDir.empty()) remote60::native_poc::e2e::e2e_save_bmp(shotsDir + L"\\" + name, c);
+      return sh;
+    };
+    // The picker before any pick is GDI-drawn (no swap chain exists until a pick produces a frame): PrintWindow.
+    const auto capture_gdi = [&](const std::wstring& name) {
+      Shot sh;
+      RECT rc{};
+      GetClientRect(viewerWindow, &rc);
+      sh.w = rc.right - rc.left;
+      sh.h = rc.bottom - rc.top;
+      if (sh.w <= 0 || sh.h <= 0) return sh;
+      HDC wdc = GetDC(viewerWindow);
+      HDC mem = CreateCompatibleDC(wdc);
+      BITMAPINFO bi{};
+      bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+      bi.bmiHeader.biWidth = sh.w;
+      bi.bmiHeader.biHeight = -sh.h;
+      bi.bmiHeader.biPlanes = 1;
+      bi.bmiHeader.biBitCount = 32;
+      bi.bmiHeader.biCompression = BI_RGB;
+      void* bits = nullptr;
+      HBITMAP bmp = CreateDIBSection(wdc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+      HGDIOBJ old = SelectObject(mem, bmp);
+      const BOOL printed = PrintWindow(viewerWindow, mem, PW_CLIENTONLY);
+      SelectObject(mem, old);
+      if (printed && bits) {
+        remote60::native_poc::e2e::WindowCapture c;
+        c.ok = true;
+        c.w = sh.w;
+        c.h = sh.h;
+        c.px.assign(static_cast<const uint32_t*>(bits), static_cast<const uint32_t*>(bits) + sh.w * sh.h);
+        size_t picker = 0;
+        for (const uint32_t px : c.px) {
+          if ((px & 0xFFFFFF) == 0x0D0F14) ++picker;
+        }
+        sh.pickerShare = static_cast<double>(picker) / (static_cast<double>(sh.w) * sh.h);
+        sh.ok = true;
+        if (!shotsDir.empty()) remote60::native_poc::e2e::e2e_save_bmp(shotsDir + L"\\" + name, c);
+      }
+      DeleteObject(bmp);
+      DeleteDC(mem);
+      ReleaseDC(viewerWindow, wdc);
+      return sh;
+    };
+    const auto shot_text = [](const Shot& sh) {
+      char b[128];
+      std::snprintf(b, sizeof(b), "pickerBg=%.1f%% luma=%u colors=%zu %dx%d", sh.pickerShare * 100.0, sh.lumaSpread,
+                    sh.colors, sh.w, sh.h);
+      return std::string(b);
+    };
+    RECT wr{};
+    GetWindowRect(viewerWindow, &wr);
+    const RECT vs{GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+                  GetSystemMetrics(SM_XVIRTUALSCREEN) + GetSystemMetrics(SM_CXVIRTUALSCREEN),
+                  GetSystemMetrics(SM_YVIRTUALSCREEN) + GetSystemMetrics(SM_CYVIRTUALSCREEN)};
+    RECT overlap{};
+    check("E1: the viewer window is OFF every monitor (the user's screen is not covered)",
+          !IntersectRect(&overlap, &wr, &vs), std::to_string(wr.left) + "," + std::to_string(wr.top));
+    // The product picker: shown by the control client (startInPicker), the stream off behind it.
+    const bool pickerUp = pump_until([&] { return ctx.picker.visible.load(); }, 5000);
+    check("E1: the product's picker is shown", pickerUp);
+    // The desktop card where the product lays it out, pressed with the messages a mouse produces.
+    const auto press_desktop = [&] {
+      const ClientLayout layout = compute_client_layout(ctx, viewerWindow);
+      const CardGridMetrics grid = compute_card_grid(ctx, layout.listRect);
+      const RECT card = card_rect_for_slot(layout.listRect, grid, 0);
+      const int cx = (card.left + card.right) / 2, cy = (card.top + card.bottom) / 2;
+      PostMessageW(viewerWindow, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(cx, cy));
+      PostMessageW(viewerWindow, WM_LBUTTONUP, 0, MAKELPARAM(cx, cy));
+    };
+    // The picker (whatever draws it: GDI before the first swap chain, the swap chain after).
+    const auto picker_shot = [&](const std::wstring& name) {
+      const Shot a = capture(name);
+      if (a.ok && a.pickerShare > 0.15) return a;
+      return capture_gdi(name);
+    };
+    // Waits for the product renderer to present a picture after `t0`: picker closed, a successful present.
+    const auto wait_presented = [&](uint64_t presentsBefore, uint64_t t0, int budgetMs, uint64_t* latencyMs) {
+      uint64_t at = 0;
+      const bool ok = pump_until([&] {
+        if (presents() > presentsBefore && !ctx.picker.visible.load() &&
+            ctx.frameBuf.lastPresentedVersion.load(std::memory_order_relaxed) != 0) {
+          at = qpc_now_us();
+          return true;
+        }
+        return false;
+      }, budgetMs);
+      *latencyMs = ok ? (at - t0) / 1000 : 0;
+      return ok;
+    };
+    const auto shown_after = [&](const char* name, const std::wstring& shot, const Shot& pickerShot) {
+      pump_until([] { return false; }, 300);
+      const Shot streamShot = capture(shot);
+      check((std::string("E1 PS ") + name + ": SCREENSHOT -- the window shows the picture (not the picker, not a blank)").c_str(),
+            streamShot.ok && streamShot.pickerShare < 0.05 && streamShot.lumaSpread >= 8 && streamShot.colors > 64 &&
+                pickerShot.pickerShare > 0.15,
+            shot_text(streamShot) + " (picker before: " + shot_text(pickerShot) + ")");
+      const uint64_t presentsAt = presents();
+      pump_until([] { return false; }, 3000);
+      const uint64_t refreshed = presents() - presentsAt;
+      check((std::string("E1 PS ") + name + ": THE STILL SCREEN KEEPS BEING PRESENTED (>= 4 presents in the next 3 s)").c_str(),
+            refreshed >= 4, std::to_string(refreshed) + " presents");
+    };
+    const auto viewer_text = [&] { return std::string(); };
+    (void)viewer_text;
+
+    // (0) rel-0163 r3: the first pick BEFORE the host's role is known (its first pong is 4 s late): held, not sent;
+    //     run once when the role is known -- at the logon screen, as a local selection.
+    pump_until([] { return false; }, 700);  // past the picker's mis-click guard
+    const bool roleUnknown = !ctx.session.hostRoleKnown.load();
+    const Shot pickerShot0 = picker_shot(L"E1-0-picker-before-role.bmp");
+    const uint64_t p0 = presents();
+    const uint64_t t0 = qpc_now_us();
+    press_desktop();
+    pump_until([] { return false; }, 300);
+    check("E1 PS (0): pressed BEFORE the host's role is known -- the pick is held (picker stays, nothing sent blind)",
+          roleUnknown && ctx.sel.deferredPick.load() == 1 && ctx.picker.visible.load() && !ctx.sel.pending.load(),
+          std::string("roleKnown=") + (ctx.session.hostRoleKnown.load() ? "1" : "0") +
+              " deferred=" + std::to_string(ctx.sel.deferredPick.load()));
+    uint64_t lat0 = 0;
+    const bool shown0 = wait_presented(p0, t0, 9000, &lat0);
+    const bool roleKnownMs = ctx.session.hostRoleKnown.load();
+    check("E1 PS (0): ...once the role is known (logon screen) it runs ONCE as a local selection and the product renderer presents",
+          shown0 && roleKnownMs && ctx.sel.deferredPick.load() == 0,
+          shown0 ? std::to_string(lat0) + " ms after the press (the pong was held 4 s)" : std::string("no present in 9 s"));
+    if (shown0) shown_after("(0)", L"E1-0b-presented-after-role.bmp", pickerShot0);
+
+    // (1) a WINDOW pick at the logon screen is refused (the host takes no WindowSelect there); nothing changes.
+    set_picker_visible_and_sync_stream(ctx, true);  // what the toolbar's "targets" does
+    pump_until([] { return false; }, 700);
+    const bool windowTaken = begin_pc_target_selection(ctx, 0x12345678ull, "window_select_requested");
+    check("E1 PS (1): a window pick at the logon screen is refused -- no transaction, the picker stays",
+          !windowTaken && !ctx.sel.pending.load() && ctx.picker.visible.load() &&
+              ctx.picker.windowPanel.Snapshot().status == "window_select_unavailable_prelogin",
+          ctx.picker.windowPanel.Snapshot().status);
+
+    // (2) Codex E1: picker 10 s (the worker's capture idles, then detaches) -> the desktop card -> presented <= 1 s.
+    pump_until([] { return false; }, 10000);
+    const Shot pickerShot = picker_shot(L"E1-1-picker.bmp");
+    check("E1: screenshot 1 -- the picker (negative control for the stream screenshots)",
+          pickerShot.ok && pickerShot.pickerShare > 0.15, shot_text(pickerShot));
+    const uint64_t p2 = presents();
+    const uint64_t t2 = qpc_now_us();
+    press_desktop();
+    uint64_t lat2 = 0;
+    const bool shown2 = wait_presented(p2, t2, 4000, &lat2);
+    check("E1 PS: THE DESKTOP CARD WAS PRESSED -> THE PRODUCT RENDERER PRESENTED THE STILL SCREEN WITHIN 1 s",
+          shown2 && lat2 <= 1000,
+          shown2 ? std::to_string(lat2) + " ms (d3dPresentSuccess " + std::to_string(p2) + " -> " + std::to_string(presents()) + ")"
+                 : std::string("no successful present in 4 s"));
+    if (shown2) shown_after("(2)", L"E1-2-presented.bmp", pickerShot);
+
+    // (3) again: the picker 10 s more, the desktop again (repeated viewing; the idle reattach again).
+    set_picker_visible_and_sync_stream(ctx, true);
+    pump_until([] { return false; }, 10000);
+    const Shot pickerShot3 = picker_shot(L"E1-3-picker-again.bmp");
+    const uint64_t p3 = presents();
+    const uint64_t t3 = qpc_now_us();
+    press_desktop();
+    uint64_t lat3 = 0;
+    const bool shown3 = wait_presented(p3, t3, 4000, &lat3);
+    check("E1 PS (3): the desktop again after 10 s in the picker: PRESENTED WITHIN 1 s",
+          shown3 && lat3 <= 1000, shown3 ? std::to_string(lat3) + " ms" : std::string("no present in 4 s"));
+    if (shown3) shown_after("(3)", L"E1-4-presented-again.bmp", pickerShot3);
+
+    // (4) rel-0163 r5 (Codex R3): the FINAL adoption boundary. A local pick A; right before A's first picture is
+    //     committed to the FrameBuffer (a test hook on the receive thread), A is cancelled and a new local op B
+    //     begins. A's picture must not be adopted (refused at the commit, its version not written) nor bind or
+    //     reveal B; B then completes on its OWN decoded keyframe.
+    set_picker_visible_and_sync_stream(ctx, true);
+    pump_until([] { return false; }, 1500);
+    std::atomic<bool> fired{false};
+    std::atomic<uint64_t> opA{0}, opB{0}, versionAtFire{0}, refusedAtFire{0};
+    ctx.sel.testBeforeFrameCommit = [&] {
+      if (fired.load()) return;
+      const uint64_t e = ctx.sel.epoch.load();
+      if (!ctx.sel.LocalUnbound(e)) return;  // only A's first picture, before any bind
+      opA = e;
+      {
+        std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+        versionAtFire = ctx.frameBuf.frame.version;
+      }
+      refusedAtFire = ctx.sel.localFramesRefused.load();
+      ctx.sel.Clear();       // A cancelled ...
+      ctx.sel.BeginLocal();  // ... and a new local op B began
+      opB = ctx.sel.epoch.load();
+      fired = true;
+    };
+    const uint64_t p4 = presents();
+    press_desktop();
+    const bool hookFired = pump_until([&] { return fired.load(); }, 8000);
+    pump_until([] { return false; }, 50);
+    uint64_t versionAfter = 0;
+    {
+      std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+      versionAfter = ctx.frameBuf.frame.version;
+    }
+    // The refusal is the next commit after the hook; B's own first picture needs B's own keyframe (later), so the
+    // version read the moment the refusal is counted is A's not-written one.
+    pump_until([&] { return ctx.sel.localFramesRefused.load() > refusedAtFire.load(); }, 3000);
+    {
+      std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+      versionAfter = ctx.frameBuf.frame.version;
+    }
+    check("E1 PS (4) R3: A cancelled and B begun right before A's first picture's commit -- A's picture REFUSED, not written",
+          hookFired && ctx.sel.localFramesRefused.load() > refusedAtFire.load() && versionAfter == versionAtFire.load(),
+          "versionAtFire=" + std::to_string(versionAtFire.load()) + " refused " + std::to_string(refusedAtFire.load()) + " -> " +
+              std::to_string(ctx.sel.localFramesRefused.load()));
+    ctx.sel.testBeforeFrameCommit = nullptr;
+    // B (pending, picker still up) completes on its own keyframe: bound with B's token, revealed, presented.
+    uint64_t lat4 = 0;
+    const bool shown4 = wait_presented(p4, qpc_now_us(), 12000, &lat4);
+    check("E1 PS (4) R3: ...B then binds and completes on its OWN decoded keyframe (bound with B's op, never A's)",
+          shown4 && ctx.sel.activeStreamGeneration.load() != 0 && ctx.sel.epoch.load() == opB.load() && opA.load() != opB.load(),
+          "opA=" + std::to_string(opA.load()) + " opB=" + std::to_string(opB.load()) + " versionAfterFire=" +
+              std::to_string(versionAfter));
+
+    // (5) rel-0163 r6 (Codex R3 1): between a picture's PERMISSION and its WRITE. A local pick A; right after A's first
+    //     picture is permitted (the gate's lock held), another thread tries to cancel A and begin B: it must wait
+    //     until A's picture is written; only then does B begin. A's write (made while A was live) lands; B completes on
+    //     its own keyframe.
+    set_picker_visible_and_sync_stream(ctx, true);
+    pump_until([] { return false; }, 1500);
+    std::atomic<bool> fired5{false}, blocked5{false}, began5{false};
+    std::atomic<uint64_t> version5{0};
+    std::thread other5;
+    ctx.sel.testAfterFramePermit = [&] {
+      // (The gate's lock is held here by the receive thread -- read its atomics, never call a locking member.)
+      if (fired5.load() || !ctx.sel.pending.load() || !ctx.sel.localAckless.load()) return;
+      fired5 = true;
+      version5 = ctx.frameBuf.frame.version;  // (the FrameBuffer lock is held here by the receive thread itself)
+      other5 = std::thread([&] {
+        ctx.sel.Clear();
+        ctx.sel.BeginLocal();
+        began5 = true;
+      });
+      std::this_thread::sleep_for(std::chrono::milliseconds(150));
+      blocked5 = !began5.load();
+    };
+    const uint64_t p5 = presents();
+    press_desktop();
+    const bool fired5ok = pump_until([&] { return fired5.load() && began5.load(); }, 8000);
+    ctx.sel.testAfterFramePermit = nullptr;
+    if (other5.joinable()) other5.join();
+    uint64_t version5After = 0;
+    {
+      std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+      version5After = ctx.frameBuf.frame.version;
+    }
+    check("E1 PS (5) R3: a cancel/new op tried between A's permission and its write WAITS -- A's write lands first",
+          fired5ok && blocked5.load() && version5After > version5.load(),
+          "blocked=" + std::to_string(blocked5.load() ? 1 : 0) + " version " + std::to_string(version5.load()) + " -> " +
+              std::to_string(version5After));
+    uint64_t lat5 = 0;
+    const bool shown5 = wait_presented(p5, qpc_now_us(), 12000, &lat5);
+    check("E1 PS (5) R3: ...then B begins and completes on its own keyframe", shown5 && ctx.sel.activeStreamGeneration.load() != 0);
+
+    // (6) rel-0163 r7 (Codex R3 token): at the TICKET boundary. A local pick A; right after a frame took A's ticket
+    //     (local, A's epoch) A is cancelled and B begins. That frame must be refused at its commit -- neither
+    //     written as A's nor re-read as an ordinary frame -- and B completes on its own ticket and keyframe.
+    set_picker_visible_and_sync_stream(ctx, true);
+    pump_until([] { return false; }, 1500);
+    std::atomic<bool> fired6{false};
+    std::atomic<uint64_t> opA6{0}, refused6{0}, version6{0};
+    ctx.sel.testAfterFrameTicket = [&](uint64_t epoch, bool local) {
+      if (fired6.load() || !local) return;
+      opA6 = epoch;
+      refused6 = ctx.sel.localFramesRefused.load();
+      {
+        std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+        version6 = ctx.frameBuf.frame.version;
+      }
+      ctx.sel.Clear();       // A cancelled ...
+      ctx.sel.BeginLocal();  // ... B begun
+      fired6 = true;
+    };
+    const uint64_t p6 = presents();
+    press_desktop();
+    const bool fired6ok = pump_until([&] { return fired6.load(); }, 8000);
+    ctx.sel.testAfterFrameTicket = nullptr;
+    // That frame's own outcome: it reaches its commit (refused) or drops earlier (B's AdmitGeneration / decoder) --
+    // either way it is never written; B's first write needs B's own keyframe, which comes later.
+    pump_until([&] { return ctx.sel.localFramesRefused.load() > refused6.load(); }, 1500);
+    uint64_t version6After = 0;
+    {
+      std::lock_guard<std::mutex> lk(ctx.frameBuf.frame.mu);
+      version6After = ctx.frameBuf.frame.version;
+    }
+    check("E1 PS (6) R3: A cancelled / B begun right after a frame took A's ticket -- that frame is NOT written",
+          fired6ok && version6After == version6.load(),
+          "version " + std::to_string(version6.load()) + " -> " + std::to_string(version6After) + ", refused " +
+              std::to_string(refused6.load()) + " -> " + std::to_string(ctx.sel.localFramesRefused.load()));
+    uint64_t lat6 = 0;
+    const bool shown6 = wait_presented(p6, qpc_now_us(), 12000, &lat6);
+    check("E1 PS (6) R3: ...B completes on its own ticket and keyframe", shown6 && ctx.sel.epoch.load() != opA6.load());
+    check("E1 PS: the worker is still serving (no exit 15 / 14)", worker_alive());
+    check("E1 PS: no present failed", ctx.present.d3dPresentFailCount.load() == 0,
+          std::to_string(ctx.present.d3dPresentFailCount.load()) + " failed");
+    {
+      // The host's own account of the run, for the evidence.
+      std::istringstream lines(host.log());
+      std::string line;
+      while (std::getline(lines, line)) {
+        for (const char* key : {"select", "window", "stream-state", "full-frame", "[desktop]", "capture detached",
+                                "capture reattached", "bootstrap-cache", "kick"}) {
+          if (line.find(key) != std::string::npos) {
+            std::cout << "    host| " << line << "\n";
+            break;
+          }
+        }
+      }
+    }
+  }
+  if (stillScreen && connected && !renderE1) {
+    std::cout << "\n--- PS: a still logon screen, picked after the picker ---\n";
+    const auto frames_since = [&](uint64_t fromUs) {
+      std::lock_guard<std::mutex> lk(shownMu);
+      return static_cast<size_t>(std::count_if(shown.begin(), shown.end(), [&](const Shown& s) { return s.us >= fromUs; }));
+    };
+    const auto first_since = [&](uint64_t fromUs, Shown* out) {
+      std::lock_guard<std::mutex> lk(shownMu);
+      for (const Shown& s : shown) {
+        if (s.us >= fromUs) {
+          *out = s;
+          return true;
+        }
+      }
+      return false;
+    };
+    const auto worker_alive = [&] { return host.pi.hProcess && WaitForSingleObject(host.pi.hProcess, 0) == WAIT_TIMEOUT; };
+    const auto pick_after = [&](const char* name, int pickerMs) {
+      std::cout << "\n--- PS " << name << ": " << pickerMs << " ms in the picker (stream off), then the desktop ---\n";
+      ctx.control.streamState.Request(false);
+      Sleep(static_cast<DWORD>(pickerMs));
+      const uint64_t t0 = qpc_now_us();
+      ctx.control.streamState.Request(true);
+      Shown first{};
+      const bool got = wait_until([&] { return first_since(t0, &first); }, 4000);
+      const uint64_t latencyMs = got ? (first.us - t0) / 1000 : 0;
+      check((std::string("PS ") + name + ": THE LOGON SCREEN IS SHOWN WITHIN 1 s OF THE PICK (a decoded frame)").c_str(),
+            got && latencyMs <= 1000, got ? std::to_string(latencyMs) + " ms" : std::string("no decoded frame in 4 s"));
+      check((std::string("PS ") + name + ": ...and it is a picture, not a blank (luma spread)").c_str(),
+            got && first.lumaSpread >= 8,
+            got ? "spread=" + std::to_string(first.lumaSpread) + " " + std::to_string(first.w) + "x" +
+                      std::to_string(first.h) + (first.synthetic ? " (re-served cached frame)" : " (captured frame)")
+                : std::string());
+      Sleep(3000);
+      const size_t refreshed = frames_since(t0 + 1000000ULL);
+      check((std::string("PS ") + name + ": THE STILL SCREEN KEEPS BEING REFRESHED (>= 4 frames in the next 3 s, 500 ms cadence)").c_str(),
+            refreshed >= 4, std::to_string(refreshed) + " frames");
+      check((std::string("PS ") + name + ": the worker is still serving (no exit 15 / 14)").c_str(), worker_alive());
+    };
+    // The viewer started in its picker; the worker's capture comes up behind it.
+    Sleep(1500);
+    if (!stillNoFirst) {
+      pick_after("A (still attached)", 3000);
+      pick_after("B (after the idle detach)", 10000);
+      pick_after("B2 (after the idle detach, again)", 10000);
+      // r2 (Codex): the full-frame reacquire ran the capture library's REAL duplication remake -- not a seam in
+      // the host -- and that remake's first frame is what was delivered.
+      check("PS: THE REACQUIRE RAN THE LIBRARY'S DUPLICATION REMAKE (\"duplication made anew\")",
+            host.Count("full-frame reacquire: duplication made anew") >= 1,
+            std::to_string(host.Count("full-frame reacquire: duplication made anew")) + " remakes");
+      check("PS: ...and its first frame was delivered (\"reacquire: delivered after\")",
+            host.Count("full-frame reacquire: delivered after") >= 1,
+            std::to_string(host.Count("full-frame reacquire: delivered after")) + " deliveries");
+      if (stillPointerFirst) {
+        // r3 (Codex M9): the remade duplication's first acquire is pointer-only (the test build says so) -- it does
+        // NOT answer the request; the next acquire with an image does. In that order.
+        const std::string log = host.log();
+        const size_t declined = log.find("full-frame reacquire: a pointer-only acquire does not answer it");
+        const size_t delivered = log.find("full-frame reacquire: delivered after");
+        check("PS pointer-first: A POINTER-ONLY ACQUIRE DID NOT ANSWER THE FULL-FRAME REQUEST (request kept)",
+              declined != std::string::npos);
+        check("PS pointer-first: ...the image acquire after it did (delivered after the refusal)",
+              declined != std::string::npos && delivered != std::string::npos && delivered > declined);
+      }
+    } else {
+      // r2 contrast (=nofirst): the same pick with a capture that gives NOTHING, not even a remade
+      // duplication's first frame. Nothing is shown (so the still run's picture came from the remake), the
+      // library gives up after its bounded remakes, the host stops asking at its bound, the worker lives on.
+      std::cout << "\n--- PS contrast: a still screen that gives no frame at all ---\n";
+      ctx.control.streamState.Request(false);
+      Sleep(3000);
+      const uint64_t t0 = qpc_now_us();
+      ctx.control.streamState.Request(true);
+      Sleep(8000);
+      check("PS contrast: NOTHING IS SHOWN (no frame from a capture that gives none)", frames_since(t0) == 0,
+            std::to_string(frames_since(t0)) + " frames");
+      const size_t remakes = host.Count("full-frame reacquire: duplication made anew");
+      check("PS contrast: the library's duplication remake ran (\"duplication made anew\")", remakes >= 1,
+            std::to_string(remakes) + " remakes");
+      check("PS contrast: ...and gave up, bounded (\"reacquire gave up after 3\")",
+            host.Count("full-frame reacquire gave up after 3") >= 1,
+            std::to_string(host.Count("full-frame reacquire gave up after 3")) + " give-ups");
+      const size_t asks = host.Count("full-frame ask=");
+      check("PS contrast: the host's asks stop at their bound (3/3 reached, never 4)",
+            host.Count("full-frame ask=3/3") >= 1 && host.Count("full-frame ask=4/") == 0, std::to_string(asks) + " asks");
+      Sleep(4000);
+      check("PS contrast: ...and stay stopped (no new ask in the next 4 s: no loop)", host.Count("full-frame ask=") == asks,
+            std::to_string(host.Count("full-frame ask=")) + " asks now");
+      // r2 (Codex N4): a NEW source -- the idle detach, then the pick's reattach -- gets its own bounded budget;
+      // the spent one does not carry over (r1: it did, and the new source was never asked at all).
+      ctx.control.streamState.Request(false);
+      Sleep(10000);
+      const int asksBefore = host.Count("full-frame ask=");
+      ctx.control.streamState.Request(true);
+      Sleep(8000);
+      const int asksNew = host.Count("full-frame ask=") - asksBefore;
+      check("PS contrast: A NEW SOURCE (idle detach -> reattach) GETS A NEW BUDGET (asks again, from 1/3)",
+            asksNew >= 1 && host.Count("full-frame ask=1/3") >= 2, std::to_string(asksNew) + " new asks");
+      check("PS contrast: ...bounded again (3 at most for that source, never 4)",
+            asksNew <= 3 && host.Count("full-frame ask=4/") == 0, std::to_string(asksNew) + " new asks");
+      check("PS contrast: the worker is still serving", worker_alive());
+    }
+    check("PS: the worker never asked for WGC before login (r10 T2 path not taken)",
+          host.log().find("capture cannot continue on the logon desktop") == std::string::npos &&
+              host.log().find("wgc requested") == std::string::npos,
+          host.log().find("capture cannot continue") == std::string::npos ? std::string()
+                                                                           : host.log().substr(host.log().find("capture cannot continue"), 200));
+    std::cout << "    host: full-frame asks=" << host.Count("full-frame ask=") << " dxgi reacquire delivered="
+              << host.Count("full-frame reacquire: delivered") << " cache-cleared=" << host.Count("bootstrap-cache cleared")
+              << " idle-detach=" << host.Count("capture detached (idle)") << "\n";
+    // The host's own account of the run, for the evidence (stillness: content acquires per second).
+    {
+      std::istringstream lines(host.log());
+      std::string line;
+      while (std::getline(lines, line)) {
+        for (const char* key : {"dxgi-acquire", "full-frame", "[desktop]", "bootstrap-cache", "stream-state", "capture detached",
+                                "capture reattached", "stream active", "stream inactive", "trailing-edge kick",
+                                "capture cannot continue", "desktop_backend="}) {
+          if (line.find(key) != std::string::npos) {
+            std::cout << "    host| " << line << "\n";
+            break;
+          }
+        }
+      }
+    }
+  }
+
+  const bool ready = connected && pump_until([&] { return ctx.control.lastRttUs.load() > 0; }, 25000);
+  if (!androidSession && !captureFallback) check("the worker completes a round trip with the host", ready);
+  const auto flags = [&] { return ctx.session.hostCaptureFlags.load(); };
+  if (ready) {
+    bar = FindWindowExW(nullptr, nullptr, L"Remote60SessionToolbar", nullptr);
+    check("the toolbar window exists", bar != nullptr);
+  }
+
+  if (ready && bar && !notPrelogin && !sessionEnds && !captureFallback && !stillScreen) {
+    std::cout << "\n--- the host is at the pre-login screen ---\n";
+    check("THE PONG ADVERTISES kCaptureFlagPreloginV1 (0x2000)", pump_until([&] { return (flags() & kCaptureFlagPreloginV1) != 0; }, 8000),
+          std::to_string(flags()));
+    {
+      // Nothing a pre-login host does not take may be advertised: a viewer would send it, and the host
+      // closes the link on any control message outside its allowlist.
+      const uint32_t userOnly = kCaptureFlagHostImeV1 | kCaptureFlagHostImePulseStateV2 | kCaptureFlagClipboardTextV1 |
+                                kCaptureFlagPasteOnDemandV1 | kCaptureFlagClipboardImageV1 | kCaptureFlagFileCopyV1 |
+                                kCaptureFlagFileOfferCopyGenV1 | kCaptureFlagMouseXButtonsV1;
+      check("...and NONE of the user-environment capabilities (clipboard, files incl. 86/87, IME, X buttons)",
+            (flags() & userOnly) == 0, std::to_string(flags() & userOnly));
+    }
+    remote60::native_poc::viewer::push_session_toolbar_state(ctx);
+    session_toolbar_follow_owner();
+    pump_until([] { return false; }, 300);
+    const int x = find_item("7");
+    check("THE TOOLBAR LAYS OUT \"Windows 로그인\" (item 7)", x >= 0, std::to_string(x));
+    save_capture(bar, L"toolbar_prelogin_item");
+
+    // ---- 1. the toolbar item -> prompt -> typed into the test window, byte for byte
+    std::cout << "\n--- 1. the toolbar item, the password typed, 입력 ---\n";
+    targets.Clear();
+    OperatorRun run;
+    std::atomic<bool> fronted{false};
+    std::wstring boxText;
+    bool boxCaptured = false;
+    std::thread op([&] {
+      operate_prompt(&run, kPreloginPromptClass, false);
+      Sleep(300);  // the prompt hands the foreground back to the viewer as it closes; then the user's window
+      fronted = bring_front(targets.main);
+      HWND box = wait_window(kPreloginResultClass, nullptr, 15000);
+      if (box) {
+        boxText = result_box_text(box);
+        boxCaptured = save_capture(box, L"result_injected");
+        close_result(box);
+      }
+    });
+    RECT rc{};
+    GetClientRect(bar, &rc);
+    const int midY = (rc.bottom - rc.top) / 2;
+    PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(x, midY));
+    PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(x, midY));
+    pump_until([&] { return !boxText.empty(); }, 25000);
+    join_pumping(op);
+    check("the click opened the product's password window", run.sawPrompt, utf8(run.promptTitle));
+    check("...titled \"GNLink — Windows 로그인\"", run.promptTitle == kPreloginPromptTitle);
+    check("...took every character typed into it", run.typedAll);
+    check("the test window came to the front after 입력", fronted.load());
+    const std::wstring got = Targets::text(targets.edit);
+    save_capture(targets.main, L"target_window_received");
+    check("THE HOST TYPED THE SECRET INTO THE TEST WINDOW, BYTE FOR BYTE", got == kSecret, hexw(got));
+    check("...and nothing into the decoy", Targets::text(targets.decoyEdit).empty());
+    check("THE RESULT WINDOW SAYS \"typed\", NOT \"logged in\"",
+          boxText.find(L"입력했습니다") != std::wstring::npos && boxText.find(L"로그인 성공이 아닙니다") != std::wstring::npos,
+          utf8(boxText));
+    check("the host's result line: stage 8 (Injected), once", host.Count(" stage=8 win32=0") == 1);
+    check("the result window was captured", boxCaptured || gCaptureDir.empty());
+
+    // ---- 2. Ctrl+Alt+U in the viewer window: the same path, while the host is at the logon screen
+    std::cout << "\n--- 2. Ctrl+Alt+U ---\n";
+    Sleep(600);  // the host's challenge rate limit
+    targets.Clear();
+    OperatorRun run2;
+    std::wstring box2;
+    std::thread op2([&] {
+      operate_prompt(&run2, kPreloginPromptClass, false);
+      Sleep(300);
+      bring_front(targets.main);
+      HWND box = wait_window(kPreloginResultClass, nullptr, 15000);
+      if (box) {
+        box2 = result_box_text(box);
+        close_result(box);
+      }
+    });
+    BYTE keys[256] = {};
+    GetKeyboardState(keys);
+    BYTE held[256];
+    std::memcpy(held, keys, sizeof(held));
+    held[VK_CONTROL] = held[VK_LCONTROL] = 0x80;
+    held[VK_MENU] = held[VK_LMENU] = 0x80;
+    SetKeyboardState(held);  // this thread's view of the modifiers only (what GetKeyState reads)
+    SendMessageW(viewerWindow, WM_KEYDOWN, 'U', 1);  // not posted: no TranslateMessage, no WM_CHAR
+    pump_until([&] { return run2.sawPrompt || !box2.empty(); }, 8000);
+    SetKeyboardState(keys);
+    pump_until([&] { return !box2.empty(); }, 25000);
+    join_pumping(op2);
+    check("Ctrl+Alt+U opened the \"Windows 로그인\" window (not the unlock prompt)", run2.sawPrompt && run2.promptTitle == kPreloginPromptTitle,
+          utf8(run2.promptTitle));
+    check("THE SECRET ARRIVED AGAIN, BYTE FOR BYTE", Targets::text(targets.edit) == kSecret, hexw(Targets::text(targets.edit)));
+    check("...the result said typed", box2.find(L"입력했습니다") != std::wstring::npos, utf8(box2));
+
+    // ---- 3. negative: the focus is on another window -> nothing is typed anywhere
+    std::cout << "\n--- 3. NEGATIVE: the test window does not have the focus ---\n";
+    Sleep(600);
+    targets.Clear();
+    OperatorRun run3;
+    std::wstring box3;
+    bool box3Captured = false;
+    std::thread op3([&] {
+      operate_prompt(&run3, kPreloginPromptClass, false);
+      Sleep(300);
+      bring_front(targets.decoy);  // the user is somewhere else
+      HWND box = wait_window(kPreloginResultClass, nullptr, 20000);
+      if (box) {
+        box3 = result_box_text(box);
+        box3Captured = save_capture(box, L"result_not_at_target");
+        close_result(box);
+      }
+    });
+    PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(x, midY));
+    PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(x, midY));
+    pump_until([&] { return !box3.empty(); }, 30000);
+    join_pumping(op3);
+    (void)box3Captured;
+    check("the prompt was used", run3.sawPrompt && run3.typedAll);
+    check("NEGATIVE: NOTHING reached the test window", Targets::text(targets.edit).empty(), hexw(Targets::text(targets.edit)));
+    check("NEGATIVE: and NOTHING was typed into the window that had the focus",
+          Targets::text(targets.decoyEdit).empty(), hexw(Targets::text(targets.decoyEdit)));
+    check("the result says it was not typed (the target was not the logon screen)",
+          box3.find(L"입력하지 않았습니다") != std::wstring::npos, utf8(box3));
+    check("the host's result line: stage 1 (RejectedPolicy)", host.Count(" stage=1 win32=0") == 1);
+
+    // ---- 3b. r7 H5: the right window, the wrong field -- the focus is in its user-name box
+    std::cout << "\n--- 3b. r7 H5 NEGATIVE: the target window is in front but its user-name field has the focus ---\n";
+    Sleep(600);
+    targets.Clear();
+    targets.FocusOn(targets.userEdit);
+    OperatorRun run3b;
+    std::wstring box3b;
+    bool userFocused = false;
+    std::thread op3b([&] {
+      operate_prompt(&run3b, kPreloginPromptClass, false);
+      Sleep(300);
+      bring_front(targets.main);
+      {
+        const DWORD wt = GetWindowThreadProcessId(targets.main, nullptr);
+        GUITHREADINFO gi{sizeof(gi)};
+        userFocused = GetGUIThreadInfo(wt, &gi) && gi.hwndFocus == targets.userEdit;
+      }
+      HWND box = wait_window(kPreloginResultClass, nullptr, 20000);
+      if (box) {
+        box3b = result_box_text(box);
+        save_capture(box, L"result_wrong_field");
+        close_result(box);
+      }
+    });
+    PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(x, midY));
+    PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(x, midY));
+    pump_until([&] { return !box3b.empty(); }, 30000);
+    op3b.join();
+    targets.FocusOn(targets.edit);
+    check("the prompt was used", run3b.sawPrompt && run3b.typedAll);
+    check("...the target window was in front with its USER-NAME field focused", userFocused);
+    check("H5 NEGATIVE: NOTHING was typed into the user-name field", Targets::text(targets.userEdit).empty(),
+          hexw(Targets::text(targets.userEdit)));
+    check("H5 NEGATIVE: ...nor into the password field", Targets::text(targets.edit).empty(), hexw(Targets::text(targets.edit)));
+    check("...the result says it was not typed", box3b.find(L"입력하지 않았습니다") != std::wstring::npos, utf8(box3b));
+    check("...the host's result line: stage 1 (RejectedPolicy), a second time", host.Count(" stage=1 win32=0") == 2);
+
+
+    // ---- 4. r5 G8: typing at the logon screen goes nowhere -- it is not even sent
+    std::cout << "\n--- 4. r5 G8: characters typed in the viewer are not sent to a host at the logon screen ---\n";
+    {
+      {
+        std::lock_guard<std::mutex> lock(ctx.frameBuf.frame.mu);
+        ctx.frameBuf.frame.width = 320;
+        ctx.frameBuf.frame.height = 240;
+      }
+      ctx.picker.visible.store(false, std::memory_order_relaxed);
+      const uint64_t sentBefore = ctx.session.inputEventsSent.load();
+      const uint64_t heldBefore = ctx.session.preloginInputHeldBack.load();
+      const int droppedBefore = host.Count("dropped non-navigation key");
+      std::wstring notice;
+      std::thread op4([&] {
+        HWND b = wait_window(kPreloginResultClass, nullptr, 8000);
+        if (b) {
+          notice = result_box_text(b);
+          save_capture(b, L"typing_held_back_notice");
+          close_result(b);
+        }
+      });
+      for (WPARAM vk : {static_cast<WPARAM>('P'), static_cast<WPARAM>('W'), static_cast<WPARAM>('7')}) {
+        SendMessageW(viewerWindow, WM_KEYDOWN, vk, 1);
+        SendMessageW(viewerWindow, WM_KEYUP, vk, 0xC0000001);
+      }
+      pump_until([&] { return !notice.empty(); }, 10000);
+      join_pumping(op4);
+      SendMessageW(viewerWindow, WM_KEYDOWN, VK_TAB, 1);  // a navigation key still goes
+      SendMessageW(viewerWindow, WM_KEYUP, VK_TAB, 0xC0000001);
+      pump_until([] { return false; }, 1500);
+      const uint64_t held = ctx.session.preloginInputHeldBack.load() - heldBefore;
+      const uint64_t sent = ctx.session.inputEventsSent.load() - sentBefore;
+      // lockscreen-cred r1: the three downs are held back and forgotten, so their ups are not sent either (a
+      // release goes only for a down that went) -- 3 edges counted.
+      check("G8: the character keys were held back in the viewer (3 downs; their ups never sent), not sent", held == 3,
+            std::to_string(held));
+      check("...the window said so once, pointing at \"Windows 로그인\"",
+            notice.find(L"보내지 않았습니다") != std::wstring::npos && notice.find(L"Windows 로그인") != std::wstring::npos,
+            utf8(notice));
+      check("...a navigation key (Tab) still went (2 edges)", sent == 2, std::to_string(sent));
+      check("...and the host dropped nothing: no character key ever reached it",
+            host.Count("dropped non-navigation key") == droppedBefore);
+    }
+
+    // ---- 4b. r7 H6: an input already in the queue is looked at again right before it leaves
+    std::cout << "\n--- 4b. r7 H6: a character key already queued (before the role was known) is not sent ---\n";
+    {
+      // The keyboard's gate is passed by putting the key straight into the send queue with the product's
+      // own message builder and enqueue (what the gate itself calls) -- a key that got in while the host
+      // looked like a desktop. The control thread's last look must hold it back.
+      const uint64_t atSendBefore = ctx.session.preloginHeldBackAtSend.load();
+      const uint64_t sentBefore = ctx.session.inputEventsSent.load();
+      const int droppedBefore = host.Count("dropped non-navigation key");
+      for (uint16_t kind : {static_cast<uint16_t>(5), static_cast<uint16_t>(6)}) {
+        remote60::native_poc::viewer::enqueue_control_input_message(
+            ctx, remote60::native_poc::make_control_input_event(ctx.control.inputQueue, kind, 0, 0, 0, 0, 'K', qpc_now_us()));
+      }
+      pump_until([&] { return ctx.session.preloginHeldBackAtSend.load() - atSendBefore >= 2; }, 5000);
+      pump_until([] { return false; }, 1000);
+      check("H6: both edges were held back at the send (the last look), none sent",
+            ctx.session.preloginHeldBackAtSend.load() - atSendBefore == 2 && ctx.session.inputEventsSent.load() == sentBefore,
+            std::to_string(ctx.session.preloginHeldBackAtSend.load() - atSendBefore) + " held at send, " +
+                std::to_string(ctx.session.inputEventsSent.load() - sentBefore) + " sent");
+      check("...and the host never saw them", host.Count("dropped non-navigation key") == droppedBefore);
+    }
+
+    // ---- 5. r5 G11: the remote restart's answer is shown, not only logged
+    std::cout << "\n--- 5. r5 G11: the PC viewer shows what the restart request came to ---\n";
+    {
+      remote60::native_poc::viewer::push_session_toolbar_state(ctx);
+      session_toolbar_follow_owner();
+      pump_until([] { return false; }, 300);
+      const int rx = find_item("6");
+      check("the toolbar lays out \"다시 시작\" (item 6) -- the host advertises remote reboot", rx >= 0, std::to_string(rx));
+      std::wstring answer;
+      bool confirmed = false;
+      std::thread op5([&] {
+        HWND c = wait_window(L"GNLinkRebootConfirm", nullptr, 8000);
+        if (c) {
+          confirmed = true;
+          PostMessageW(GetDlgItem(c, 1), BM_CLICK, 0, 0);  // 다시 시작
+          wait_until([&] { return !IsWindow(c); }, 3000);
+        }
+        HWND b = wait_window(kPreloginResultClass, nullptr, 15000);
+        if (b) {
+          answer = result_box_text(b);
+          save_capture(b, L"reboot_result_failed");
+          close_result(b);
+        }
+      });
+      if (rx >= 0) {
+        RECT rc{};
+        GetClientRect(bar, &rc);
+        PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(rx, (rc.bottom - rc.top) / 2));
+        PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(rx, (rc.bottom - rc.top) / 2));
+      }
+      pump_until([&] { return !answer.empty(); }, 20000);
+      join_pumping(op5);
+      // The host delegates to its service; this run's test pipe has no server, so the service cannot be
+      // reached: Failed (ERROR_SERVICE_NOT_ACTIVE). Nothing can restart this PC (and the host's token
+      // cannot either).
+      check("the confirm popup was answered", confirmed);
+      check("G11: the answer is SHOWN in the viewer: \"다시 시작하지 못했습니다 (오류 1062)\"",
+            answer.find(L"다시 시작하지 못했습니다") != std::wstring::npos && answer.find(L"1062") != std::wstring::npos,
+            utf8(answer));
+      check("...as the host answered it (auth=1, result=3 Failed)", host.Count(" auth=1 result=3 win32=1062") == 1);
+    }
+
+    // ---- 5b. r9 R5: Ctrl+Alt+Del at the logon screen, through the worker to the service
+    std::cout << "\n--- 5b. r9 R5: Ctrl+Alt+Del from the toolbar reaches the service; its answer is shown ---\n";
+    {
+      SasService svc;
+      svc.start(L"\\\\.\\pipe\\GNLinkTest-prelogin-login-" + std::to_wstring(GetCurrentProcessId()), dir + L"GNLinkStream.exe");
+      remote60::native_poc::viewer::push_session_toolbar_state(ctx);
+      session_toolbar_set_visible(true);
+      session_toolbar_follow_owner();
+      pump_until([] { return false; }, 300);
+      const int sx = find_item("8");
+      check("R5: the toolbar lays out \"Ctrl+Alt+Del\" (item 8) -- the pre-login host offers it (0x20000)",
+            sx >= 0 && (flags() & remote60::native_poc::kCaptureFlagPreloginSasV1) != 0, std::to_string(sx));
+      auto click_and_read = [&](const wchar_t* capture) {
+        std::wstring answer;
+        std::thread op([&] {
+          HWND b = wait_window(kPreloginResultClass, nullptr, 15000);
+          if (b) {
+            answer = result_box_text(b);
+            save_capture(b, capture);
+            close_result(b);
+          }
+        });
+        if (sx >= 0) {
+          session_toolbar_set_visible(true);
+          pump_until([] { return false; }, 200);
+          RECT rc{};
+          GetClientRect(bar, &rc);
+          PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(sx, (rc.bottom - rc.top) / 2));
+          PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(sx, (rc.bottom - rc.top) / 2));
+        }
+        pump_until([&] { return !answer.empty(); }, 20000);
+        join_pumping(op);
+        return answer;
+      };
+      const std::wstring sent = click_and_read(L"sas_result_sent");
+      DWORD hostSession = 0;
+      ProcessIdToSessionId(host.pi.dwProcessId, &hostSession);
+      {
+        std::lock_guard<std::mutex> l(svc.mu);
+        check("R5: the click reached the service once, asked for the worker's own session",
+              svc.calls == 1 && svc.callerSession == hostSession, std::to_string(svc.calls));
+      }
+      check("R5: ...and the viewer SHOWS the answer: sent to the logon screen", sent.find(L"Ctrl+Alt+Del 을 보냈습니다") != std::wstring::npos,
+            utf8(sent));
+      check("...as the host answered it (result 0)", host.Count("[native-video-host][control][sas] requestId=") == 1 &&
+                                                         host.Count(" result=0 win32=0") >= 1);
+      {
+        std::lock_guard<std::mutex> l(svc.mu);
+        svc.answer = 1;  // PolicyDenied
+        svc.answerWin32 = 0;  // SoftwareSASGeneration = 0
+      }
+      Sleep(600);
+      const std::wstring denied = click_and_read(L"sas_result_policy");
+      check("R5: a policy that does not allow it is SAID, with the policy and its value (not \"sent\")",
+            denied.find(L"SoftwareSASGeneration=0") != std::wstring::npos && denied.find(L"보냈습니다") == std::wstring::npos,
+            utf8(denied));
+      {
+        std::lock_guard<std::mutex> l(svc.mu);
+        svc.answer = 5;  // SentUnconfirmed: the policy is not set (this PC's case)
+        svc.answerWin32 = 0;
+        svc.answerCad = true;  // and DisableCAD is set
+      }
+      Sleep(600);
+      const std::wstring unconfirmed = click_and_read(L"sas_result_unconfirmed");
+      check("R5: policy unset: sent, said to be UNCONFIRMED (look at the logon screen), and DisableCAD is said",
+            unconfirmed.find(L"보냈습니다") != std::wstring::npos && unconfirmed.find(L"확인되지 않습니다") != std::wstring::npos &&
+                unconfirmed.find(L"필요 없도록") != std::wstring::npos,
+            utf8(unconfirmed));
+      svc.stop();
+    }
+
+    // ---- typed is not logged in: no "logged in" while the host stays at the logon screen
+    pump_until([] { return false; }, 1500);
+    check("no \"logged in\" window appeared (the host is still at the logon screen)",
+          FindWindowW(kPreloginResultClass, nullptr) == nullptr && (flags() & kCaptureFlagPreloginV1) != 0);
+  }
+
+
+  if (ready && bar && sessionEnds) {
+    // r5 G7, on the real worker path: the password is opened and waits for the logon UI (the focus is
+    // elsewhere; this host waits up to 25 s); the viewer then goes away; the host's control session ends;
+    // only THEN does the target come to the front -- and nothing may be typed into it.
+    std::cout << "\n--- r5 G7: the viewer goes away while its password waits ---\n";
+    check("the host is at the logon screen", pump_until([&] { return (flags() & kCaptureFlagPreloginV1) != 0; }, 8000));
+    remote60::native_poc::viewer::push_session_toolbar_state(ctx);
+    session_toolbar_follow_owner();
+    pump_until([] { return false; }, 300);
+    const int x = find_item("7");
+    check("the \"Windows 로그인\" item is there", x >= 0);
+    targets.Clear();
+    OperatorRun run;
+    std::atomic<bool> opDone{false};
+    std::thread op([&] {
+      operate_prompt(&run, kPreloginPromptClass, false);
+      Sleep(300);
+      bring_front(targets.decoy);  // not the logon UI: the worker waits
+      opDone = true;
+    });
+    RECT rc{};
+    GetClientRect(bar, &rc);
+    PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(x, (rc.bottom - rc.top) / 2));
+    PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(x, (rc.bottom - rc.top) / 2));
+    std::cout << "    [step] clicked the item\n";
+    pump_until([&] { return run.sawPrompt && !FindWindowW(kPreloginPromptClass, nullptr); }, 10000);
+    std::cout << "    [step] prompt done\n";
+    // Pumped while the operator moves the focus: deactivating the viewer is a message to THIS thread.
+    pump_until([&] { return opDone.load(); }, 10000);
+    join_pumping(op);
+    std::cout << "    [step] operator done\n";
+    check("the password was typed into the prompt and sent", run.sawPrompt && run.typedAll);
+    Sleep(1500);  // the sealed request is at the host, waiting (no pumping: the viewer is about to go)
+    check("...and is waiting at the host (no result yet)", host.Count("[native-video-host][prelogin-cred] requestId=") == 0);
+    // The viewer goes away: its control thread stops, its socket closes. The host's control session
+    // ends when ten silent seconds have passed.
+    ctx.session.running.store(false);
+    if (worker.joinable()) worker.join();
+    ingressStop.store(true);
+    if (ingress.joinable()) ingress.join();
+    closesocket(ctx.session.sock);
+    ctx.session.sock = INVALID_SOCKET;
+    std::cout << "    [step] the viewer is gone\n";
+    const bool ended = wait_until([&] { return host.Count("[native-video-host][prelogin-cred] control session ended") >= 1; }, 20000);
+    check("the host's control session for that viewer ended (while the password still waited)", ended &&
+          host.Count("[native-video-host][prelogin-cred] requestId=") <= 1);
+    bring_front(targets.main);  // now the "logon UI" is in front
+    wait_until([&] { return host.Count("[native-video-host][prelogin-cred] requestId=") >= 1; }, 5000);
+    Sleep(500);
+    check("G7: NOTHING was typed into the target that came afterwards", Targets::text(targets.edit).empty(),
+          hexw(Targets::text(targets.edit)));
+    check("...nor into the window that had the focus", Targets::text(targets.decoyEdit).empty());
+    check("...the worker dropped it as stale (stage 2), never Injected",
+          host.Count(" stage=2 win32=0") == 1 && host.Count(" stage=8 ") == 0);
+  }
+
+  if (ready && bar && lockScreen) {
+    std::cout << "\n--- lockscreen-cred: the host's own session at its lock screen ---\n";
+    check("THE PONG ADVERTISES kCaptureFlagLockCredV1 (0x40000) -- and not the pre-login 0x2000",
+          pump_until([&] { return (flags() & kCaptureFlagLockCredV1) != 0; }, 20000) && (flags() & kCaptureFlagPreloginV1) == 0,
+          std::to_string(flags()));
+    check("...the host said so once it heard the service could type (capability, then advertised)",
+          host.log().find("[lock-cred] service capability supported") != std::string::npos &&
+              host.log().find("[lock-cred] advertised=1") != std::string::npos);
+    remote60::native_poc::viewer::push_session_toolbar_state(ctx);
+    session_toolbar_follow_owner();
+    pump_until([] { return false; }, 300);
+    const int x = find_item("7");
+    check("THE TOOLBAR LAYS OUT \"Windows 로그인\" (item 7) AT THE LOCK SCREEN", x >= 0, std::to_string(x));
+    save_capture(bar, L"toolbar_lock_screen_item");
+    RECT rc{};
+    GetClientRect(bar, &rc);
+    const int midY = (rc.bottom - rc.top) / 2;
+    const auto click_item = [&] {
+      PostMessageW(bar, WM_LBUTTONDOWN, 0, MAKELPARAM(x, midY));
+      PostMessageW(bar, WM_LBUTTONUP, 0, MAKELPARAM(x, midY));
+    };
+    const auto take_box = [&](std::wstring* text, const wchar_t* picture, bool* fits = nullptr, std::string* fitsWhy = nullptr) {
+      HWND box = wait_window(kPreloginResultClass, nullptr, 20000);
+      if (!box) return;
+      if (fits) *fits = result_box_text_fits(box, fitsWhy);  // before the text is published: the caller waits on it
+      *text = result_box_text(box);
+      save_capture(box, picture);
+      close_result(box);
+    };
+
+    // ---- A5: a character typed in the viewer is held back, and the window says where to go instead
+    std::cout << "\n--- A5: a character at the lock screen ---\n";
+    targets.Clear();
+    const uint64_t sentBefore = ctx.session.inputEventsSent.load();
+    std::wstring notice;
+    std::thread opn([&] { take_box(&notice, L"lock_screen_typing_notice"); });
+    SendMessageW(viewerWindow, WM_KEYDOWN, 'Q', 1);
+    SendMessageW(viewerWindow, WM_KEYUP, 'Q', 0xC0000001);
+    pump_until([&] { return !notice.empty(); }, 10000);
+    join_pumping(opn);
+    check("A5: THE VIEWER HELD THE CHARACTER BACK AND SAID WHERE TO GO (the button, Ctrl+Alt+U)",
+          notice.find(L"Windows 로그인") != std::wstring::npos && notice.find(L"Ctrl+Alt+U") != std::wstring::npos,
+          utf8(notice));
+    check("...nothing of it was sent (its up neither: its down never went)", ctx.session.inputEventsSent.load() == sentBefore,
+          std::to_string(ctx.session.inputEventsSent.load() - sentBefore));
+    // A6, the host's half: whatever character DID reach the host (none, unless the viewer's hold above is
+    // broken -- the E1 mutant) is refused there and typed nowhere.
+    Sleep(500);
+    const uint64_t charsSent = ctx.session.inputEventsSent.load() - sentBefore;
+    check("A6 (host): a character that reached the host would be refused there -- nothing typed anywhere",
+          Targets::text(targets.edit).empty() && Targets::text(targets.userEdit).empty() && Targets::text(targets.decoyEdit).empty() &&
+              (charsSent == 0 || host.Count("[input][lock] plaintext key refused") >= 1),
+          "sent=" + std::to_string(charsSent) + " hostRefusals=" + std::to_string(host.Count("[input][lock] plaintext key refused")));
+
+    // ---- cancel: said, nothing sent
+    std::cout << "\n--- cancel ---\n";
+    OperatorRun runC;
+    std::wstring boxC;
+    std::thread opc([&] {
+      operate_prompt(&runC, kPreloginPromptClass, /*cancel=*/true);
+      take_box(&boxC, L"lock_screen_cancelled");
+    });
+    click_item();
+    pump_until([&] { return !boxC.empty(); }, 20000);
+    join_pumping(opc);
+    check("the click opened the password window, worded for the lock screen", runC.sawPrompt && runC.promptTitle == kPreloginPromptTitle,
+          utf8(runC.promptTitle));
+    check("CANCEL IS SAID (\"취소했습니다\") and nothing reached the host",
+          boxC.find(L"취소했습니다") != std::wstring::npos && host.Count("[lock-cred] challenge requestId=") == 0, utf8(boxC));
+
+    // ---- NEGATIVE: the focus is on the user-name field, not a password field -> nothing typed
+    std::cout << "\n--- NEGATIVE: the password field is not the target ---\n";
+    targets.Clear();
+    targets.FocusOn(targets.userEdit);
+    OperatorRun runN;
+    std::wstring boxN;
+    std::thread opN([&] {
+      operate_prompt(&runN, kPreloginPromptClass, false);
+      Sleep(300);
+      bring_front(targets.main);
+      take_box(&boxN, L"lock_screen_target_not_ready");
+    });
+    click_item();
+    pump_until([&] { return !boxN.empty(); }, 30000);
+    join_pumping(opN);
+    check("NEGATIVE: THE AGENT TYPED NOTHING (the focused field is not a password field) and the window says so",
+          Targets::text(targets.userEdit).empty() && Targets::text(targets.edit).empty() &&
+              Targets::text(targets.decoyEdit).empty() && boxN.find(L"비밀번호 칸이 준비되지 않아") != std::wstring::npos,
+          utf8(boxN) + " | user=" + hexw(Targets::text(targets.userEdit)));
+    targets.FocusOn(targets.edit);
+    Sleep(700);  // the service's challenge rate limit
+
+    // ---- r3 (Codex UX-R): ANOTHER host's transaction holds the service's one unlock pipe -> this viewer is
+    // told exactly that, nothing is typed, and once that transaction ends a manual retry goes through (the
+    // next step). "Host A" is this test process on the service's real pipe with a real lock-screen challenge
+    // the service issued (pending, awaiting its seal) -- as another user's host would hold it.
+    std::cout << "\n--- r3 UX-R: another host's transaction is pending -> busy, said as that ---\n";
+    {
+      HANDLE a = CreateFileW(seam.unlockPipe().c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+      DWORD mode = PIPE_READMODE_MESSAGE;
+      if (a != INVALID_HANDLE_VALUE) SetNamedPipeHandleState(a, &mode, nullptr, nullptr);
+      SecureUnlockChallengeRequest areq{};
+      areq.kind = static_cast<uint16_t>(SecureUnlockKind::LockCredChallengeRequest);
+      areq.requestId = 7001;
+      areq.clientSessionCookie = 0xA0A0A0A0ull;
+      SecureUnlockChallengeResponse aresp{};
+      DWORD io = 0;
+      const bool aIssued = a != INVALID_HANDLE_VALUE && WriteFile(a, &areq, sizeof(areq), &io, nullptr) &&
+                           ReadFile(a, &aresp, sizeof(aresp), &io, nullptr) && io == sizeof(aresp) &&
+                           aresp.stage == static_cast<uint16_t>(UnlockStage::ChallengeIssued);
+      check("UX-R setup: host A holds the service's pipe with a REAL pending lock-screen challenge",
+            aIssued, "stage=" + std::to_string(aresp.stage));
+      targets.Clear();
+      SetWindowTextW(targets.edit, L"untouched");
+      OperatorRun runB;
+      std::wstring boxB;
+      std::thread opB([&] {
+        operate_prompt(&runB, kPreloginPromptClass, false);
+        Sleep(300);
+        bring_front(targets.main);
+        take_box(&boxB, L"lock_screen_busy");
+      });
+      click_item();
+      pump_until([&] { return !boxB.empty(); }, 30000);
+      join_pumping(opB);
+      check("UX-R: the click opened the password window and took the password", runB.sawPrompt && runB.typedAll);
+      check("UX-R: THE RESULT WINDOW SAYS ANOTHER CONNECTION'S REQUEST IS IN PROGRESS -- try again after it ends -- "
+            "not a general error",
+            boxB.find(L"다른 연결이") != std::wstring::npos && boxB.find(L"다시 누르세요") != std::wstring::npos &&
+                boxB.find(L"오류") == std::wstring::npos && boxB.find(L"입력했습니다") == std::wstring::npos,
+            utf8(boxB));
+      check("UX-R: ...NOTHING was typed anywhere (the field keeps its text)",
+            Targets::text(targets.edit) == L"untouched" && Targets::text(targets.userEdit).empty() &&
+                Targets::text(targets.decoyEdit).empty(),
+            hexw(Targets::text(targets.edit)));
+      // A's transaction was not disturbed: the service still answers A on A's connection.
+      SecureUnlockQuery q{};
+      q.kind = static_cast<uint16_t>(SecureUnlockKind::CapabilitiesRequest);
+      q.requestId = 7002;
+      SecureUnlockCapabilitiesResponse caps{};
+      const bool aStill = a != INVALID_HANDLE_VALUE && WriteFile(a, &q, sizeof(q), &io, nullptr) &&
+                          ReadFile(a, &caps, sizeof(caps), &io, nullptr) && io == sizeof(caps) && caps.requestId == 7002;
+      check("UX-R: ...host A's connection was left alone (the service still answers it)", aStill);
+      if (a != INVALID_HANDLE_VALUE) CloseHandle(a);  // host A's transaction ends
+      std::cout << "    host A's transaction ended (its connection closed)\n";
+      SetWindowTextW(targets.edit, L"");
+      // The control: a general failure is NOT shown as busy (the product's window for stage 12 of this connection).
+      std::wstring general;
+      std::thread opE([&] { take_box(&general, L"lock_screen_general_error"); });
+      PostMessageW(viewerWindow, remote60::native_poc::viewer::kMsgPreloginCredResult,
+                   remote60::native_poc::viewer::make_login_result_wparam(
+                       remote60::native_poc::viewer::kLoginRoleLockScreen,
+                       static_cast<uint16_t>(UnlockStage::InternalError), ctx.session.controlRunGen.load()),
+                   0);
+      pump_until([&] { return !general.empty(); }, 8000);
+      join_pumping(opE);
+      check("UX-R control: a general failure is said as a failure, not as 'another connection is busy'",
+            !general.empty() && general.find(L"다른 연결이") == std::wstring::npos, utf8(general));
+      Sleep(700);  // the service's challenge rate limit
+    }
+
+    // ---- the button -> the password -> typed into the password field by the service's agent
+    // (r3 UX-R: after host A's transaction ended, this is the manual retry -- it goes through)
+    std::cout << "\n--- the button, the password, 입력 (the field already holds an earlier attempt) ---\n";
+    targets.Clear();
+    SetWindowTextW(targets.edit, L"earlier-attempt");  // Codex Q1 (b): a retry replaces, never appends
+    OperatorRun run;
+    std::wstring boxTyped;
+    std::atomic<bool> fronted{false};
+    std::thread op([&] {
+      operate_prompt(&run, kPreloginPromptClass, false);
+      Sleep(300);
+      fronted = bring_front(targets.main);
+      take_box(&boxTyped, L"lock_screen_result_typed");
+    });
+    click_item();
+    pump_until([&] { return !boxTyped.empty(); }, 30000);
+    join_pumping(op);
+    const std::wstring got = Targets::text(targets.edit);
+    save_capture(targets.main, L"lock_screen_target_received");
+    check("...the prompt took every character", run.sawPrompt && run.typedAll);
+    check("THE SERVICE'S AGENT REPLACED THE FIELD'S CONTENT WITH THE SECRET, BYTE FOR BYTE (the earlier attempt gone)",
+          got == kSecret, hexw(got));
+    check("...and nothing into the user-name field or the decoy",
+          Targets::text(targets.userEdit).empty() && Targets::text(targets.decoyEdit).empty());
+    check("THE RESULT WINDOW SAYS \"typed -- press Enter\", NOT \"unlocked\"",
+          boxTyped.find(L"입력했습니다") != std::wstring::npos && boxTyped.find(L"Enter") != std::wstring::npos &&
+              boxTyped.find(L"해제되었습니다") == std::wstring::npos,
+          utf8(boxTyped));
+    check("the service typed it once (its log, no password in it)",
+          seam.DiagLog().find("lock-cred requestId=") != std::string::npos && seam.DiagLog().find(" typed session=") != std::string::npos);
+
+    // ---- lk-ux-retry r1 (Codex section 2): the user's 10-22 case. That password was the wrong one -- Windows
+    // refused it on the remote screen -- and its wait for the unlock goes on. The same connection presses
+    // "Windows 로그인" again: the earlier wait is ended first, then a new challenge, a new password, the field's
+    // content replaced. No reconnect. (Windows' own refusal is the field check: here the stand-in's lock stays.)
+    std::cout << "\n--- lk-ux-retry: the first password was wrong; the same connection presses again ---\n";
+    check("THE PONG ADVERTISES kCaptureFlagLockCredRetryV1 (0x80000) -- the host and its service can end the wait",
+          (flags() & kCaptureFlagLockCredRetryV1) != 0, std::to_string(flags()));
+    check("...the first password still waits for its unlock (the state 0.2.162 answered 'still in progress')",
+          ctx.session.lockCredPending.load());
+    const uint64_t genBeforeRetry = ctx.session.controlRunGen.load();
+    {
+      // The retry's password window, cancelled: nothing sent, and the earlier wait goes on.
+      OperatorRun runRc;
+      std::wstring boxRc;
+      std::thread opRc([&] {
+        operate_prompt(&runRc, kPreloginPromptClass, /*cancel=*/true);
+        take_box(&boxRc, L"lock_screen_retry_cancelled");
+      });
+      click_item();
+      pump_until([&] { return !boxRc.empty(); }, 20000);
+      join_pumping(opRc);
+      check("RETRY: THE PRESS OPENS THE PASSWORD WINDOW (not \"the earlier one is still in progress\")",
+            runRc.sawPrompt && runRc.promptTitle == kPreloginPromptTitle, utf8(runRc.promptTitle) + " | " + utf8(boxRc));
+      check("RETRY, CANCELLED: said, no retry reached the host, and the earlier wait goes on",
+            boxRc.find(L"취소했습니다") != std::wstring::npos && host.Count("retry challenge requestId=") == 0 &&
+                ctx.session.lockCredPending.load(),
+            utf8(boxRc));
+    }
+    Sleep(700);  // the service's challenge rate limit
+    OperatorRun runR;
+    std::wstring boxR;
+    bool fitsR = false;
+    std::string fitsWhyR;
+    std::thread opR([&] {
+      operate_prompt(&runR, kPreloginPromptClass, false, kSecret2);
+      Sleep(300);
+      bring_front(targets.main);
+      take_box(&boxR, L"lock_screen_retry_typed", &fitsR, &fitsWhyR);
+    });
+    click_item();
+    pump_until([&] { return !boxR.empty(); }, 30000);
+    join_pumping(opR);
+    const std::wstring gotR = Targets::text(targets.edit);
+    save_capture(targets.main, L"lock_screen_retry_target_received");
+    check("RETRY: the password window took the new password", runR.sawPrompt && runR.typedAll);
+    const std::string hostLogR = host.log();
+    const size_t retryAt = hostLogR.find("[lock-cred] retry challenge requestId=");
+    const std::string retryLine =
+        retryAt == std::string::npos ? std::string() : hostLogR.substr(retryAt, hostLogR.find('\n', retryAt) - retryAt);
+    check("THE HOST ENDED THE EARLIER WAIT FIRST -- confirmed by the service (Superseded, 17) -- THEN ASKED A NEW CHALLENGE",
+          host.Count("[lock-cred] retry requestId=") == 1 && hostLogR.find(" cleared=1 stage=17") != std::string::npos &&
+              retryLine.find(" status=3") != std::string::npos,
+          "retries=" + std::to_string(host.Count("[lock-cred] retry requestId=")) + " | " + retryLine);
+    check("THE SERVICE'S AGENT REPLACED THE FIELD'S CONTENT WITH THE NEW PASSWORD, BYTE FOR BYTE (the first one gone)",
+          gotR == kSecret2, hexw(gotR));
+    check("...and nothing into the user-name field or the decoy",
+          Targets::text(targets.userEdit).empty() && Targets::text(targets.decoyEdit).empty());
+    check("THE RESULT WINDOW SAYS \"typed -- press Enter\" for the new password, and how to retry if Windows refuses it",
+          boxR.find(L"입력했습니다") != std::wstring::npos && boxR.find(L"Enter") != std::wstring::npos &&
+              boxR.find(L"다시 누르세요") != std::wstring::npos && boxR.find(L"해제되었습니다") == std::wstring::npos &&
+              boxR.find(L"보내지 않았습니다") == std::wstring::npos,
+          utf8(boxR));
+    check("...AND THE WINDOW SHOWS ALL OF IT -- the retry guidance is not cut off, the 확인 button below it", fitsR,
+          fitsWhyR);
+    check("SAME CONNECTION: the control connection was never re-made (reconnect 0)",
+          ctx.session.controlRunGen.load() == genBeforeRetry,
+          std::to_string(ctx.session.controlRunGen.load() - genBeforeRetry) + " reconnects");
+    const std::string diagR = seam.DiagLog();
+    size_t typedLines = 0;
+    for (size_t at = diagR.find(" typed session="); at != std::string::npos; at = diagR.find(" typed session=", at + 1)) ++typedLines;
+    check("the service ended the first (its own line) and typed twice in all -- once per password, never re-sent",
+          diagR.find("superseded by the same connection's retry") != std::string::npos && typedLines == 2,
+          std::to_string(typedLines) + " typed lines");
+    check("...the new attempt is the one followed now", ctx.session.lockCredPending.load());
+
+    // ---- lk-ux-retry r2 (Codex N2): the retry ends the earlier wait (the host issued the new challenge), and
+    // then the new password fails HERE, before it is sealed (the test-only fault, REMOTE60_VIEWER_UNLOCK_TEST_SEAM).
+    // The earlier wait is over and said so; the new password was not sent and said so; nothing waits on; no
+    // "2 minutes" -- and nothing was typed.
+    std::cout << "\n--- lk-ux-retry r2 (N2): the earlier wait ended, the new password failed before sealing ---\n";
+    {
+      Sleep(700);  // the service's challenge rate limit
+      const std::wstring fieldBefore = Targets::text(targets.edit);
+      SetEnvironmentVariableW(L"GNLINK_VIEWER_TEST_SEAL_FAIL", L"1");
+      OperatorRun runF;
+      std::wstring boxF;
+      std::thread opF([&] {
+        operate_prompt(&runF, kPreloginPromptClass, false, kSecret);
+        take_box(&boxF, L"lock_screen_retry_seal_failed");
+      });
+      click_item();
+      pump_until([&] { return !boxF.empty(); }, 30000);
+      join_pumping(opF);
+      SetEnvironmentVariableW(L"GNLINK_VIEWER_TEST_SEAL_FAIL", nullptr);
+      check("N2: the host ended the earlier wait and issued the new challenge (a second retry, cleared)",
+            host.Count("[lock-cred] retry requestId=") == 2 && host.Count(" cleared=1 stage=17") == 2,
+            std::to_string(host.Count("[lock-cred] retry requestId=")) + " retries");
+      check("N2: THE WINDOW SAYS the earlier wait is over and the new password was NOT sent -- not \"2 minutes\"",
+            boxF.find(L"대기는 끝냈지만") != std::wstring::npos && boxF.find(L"보내지 않았습니다") != std::wstring::npos &&
+                boxF.find(L"2분") == std::wstring::npos,
+            utf8(boxF));
+      check("N2: ...nothing follows the earlier wait any more, and nothing new was typed (the field as it was)",
+            !ctx.session.lockCredPending.load() && Targets::text(targets.edit) == fieldBefore,
+            hexw(Targets::text(targets.edit)));
+      Sleep(4000);  // a late answer of the earlier attempt, had it still been followed, would show by now
+      check("N2: ...and no later window reports the earlier one (no \"2 minutes\", no stale result)",
+            FindWindowW(kPreloginResultClass, nullptr) == nullptr);
+      // The user presses once more: an ordinary press (nothing waits), the field replaced, typed.
+      Sleep(700);
+      OperatorRun runG;
+      std::wstring boxG;
+      std::thread opG([&] {
+        operate_prompt(&runG, kPreloginPromptClass, false, kSecret);
+        Sleep(300);
+        bring_front(targets.main);
+        take_box(&boxG, L"lock_screen_after_seal_failure");
+      });
+      click_item();
+      pump_until([&] { return !boxG.empty(); }, 30000);
+      join_pumping(opG);
+      check("N2: the next press goes through as an ordinary one: typed (the field replaced), followed for its unlock",
+            boxG.find(L"입력했습니다") != std::wstring::npos && Targets::text(targets.edit) == kSecret &&
+                ctx.session.lockCredPending.load(),
+            utf8(boxG));
+    }
+
+    // ---- lk-ux-retry r3 (Codex N2-a): the new password LEFT (the host took its seal) but its answer did not come
+    // within the exchange (the test-only GNLINK_VIEWER_TEST_STATUS_POLLS=0: the viewer stops asking right after
+    // the host accepted it -- the 10 s give-up of the field case, on demand). It must stay followed: the host
+    // types it a moment later, and the user's next press is a retry that NAMES it (the host ends its wait first)
+    // -- not an ordinary request refused as "the earlier one still waits". Nothing re-sent by itself.
+    std::cout << "\n--- lk-ux-retry r3 (N2-a): sent, its answer not come -> followed; the next press names it ---\n";
+    {
+      Sleep(700);  // the service's challenge rate limit
+      SetEnvironmentVariableW(L"GNLINK_VIEWER_TEST_STATUS_POLLS", L"0");
+      OperatorRun runH;
+      std::wstring boxH;
+      std::thread opH([&] {
+        operate_prompt(&runH, kPreloginPromptClass, false, kSecret2);
+        Sleep(300);
+        bring_front(targets.main);
+        take_box(&boxH, L"lock_screen_retry_sent_unanswered");
+      });
+      click_item();
+      pump_until([&] { return !boxH.empty(); }, 30000);
+      join_pumping(opH);
+      SetEnvironmentVariableW(L"GNLINK_VIEWER_TEST_STATUS_POLLS", nullptr);
+      check("N2-a: a retry (the earlier wait ended), its new password sent, its answer not come",
+            host.Count("[lock-cred] retry requestId=") == 3 && host.Count(" cleared=1 stage=17") == 3,
+            std::to_string(host.Count("[lock-cred] retry requestId=")) + " retries");
+      check("N2-a: THE WINDOW SAYS it was sent and is being followed -- not \"typed\", not \"not sent\", not \"2 minutes\"",
+            boxH.find(L"계속 확인합니다") != std::wstring::npos && boxH.find(L"입력했습니다") == std::wstring::npos &&
+                boxH.find(L"2분") == std::wstring::npos,
+            utf8(boxH));
+      check("N2-a: ...AND IT IS FOLLOWED (the viewer still waits on it)", ctx.session.lockCredPending.load());
+      check("N2-a: ...the host types it a moment later (the field now holds the new password)",
+            pump_until([&] { return Targets::text(targets.edit) == kSecret2; }, 8000), hexw(Targets::text(targets.edit)));
+      // The user presses again: a retry naming THAT password -- its wait ended first -- and the field replaced.
+      Sleep(700);
+      OperatorRun runI;
+      std::wstring boxI;
+      std::thread opI([&] {
+        operate_prompt(&runI, kPreloginPromptClass, false, kSecret);
+        Sleep(300);
+        bring_front(targets.main);
+        take_box(&boxI, L"lock_screen_retry_after_unanswered");
+      });
+      click_item();
+      pump_until([&] { return !boxI.empty(); }, 30000);
+      join_pumping(opI);
+      check("N2-a: THE NEXT PRESS IS A RETRY OF IT -- ended first (17), then typed: field replaced, no 'pending' refusal",
+            host.Count("[lock-cred] retry requestId=") == 4 && host.Count(" cleared=1 stage=17") == 4 &&
+                boxI.find(L"입력했습니다") != std::wstring::npos && Targets::text(targets.edit) == kSecret &&
+                ctx.session.lockCredPending.load(),
+            utf8(boxI) + " | retries=" + std::to_string(host.Count("[lock-cred] retry requestId=")));
+      check("N2-a: ...on the same connection (reconnect 0) and nothing was re-sent by itself (typed once per press)",
+            ctx.session.controlRunGen.load() == genBeforeRetry);
+    }
+
+    // ---- r2 (Codex L5): a result of an EARLIER control connection, still queued, is not shown
+    std::cout << "\n--- r2 L5: a stale result window from an earlier connection ---\n";
+    {
+      const uint64_t gen = ctx.session.controlRunGen.load();
+      // A watcher closes the window if one does appear (it would be modal on this thread), so a broken check
+      // fails here instead of hanging the run.
+      std::wstring stale;
+      std::thread ops([&] {
+        HWND b = wait_window(kPreloginResultClass, nullptr, 2000);
+        if (b) {
+          stale = result_box_text(b);
+          close_result(b);
+        }
+      });
+      PostMessageW(viewerWindow, remote60::native_poc::viewer::kMsgPreloginCredResult,
+                   remote60::native_poc::viewer::make_login_result_wparam(
+                       remote60::native_poc::viewer::kLoginRoleLockScreen,
+                       static_cast<uint16_t>(remote60::native_poc::UnlockStage::SessionUnlocked), gen - 1),
+                   0);
+      pump_until([] { return false; }, 2500);
+      join_pumping(ops);
+      check("L5: a queued 'unlocked' of an earlier connection is NOT shown", stale.empty(), utf8(stale));
+      std::wstring current;
+      std::thread opg([&] { take_box(&current, L"lock_screen_current_generation"); });
+      PostMessageW(viewerWindow, remote60::native_poc::viewer::kMsgPreloginCredResult,
+                   remote60::native_poc::viewer::make_login_result_wparam(
+                       remote60::native_poc::viewer::kLoginRoleLockScreen, remote60::native_poc::viewer::kLoginCancelled, gen),
+                   0);
+      pump_until([&] { return !current.empty(); }, 8000);
+      join_pumping(opg);
+      check("L5 control: the same message of THIS connection is shown", current.find(L"취소했습니다") != std::wstring::npos,
+            utf8(current));
+    }
+
+    // ---- the session unlocks (the stand-in's event: one session event, then "unlocked") -> said
+    std::cout << "\n--- the session unlocks ---\n";
+    std::wstring boxUnlocked;
+    std::thread opU([&] { take_box(&boxUnlocked, L"lock_screen_result_unlocked"); });
+    seam.Unlock();
+    pump_until([&] { return !boxUnlocked.empty(); }, 20000);
+    join_pumping(opU);
+    check("THE RESULT WINDOW SAYS \"unlocked\" -- the service saw that session unlock after the typing",
+          boxUnlocked.find(L"잠금이 해제되었습니다") != std::wstring::npos, utf8(boxUnlocked));
+    check("...and the host stops offering it (0x40000 gone)",
+          pump_until([&] { return (flags() & kCaptureFlagLockCredV1) == 0; }, 10000), std::to_string(flags()));
+    // The bar collapses 2.5 s after it was shown and lays its items out again only when expanded (as a user
+    // sees it on the next hover): shown again, as on entry, before it is looked at.
+    session_toolbar_set_visible(true);
+    remote60::native_poc::viewer::push_session_toolbar_state(ctx);
+    session_toolbar_follow_owner();
+    pump_until([] { return false; }, 300);
+    check("...so the toolbar no longer lays out \"Windows 로그인\"", find_item("7") < 0);
+  }
+
+  if (ready && bar && notPrelogin && !lockScreen) {
+    std::cout << "\n--- the host is NOT at the pre-login screen ---\n";
+    pump_until([&] { return flags() != 0; }, 8000);
+    check("THE PONG DOES NOT ADVERTISE 0x2000", flags() != 0 && (flags() & kCaptureFlagPreloginV1) == 0, std::to_string(flags()));
+    remote60::native_poc::viewer::push_session_toolbar_state(ctx);
+    session_toolbar_follow_owner();
+    pump_until([] { return false; }, 300);
+    check("NEGATIVE: the toolbar lays out NO \"Windows 로그인\" item", find_item("7") < 0);
+    check("NEGATIVE: ...nor \"Ctrl+Alt+Del\" (r9 R5: only a pre-login host offers it)", find_item("8") < 0 &&
+              (ctx.session.hostCaptureFlags.load() & remote60::native_poc::kCaptureFlagPreloginSasV1) == 0);
+    save_capture(bar, L"toolbar_not_prelogin");
+
+    std::cout << "\n--- Ctrl+Alt+U takes the existing unlock path ---\n";
+    OperatorRun run;
+    // lockscreen-cred r1 (contract 2): the cancel is then said in the result window -- modal on this thread, so
+    // the same operator waits for it and closes it (a second thread started after the pump would never run).
+    std::wstring cancelled;
+    std::thread op([&] {
+      operate_prompt(&run, L"GNLinkUnlockPrompt", /*cancel=*/true);
+      HWND b = wait_window(kPreloginResultClass, nullptr, 8000);
+      if (b) {
+        cancelled = result_box_text(b);
+        save_capture(b, L"result_unlock_cancelled");
+        close_result(b);
+      }
+    });
+    BYTE keys[256] = {};
+    GetKeyboardState(keys);
+    BYTE held[256];
+    std::memcpy(held, keys, sizeof(held));
+    held[VK_CONTROL] = held[VK_LCONTROL] = 0x80;
+    held[VK_MENU] = held[VK_LMENU] = 0x80;
+    SetKeyboardState(held);
+    SendMessageW(viewerWindow, WM_KEYDOWN, 'U', 1);  // not posted: no TranslateMessage, no WM_CHAR
+    pump_until([&] { return run.sawPrompt && !cancelled.empty(); }, 12000);
+    SetKeyboardState(keys);
+    pump_until([] { return false; }, 1000);
+    join_pumping(op);
+    check("Ctrl+Alt+U opened the EXISTING unlock prompt (GNLinkUnlockPrompt), as before", run.sawPrompt,
+          utf8(run.promptTitle));
+    check("NEGATIVE: no \"Windows 로그인\" window exists", FindWindowW(kPreloginPromptClass, nullptr) == nullptr);
+    check("lockscreen-cred: ...and its cancel is said (\"취소했습니다\"), nothing sent",
+          cancelled.find(L"취소했습니다") != std::wstring::npos, utf8(cancelled));
+
+    std::cout << "\n--- the entry itself, and a request that slipped through ---\n";
+    remote60::native_poc::viewer::request_prelogin_login(ctx, viewerWindow);
+    pump_until([] { return false; }, 500);
+    check("NEGATIVE: request_prelogin_login opens nothing at a host that is not at the logon screen",
+          FindWindowW(kPreloginPromptClass, nullptr) == nullptr && !ctx.session.preloginCredRequested.load());
+    // A request queued while the host was at the logon screen, drained after it left it.
+    {
+      std::lock_guard<std::mutex> l(ctx.session.preloginCredMu);
+      ctx.session.preloginCredPassword = kSecret;
+    }
+    std::wstring box;
+    std::thread op2([&] {
+      HWND b = wait_window(kPreloginResultClass, nullptr, 10000);
+      if (b) {
+        box = result_box_text(b);
+        save_capture(b, L"result_not_at_logon");
+        close_result(b);
+      }
+    });
+    ctx.session.preloginCredRequested.store(true);
+    pump_until([&] { return !box.empty(); }, 12000);
+    join_pumping(op2);
+    check("...is answered locally: \"not at the logon screen\"", box.find(L"로그인 화면 상태가 아니") != std::wstring::npos, utf8(box));
+    check("NEGATIVE: the prelogin path reached the host 0 times", host.Count("[native-video-host][prelogin-cred]") == 0);
+    check("...and the queued password is gone from the viewer", ctx.session.preloginCredPassword.empty());
+
+    std::cout << "\n--- \"logged in\" is the host leaving the logon screen after a typed password ---\n";
+    std::wstring logon;
+    std::thread op3([&] {
+      HWND b = wait_window(kPreloginResultClass, nullptr, 10000);
+      if (b) {
+        logon = result_box_text(b);
+        save_capture(b, L"result_logged_in");
+        close_result(b);
+      }
+    });
+    // As if this viewer had just been told "typed" by a pre-login host: the next pong from a host that is
+    // not at the logon screen is what it observed. r5 G11: it says exactly that -- the host LEFT the
+    // logon screen -- not "logged in": which account, and its desktop, it has not seen (that is G).
+    ctx.session.preloginInjectedAtUs.store(qpc_now_us());
+    pump_until([&] { return !logon.empty(); }, 12000);
+    join_pumping(op3);
+    check("A POSTED \"left the logon screen\" WINDOW, DIFFERENT FROM \"typed\", that does not claim a login",
+          logon.find(L"로그인 화면을 벗어났습니다") != std::wstring::npos && logon.find(L"입력했습니다") == std::wstring::npos &&
+              logon.find(L"로그인되었습니다") == std::wstring::npos,
+          utf8(logon));
+  }
+
+  // ------------------------------------------------------------------------------- teardown
+  ctx.session.running.store(false);
+  if (worker.joinable()) worker.join();
+  ingressStop.store(true);
+  if (ingress.joinable()) ingress.join();
+  if (presentThread.joinable()) presentThread.join();
+  receiver.reset();  // capture-lifecycle r1 (PS): its decoder goes while Media Foundation is still up
+  if (ctx.session.sock != INVALID_SOCKET) closesocket(ctx.session.sock);
+  session_toolbar_destroy();
+  if (viewerWindow) DestroyWindow(viewerWindow);
+  targets.Stop();
+  host.Stop();
+  if (lockScreen) {
+    check("lockscreen-cred: the service's log carries no password", seam.DiagLog().find("Pw-7Qz") == std::string::npos);
+    seam.Stop();
+  }
+  if (restricted) CloseHandle(restricted);
+
+  std::cout << "\n--- nothing kept ---\n";
+  const std::string secret8 = utf8(kSecret);
+  check("the password is in none of the viewer's output", tee.all().find(secret8) == std::string::npos &&
+                                                            tee.all().find("Pw-7Qz") == std::string::npos);
+  check("...nor in the host's", host.log().find("Pw-7Qz") == std::string::npos);
+  const std::wstring onDisk = find_secret_on_disk(dir);
+  check("...nor in any file of this run (the viewer's credential store included)", onDisk.empty(), utf8(onDisk));
+  WIN32_FIND_DATAW fd{};
+  HANDLE f = FindFirstFileW((viewerAppData + L"\\GNLink\\unlock_*.cred").c_str(), &fd);
+  check("no credential file was written by the viewer", f == INVALID_HANDLE_VALUE);
+  if (f != INVALID_HANDLE_VALUE) FindClose(f);
+
+  std::cout.rdbuf(tee.real);
+  check("the scratch directory is cleaned up", staging.Remove(), staging.why());
+  if (stillScreen) MFShutdown();
+  WSACleanup();
+  std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  (" << gChecks << " checks, "
+            << gFailures << " failed)\n";
+  return gFailures == 0 ? 0 : 1;
+}

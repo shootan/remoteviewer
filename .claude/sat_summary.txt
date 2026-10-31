@@ -1,0 +1,11 @@
+FULL_BUILD_EXIT=0
+errors=0
+recovery run1 EXIT=0 fails=0 giveups=6
+recovery run2 EXIT=0 fails=0 giveups=6
+recovery run3 EXIT=0 fails=0 giveups=6
+recovery run4 EXIT=0 fails=0 giveups=6
+recovery run5 EXIT=0 fails=0 giveups=6
+shared_core2=0
+remote60_viewer_selection_gate_test                  exit=0      0s  viewer_selection_gate_test: PASS
+remote60_viewer_udp_recovery_test                    exit=0     60s  viewer_udp_recovery_test: PASS
+--- summary: 39 ok / 1 not ok

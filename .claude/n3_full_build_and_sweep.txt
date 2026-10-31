@@ -1,0 +1,5 @@
+FULL_BUILD_EXIT=0
+errors=0
+remote60_viewer_selection_gate_test                  exit=0      1s  viewer_selection_gate_test: PASS
+remote60_viewer_udp_recovery_test                    exit=1     62s  viewer_udp_recovery_test: FAIL (1)
+--- summary: 38 ok / 2 not ok

@@ -1,0 +1,33 @@
+--- a/docs/history.md
++++ b/docs/history.md
+@@ -13608,11 +13608,11 @@
+ - Finding-3: HostPowerKeepalive 의 stream-start wake 는 입력 스위치와 별도로 synthetic mouse 이동/모니터 전원 broadcast 를 호출하며 display/system execution-state 요청도 있다. 생성자 Apply(false)는 인자 파싱 전 실행된다. 과거 실제 커서/모니터 반영·호출 횟수는 미확인으로 유지한다. 기본 ON·로컬 시작 전용·원격 변경 불가인 중앙 전원 정책과 효과 직전 차단을 설계하며, 테스트는 입력과 전원 양쪽 OFF/기록 경계를 고정한다. 단순 wake 함수 차단만으로 power 효과0을 주장하지 않는다. 실 Host 스트리밍 EVIDENCE 의 안전한 재확인 대기 범위에 반영하고 9개 시험 보류·기존 prelogin 실행 금지를 유지한다.
+ - 다음: 기존 작업용1(Host 시험 전수 확인)·작업용2(PC e2e) 창구에서 안전 하네스/record-only sink 후보와 mode 별 OS 효과 경계를 고정해 전문 검토한다. 현 시험의 금지는 유지하며 비해당 안전 작업은 계속한다. 이 두 파일만 Git MCP commit, 단독 push 없음.
+ 
+-### 2026-10-29 시험 안전 하네스 보수·독립 검증 완료 (안전 Finding 후속, 시험 코드 — 제품 출하 아님)
+-- 범위: 2026-10-28 안전 Finding(시험 Host 입력 주입 기본 ON·stream-start wake·전원 유지)의 **시험 하네스 보수**. 정본 `.claude/codex_test_injection_finding.md`, 시험 코드는 `spike/host-admission-r3`(ka-r3) d9a3a91 → ccaf745 (R2 통합 때 main 으로 온다).
+-- 제품 변경(같은 브랜치, Codex SOURCE OK): `--host-power-management on|off`(명령줄 전용, 기본 on, 첫 효과 전 bind) — off 면 실행 상태 요청·display wake·monitor-power broadcast 0. OS 입력 효과(SendInput·입력 PostMessage·SetCursorPos·IME·AttachThreadInput·UIA 쓰기·SetThreadExecutionState)를 `os_input_effects.hpp` 경계로 모음. 시험 전용 build `GNLinkStreamInputRecordTest` 는 기록만 하고 수행하지 않으며 출하 gate 가 그 marker 를 거부.
+-- 시험 Host 표준: `--input-injection-mode none --host-power-management off`, 해당 launch 의 두 OFF 줄 전 연결 0, 실행 중 재판정, 종료→EOF→최종 snapshot 판정, kill-on-close job, 저장소 test root 안 소유 fixture. 실제 입력이 주제인 4개 시험은 기본 REFUSED.
+-- 검증용 독립 실행(`.claude/verify_inj/VERIFY_RECORD_ba2eaf2.md`): 일반 8 + admission(product-client·real-directory) **9/9 ALL PASS**, 19 Host launch 전부 OFF 최종 판정 확인(r1, b8dcc93) · 기록 전용 e2e **12/0**, fatal **26/0**(r2, ccaf745 — r1 의 FAIL/INVALID 는 시험 판독·환경 결함으로 확인 후 보수). Codex 구성 단위 EVIDENCE OK(`codex_inj_general_evidence_r1.md`, `codex_inj_record_fatal_evidence_r2.md`).
+-- 경계 사고 기록(보수됨): 시험·출하 gate self-test 가 %TEMP% 에 만들고 지우던 경로(runtime test 9회·gate self-test 도구 호출 43회/8 세션, 실제 경로·삭제 결과 미확인) → 저장소 test root 의 새 run 폴더로 바꾸고 junction 은 들어가지 않음.
++### 2026-10-29 시험 안전 경계·하네스 보수·독립 검증 완료 (안전 Finding 후속 — 제품 출하 아님)
++- 범위: 2026-10-28 안전 Finding(시험 Host 입력 주입 기본 ON·stream-start wake·전원 유지)의 **제품 안전 경계·시험 하네스 보수**. 정본 `.claude/codex_test_injection_finding.md`, 구현은 `spike/host-admission-r3`(ka-r3) d9a3a91 → ccaf745 (R2 통합 때 main 으로 온다).
++- 제품 변경(같은 브랜치, Codex SOURCE OK): `--host-power-management on|off`(명령줄 전용, 기본 on, 첫 효과 전 bind) — off 면 실행 상태 요청·display wake·monitor-power broadcast 0. OS 입력·전원 API(SendInput·입력 PostMessage·SetCursorPos·IME·AttachThreadInput·UIA SetValue·SetThreadExecutionState)를 `os_input_effects.hpp` 경계로 모음. 시험 전용 build `GNLinkStreamInputRecordTest` 는 해당 API 효과를 기록만 하고 수행하지 않으며 출하 gate 가 그 marker 를 거부.
++- 일반 시험 Host 표준: `--input-injection-mode none --host-power-management off`, 해당 launch 의 두 OFF 줄 전 연결 0, 실행 중 재판정, 종료→EOF→최종 snapshot 판정, kill-on-close job, 저장소 test root 안 소유 fixture. record-only·fatal 은 별도 검수한 선언/gate·효과·수명 조건을 적용한다. 실제 입력이 주제인 4개 시험은 기본 REFUSED.
++- 검증용 독립 실행(`.claude/verify_inj/VERIFY_RECORD_ba2eaf2.md`): 일반 8종(admission 2모드)의 **9개 명령 ALL PASS**, 19 Host launch 전부 OFF 최종 판정 확인(r1, b8dcc93) · 기록 전용 e2e **12/0**, fatal **26/0**(r2, ccaf745). r1 FAIL/INVALID 이력은 보존하고 판독·환경 보수 후 r2 통과로 구분한다(record r1 Host 원문은 삭제돼 세부 재구성 불가). Codex 구성 단위 EVIDENCE OK(`codex_inj_general_evidence_r1.md`, `codex_inj_record_fatal_evidence_r2.md`).
++- 경계 사고 기록(코드 보수, 과거 미확인 유지): 저장소 밖 %TEMP% 생성·cleanup 경로(runtime fixture 작업용 9회 실행 보고·생성/삭제 시도 27회, gate self-test 도구 호출 43회/8 세션; 실제 전체 경로·개별 생성/삭제 결과 미확인) → 저장소 test root 의 새 run 폴더로 바꾸고 junction 은 진입 전에 제외한다. 도구 호출 수·check 수·실제 실행/정리 결과를 구분한다.
+ - 남은 것(이번 관문 밖): 실제 입력 4개 시험의 record-sink 전환, `viewer_prelogin_login_e2e` 재설계(사용자 재개 전 실행 금지 유지), 게시본 구 Host(--old-host) 실행 미검증, PS/LK/APK 의 안전 재확인과 PC·AVD 실기 EVIDENCE, R2 통합·출하.
+-- 제품/테스트/문서: 문서(이 항목·작업목록 한 줄). 제품·시험 코드는 브랜치에 있고 main 반영은 R2 통합에서.
++- 변경 파일: docs/history.md·docs/작업목록.md·docs/구현계획.md(진행 체크만). 제품·시험 코드는 기존 브랜치에 있고 main 반영은 R2 통합에서.
+--- a/docs/구현계획.md
++++ b/docs/구현계획.md
+@@ -1913,3 +1913,9 @@
+ - [x] r2 서버: 인증 → await → 부작용 경합(본문 대기·KDF 대기) 재확인 (검수 대기)
+ - [ ] NAS: 환경변수(`REMOTE60_DIR_ADMIN_PORT=29182`, `REMOTE60_DIR_ADMIN_KEY`) 추가·재시작 (NAS 담당)
+ - [ ] 메인 서버와의 실제 연동 확인
++
++## 시험 안전 경계·하네스 — 진행
++- [x] INJ 브랜치 안전 경계·하네스 보수 및 독립 구성 단위 검증(일반 8종·record·fatal)
++- [ ] INJ 실제 입력 4개 시험의 record-sink 전환
++- [ ] INJ viewer_prelogin_login_e2e 재설계(사용자 명시 재개 전 실행 금지)
++- [ ] INJ R2 통합·출하 및 남은 실기 안전 재확인

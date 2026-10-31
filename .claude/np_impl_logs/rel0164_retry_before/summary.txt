@@ -1,0 +1,22 @@
+﻿exe: C:\work\gnlink-wt\rel-0164-testbuild\apps\native_poc\Release\remote60_directory_retry_test.exe  sha256: 825D8F7B8656C010723CE030BB024D7E98E2A9C527FB16BC9BC26A5FB026531D
+run  1 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run  2 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run  3 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run  4 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run  5 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run  6 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run  7 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run  8 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run  9 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run 10 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run 11 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run 12 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run 13 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run 14 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run 15 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run 16 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run 17 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run 18 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run 19 rc=0 PASS=176 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+run 20 rc=0 PASS=177 FAIL=0 single-use-FAIL=0 | PASS  ...and the capability is single use
+TOTAL single-use FAIL in 0 of 20 runs; other FAIL lines: 0

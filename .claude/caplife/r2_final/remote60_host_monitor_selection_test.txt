@@ -1,0 +1,24 @@
+﻿
+--- two screens, the second picked (id=1), then only one attached ---
+PASS  with both attached the picked screen is found where it is (id=1)  found index=1
+PASS  once it is gone the capture falls back to the primary (id=0), not a retry of the missing one  fell-back index=0
+
+--- a display reconfiguration in progress: nothing enumerated ---
+PASS  absence is not established: no fallback, the existing retry keeps aiming at the same screen  unconfirmed index=0
+
+--- the picked screen is attached but its index moved ---
+PASS  three screens, the middle one unplugged: the picked third is found at its new index 1  found index=1
+
+--- a screen still listed but its capture failing is not this function's case ---
+PASS  listed = Found: an attach failure there is the caller's transient retry, not a fallback  found index=1
+
+--- nothing picked ---
+PASS  no selection: the primary as before  no-selection index=0
+
+--- the fallback is the first listed screen ---
+PASS  no primary flagged: the first (leftmost) screen  fell-back index=0
+
+--- not reverted ---
+PASS  the old screen plugged back in: still the primary (id=0)  found index=0
+
+RESULT: ALL PASS  (8 checks, 0 failed)

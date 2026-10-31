@@ -1,0 +1,396 @@
+﻿mode: host in --prelogin ("Windows 로그인")
+PASS  the fake directory starts
+PASS  the test's own target and decoy windows are up
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r6 V2: the worker started EXACTLY as the service starts it (--prelogin alone, the service's environment function)
+PASS  r6 V2: ...it loaded the machine record (no directory argument exists to stand in for it)
+PASS  the host registered and collected the viewer's capability from its heartbeat
+PASS  the product's window procedure owns a window
+PASS  the session toolbar is created
+PASS  the viewer's directory-authenticated Hello is answered
+
+--- PS: a still logon screen, picked after the picker ---
+[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=0.2.162 peerProcess=GNLinkStream peerVersion=unknown-awaiting-pong eventQpcUs=342712913134
+[native-video-client] secure-desktop-active=1  (a Windows security prompt is on screen; it cannot be captured, so the picture is paused)
+[native-video-client][control] seq=1 rttUs=1643 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=1 rttUs=1643 clockOffsetUs=649 clientSendUs=342712913153 hostRecvUs=342712914624 hostSendUs=342712914624 clientRecvUs=342712914796 eventQpcUs=342712914911
+[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=0.2.162 peerProcess=GNLinkStream peerVersion=0.2.162 peerVersionSource=peer-report eventQpcUs=342712915065
+[native-video-client][control] stream-state seq=1 active=0
+[native-video-client][control] seq=2 rttUs=303 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=2 rttUs=303 clockOffsetUs=12 clientSendUs=342713423928 hostRecvUs=342713424092 hostSendUs=342713424092 clientRecvUs=342713424231 eventQpcUs=342713424288
+[native-video-client] keyframe recovery retry count=1 waitedUs=526445 state=normal waitForKey=1 nextRetryUs=1000000
+[native-video-client][control] keyframe-request seq=1 reason=7
+[native-video-client][input-p0] windowUs=1007924 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=3 rttUs=519 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=3 rttUs=519 clockOffsetUs=-3 clientSendUs=342713936937 hostRecvUs=342713937193 hostSendUs=342713937193 clientRecvUs=342713937456 eventQpcUs=342713937553
+
+--- PS contrast: a still screen that gives no frame at all ---
+[native-video-client][control] stream-state seq=2 active=0
+[native-video-client] keyframe recovery retry count=2 waitedUs=1530148 state=normal waitForKey=1 nextRetryUs=2000000
+[native-video-client][control] seq=4 rttUs=366 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=4 rttUs=366 clockOffsetUs=-26 clientSendUs=342714443224 hostRecvUs=342714443381 hostSendUs=342714443381 clientRecvUs=342714443590 eventQpcUs=342714443643
+[native-video-client][control] keyframe-request seq=2 reason=7
+[native-video-client][input-p0] windowUs=1002508 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=5 rttUs=307 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=5 rttUs=307 clockOffsetUs=20 clientSendUs=342714954761 hostRecvUs=342714954935 hostSendUs=342714954935 clientRecvUs=342714955068 eventQpcUs=342714955119
+[native-video-client][control] seq=6 rttUs=514 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=6 rttUs=514 clockOffsetUs=-22 clientSendUs=342715469908 hostRecvUs=342715470143 hostSendUs=342715470143 clientRecvUs=342715470422 eventQpcUs=342715470511
+[native-video-client][input-p0] windowUs=1011869 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=7 rttUs=392 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=7 rttUs=392 clockOffsetUs=-43 clientSendUs=342715982268 hostRecvUs=342715982421 hostSendUs=342715982421 clientRecvUs=342715982660 eventQpcUs=342715982750
+[native-video-client] keyframe recovery retry count=3 waitedUs=3535841 state=normal waitForKey=1 nextRetryUs=2000000
+[native-video-client][control] keyframe-request seq=3 reason=7
+[native-video-client][control] seq=8 rttUs=302 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=8 rttUs=302 clockOffsetUs=18 clientSendUs=342716496101 hostRecvUs=342716496270 hostSendUs=342716496270 clientRecvUs=342716496403 eventQpcUs=342716496476
+[native-video-client][input-p0] windowUs=1012073 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=9 rttUs=299 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=9 rttUs=299 clockOffsetUs=18 clientSendUs=342717010130 hostRecvUs=342717010298 hostSendUs=342717010298 clientRecvUs=342717010429 eventQpcUs=342717010504
+[native-video-client][control] stream-state seq=3 active=1
+[native-video-client][control] seq=10 rttUs=253 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=10 rttUs=253 clockOffsetUs=16 clientSendUs=342717522023 hostRecvUs=342717522166 hostSendUs=342717522166 clientRecvUs=342717522276 eventQpcUs=342717522361
+[native-video-client][input-p0] windowUs=1010919 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=11 rttUs=475 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=11 rttUs=475 clockOffsetUs=40 clientSendUs=342718037484 hostRecvUs=342718037762 hostSendUs=342718037762 clientRecvUs=342718037959 eventQpcUs=342718038076
+[native-video-client] keyframe recovery retry count=4 waitedUs=5563890 state=normal waitForKey=1 nextRetryUs=2000000
+[native-video-client][control] keyframe-request seq=4 reason=7
+[native-video-client][control] seq=12 rttUs=333 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=12 rttUs=333 clockOffsetUs=-13 clientSendUs=342718539354 hostRecvUs=342718539507 hostSendUs=342718539507 clientRecvUs=342718539687 eventQpcUs=342718539761
+[native-video-client][input-p0] windowUs=1001702 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=13 rttUs=449 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=13 rttUs=449 clockOffsetUs=63 clientSendUs=342719053492 hostRecvUs=342719053780 hostSendUs=342719053780 clientRecvUs=342719053941 eventQpcUs=342719054011
+[native-video-client][control] seq=14 rttUs=366 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=14 rttUs=366 clockOffsetUs=-19 clientSendUs=342719554831 hostRecvUs=342719554995 hostSendUs=342719554995 clientRecvUs=342719555197 eventQpcUs=342719555291
+[native-video-client][input-p0] windowUs=1012747 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=15 rttUs=329 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=15 rttUs=329 clockOffsetUs=12 clientSendUs=342720065194 hostRecvUs=342720065371 hostSendUs=342720065371 clientRecvUs=342720065523 eventQpcUs=342720065649
+[native-video-client] keyframe recovery retry count=5 waitedUs=7587159 state=normal waitForKey=1 nextRetryUs=[native-video-client][control] keyframe-request seq=20000005
+ reason=7
+[native-video-client][control] seq=16 rttUs=266 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=16 rttUs=266 clockOffsetUs=3 clientSendUs=342720577149 hostRecvUs=342720577285 hostSendUs=342720577285 clientRecvUs=342720577415 eventQpcUs=342720577481
+[native-video-client][input-p0] windowUs=1007859 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=17 rttUs=283 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=17 rttUs=283 clockOffsetUs=23 clientSendUs=342721090385 hostRecvUs=342721090550 hostSendUs=342721090550 clientRecvUs=342721090668 eventQpcUs=342721090732
+[native-video-client][control] seq=18 rttUs=272 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=18 rttUs=272 clockOffsetUs=19 clientSendUs=342721591454 hostRecvUs=342721591609 hostSendUs=342721591609 clientRecvUs=342721591726 eventQpcUs=342721591832
+[native-video-client][input-p0] windowUs=1015156 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=19 rttUs=542 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=19 rttUs=542 clockOffsetUs=55 clientSendUs=342722103747 hostRecvUs=342722104073 hostSendUs=342722104073 clientRecvUs=342722104289 eventQpcUs=342722104413
+[native-video-client] keyframe recovery retry count=6 waitedUs=9609233 state=normal waitForKey=1 nextRetryUs=2000000
+[native-video-client][control] keyframe-request seq=6 reason=7
+[native-video-client][control] seq=20 rttUs=216 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=20 rttUs=216 clockOffsetUs=10 clientSendUs=342722615724 hostRecvUs=342722615842 hostSendUs=342722615842 clientRecvUs=342722615940 eventQpcUs=342722615995
+[native-video-client][input-p0] windowUs=1009693 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=21 rttUs=298 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=21 rttUs=298 clockOffsetUs=11 clientSendUs=342723129814 hostRecvUs=342723129974 hostSendUs=342723129974 clientRecvUs=342723130112 eventQpcUs=342723130187
+[native-video-client][control] seq=22 rttUs=418 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=22 rttUs=418 clockOffsetUs=-37 clientSendUs=342723633696 hostRecvUs=342723633868 hostSendUs=342723633868 clientRecvUs=342723634114 eventQpcUs=342723634192
+[native-video-client][input-p0] windowUs=1006281 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=23 rttUs=555 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=23 rttUs=555 clockOffsetUs=0 clientSendUs=342724137315 hostRecvUs=342724137593 hostSendUs=342724137593 clientRecvUs=342724137870 eventQpcUs=342724137942
+[native-video-client] keyframe recovery retry count=7 waitedUs=11613294 state=normal waitForKey=1 nextRetryUs=2000000
+[native-video-client][control] keyframe-request seq=7 reason=7
+[native-video-client][control] seq=24 rttUs=570 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=24 rttUs=570 clockOffsetUs=-138 clientSendUs=342724651879 hostRecvUs=342724652026 hostSendUs=342724652026 clientRecvUs=342724652449 eventQpcUs=342724652507
+[native-video-client][input-p0] windowUs=1012178 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=25 rttUs=318 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=25 rttUs=318 clockOffsetUs=3 clientSendUs=342725165032 hostRecvUs=342725165194 hostSendUs=342725165194 clientRecvUs=342725165350 eventQpcUs=342725165432
+PASS  PS contrast: NOTHING IS SHOWN (no frame from a capture that gives none)  0 frames
+PASS  PS contrast: the library's duplication remake ran ("duplication made anew")  9 remakes
+PASS  PS contrast: ...and gave up, bounded ("reacquire gave up after 3")  3 give-ups
+PASS  PS contrast: the host's asks stop at their bound (3/3 reached, never 4)  3 asks
+[native-video-client][control] seq=26 rttUs=301 hostQueueUs=1 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=26 rttUs=301 clockOffsetUs=3 clientSendUs=342725668037 hostRecvUs=342725668190 hostSendUs=342725668191 clientRecvUs=342725668338 eventQpcUs=342725668443
+[native-video-client][input-p0] windowUs=1000284 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=27 rttUs=360 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=27 rttUs=360 clockOffsetUs=-2 clientSendUs=342726178410 hostRecvUs=342726178588 hostSendUs=342726178588 clientRecvUs=342726178770 eventQpcUs=342726178879
+[native-video-client] keyframe recovery retry count=8 waitedUs=13638608 state=normal waitForKey=[native-video-client][control] keyframe-request seq=1 nextRetryUs=8 reason=20000007
+
+[native-video-client][control] seq=28 rttUs=284 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=28 rttUs=284 clockOffsetUs=11 clientSendUs=342726689244 hostRecvUs=342726689397 hostSendUs=342726689397 clientRecvUs=342726689528 eventQpcUs=342726689591
+[native-video-client][input-p0] windowUs=1010375 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=29 rttUs=328 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=29 rttUs=328 clockOffsetUs=18 clientSendUs=342727193292 hostRecvUs=342727193474 hostSendUs=342727193474 clientRecvUs=342727193620 eventQpcUs=342727193696
+[native-video-client][control] seq=30 rttUs=590 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=30 rttUs=590 clockOffsetUs=65 clientSendUs=342727703813 hostRecvUs=342727704173 hostSendUs=342727704173 clientRecvUs=342727704403 eventQpcUs=342727704477
+[native-video-client][input-p0] windowUs=1012018 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=31 rttUs=300 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=31 rttUs=300 clockOffsetUs=-11 clientSendUs=342728205095 hostRecvUs=342728205234 hostSendUs=342728205234 clientRecvUs=342728205395 eventQpcUs=342728205458
+[native-video-client] keyframe recovery retry count=9 waitedUs=15665999 state=normal waitForKey=1 nextRetryUs=20[native-video-client][control] keyframe-request seq=000009
+ reason=7
+[native-video-client][control] seq=32 rttUs=400 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=32 rttUs=400 clockOffsetUs=-27 clientSendUs=342728717108 hostRecvUs=342728717281 hostSendUs=342728717281 clientRecvUs=342728717508 eventQpcUs=342728717602
+[native-video-client][input-p0] windowUs=1014620 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=33 rttUs=293 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=33 rttUs=293 clockOffsetUs=12 clientSendUs=342729218436 hostRecvUs=342729218595 hostSendUs=342729218595 clientRecvUs=342729218729 eventQpcUs=342729218816
+PASS  PS contrast: ...and stay stopped (no new ask in the next 4 s: no loop)  3 asks now
+[native-video-client][control] stream-state seq=4 active=0
+[native-video-client][control] seq=34 rttUs=324 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=34 rttUs=324 clockOffsetUs=15 clientSendUs=342729731990 hostRecvUs=342729732167 hostSendUs=342729732167 clientRecvUs=342729732314 eventQpcUs=342729732382
+[native-video-client][input-p0] windowUs=1012136 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=35 rttUs=387 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=35 rttUs=387 clockOffsetUs=0 clientSendUs=342730245819 hostRecvUs=342730246012 hostSendUs=342730246012 clientRecvUs=342730246206 eventQpcUs=342730246302
+[native-video-client] keyframe recovery retry count=10 waitedUs=17691073 state=normal waitForKey=1 nextRetryUs=2000000
+[native-video-client][control] keyframe-request seq=10 reason=7
+[native-video-client][control] seq=36 rttUs=270 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=36 rttUs=270 clockOffsetUs=23 clientSendUs=342730760477 hostRecvUs=342730760635 hostSendUs=342730760635 clientRecvUs=342730760747 eventQpcUs=342730760824
+[native-video-client][input-p0] windowUs=1015052 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=37 rttUs=265 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=37 rttUs=265 clockOffsetUs=19 clientSendUs=342731262817 hostRecvUs=342731262969 hostSendUs=342731262969 clientRecvUs=342731263082 eventQpcUs=342731263179
+[native-video-client][control] seq=38 rttUs=269 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=38 rttUs=269 clockOffsetUs=18 clientSendUs=342731765342 hostRecvUs=342731765495 hostSendUs=342731765495 clientRecvUs=342731765611 eventQpcUs=342731765681
+[native-video-client][input-p0] windowUs=1004687 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=39 rttUs=270 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=39 rttUs=270 clockOffsetUs=7 clientSendUs=342732280063 hostRecvUs=342732280205 hostSendUs=342732280205 clientRecvUs=342732280333 eventQpcUs=342732280395
+[native-video-client] keyframe recovery retry count=11 waitedUs=19693875 state=normal waitForKey=1 nextRetryUs=2000000
+[native-video-client][control] keyframe-request seq=11 reason=7
+[native-video-client][control] seq=40 rttUs=293 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=40 rttUs=293 clockOffsetUs=12 clientSendUs=342732791975 hostRecvUs=342732792134 hostSendUs=342732792134 clientRecvUs=342732792268 eventQpcUs=342732792330
+[native-video-client][input-p0] windowUs=1009309 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=41 rttUs=267 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=41 rttUs=267 clockOffsetUs=13 clientSendUs=342733306171 hostRecvUs=342733306318 hostSendUs=342733306318 clientRecvUs=342733306438 eventQpcUs=342733306520
+[native-video-client][control] seq=42 rttUs=291 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=42 rttUs=291 clockOffsetUs=29 clientSendUs=342733806952 hostRecvUs=342733807127 hostSendUs=342733807127 clientRecvUs=342733807243 eventQpcUs=342733807310
+[native-video-client][input-p0] windowUs=1003059 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=43 rttUs=360 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=43 rttUs=360 clockOffsetUs=-11 clientSendUs=342734310868 hostRecvUs=342734311037 hostSendUs=342734311037 clientRecvUs=342734311228 eventQpcUs=342734311303
+[native-video-client] keyframe recovery retry count=12 waitedUs=21693879 state=normal waitForKey=1 nextRetryUs=2000000
+[native-video-client][control] keyframe-request seq=12 reason=7
+[native-video-client][control] seq=44 rttUs=265 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=44 rttUs=265 clockOffsetUs=0 clientSendUs=342734825337 hostRecvUs=342734825470 hostSendUs=342734825470 clientRecvUs=342734825602 eventQpcUs=342734825678
+[native-video-client][input-p0] windowUs=1004333 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=45 rttUs=324 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=45 rttUs=324 clockOffsetUs=11 clientSendUs=342735327478 hostRecvUs=342735327651 hostSendUs=342735327651 clientRecvUs=342735327802 eventQpcUs=342735327876
+[native-video-client][control] seq=46 rttUs=418 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=46 rttUs=418 clockOffsetUs=2 clientSendUs=342735828218 hostRecvUs=342735828429 hostSendUs=342735828429 clientRecvUs=342735828636 eventQpcUs=342735828738
+[native-video-client][input-p0] windowUs=1014302 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=47 rttUs=412 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=47 rttUs=412 clockOffsetUs=8 clientSendUs=342736343019 hostRecvUs=342736343233 hostSendUs=342736343233 clientRecvUs=342736343431 eventQpcUs=342736343524
+[native-video-client] keyframe recovery retry count=13 waitedUs=23694992 state=normal waitForKey=1 nextRetryUs=2000000
+[native-video-client][control] keyframe-request seq=13 reason=7
+[native-video-client][control] seq=48 rttUs=429 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=48 rttUs=429 clockOffsetUs=24 clientSendUs=342736845385 hostRecvUs=342736845624 hostSendUs=342736845624 clientRecvUs=342736845814 eventQpcUs=342736845894
+[native-video-client][input-p0] windowUs=1002596 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=49 rttUs=300 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=49 rttUs=300 clockOffsetUs=5 clientSendUs=342737361576 hostRecvUs=342737361731 hostSendUs=342737361731 clientRecvUs=342737361876 eventQpcUs=342737361972
+[native-video-client][control] seq=50 rttUs=346 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=50 rttUs=346 clockOffsetUs=20 clientSendUs=342737876356 hostRecvUs=342737876549 hostSendUs=342737876549 clientRecvUs=342737876702 eventQpcUs=342737876817
+[native-video-client][input-p0] windowUs=1005505 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=51 rttUs=279 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=51 rttUs=279 clockOffsetUs=16 clientSendUs=342738383057 hostRecvUs=342738383213 hostSendUs=342738383213 clientRecvUs=342738383336 eventQpcUs=342738383403
+[native-video-client] keyframe recovery retry count=14 waitedUs=25708348 state=normal waitForKey=1 nextRetryUs=2000000
+[native-video-client][control] keyframe-request seq=14 reason=7
+[native-video-client][control] seq=52 rttUs=275 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=52 rttUs=275 clockOffsetUs=18 clientSendUs=342738890146 hostRecvUs=342738890302 hostSendUs=342738890302 clientRecvUs=342738890421 eventQpcUs=342738890496
+[native-video-client][input-p0] windowUs=1008077 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=53 rttUs=401 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=53 rttUs=401 clockOffsetUs=5 clientSendUs=342739393799 hostRecvUs=342739394005 hostSendUs=342739394005 clientRecvUs=342739394200 eventQpcUs=342739394275
+[native-video-client][control] stream-state seq=5 active=1
+[native-video-client][control] seq=54 rttUs=248 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=54 rttUs=248 clockOffsetUs=12 clientSendUs=342739906919 hostRecvUs=342739907055 hostSendUs=342739907055 clientRecvUs=342739907167 eventQpcUs=342739907232
+[native-video-client][input-p0] windowUs=1013461 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=55 rttUs=251 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=55 rttUs=251 clockOffsetUs=10 clientSendUs=342740419434 hostRecvUs=342740419570 hostSendUs=342740419570 clientRecvUs=342740419685 eventQpcUs=342740419773
+[native-video-client] keyframe recovery retry count=15 waitedUs=27708917 state=normal waitForKey=1 nextRetryUs=2000000[native-video-client][control] keyframe-request seq=
+15 reason=7
+[native-video-client][control] seq=56 rttUs=322 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=56 rttUs=322 clockOffsetUs=23 clientSendUs=342740934709 hostRecvUs=342740934893 hostSendUs=342740934893 clientRecvUs=342740935031 eventQpcUs=342740935087
+[native-video-client][input-p0] windowUs=1014415 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=57 rttUs=320 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=57 rttUs=320 clockOffsetUs=0 clientSendUs=342741448314 hostRecvUs=342741448474 hostSendUs=342741448474 clientRecvUs=342741448634 eventQpcUs=342741448707
+[native-video-client][control] seq=58 rttUs=305 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=58 rttUs=305 clockOffsetUs=0 clientSendUs=342741960820 hostRecvUs=342741960972 hostSendUs=342741960972 clientRecvUs=342741961125 eventQpcUs=342741961206
+[native-video-client][input-p0] windowUs=1010960 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=59 rttUs=611 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=59 rttUs=611 clockOffsetUs=74 clientSendUs=342742475549 hostRecvUs=342742475929 hostSendUs=342742475929 clientRecvUs=342742476160 eventQpcUs=342742476243
+[native-video-client] keyframe recovery retry count=16 waitedUs=29719787 state=normal waitForKey=1 nextRetryUs=2000000
+[native-video-client][control] keyframe-request seq=16 reason=7
+[native-video-client][control] seq=60 rttUs=311 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=60 rttUs=311 clockOffsetUs=15 clientSendUs=342742981666 hostRecvUs=342742981837 hostSendUs=342742981837 clientRecvUs=342742981977 eventQpcUs=342742982062
+[native-video-client][input-p0] windowUs=1006535 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=61 rttUs=349 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=61 rttUs=349 clockOffsetUs=22 clientSendUs=342743497707 hostRecvUs=342743497904 hostSendUs=342743497904 clientRecvUs=342743498056 eventQpcUs=342743498129
+[native-video-client][control] seq=62 rttUs=315 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=62 rttUs=315 clockOffsetUs=9 clientSendUs=342744012429 hostRecvUs=342744012596 hostSendUs=342744012596 clientRecvUs=342744012744 eventQpcUs=342744012838
+[native-video-client][input-p0] windowUs=1014280 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=63 rttUs=275 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=63 rttUs=275 clockOffsetUs=-5 clientSendUs=342744516564 hostRecvUs=342744516696 hostSendUs=342744516696 clientRecvUs=342744516839 eventQpcUs=342744516925
+[native-video-client] keyframe recovery retry count=17 waitedUs=31744321 state=normal waitForKey=1 nextRetryUs=2000000
+[native-video-client][control] keyframe-request seq=17 reason=7
+[native-video-client][control] seq=64 rttUs=307 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=64 rttUs=307 clockOffsetUs=6 clientSendUs=342745029729 hostRecvUs=342745029889 hostSendUs=342745029889 clientRecvUs=342745030036 eventQpcUs=342745030114
+[native-video-client][input-p0] windowUs=1003145 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=65 rttUs=345 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=65 rttUs=345 clockOffsetUs=25 clientSendUs=342745544935 hostRecvUs=342745545133 hostSendUs=342745545133 clientRecvUs=342745545280 eventQpcUs=342745545379
+[native-video-client][control] seq=66 rttUs=276 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=66 rttUs=276 clockOffsetUs=8 clientSendUs=342746056299 hostRecvUs=342746056445 hostSendUs=342746056445 clientRecvUs=342746056575 eventQpcUs=342746056664
+[native-video-client][input-p0] windowUs=1006680 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=67 rttUs=545 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=67 rttUs=545 clockOffsetUs=5 clientSendUs=342746571042 hostRecvUs=342746571320 hostSendUs=342746571320 clientRecvUs=342746571587 eventQpcUs=342746571648
+[native-video-client] keyframe recovery retry count=18 waitedUs=33764457 state=normal waitForKey=[native-video-client][control] keyframe-request seq=1 nextRetryUs=182000000
+ reason=7
+[native-video-client][control] seq=68 rttUs=442 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=68 rttUs=442 clockOffsetUs=-20 clientSendUs=342747083645 hostRecvUs=342747083846 hostSendUs=342747083846 clientRecvUs=342747084087 eventQpcUs=342747084187
+[native-video-client][input-p0] windowUs=1014564 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+PASS  PS contrast: A NEW SOURCE (idle detach -> reattach) GETS A NEW BUDGET (asks again, from 1/3)  3 new asks
+PASS  PS contrast: ...bounded again (3 at most for that source, never 4)  3 new asks
+PASS  PS contrast: the worker is still serving
+PASS  PS: the worker never asked for WGC before login (r10 T2 path not taken)
+    host: full-frame asks=6 dxgi reacquire delivered=0 cache-cleared=0 idle-detach=1
+    host| 10-26 15:41:39.274 [native-video-host][control] stream-state seq=1 active=0
+
+    host| 10-26 15:41:39.338 [native-video-host] desktop_backend=dxgi capture=1920x1080
+
+    host| 10-26 15:41:39.494 [native-video-host] desktop_backend=dxgi capture-started=1 acquireTimeoutMs=8 acquireIdleSleepUs=2000 d3dMt=off
+
+    host| 10-26 15:41:39.494 [native-video-host][desktop] input desktop <first look> -> Winlogon desktopGen=0
+
+    host| 10-26 15:41:39.494 [native-video-host] stream inactive
+
+    host| 10-26 15:41:40.497 [native-video-host] dxgi-acquire acquires=0 timeouts=122 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:40.787 [native-video-host][control] stream-state seq=2 active=0
+
+    host| 10-26 15:41:41.507 [native-video-host] dxgi-acquire acquires=0 timeouts=121 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:42.507 [native-video-host] dxgi-acquire acquires=0 timeouts=120 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:43.509 [native-video-host] dxgi-acquire acquires=0 timeouts=120 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:43.773 [native-video-host][control] stream-state seq=3 active=1
+
+    host| 10-26 15:41:43.775 [native-video-host] stream active; forcing keyframe
+
+    host| 10-26 15:41:43.842 [native-video-host] full-frame ask=1/3 episode=1 desktopGen=0 streamGen=1 epoch=1 source=1 via=dxgi from=kick reason=nothing-cached
+
+    host| 10-26 15:41:43.997 [native-video-host] full-frame reacquire: duplication made anew attempt=1
+
+    host| 10-26 15:41:44.159 [native-video-host] full-frame reacquire: duplication made anew attempt=2
+
+    host| 10-26 15:41:44.310 [native-video-host] full-frame reacquire: duplication made anew attempt=3
+
+    host| 10-26 15:41:44.463 [native-video-host] full-frame reacquire gave up after 3 duplications (no acquire)
+
+    host| 10-26 15:41:44.513 [native-video-host] dxgi-acquire acquires=0 timeouts=122 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:44.931 [native-video-host] full-frame ask=2/3 episode=1 desktopGen=0 streamGen=1 epoch=1 source=1 via=dxgi from=kick reason=nothing-cached
+
+    host| 10-26 15:41:45.088 [native-video-host] full-frame reacquire: duplication made anew attempt=1
+
+    host| 10-26 15:41:45.243 [native-video-host] full-frame reacquire: duplication made anew attempt=2
+
+    host| 10-26 15:41:45.397 [native-video-host] full-frame reacquire: duplication made anew attempt=3
+
+    host| 10-26 15:41:45.513 [native-video-host] dxgi-acquire acquires=0 timeouts=119 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:45.557 [native-video-host] full-frame reacquire gave up after 3 duplications (no acquire)
+
+    host| 10-26 15:41:45.934 [native-video-host] full-frame ask=3/3 episode=1 desktopGen=0 streamGen=1 epoch=1 source=1 via=dxgi from=kick reason=nothing-cached
+
+    host| 10-26 15:41:46.092 [native-video-host] full-frame reacquire: duplication made anew attempt=1
+
+    host| 10-26 15:41:46.248 [native-video-host] full-frame reacquire: duplication made anew attempt=2
+
+    host| 10-26 15:41:46.408 [native-video-host] full-frame reacquire: duplication made anew attempt=3
+
+    host| 10-26 15:41:46.524 [native-video-host] dxgi-acquire acquires=0 timeouts=124 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:46.563 [native-video-host] full-frame reacquire gave up after 3 duplications (no acquire)
+
+    host| 10-26 15:41:47.525 [native-video-host] dxgi-acquire acquires=0 timeouts=116 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:48.525 [native-video-host] dxgi-acquire acquires=0 timeouts=117 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:49.530 [native-video-host] dxgi-acquire acquires=0 timeouts=121 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:50.541 [native-video-host] dxgi-acquire acquires=0 timeouts=121 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:51.541 [native-video-host] dxgi-acquire acquires=0 timeouts=116 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:52.544 [native-video-host] dxgi-acquire acquires=0 timeouts=120 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:53.547 [native-video-host] dxgi-acquire acquires=0 timeouts=121 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:54.547 [native-video-host] dxgi-acquire acquires=0 timeouts=120 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:55.547 [native-video-host] dxgi-acquire acquires=0 timeouts=120 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:55.795 [native-video-host][control] stream-state seq=4 active=0
+
+    host| 10-26 15:41:55.802 [native-video-host] stream inactive
+
+    host| 10-26 15:41:56.547 [native-video-host] dxgi-acquire acquires=0 timeouts=115 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:57.547 [native-video-host] dxgi-acquire acquires=0 timeouts=120 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:58.547 [native-video-host] dxgi-acquire acquires=0 timeouts=120 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:41:59.559 [native-video-host] dxgi-acquire acquires=0 timeouts=121 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:42:00.559 [native-video-host] dxgi-acquire acquires=0 timeouts=117 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:42:00.812 [native-video-host] capture detached (idle)
+
+    host| 10-26 15:42:05.799 [native-video-host][control] stream-state seq=5 active=1
+
+    host| 10-26 15:42:05.807 [native-video-host] desktop_backend=dxgi capture-started=1 acquireTimeoutMs=8 acquireIdleSleepUs=2000 d3dMt=off
+
+    host| 10-26 15:42:05.808 [native-video-host] capture reattached backend=dxgi
+
+    host| 10-26 15:42:05.809 [native-video-host] stream active; forcing keyframe
+
+    host| 10-26 15:42:06.319 [native-video-host] full-frame ask=1/3 episode=2 desktopGen=0 streamGen=1 epoch=1 source=3 via=dxgi from=kick reason=nothing-cached
+
+    host| 10-26 15:42:06.475 [native-video-host] full-frame reacquire: duplication made anew attempt=1
+
+    host| 10-26 15:42:06.630 [native-video-host] full-frame reacquire: duplication made anew attempt=2
+
+    host| 10-26 15:42:06.792 [native-video-host] full-frame reacquire: duplication made anew attempt=3
+
+    host| 10-26 15:42:06.811 [native-video-host] dxgi-acquire acquires=0 timeouts=121 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:42:06.947 [native-video-host] full-frame reacquire gave up after 3 duplications (no acquire)
+
+    host| 10-26 15:42:07.355 [native-video-host] full-frame ask=2/3 episode=2 desktopGen=0 streamGen=1 epoch=1 source=3 via=dxgi from=kick reason=nothing-cached
+
+    host| 10-26 15:42:07.509 [native-video-host] full-frame reacquire: duplication made anew attempt=1
+
+    host| 10-26 15:42:07.660 [native-video-host] full-frame reacquire: duplication made anew attempt=2
+
+    host| 10-26 15:42:07.814 [native-video-host] full-frame reacquire: duplication made anew attempt=3
+
+    host| 10-26 15:42:07.814 [native-video-host] dxgi-acquire acquires=0 timeouts=123 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:42:07.974 [native-video-host] full-frame reacquire gave up after 3 duplications (no acquire)
+
+    host| 10-26 15:42:08.362 [native-video-host] full-frame ask=3/3 episode=2 desktopGen=0 streamGen=1 epoch=1 source=3 via=dxgi from=kick reason=nothing-cached
+
+    host| 10-26 15:42:08.513 [native-video-host] full-frame reacquire: duplication made anew attempt=1
+
+    host| 10-26 15:42:08.674 [native-video-host] full-frame reacquire: duplication made anew attempt=2
+
+    host| 10-26 15:42:08.825 [native-video-host] full-frame reacquire: duplication made anew attempt=3
+
+    host| 10-26 15:42:08.825 [native-video-host] dxgi-acquire acquires=0 timeouts=120 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:42:08.980 [native-video-host] full-frame reacquire gave up after 3 duplications (no acquire)
+
+    host| 10-26 15:42:09.830 [native-video-host] dxgi-acquire acquires=0 timeouts=122 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:42:10.840 [native-video-host] dxgi-acquire acquires=0 timeouts=121 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:42:11.841 [native-video-host] dxgi-acquire acquires=0 timeouts=120 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+    host| 10-26 15:42:12.843 [native-video-host] dxgi-acquire acquires=0 timeouts=118 dxgiContentAcquires=0 dxgiPointerOnly=0 coalesced=0 accumTotal=0 accumMax=0 holdAvgUs=0 holdMaxUs=0
+
+PASS  the worker completes a round trip with the host
+PASS  the toolbar window exists
+
+--- nothing kept ---
+PASS  the password is in none of the viewer's output
+PASS  ...nor in the host's
+PASS  ...nor in any file of this run (the viewer's credential store included)
+PASS  no credential file was written by the viewer
+PASS  the scratch directory is cleaned up
+
+RESULT: ALL PASS  (26 checks, 0 failed)

@@ -1,0 +1,60 @@
+
+--- N1: the activation's HelloAck passes the ordinary test, or it is nothing ---
+PASS  parked at the fake host
+PASS  activation arguments, an operation number, and the handshake holds the owner
+PASS  the handshake sends this activation's StandbyActivate
+PASS  invalid HelloAcks + the granted Pong: NOT activated (no invalid one counted)  state=3
+PASS  ...early SessionOver during the handshake: refused, still handed off
+PASS  ...Abandon during the handshake: refused (the session's handle stays open)
+PASS  a valid HelloAck: activated, with ITS features
+PASS  SessionOver of another operation: nothing
+PASS  SessionOver of its own: the lease has its socket again
+PASS  the arguments gone: the owner is held no more
+
+--- N1: A cancelled, then B; A's late answers; B's own Pong completes B ---
+PASS  A: activation arguments
+PASS  A cancelled: the handshake returns false, the entry is parked
+PASS  ...A's session over (Connect failed)
+PASS  B: a new operation
+PASS  A's late Pong + a late HelloAck: B is NOT activated (only B's own Pong grants)
+PASS  B's own Pong: B active, with the HelloAck's features (validated)
+
+--- events are bounded ---
+PASS  200 notes: at most 32 kept  32
+
+--- N2: the arguments outlive ReleaseAll ---
+PASS  a lease parks
+PASS  TakeActivation
+PASS  ...a second one while handed off is refused
+PASS  ReleaseAll: gone from the runner, but the slot lives on in the arguments
+PASS  ...its handshake run now: false (cancelled), nothing sent, no use after free  standby activation cancelled
+PASS  ...nothing was released at the host (handed off: the grant, if any, ends with its session)
+PASS  the arguments gone: the slot goes
+
+--- N2: a Release during the handshake wait; an early SessionOver ---
+PASS  a lease parks
+PASS  TakeActivation
+PASS  the handshake waits for the host (it never answers)
+PASS  ...early SessionOver: refused, still handed off (the pump stays off the socket)
+PASS  ...early Abandon: refused
+PASS  Release: the handshake in flight returns false at once  after 126 ms: standby activation stopped
+PASS  ...and its slot is gone with the arguments
+
+--- N2: a late SessionOver / Abandon after a new lease under the same key ---
+PASS  a lease parks
+PASS  TakeActivation (the old one)
+PASS  a NEW lease under the same key parks
+PASS  the late SessionOver of the old operation: nothing
+PASS  TakeActivation (the new one)
+PASS  ...a late SessionOver / Abandon of the old operation: refused, still handed off
+PASS  ...its session handle still open
+
+--- N2: handed off, the pump leaves the socket alone; Abandon gives it back ---
+PASS  6 s handed off: no Ping from the pump (the session's reader alone may read)  0 pings
+PASS  Abandon of its own operation: the session handle closed, the lease has its socket again
+PASS  a stale copy of the abandoned handshake: false, nothing sent  standby activation cancelled
+PASS  ...the lease pings again on its own
+PASS  ReleaseAll: every slot gone
+
+43 checks, 0 failures
+RESULT PASS

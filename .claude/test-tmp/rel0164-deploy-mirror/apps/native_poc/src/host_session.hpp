@@ -1,0 +1,258 @@
+#pragma once
+
+// Client session sockets / directory / epoch state (SocketCloser, SessionState).
+//
+// Host split refactor Phase 2-0: this state moved out of native_video_host_main.cpp verbatim so
+// it can be read on its own; the struct comment below documents role and thread ownership.
+// Phase 2 turns it into the class that owns the matching main() lambdas.
+
+#include <winsock2.h>
+#include <windows.h>
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <functional>
+#include <mutex>
+#include <string>
+#include <thread>
+
+#include "directory_client.hpp"
+#include "host_injected_input.hpp"
+#include "host_standby_table.hpp"
+#include "native_socket.hpp"
+#include "prelogin_admin_pipe.hpp"
+#include "udp_control_channel.hpp"
+
+namespace remote60::native_poc {
+
+class HostClipImageService;
+class HostFileCopyService;
+
+// main() returns from many places; a destructor is the only way to close these on every path.
+struct SocketCloser {
+  SOCKET* handle;
+  ~SocketCloser() {
+    if (handle && *handle != INVALID_SOCKET) {
+      closesocket(*handle);
+      *handle = INVALID_SOCKET;
+    }
+  }
+};
+
+// Client session plumbing (Phase 1-1 state struct): the media/control sockets and their
+// lifetime closers, the directory agent + per-session directory authentication, the session
+// epoch (bumped on every new client so stale work is fenced) with its wait, the control-ready
+// handshake epoch, the stream-active flag, and the control/reader thread handles.
+// thread: sockets are created on the main thread before the threads start; clientSock/lanSock/
+// retiredSock swap on the main thread only (the reader thread reads the handle it was given);
+// directoryAuth* under directoryAuthMu (reader + control); epoch/controlReadyEpoch/
+// streamControlActive are the cross-thread atomics (control/reader -> main).
+  // Which of the three things a Hello can be. The caller needs the distinction because a first
+  // Hello and its retransmissions are indistinguishable at the endpoint level -- and, behind a
+  // relay, so are two entirely different clients.
+  enum class DirectoryHello { Rejected, Retransmit, NewSession };
+
+struct SessionState {
+  // r12 L1: the Ready notifier (which reads directoryAgent) first, then the agent -- before member/socket
+  // destruction, including an early startup failure.
+  ~SessionState() {
+    readyNotifier.Stop();
+    directoryAgent.Stop();
+  }
+  // Directory service credentials (args or REMOTE60_DIRECTORY_* env) and the agent.
+  std::string directoryUrl;
+  std::string directoryId;
+  std::string directoryPw;
+  remote60::native_poc::directory::HostAgent directoryAgent;
+  // r11 U4 / r12 L1: the user Host's periodic Ready to the service; reads directoryAgent's status. Declared
+  // after it (destroyed before it) and stopped first by ~SessionState and shutdown_host.
+  remote60::native_poc::prelogin::UserHostReadyNotifier readyNotifier;
+  // Media sockets. lanSock is the legacy-port listener; retiredSock holds whichever socket the
+  // handshake did not choose but that still has an owner (the directory agent keeps
+  // heartbeating on it).
+  SOCKET listenSock = INVALID_SOCKET;
+  SOCKET clientSock = INVALID_SOCKET;
+  SOCKET lanSock = INVALID_SOCKET;
+  SOCKET retiredSock = INVALID_SOCKET;
+  SocketCloser lanCloser{&lanSock};
+  SocketCloser retiredCloser{&retiredSock};
+  // The port the media socket actually landed on (differs from args.bindPort on a fallback).
+  uint16_t mediaBindPort = 0;
+  // Per-session directory authentication (token + peer the directory handed us).
+  std::atomic<bool> directoryAuthenticated{false};
+  std::mutex directoryAuthMu;
+  std::string directoryToken;
+  uint32_t directoryIpNet = 0;
+  // cross-thread: viewer stream state (ControlStreamState) -> main loop.
+  std::atomic<bool> streamControlActive{true};
+  // Control channel: TCP listener + accepted socket + its thread, or the UDP control dispatcher
+  // and the reader thread that owns the UDP peer.
+  SOCKET controlListenSock = INVALID_SOCKET;
+  // The accepted control socket, and the mutex that makes its LIFETIME -- not just its value --
+  // safe to share. An atomic only publishes the handle; it cannot stop the owning thread from
+  // closing it between another thread's load and that thread's next Winsock call, and a SOCKET
+  // value is reusable the instant it closes. Every use outside the owner (currently only
+  // shutdown_host's wake-up shutdown()) holds this mutex, and the owner holds it while closing.
+  // (Ledger H-02, second pass.)
+  std::mutex controlClientSockMu;
+  SOCKET controlClientSock = INVALID_SOCKET;
+  std::thread controlThread;
+  UdpControlChannel udpControlChannel;
+  std::thread udpControlThread;
+  std::thread udpReaderThread;
+  // Session epoch: bumped per new client; waited on by the main loop until control is ready.
+  std::atomic<uint64_t> epoch{1};
+  std::atomic<uint64_t> controlReadyEpoch{0};
+  std::mutex epochMu;
+  std::condition_variable epochCv;
+
+  // --- control resume (item 8) ---
+  //
+  // A client whose control channel died but whose media socket is still carrying video asks to
+  // rebuild control on THIS session rather than starting a new one. The epoch cannot be used to
+  // hand that over: bumping it is what tells everything downstream that a different client
+  // arrived, and here it is the same one. So the resume gets its own counter, with the same
+  // shape as the epoch handover -- the reader raises it and waits, the dispatcher re-keys the
+  // channel and publishes that it is ready, and only then does the reader answer. The client
+  // repeats its request until it sees that answer, so nothing it sends can arrive before the
+  // re-key (the same discipline the Hello path already relies on).
+  std::atomic<uint64_t> controlResumeSeq{0};        // reader: a resume was accepted
+  std::atomic<uint64_t> controlResumeServedSeq{0};  // dispatcher: re-keyed and serving it
+  std::atomic<uint32_t> controlResumeId{0};         // the id both sides derive stream ids from
+  // Whether this client asked for resume in its Hello. A client that did not is never given one.
+  std::atomic<bool> controlResumeNegotiated{false};
+  // C0 stage 1: this client's accepted Hello asked for bandwidth observation. Only then are its
+  // ControlClientBandwidth messages logged; they are read for nothing else.
+  std::atomic<bool> bandwidthObserveNegotiated{false};
+  // Clipboard image v1 (direction A). Owned by main(), null when clipboard sync is off. The reader
+  // routes bulk-stream datagrams to it ahead of the control channel; the control session answers
+  // its Offer / Cancel / Status; a new epoch ends whatever transfer was running.
+  HostClipImageService* clipImage = nullptr;
+  // File copy (t-zdmsd4gb). Owned by main(), null when switched off. The reader routes the file bulk
+  // streams to it ahead of the image service; the control session answers 65~76.
+  HostFileCopyService* fileCopy = nullptr;
+  // Whether the dispatcher is inside Serve() right now. A resume is honoured only when it is
+  // not: resetting a stream that is working is the one thing this must never do, and it is also
+  // what stops a stray packet from being able to disturb a healthy session.
+  std::atomic<bool> controlServing{false};
+  // A resume has been accepted and the dispatcher is being woken out of Serve() for it.
+  // (item 8, C3 r2)
+  //
+  // Read by serve_control_session on its way out: the ordinary end of a control session turns
+  // the video stream off, and this one is not the end of anything -- the same session is being
+  // repaired and the picture must not blink. Set by the reader before it wakes the dispatcher,
+  // cleared once the answer has gone out.
+  std::atomic<bool> controlResumePending{false};
+  // capture-lifecycle r2 (Codex N2): the control session that really ended -- its Serve() returned while it was
+  // still current and no resume was pending (the same rule that turns its stream off), packed with that
+  // Serve()'s own sequence (r3: PackBackendSessionEnd). The main loop puts that owner's backend choice back to
+  // the host default, once, and drops that Serve()'s requests (host_backend_owner.hpp). Every Serve() takes
+  // the next backendServeSeq.
+  std::atomic<uint64_t> backendSessionEnded{0};
+  std::atomic<uint64_t> backendServeSeq{0};
+  // Keys and buttons this session injected as down, released by the host whenever a Serve()
+  // ends -- a resume or the end of the session. Lives here, not in Serve(), because a resume
+  // leaves one Serve() and enters the next and the marks must survive that. (RV-01)
+  InjectedInputTracker injectedInput;
+  // keepalive-r2 A: the control-only standby entries (host_standby_table.hpp). Used by the handshake loop
+  // before the first session and by the UDP reader after it -- never both at once.
+  StandbyTable standby;
+
+
+  // --- behaviour (Phase 2-3: former main() lambdas begin_session_epoch / await_control_ready) ---
+  // Open a new session epoch for a just-connected client; returns the epoch to wait on.
+  // r9 R3: the epoch whose session a directory capability admitted (0 = none). What a dispatcher may do
+  // on the strength of directory auth is decided against THIS and its own epoch -- never by the shared
+  // flag alone, which a newer session's admission sets while an older dispatcher is still running.
+  std::atomic<uint64_t> directoryAuthEpoch{0};
+
+  // An admitted Hello: a new epoch first (when it starts a session), then this session's standing, then
+  // the shared flag -- in that order, so a dispatcher of an earlier epoch can never see the newcomer's
+  // authorization as its own. `step` (tests only) is told after each write. Returns the session's epoch.
+  uint64_t AdmitHello(bool directoryAuth, bool startsSession, const std::function<void(const char*)>& step = {}) {
+    uint64_t e = epoch.load(std::memory_order_acquire);
+    if (startsSession) {
+      e = BeginEpoch();
+      if (step) step("epoch");
+    }
+    directoryAuthEpoch.store(directoryAuth ? e : 0, std::memory_order_release);
+    if (step) step("auth-epoch");
+    directoryAuthenticated.store(directoryAuth, std::memory_order_release);
+    if (step) step("auth");
+    return e;
+  }
+
+  // Directory-authenticated, for a dispatcher serving `servedEpoch` (and only if that is still the session).
+  bool DirectoryAuthenticatedFor(uint64_t servedEpoch) const {
+    return directoryAuthenticated.load(std::memory_order_acquire) &&
+           directoryAuthEpoch.load(std::memory_order_acquire) == servedEpoch &&
+           epoch.load(std::memory_order_acquire) == servedEpoch;
+  }
+
+  uint64_t BeginEpoch() {
+    SessionState& clientSession = *this;
+    const uint64_t epoch = clientSession.epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
+    // Wakes the dispatcher out of its blocking read so it can pick the new epoch up. Reset is
+    // deliberately left to that thread: doing it here would clear the queues underneath a
+    // session still being served.
+    clientSession.udpControlChannel.Close(remote60::native_poc::ControlCloseReason::SessionRollover);
+    clientSession.epochCv.notify_all();
+    EndClipImageTransfer(epoch);
+    return epoch;
+  }
+  // Set by main() next to clipImage (a callback, so nothing that includes this header has to link
+  // the image service).
+  std::function<void(uint64_t)> onClipImageSessionEnd;
+  std::function<void(uint64_t)> onFileCopySessionEnd;  // likewise for file copy
+  void EndClipImageTransfer(uint64_t newEpoch) {
+    if (onClipImageSessionEnd) onClipImageSessionEnd(newEpoch);
+    if (onFileCopySessionEnd) onFileCopySessionEnd(newEpoch);
+  }
+  // Block until the control channel has served that epoch (or the host stops).
+  void AwaitControlReady(uint64_t epoch) {
+    SessionState& clientSession = *this;
+    std::unique_lock<std::mutex> lock(clientSession.epochMu);
+    // Bounded: if the dispatcher cannot come back we answer the client anyway, because a session
+    // with video and no window list still beats one that never starts.
+    clientSession.epochCv.wait_for(lock, std::chrono::milliseconds(1500), [&] {
+      return clientSession.controlReadyEpoch.load(std::memory_order_acquire) >= epoch ||
+             clientSession.epoch.load(std::memory_order_acquire) > epoch;
+    });
+  }
+
+  // --- directory Hello classification (Phase 2-12: former main() lambdas classify_directory_hello /
+  // authorize_directory_session) ---
+  DirectoryHello ClassifyDirectoryHello(
+      const std::string& token, const sockaddr_in& peer,
+      remote60::native_poc::directory::HostAgent::PeerAuthDiag* diag = nullptr) {
+    SessionState& clientSession = *this;
+    if (token.empty()) return DirectoryHello::Rejected;
+    {
+      std::lock_guard<std::mutex> lock(clientSession.directoryAuthMu);
+      if (!clientSession.directoryToken.empty() && token == clientSession.directoryToken &&
+          peer.sin_addr.s_addr == clientSession.directoryIpNet) {
+        // A controller reconnect creates a new UDP socket/port. The already-proven opaque
+        // capability remains the session credential, while the first authenticated source IP
+        // (which can differ from the directory-observed endpoint under hairpin NAT) stays bound.
+        // This is also what makes retransmission safe: the capability itself is single-use, so
+        // without the cache the client's second Hello would be refused.
+        return DirectoryHello::Retransmit;
+      }
+    }
+    if (!clientSession.directoryAgent.AuthorizePeer(token, peer, diag)) {
+      return DirectoryHello::Rejected;
+    }
+    {
+      std::lock_guard<std::mutex> lock(clientSession.directoryAuthMu);
+      clientSession.directoryToken = token;
+      clientSession.directoryIpNet = peer.sin_addr.s_addr;
+    }
+    return DirectoryHello::NewSession;
+  }
+  bool AuthorizeDirectorySession(const std::string& token, const sockaddr_in& peer) {
+    return ClassifyDirectoryHello(token, peer) != DirectoryHello::Rejected;
+  }
+};
+
+}  // namespace remote60::native_poc

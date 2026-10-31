@@ -1,0 +1,12 @@
+{
+  "repo_path": "D:/remote/remote",
+  "files": [
+    "apps/native_poc/CMakeLists.txt",
+    "apps/native_poc/src/directory_client.cpp",
+    "apps/native_poc/src/directory_observe.hpp",
+    "apps/native_poc/src/directory_session_bootstrap.cpp",
+    "apps/native_poc/src/directory_session_client_test.cpp",
+    "apps/native_poc/src/winhttp_transport.cpp",
+    "apps/native_poc/src/winhttp_transport.hpp"
+  ]
+}

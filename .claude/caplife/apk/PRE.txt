@@ -1,0 +1,51 @@
+﻿client_session_prelogin_select_test (apk-0232 r1)
+
+--- P1/P5/P6: desktop picks at a host known to be at the logon screen ---
+PASS  P1: the session connects
+PASS  P1: the desktop pick is accepted
+FAIL  P1: an IDR is asked for (allowed at the logon screen); no WindowSelect on the wire  status=desktop_select_requested
+PASS  P1: not selected yet (the APK stays REQUESTING): no IDR has come  desktop_select_requested
+PASS  P1: a delta before the IDR does not reach the decoder and binds nothing
+PASS  P1: an IDR the decoder could not take (no surface) binds nothing: not selected, no output  desktop_select_requested
+FAIL  P1: ...and an IDR is asked for again
+FAIL  P1: the first IDR reaches the decoder
+FAIL  P1: the panel says selected (APK: ACKED) with the generation that IDR bound  desktop_select_requested gen=0
+FAIL  P1: the selection's first output is ready (APK: select_ready)
+FAIL  P1: after it, only that generation passes (a straggler of another is dropped)
+PASS  P6: a second desktop pick is accepted (a new local op)
+PASS  P6: ...not selected until a NEW IDR (the panel is no longer ACKED)  desktop_select_requested
+PASS  P6: deltas of the old generation do not complete it
+FAIL  P6: the new IDR completes it
+FAIL  P5: A then B, then the IDR: B completes, A never does
+PASS  P5: an abandoned local op: the IDR after it completes nothing, the panel does not say selected  fed=1 status=desktop_select_requested
+PASS  P1: no WindowSelect ever reached the logon-screen host
+
+--- P2: a desktop pick before the first Pong, the Pong says logon screen ---
+PASS  P2: the session connects (Pongs held)
+PASS  P2: the pick is accepted before the role is known
+FAIL  P2: after the Pong the SAME op went local: an IDR asked for, no WindowSelect sent  status=desktop_select_requested
+FAIL  P2: the IDR completes it (APK: ACKED, then ready)  desktop_select_requested
+
+--- P3: window picks at the logon screen are refused, not left waiting ---
+PASS  P3: the session connects
+FAIL  P3: known logon screen: the window pick is refused at once, nothing on the wire  status=window_select_requested
+PASS  P3: the session connects (Pongs held)
+PASS  P3: a window pick before the role is known is queued
+FAIL  P3: after the Pong it is refused (APK: FAILED, back to the list), never sent  window_select_requested
+PASS  P3: ...and the gate opens nothing for it
+
+--- P4: an ordinary host, and UAC / LockCred without PreloginV1: the ack path ---
+PASS  P4 (ordinary): the session connects
+PASS  P4 (ordinary): WindowSelect(0) on the wire, the host's answer selects (its generation)  window_selected: desktop gen=7001
+PASS  P4 (ordinary): the gate follows the host's answer, not a local bind
+PASS  P4 (UAC+LockCred): the session connects
+PASS  P4 (UAC+LockCred): WindowSelect(0) on the wire, the host's answer selects (its generation)  window_selected: desktop gen=7001
+PASS  P4 (UAC+LockCred): the gate follows the host's answer, not a local bind
+
+--- P7: a new connection to a logon-screen host ---
+PASS  P7: the session connects
+FAIL  P7: first connection: the pick completes  desktop_select_requested
+PASS  P7: the session connects
+FAIL  P7: after a reconnect: the pick completes again  desktop_select_requested
+
+RESULT: FAILED  (38 checks, 14 failed)

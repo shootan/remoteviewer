@@ -1,0 +1,284 @@
+{
+  "rev": "b11fc0d40b49e086ed3df9bcbfcaa467fd7318a2",
+  "scope": "real frozen functions/P branch with synthetic cumulative logs and virtual clock; no adb/Host/Viewer/child",
+  "hashes": {
+    "oa_avd_original.py": "e48e9d1b52ed112f93b6cf355f2925df922662bc9389af8e12ad29812e5ee19f",
+    "oa_avd_fixed.py": "c2b238d66aaaec05c77c22b730b528e5379ce0369b323e0a829c8bcc3577088b",
+    "watch_baseline_approved.patch": "a752efa7d61b72c1079da7170d1e9c4b9be0e1e60a064774a1e76a7a245aba29"
+  },
+  "rows": [
+    {
+      "case": "frozen_nonzero",
+      "original": {
+        "result": true,
+        "verdict": [
+          "3w: 30 s with no input after the first frame -- the same viewer and connection held, the picture went on",
+          true,
+          "held 30.0 s; video out 0 -> 55; test snapshot"
+        ],
+        "snapshot_calls": [],
+        "elapsed": 30.0
+      },
+      "fixed": {
+        "result": false,
+        "verdict": [
+          "3w: 30 s with no input after the first frame -- the same viewer and connection held, the picture went on",
+          false,
+          "held 30.0 s; video out 55 -> 55; test snapshot"
+        ],
+        "snapshot_calls": [
+          0,
+          30.0
+        ],
+        "elapsed": 30.0
+      },
+      "fixed_expected": false,
+      "fixed_pass": true
+    },
+    {
+      "case": "growing",
+      "original": {
+        "result": true,
+        "verdict": [
+          "3w: 30 s with no input after the first frame -- the same viewer and connection held, the picture went on",
+          true,
+          "held 30.0 s; video out 0 -> 57; test snapshot"
+        ],
+        "snapshot_calls": [],
+        "elapsed": 30.0
+      },
+      "fixed": {
+        "result": true,
+        "verdict": [
+          "3w: 30 s with no input after the first frame -- the same viewer and connection held, the picture went on",
+          true,
+          "held 30.0 s; video out 55 -> 57; test snapshot"
+        ],
+        "snapshot_calls": [
+          0,
+          30.0
+        ],
+        "elapsed": 30.0
+      },
+      "fixed_expected": true,
+      "fixed_pass": true
+    },
+    {
+      "case": "reset_then_growing",
+      "original": {
+        "result": true,
+        "verdict": [
+          "3w: 30 s with no input after the first frame -- the same viewer and connection held, the picture went on",
+          true,
+          "held 30.0 s; video out 0 -> 57; test snapshot"
+        ],
+        "snapshot_calls": [],
+        "elapsed": 30.0
+      },
+      "fixed": {
+        "result": false,
+        "verdict": [
+          "3w: 30 s with no input after the first frame -- the same viewer and connection held, the picture went on",
+          false,
+          "held 30.0 s; video out 55 -> 57; test snapshot"
+        ],
+        "snapshot_calls": [
+          0,
+          30.0
+        ],
+        "elapsed": 30.0
+      },
+      "fixed_expected": false,
+      "fixed_pass": true
+    },
+    {
+      "case": "no_baseline",
+      "original": {
+        "result": true,
+        "verdict": [
+          "3w: 30 s with no input after the first frame -- the same viewer and connection held, the picture went on",
+          true,
+          "held 30.0 s; video out 0 -> 55; test snapshot"
+        ],
+        "snapshot_calls": [],
+        "elapsed": 30.0
+      },
+      "fixed": {
+        "result": false,
+        "verdict": [
+          "3w: a readable current-pick video counter exists before the watch",
+          false,
+          "no current snapshot / pick marker / video out baseline; nothing judged as progressing"
+        ],
+        "snapshot_calls": [
+          0
+        ],
+        "elapsed": 0
+      },
+      "fixed_expected": false,
+      "fixed_pass": true
+    },
+    {
+      "case": "final_read_fail",
+      "original": {
+        "result": true,
+        "verdict": [
+          "3w: 30 s with no input after the first frame -- the same viewer and connection held, the picture went on",
+          true,
+          "held 30.0 s; video out 0 -> 55; test snapshot"
+        ],
+        "snapshot_calls": [],
+        "elapsed": 30.0
+      },
+      "fixed": {
+        "result": false,
+        "verdict": [
+          "3w: 30 s with no input after the first frame -- the same viewer and connection held, the picture went on",
+          false,
+          "held 30.0 s; video out 55 -> 55; test snapshot"
+        ],
+        "snapshot_calls": [
+          0,
+          30.0
+        ],
+        "elapsed": 30.0
+      },
+      "fixed_expected": false,
+      "fixed_pass": true
+    },
+    {
+      "case": "marker_lost",
+      "original": {
+        "result": true,
+        "verdict": [
+          "3w: 30 s with no input after the first frame -- the same viewer and connection held, the picture went on",
+          true,
+          "held 30.0 s; video out 0 -> 55; test snapshot"
+        ],
+        "snapshot_calls": [],
+        "elapsed": 30.0
+      },
+      "fixed": {
+        "result": false,
+        "verdict": [
+          "3w: 30 s with no input after the first frame -- the same viewer and connection held, the picture went on",
+          false,
+          "held 30.0 s; video out 55 -> 55; test snapshot"
+        ],
+        "snapshot_calls": [
+          0,
+          30.0
+        ],
+        "elapsed": 30.0
+      },
+      "fixed_expected": false,
+      "fixed_pass": true
+    },
+    {
+      "case": "disconnected",
+      "original": {
+        "result": false,
+        "verdict": [
+          "3w: 30 s with no input after the first frame -- the same viewer and connection held, the picture went on",
+          false,
+          "held 0.0 s; video out 0 -> 0; test snapshot"
+        ],
+        "snapshot_calls": [],
+        "elapsed": 0
+      },
+      "fixed": {
+        "result": false,
+        "verdict": [
+          "3w: 30 s with no input after the first frame -- the same viewer and connection held, the picture went on",
+          false,
+          "held 0.0 s; video out 55 -> 55; test snapshot"
+        ],
+        "snapshot_calls": [
+          0,
+          0
+        ],
+        "elapsed": 0
+      },
+      "fixed_expected": false,
+      "fixed_pass": true
+    }
+  ],
+  "p_failures": [
+    {
+      "case": "disconnect",
+      "original": {
+        "return": 0,
+        "next7": [
+          "7"
+        ]
+      },
+      "fixed": {
+        "return": 1,
+        "next7": []
+      }
+    },
+    {
+      "case": "reconnect",
+      "original": {
+        "return": 0,
+        "next7": [
+          "7"
+        ]
+      },
+      "fixed": {
+        "return": 1,
+        "next7": []
+      }
+    },
+    {
+      "case": "pick",
+      "original": {
+        "return": 0,
+        "next7": [
+          "7"
+        ]
+      },
+      "fixed": {
+        "return": 1,
+        "next7": []
+      }
+    }
+  ],
+  "snapshot_guards": [
+    {
+      "case": "unchanged",
+      "result": true,
+      "detail": "since the pick: scenes=[] status=[] picks=0 host ended=[] host new clients=0"
+    },
+    {
+      "case": "app_fail",
+      "result": false,
+      "detail": "no app snapshot: pull failed"
+    },
+    {
+      "case": "host_fail",
+      "result": false,
+      "detail": "no host snapshot: read failed"
+    },
+    {
+      "case": "host_short",
+      "result": false,
+      "detail": "the host log shrank (0 < 18 at the pick): cannot tell"
+    },
+    {
+      "case": "host_replaced",
+      "result": false,
+      "detail": "the host log does not continue the one read at the pick (replaced): cannot tell"
+    },
+    {
+      "case": "marker_lost",
+      "result": false,
+      "detail": "the pick marker is gone from the app log (rotated / replaced): cannot tell"
+    },
+    {
+      "case": "scene_changed",
+      "result": false,
+      "detail": "since the pick: scenes=['HOSTS'] status=[] picks=0 host ended=[] host new clients=0"
+    }
+  ]
+}

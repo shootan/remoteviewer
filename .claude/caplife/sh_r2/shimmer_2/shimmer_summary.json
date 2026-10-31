@@ -1,0 +1,73 @@
+[
+ {
+  "segment": "off",
+  "level": "off",
+  "method": "default",
+  "mp4": "shimmer_off.mp4",
+  "bytes": 700501,
+  "recordSeconds": 5.41,
+  "sourceFrames": [
+   1,
+   184
+  ],
+  "sourceFrameCount": 184,
+  "sourceFps": 28.7,
+  "appPathLog": [
+   "[sharpen_path] path=direct requested=off effective=off fallback=none"
+  ],
+  "outputMovedMeanAbs": 66.81
+ },
+ {
+  "segment": "A_weak_s20",
+  "level": "weak",
+  "method": "default",
+  "mp4": "shimmer_A_weak_s20.mp4",
+  "bytes": 1016633,
+  "recordSeconds": 5.9,
+  "sourceFrames": [
+   185,
+   374
+  ],
+  "sourceFrameCount": 190,
+  "sourceFps": 27.6,
+  "appPathLog": [
+   "[sharpen_path] path=sharpen gen=1 requested=weak s=0.2"
+  ],
+  "outputMovedMeanAbs": 66.07
+ },
+ {
+  "segment": "A_strong_s60",
+  "level": "strong",
+  "method": "default",
+  "mp4": "shimmer_A_strong_s60.mp4",
+  "bytes": 653264,
+  "recordSeconds": 5.34,
+  "sourceFrames": [
+   375,
+   545
+  ],
+  "sourceFrameCount": 171,
+  "sourceFps": 27.0,
+  "appPathLog": [],
+  "outputMovedMeanAbs": 40.67
+ },
+ {
+  "segment": "B_display_s60",
+  "level": "strong",
+  "method": "display",
+  "mp4": "shimmer_B_display_s60.mp4",
+  "bytes": 723546,
+  "recordSeconds": 5.75,
+  "sourceFrames": [
+   546,
+   742
+  ],
+  "sourceFrameCount": 197,
+  "sourceFps": 29.2,
+  "appPathLog": [
+   "[sharpen_display_pass] mode=1 method=display place=25.0,0.0,1920.0x1080.0 buffer=1970x1080 view=1970x1080 content=1440x8",
+   "[sharpen_path] path=sharpen gen=2 requested=strong s=0.6"
+  ],
+  "outputMovedMeanAbs": 67.87
+ }
+]

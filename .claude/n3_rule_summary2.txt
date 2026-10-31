@@ -1,0 +1,43 @@
+ok D:\remote\remote\apps\native_poc\src\viewer_udp_recovery_test.cpp (3 edits, crlf=False, bom=False)
+fakehost delayed answer via reader loop ok
+BUILD_EXIT=0
+run1 EXIT=0 viewer_udp_recovery_test: PASS fails=0
+  S17: seq=21 nacks=3 keyReq=+2 waitForKey=1
+  S18: seq=21 nacks=3 keyReq=+2 waitForKey=1
+  S19: seq=21 nacks=3 keyReq=+0 published=1
+  S20: seq=21 nacks=6 keyReq=+2 waitForKey=1
+  S21: seq=21 nacks=0 keyReq=+2 waitForKey=1
+  S22: idr=21 nacks=3 keyReq=+0 published=1
+  S23: idr=21 keyReq=+1 waitForKey=1
+run2 EXIT=0 viewer_udp_recovery_test: PASS fails=0
+  S17: seq=21 nacks=3 keyReq=+2 waitForKey=1
+  S18: seq=21 nacks=3 keyReq=+2 waitForKey=1
+  S19: seq=21 nacks=3 keyReq=+0 published=1
+  S20: seq=21 nacks=6 keyReq=+2 waitForKey=1
+  S21: seq=21 nacks=0 keyReq=+2 waitForKey=1
+  S22: idr=21 nacks=3 keyReq=+0 published=1
+  S23: idr=21 keyReq=+1 waitForKey=1
+run3 EXIT=0 viewer_udp_recovery_test: PASS fails=0
+  S17: seq=21 nacks=3 keyReq=+2 waitForKey=1
+  S18: seq=21 nacks=3 keyReq=+2 waitForKey=1
+  S19: seq=21 nacks=3 keyReq=+0 published=1
+  S20: seq=21 nacks=6 keyReq=+2 waitForKey=1
+  S21: seq=21 nacks=0 keyReq=+2 waitForKey=1
+  S22: idr=21 nacks=3 keyReq=+0 published=1
+  S23: idr=21 keyReq=+2 waitForKey=1
+run4 EXIT=0 viewer_udp_recovery_test: PASS fails=0
+  S17: seq=21 nacks=3 keyReq=+2 waitForKey=1
+  S18: seq=21 nacks=3 keyReq=+2 waitForKey=1
+  S19: seq=21 nacks=3 keyReq=+0 published=1
+  S20: seq=21 nacks=6 keyReq=+2 waitForKey=1
+  S21: seq=21 nacks=0 keyReq=+2 waitForKey=1
+  S22: idr=21 nacks=3 keyReq=+0 published=1
+  S23: idr=21 keyReq=+2 waitForKey=1
+run5 EXIT=0 viewer_udp_recovery_test: PASS fails=0
+  S17: seq=21 nacks=3 keyReq=+2 waitForKey=1
+  S18: seq=21 nacks=3 keyReq=+2 waitForKey=1
+  S19: seq=21 nacks=3 keyReq=+0 published=1
+  S20: seq=21 nacks=6 keyReq=+2 waitForKey=1
+  S21: seq=21 nacks=0 keyReq=+2 waitForKey=1
+  S22: idr=22 nacks=3 keyReq=+0 published=1
+  S23: idr=21 keyReq=+1 waitForKey=1

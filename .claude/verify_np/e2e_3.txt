@@ -1,0 +1,56 @@
+
+--- new server ---
+PASS  new: host registers  status=200
+      [attempt] connect=4cadd37c candidates=2 kinds=public,relay capability=1 reobserved=0 relayEarly=accepted
+      [race] connect=4cadd37c mode=early commitMs=1000 decision=relay chosenMs=1014 firstDirectMs=-1 firstRelayMs=15 relayHeld=1 rounds=7 resolved=2 invalidFromCandidate=0 strangers=0 untracked=0 openMs=1021
+      PROBE open=1 answered=1 chosen=127.0.0.1:18543 kind=relay relay=1
+PASS  new server, new viewer, host silent: the session opens  code=0
+PASS  new server, new viewer, host silent: early race (accepted)  relayEarly=accepted mode=early
+PASS  new server, new viewer, host silent: the relay, labelled relay  kind=relay relay=1
+PASS  new server, new viewer, host silent: chosen at the commit point (~1000)  chosenMs=1014
+      [attempt] connect=2706c6fc candidates=2 kinds=public,relay capability=1 reobserved=0
+      [race] connect=2706c6fc mode=legacy commitMs=0 decision=relay chosenMs=1511 firstDirectMs=-1 firstRelayMs=1511 relayHeld=0 rounds=10 resolved=2 invalidFromCandidate=0 strangers=0 untracked=0 openMs=1518
+      PROBE open=1 answered=1 chosen=127.0.0.1:18543 kind=relay relay=1
+PASS  new server, old viewer, host silent: the session opens  code=0
+PASS  new server, old viewer, host silent: legacy race  relayEarly=(not asked) mode=legacy
+PASS  new server, old viewer, host silent: the relay, labelled relay  kind=relay relay=1
+PASS  new server, old viewer, host silent: chosen after the server grace (~1500)  chosenMs=1511
+      [attempt] connect=b6aa83a8 candidates=2 kinds=public,relay capability=1 reobserved=0 relayEarly=accepted
+      [race] connect=b6aa83a8 mode=early commitMs=1000 decision=direct chosenMs=0 firstDirectMs=0 firstRelayMs=-1 relayHeld=0 rounds=1 resolved=2 invalidFromCandidate=0 strangers=0 untracked=0 openMs=6
+      PROBE open=1 answered=1 chosen=127.0.0.1:61810 kind=public relay=0
+PASS  new server, new viewer, host answer: the session opens  code=0
+PASS  new server, new viewer, host answer: direct is chosen  decision=direct kind=public relay=0 chosenMs=0
+      [attempt] connect=bdea4cd5 candidates=2 kinds=public,relay capability=1 reobserved=0
+      [race] connect=bdea4cd5 mode=legacy commitMs=0 decision=direct chosenMs=0 firstDirectMs=0 firstRelayMs=-1 relayHeld=0 rounds=1 resolved=2 invalidFromCandidate=0 strangers=0 untracked=0 openMs=5
+      PROBE open=1 answered=1 chosen=127.0.0.1:61810 kind=public relay=0
+PASS  new server, old viewer, host answer: the session opens  code=0
+PASS  new server, old viewer, host answer: direct is chosen  decision=direct kind=public relay=0 chosenMs=0
+
+--- old server ---
+PASS  old: host registers  status=200
+      [attempt] connect=9c4524b1 candidates=2 kinds=public,relay capability=1 reobserved=0 relayEarly=unknown
+      [race] connect=9c4524b1 mode=legacy commitMs=0 decision=relay chosenMs=1502 firstDirectMs=-1 firstRelayMs=1502 relayHeld=0 rounds=10 resolved=2 invalidFromCandidate=0 strangers=0 untracked=0 openMs=1508
+      PROBE open=1 answered=1 chosen=127.0.0.1:18543 kind=relay relay=1
+PASS  old server, new viewer, host silent: the session opens  code=0
+PASS  old server, new viewer, host silent: legacy race  relayEarly=unknown mode=legacy
+PASS  old server, new viewer, host silent: the relay, labelled relay  kind=relay relay=1
+PASS  old server, new viewer, host silent: chosen after the server grace (~1500)  chosenMs=1502
+      [attempt] connect=ca75f913 candidates=2 kinds=public,relay capability=1 reobserved=0
+      [race] connect=ca75f913 mode=legacy commitMs=0 decision=relay chosenMs=1501 firstDirectMs=-1 firstRelayMs=1501 relayHeld=0 rounds=10 resolved=2 invalidFromCandidate=0 strangers=0 untracked=0 openMs=1507
+      PROBE open=1 answered=1 chosen=127.0.0.1:18543 kind=relay relay=1
+PASS  old server, old viewer, host silent: the session opens  code=0
+PASS  old server, old viewer, host silent: legacy race  relayEarly=(not asked) mode=legacy
+PASS  old server, old viewer, host silent: the relay, labelled relay  kind=relay relay=1
+PASS  old server, old viewer, host silent: chosen after the server grace (~1500)  chosenMs=1501
+      [attempt] connect=f8013b31 candidates=2 kinds=public,relay capability=1 reobserved=0 relayEarly=unknown
+      [race] connect=f8013b31 mode=legacy commitMs=0 decision=direct chosenMs=0 firstDirectMs=0 firstRelayMs=-1 relayHeld=0 rounds=1 resolved=2 invalidFromCandidate=0 strangers=0 untracked=0 openMs=5
+      PROBE open=1 answered=1 chosen=127.0.0.1:61817 kind=public relay=0
+PASS  old server, new viewer, host answer: the session opens  code=0
+PASS  old server, new viewer, host answer: direct is chosen  decision=direct kind=public relay=0 chosenMs=0
+      [attempt] connect=45a7c6d1 candidates=2 kinds=public,relay capability=1 reobserved=0
+      [race] connect=45a7c6d1 mode=legacy commitMs=0 decision=direct chosenMs=0 firstDirectMs=0 firstRelayMs=-1 relayHeld=0 rounds=1 resolved=2 invalidFromCandidate=0 strangers=0 untracked=0 openMs=5
+      PROBE open=1 answered=1 chosen=127.0.0.1:61817 kind=public relay=0
+PASS  old server, old viewer, host answer: the session opens  code=0
+PASS  old server, old viewer, host answer: direct is chosen  decision=direct kind=public relay=0 chosenMs=0
+
+ALL PASS

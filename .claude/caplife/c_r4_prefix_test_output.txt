@@ -1,0 +1,250 @@
+android_decoder_inbox_prefix_test (C r4 keep-prefix prototype vs today's C, one oracle)
+
+--- [P0] no loss: the same inputs, nothing recovered, nothing corrupt
+      [decoder I] selection prepare localGen=100
+      [decoder I] selection ack localGen=100 streamGen=1001 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1001 remoteUs=1000000 localUs=666398515078 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666398598410
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=100 streamGen=1001 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+PASS  [P0 current] 20 deltas in order: all decodable, none corrupt, no recovery  decodable=20 corrupt=0 keys=0 deltas=20 lastSeq=24
+      [decoder I] video surface cleared
+      [decoder I] selection prepare localGen=101
+      [decoder I] selection ack localGen=101 streamGen=1011 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1011 remoteUs=1799992 localUs=666398768227 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666398851559
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=101 streamGen=1011 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+PASS  [P0 prefix] 20 deltas in order: all decodable, none corrupt, no recovery  decodable=20 corrupt=0 keys=0 deltas=20 lastSeq=48
+      [decoder I] video surface cleared
+
+--- [P1] a burst while the codec is busy (the inbox overflows with no IDR)
+      [decoder I] selection prepare localGen=110
+      [decoder I] selection ack localGen=110 streamGen=1101 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1101 remoteUs=2599984 localUs=666399019386 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666399102718
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=110 streamGen=1101 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+      [decoder I] decoder inbox: chain loss at seq=62 lost=9 (total 9) skipped=0 episode=3 open
+      [decoder I] decoder recovery: IDR seq=66 committed -- episode 3 closed after 1 asks
+      [decoder I] video surface cleared
+      [decoder I] selection prepare localGen=111
+      [decoder I] selection ack localGen=111 streamGen=1111 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1111 remoteUs=3366643 localUs=666399175218 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666399258550
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=111 streamGen=1111 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+      [decoder I] decoder inbox: chain loss at seq=85 lost=1 (total 1) skipped=0 episode=3 open
+      [decoder I] decoder recovery: IDR seq=89 committed -- episode 3 closed after 1 asks
+      [decoder I] video surface cleared
+PASS  [P1 current] today's C: the queue dropped whole (case 3), the next IDR recovers; none corrupt  decodable=7 corrupt=0 keys=1 deltas=6 lastSeq=71 inboxDrops=12
+PASS  [P1 prefix] the valid prefix kept (case 3') and fed after the codec came back; none corrupt  decodable=15 corrupt=0 keys=1 deltas=14 lastSeq=94 prefixKept=1 frames=8 tailLost=1
+PASS  [P1] the same schedule: keep-prefix hands the codec MORE decodable inputs than today's C (oracle)  7 -> 15
+PASS  [P1] both recover to the newest AU sent (the host's IDR and its deltas)
+
+--- [P2] no input buffer for 150 ms (< the 267 ms budget)
+      [decoder I] selection prepare localGen=120
+      [decoder I] selection ack localGen=120 streamGen=1201 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1201 remoteUs=4133302 localUs=666399337367 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666399420699
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=120 streamGen=1201 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+      [decoder I] decoder inbox: chain loss at seq=101 lost=1 (total 1) skipped=0 episode=3 open
+      [decoder I] decoder recovery: IDR seq=104 committed -- episode 3 closed after 1 asks
+      [decoder I] video surface cleared
+      [decoder I] selection prepare localGen=121
+      [decoder I] selection ack localGen=121 streamGen=1211 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1211 remoteUs=4633297 localUs=666399621835 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666399705167
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=121 streamGen=1211 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+      [decoder I] video surface cleared
+PASS  [P2 current] none corrupt  decodable=7 corrupt=0 keys=1 deltas=6 lastSeq=109
+PASS  [P2 prefix] backpressure: the queue waits behind the held frame and is fed after; none corrupt; more decodable  decodable=11 corrupt=0 keys=1 deltas=10 lastSeq=124 vs current 7 backpressure=38
+PASS  [P2 prefix] no hot loop: worker passes during the 150 ms stall stay at the pump interval's rate (<= 2 per 3 ms)  passes=47 (current 48)
+
+--- [P3] no input buffer for 700 ms (past the budget)
+      [decoder I] selection prepare localGen=130
+      [decoder I] selection ack localGen=130 streamGen=1301 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1301 remoteUs=5133292 localUs=666399913312 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666399996644
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=130 streamGen=1301 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+      [decoder I] decoder inbox: chain loss at seq=131 lost=1 (total 1) skipped=0 episode=3 open
+      [decoder I] decoder recovery: IDR seq=150 committed -- episode 3 closed after 1 asks
+      [decoder I] video surface cleared
+      [decoder I] selection prepare localGen=131
+      [decoder I] selection ack localGen=131 streamGen=1311 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1311 remoteUs=6166615 localUs=666400732553 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666400815885
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=131 streamGen=1311 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+      [decoder I] decoder recovery: IDR seq=182 committed -- episode 3 closed after 1 asks
+      [decoder I] video surface cleared
+PASS  [P3 prefix] no AU that had waited longer than the budget (267 ms + 60 ms margin) when the buffers came back was handed to the codec  stale AUs=13 of them fed=0
+PASS  [P3 current] none corrupt  decodable=7 corrupt=0 keys=1 deltas=6 lastSeq=155 bootstrapReplay=0
+PASS  [P3 prefix] what waited past the budget was not fed (age expiry at the slot / the Pop / the overflow); none corrupt; recovered  decodable=6 corrupt=0 keys=1 deltas=5 lastSeq=187 ageExpSlot=1 ageExpPop=0 prefixRefused=0
+PASS  [P3 prefix] no hot loop over 700 ms  passes=209
+
+--- [P4] an IDR arrives while a prefix is kept
+      [decoder I] selection prepare localGen=140
+      [decoder I] selection ack localGen=140 streamGen=1401 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1401 remoteUs=7233271 localUs=666401582359 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666401665691
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=140 streamGen=1401 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+      [decoder I] decoder inbox: chain loss at seq=201 lost=1 (total 1) skipped=0 episode=3 open
+      [decoder I] decoder recovery: IDR seq=203 committed -- episode 3 closed after 1 asks
+PASS  [P4] the IDR is fed (case 1 keeps it with its suffix); none corrupt  decodable=4 corrupt=0 keys=1 deltas=3 lastSeq=205
+      [decoder I] video surface cleared
+
+--- [P5] the codec reset while a prefix is kept
+      [decoder I] selection prepare localGen=150
+      [decoder I] selection ack localGen=150 streamGen=1501 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1501 remoteUs=7833265 localUs=666401666032 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666401749364
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=150 streamGen=1501 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+      [decoder I] decoder inbox: chain loss at seq=219 lost=1 (total 1) skipped=0 episode=3 open
+      [decoder I] video decoder reset after transport discontinuity
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] delta before the codec's first IDR dropped streamGen=1501 drops=1
+      [decoder I] decoder recovery: IDR seq=221 committed -- episode 3 closed after 1 asks
+PASS  [P5] after the reset no delta reaches the new codec before an IDR (the kept prefix is not fed); from that IDR on, none corrupt  decodable=4 corrupt=0 keys=1 deltas=3 lastSeq=224 inputs after the reset point=4
+      [decoder I] video surface cleared
+
+--- [P6] a hole in the queued AUs (an AU never delivered, the sink not told)
+      [decoder I] selection prepare localGen=160
+      [decoder I] selection ack localGen=160 streamGen=1601 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1601 remoteUs=8466592 localUs=666401792608 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666401875940
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=160 streamGen=1601 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+      [decoder I] decoder inbox: chain loss at seq=239 lost=9 (total 9) skipped=0 episode=3 open
+      [decoder I] decoder recovery: IDR seq=242 committed -- episode 3 closed after 1 asks
+PASS  [P6 current] not provable (not consecutive) -> today's case 3: none corrupt  decodable=5 corrupt=0 keys=1 deltas=4 lastSeq=245 prefixRefused=0
+      [decoder I] video surface cleared
+      [decoder I] selection prepare localGen=161
+      [decoder I] selection ack localGen=161 streamGen=1611 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1611 remoteUs=9133252 localUs=666401928679 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666402012011
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=161 streamGen=1611 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+      [decoder I] decoder inbox: chain loss at seq=260 lost=9 (total 9) skipped=0 episode=3 open
+      [decoder I] decoder recovery: IDR seq=263 committed -- episode 3 closed after 1 asks
+PASS  [P6 prefix] not provable (not consecutive) -> today's case 3: none corrupt  decodable=5 corrupt=0 keys=1 deltas=4 lastSeq=266 prefixRefused=1
+      [decoder I] video surface cleared
+
+--- [P6b] the AU right after the one in flight never delivered (head != frontier + 1)
+      [decoder I] selection prepare localGen=165
+      [decoder I] selection ack localGen=165 streamGen=1651 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1651 remoteUs=9799912 localUs=666402061559 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666402144891
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=165 streamGen=1651 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+      [decoder I] decoder inbox: chain loss at seq=281 lost=9 (total 9) skipped=0 episode=3 open
+      [decoder I] decoder recovery: IDR seq=284 committed -- episode 3 closed after 1 asks
+PASS  [P6b current] the queue does not follow the frontier -> not provable -> today's case 3: none corrupt  decodable=5 corrupt=0 keys=1 deltas=4 lastSeq=287
+      [decoder I] video surface cleared
+      [decoder I] selection prepare localGen=166
+      [decoder I] selection ack localGen=166 streamGen=1661 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1661 remoteUs=10466572 localUs=666402198118 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666402281450
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=166 streamGen=1661 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+      [decoder I] decoder inbox: chain loss at seq=302 lost=9 (total 9) skipped=0 episode=3 open
+      [decoder I] decoder recovery: IDR seq=305 committed -- episode 3 closed after 1 asks
+PASS  [P6b prefix] the queue does not follow the frontier -> not provable -> today's case 3: none corrupt  decodable=5 corrupt=0 keys=1 deltas=4 lastSeq=308
+      [decoder I] video surface cleared
+
+--- [P7] sustained overload, then the current frame again
+      [decoder I] selection prepare localGen=170
+      [decoder I] selection ack localGen=170 streamGen=1701 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1701 remoteUs=11133232 localUs=666402336854 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666402420186
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=170 streamGen=1701 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+      [decoder I] decoder inbox: chain loss at seq=322 lost=9 (total 9) skipped=0 episode=3 open
+      [decoder I] decoder inbox: chain loss at seq=344 lost=1 (total 31) skipped=0 episode=3 open
+      [decoder I] decoder inbox: chain loss at seq=374 lost=1 (total 61) skipped=0 episode=3 open
+      [decoder I] decoder recovery: IDR seq=378 committed -- episode 3 closed after 4 asks
+PASS  [P7 current] bounded (inbox <= 8, asks <= 4 per episode), none corrupt, and the newest AU sent is the last one fed (the current frame again)  decodable=7 corrupt=0 keys=1 deltas=6 lastSeq=383 maxInbox=8 asks=4 newest=383
+      [decoder I] video surface cleared
+      [decoder I] selection prepare localGen=171
+      [decoder I] selection ack localGen=171 streamGen=1711 hostSendQpcUs=0 rekey=0
+      [decoder I] video surface set; codec waiting for keyframe/csd
+      [decoder I] updated codec config csd0=9 csd1=8
+      [decoder I] MediaCodec started width=1280 height=720 csd0=9 csd1=8 name=fake.h264.decoder
+      [decoder I] pts reanchor reason=init streamGen=1711 remoteUs=13633207 localUs=666410735452 stepUs=33333 count=1
+      [decoder I] queued h264 frame count=1 bytes=28 key=1 ptsUs=666410818784
+      [decoder I] output format coded=1280x720 visible=1280x720 crop=0,0,0,0 cropSource=absent hasWidth=1 hasHeight=1
+      [decoder I] selection first output localGen=171 streamGen=1711 ptsUs=1 out=1
+      [decoder I] released output frame count=1 flags=0
+      [decoder I] decoder inbox: chain loss at seq=397 lost=1 (total 1) skipped=0 episode=3 open
+      [decoder I] decoder inbox: chain loss at seq=427 lost=1 (total 31) skipped=0 episode=3 open
+      [decoder I] decoder recovery: IDR seq=453 committed -- episode 3 closed after 4 asks
+PASS  [P7 prefix] bounded (inbox <= 8, asks <= 4 per episode), none corrupt, and the newest AU sent is the last one fed (the current frame again)  decodable=15 corrupt=0 keys=1 deltas=14 lastSeq=458 maxInbox=8 asks=4 newest=458
+      [decoder I] video surface cleared
+
+android_decoder_inbox_prefix_test: 21 checks, 0 failed
+RESULT: PASS

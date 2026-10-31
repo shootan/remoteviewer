@@ -1,0 +1,44 @@
+{
+  "source": "c468c27b405538fee2196ff58f65cc641f691da9",
+  "blob_sha256": "38c782d0561e4a4cf846065705f8e698457a639bd80b90e9a2af82d613954213",
+  "ime_checks": [
+    {
+      "name": "mInputShown=false mWindowVisible=false",
+      "got": "hidden",
+      "expected": "hidden",
+      "pass": true
+    },
+    {
+      "name": "mInputShown=true",
+      "got": "shown",
+      "expected": "shown",
+      "pass": true
+    },
+    {
+      "name": "mInputShown=false mDecorViewVisible=true",
+      "got": "shown",
+      "expected": "shown",
+      "pass": true
+    },
+    {
+      "name": "mInputShown=false isInputViewShown=true",
+      "got": "shown",
+      "expected": "shown",
+      "pass": true
+    },
+    {
+      "name": "no flags",
+      "got": "unknown",
+      "expected": "unknown",
+      "pass": true
+    },
+    {
+      "name": "mWindowVisible=false",
+      "got": "unknown",
+      "expected": "unknown",
+      "pass": true
+    }
+  ],
+  "actual_main_continued_to_menu_after_input_false": true,
+  "scope": "pure frozen function/main-slice with effect stubs; no adb, no child, no real Host"
+}

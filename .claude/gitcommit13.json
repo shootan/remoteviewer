@@ -1,0 +1,4 @@
+{
+ "repo_path": "D:/remote/remote",
+ "message": "test(update): sending the answer and being refused is not the same as having nowhere to send it\n\nThe no-channel case skips the send; an unwritable channel attempts it and\nis turned down. Different code paths, and both have to end with the caller\nstaying put -- so the second one gets its own case rather than being\nassumed to follow from the first.\n\nForced deterministically by opening the acknowledgement with SYNCHRONIZE\nonly, so SetEvent fails with access denied. Closing a handle and passing it\nin would have relied on undefined behaviour to produce the failure.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+}

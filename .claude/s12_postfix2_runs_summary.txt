@@ -1,0 +1,21 @@
+== qwinsta ==
+>console                   shotan                    1  È°¼º                        
+run1 EXIT=0 viewer_udp_recovery_test: PASS fails=0
+  S12 order (zeroed IDR): first call emitted P seq=21; IDR seq=23 on call 3 (38 ms)
+  S12 order (good IDR): first call emitted P seq=67; IDR seq=68 on call 2 (20 ms)
+run2 EXIT=0 viewer_udp_recovery_test: PASS fails=0
+  S12 order (zeroed IDR): first call emitted the IDR seq=23; IDR seq=23 on call 1 (4 ms)
+  S12 order (good IDR): first call emitted the IDR seq=66; IDR seq=66 on call 1 (6 ms)
+run3 EXIT=0 viewer_udp_recovery_test: PASS fails=0
+  S12 order (zeroed IDR): first call emitted the IDR seq=22; IDR seq=22 on call 1 (4 ms)
+  S12 order (good IDR): first call emitted the IDR seq=65; IDR seq=65 on call 1 (7 ms)
+run4 EXIT=0 viewer_udp_recovery_test: PASS fails=0
+  S12 order (zeroed IDR): first call emitted the IDR seq=22; IDR seq=22 on call 1 (4 ms)
+  S12 order (good IDR): first call emitted the IDR seq=65; IDR seq=65 on call 1 (6 ms)
+run5 EXIT=0 viewer_udp_recovery_test: PASS fails=0
+  S12 order (zeroed IDR): first call emitted P seq=21; IDR seq=23 on call 2 (20 ms)
+  S12 order (good IDR): first call emitted P seq=66; IDR seq=67 on call 2 (20 ms)
+== sweep ==
+remote60_viewer_selection_gate_test                  exit=0      0s  viewer_selection_gate_test: PASS
+remote60_viewer_udp_recovery_test                    exit=0     42s  viewer_udp_recovery_test: PASS
+--- summary: 38 ok / 2 not ok

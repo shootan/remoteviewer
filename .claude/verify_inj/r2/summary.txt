@@ -1,0 +1,2 @@
+﻿os_input_record_e2e rc=0 sec=1 last= | 12 checks, 0 failures | RESULT: ALL PASS
+host_fatal_exception rc=0 sec=33 last=NOTE  kept (not empty, inside the test root): D:\remote\remote\.claude\test-tmp\verify-inj\fatal-25920-609237140-0 |  | RESULT: ALL PASS  (26 checks, 0 failed)

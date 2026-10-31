@@ -1,0 +1,151 @@
+﻿host_capture_lifecycle_ua_e2e_test (capture-lifecycle r1: UA-1 / UA-2)
+PASS  the host (test build) could be staged
+PASS  the launched host is isolated from the user's files, input injection off
+PASS  the host started (desktop capture, startup backend = its default)
+
+--- r4 (N1-a FullFrame): the full-frame WGC restart fails after its detach ---
+remote60_host_capture_lifecycle_ua_e2e_test.exe : [native-video-client-session] video receive nack=1 holdUs=120000 nonb
+locking=1
+At D:\remote\remote\.claude\caplife\r2_runs.ps1:29 char:27
++ ...   if ($a.Count -gt 0) { & $exe @a > "$out\e2e_$name.txt" 2>&1 } else  ...
++                             ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([native-video-c...0 nonblocking=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+PASS  the shared session connects  disconnected
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=29 stop=0
+PASS  it asks for WGC and the host runs it
+[native-video-host] h264 mft-identity role=decoder friendlyName="Microsoft H264 Video Decoder MFT" clsid={62CE7E72-4C71-4D20-B15D-452831A87D9D} vendorId=? hwUrl="?"
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  ...its first WGC frame is decoded (the still WGC gives nothing after it)
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=24 sinceDatagramMs=59 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=54 sinceDatagramMs=28 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=85 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=116 sinceDatagramMs=30 stop=0
+PASS  (C) the full-frame WGC restart was asked and FAILED AFTER ITS DETACH
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=148 sinceDatagramMs=215 stop=0
+PASS  (C) THE SAME EPISODE'S NEXT ASK RESTARTED IT (ok=1) -- no generic retry needed
+PASS  (C) ...and the picture comes back (a real capture after the pick, decoded)
+PASS  (C) ...within the episode's bound (2 restarts: the failed one + the one that worked)  2 restarts
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=175 sinceDatagramMs=187 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=204 sinceDatagramMs=156 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=235 sinceDatagramMs=155 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=267 sinceDatagramMs=121 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=298 sinceDatagramMs=92 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=329 sinceDatagramMs=93 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=360 sinceDatagramMs=93 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=390 sinceDatagramMs=91 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=420 sinceDatagramMs=60 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=451 sinceDatagramMs=60 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=481 sinceDatagramMs=62 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=511 sinceDatagramMs=60 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=542 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=574 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=604 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=634 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=664 sinceDatagramMs=31 stop=0
+PASS  (A) THE EPISODE'S RESTARTS STOP AT 3 (first try + its retries), NONE AFTER (12 s: no generic retry, no kick)  3 full-frame restarts, 3 restarts tried
+PASS  (A) no picture meanwhile (nothing captured, nothing re-served)  0 pictures
+PASS  (A) the session is still up
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=752 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=22 stop=0
+PASS  (B) a new session connects  disconnected
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  (B) A NEW SOURCE GETS ITS PICTURE BACK (a real capture after it, decoded)
+PASS  (B) ...with no 4th ask in any episode
+PASS  the host lived through it all
+    host| 10-26 17:00:10.362 [native-video-host][control] desktop-backend-request seq=1 backend=wgc status=asked
+
+    host| 10-26 17:00:10.420 [native-video-host] desktop_backend=dxgi capture=1920x1080
+
+    host| 10-26 17:00:10.593 [native-video-host] desktop_backend=dxgi capture-started=1 acquireTimeoutMs=8 acquireIdleSleepUs=2000 d3dMt=off
+
+    host| 10-26 17:00:10.595 [native-video-host][control] backend-owner epoch=1 requested=dxgi active=dxgi
+
+    host| 10-26 17:00:10.599 [native-video-host][desktop] input desktop <first look> -> Default desktopGen=0
+
+    host| 10-26 17:00:10.600 [native-video-host][control] desktop-backend-status seq=1 requested=1 effective=1 active=1 flags=0x11
+
+    host| 10-26 17:00:10.636 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 17:00:10.636 [native-video-host] capture-pipeline-flushed reason=desktop-backend-switch streamGen=1 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=1
+
+    host| 10-26 17:00:10.636 [native-video-host][control] desktop-backend-applied seq=1 requested=wgc active=wgc desktopActive=1
+
+    host| 10-26 17:00:10.654 [native-video-host][desktop] adopted first frame attachment=3 desktopGen=0 captureUs=347424290949
+
+    host| 10-26 17:00:14.529 [native-video-host] full-frame ask=1/3 episode=1 desktopGen=0 streamGen=1 epoch=1 source=2 via=wgc-restart from=kick reason=nothing-cached
+
+    host| 10-26 17:00:14.540 [stream-test-seam] capture restart failed (injected)
+
+    host| 10-26 17:00:14.540 [native-video-host] full-frame wgc restart ok=0
+
+    host| 10-26 17:00:15.545 [native-video-host] full-frame ask=2/3 episode=1 desktopGen=0 streamGen=1 epoch=1 source=2 via=wgc-restart from=kick reason=nothing-cached
+
+    host| 10-26 17:00:15.573 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 17:00:15.574 [native-video-host] capture-pipeline-flushed reason=full-frame-wgc-restart streamGen=1 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=4
+
+    host| 10-26 17:00:15.574 [native-video-host] full-frame wgc restart ok=1
+
+    host| 10-26 17:00:15.589 [native-video-host][desktop] adopted first frame attachment=5 desktopGen=0 captureUs=347429225737
+
+    host| 10-26 17:00:19.340 [native-video-host] full-frame ask=1/3 episode=2 desktopGen=0 streamGen=1 epoch=1 source=2 via=wgc-restart from=kick reason=nothing-cached
+
+    host| 10-26 17:00:19.353 [stream-test-seam] capture restart failed (injected)
+
+    host| 10-26 17:00:19.353 [native-video-host] full-frame wgc restart ok=0
+
+    host| 10-26 17:00:20.413 [native-video-host] full-frame ask=2/3 episode=2 desktopGen=0 streamGen=1 epoch=1 source=2 via=wgc-restart from=kick reason=nothing-cached
+
+    host| 10-26 17:00:20.423 [stream-test-seam] capture restart failed (injected)
+
+    host| 10-26 17:00:20.423 [native-video-host] full-frame wgc restart ok=0
+
+    host| 10-26 17:00:21.435 [native-video-host] full-frame ask=3/3 episode=2 desktopGen=0 streamGen=1 epoch=1 source=2 via=wgc-restart from=kick reason=nothing-cached
+
+    host| 10-26 17:00:21.444 [stream-test-seam] capture restart failed (injected)
+
+    host| 10-26 17:00:21.444 [native-video-host] full-frame wgc restart ok=0
+
+    host| 10-26 17:00:35.007 [native-video-host][control] backend-owner epoch=2 requested=wgc active=wgc
+
+    host| 10-26 17:00:35.007 [native-video-host][control] desktop-backend-reset new-session epoch=2 requested=wgc -> host-default=dxgi effective=dxgi active=wgc
+
+    host| 10-26 17:00:35.083 [native-video-host] full-frame ask=1/3 episode=3 desktopGen=0 streamGen=1 epoch=2 source=2 via=wgc-restart from=kick reason=nothing-cached
+
+    host| 10-26 17:00:35.111 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 17:00:35.111 [native-video-host] capture-pipeline-flushed reason=full-frame-wgc-restart streamGen=1 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=7
+
+    host| 10-26 17:00:35.111 [native-video-host] full-frame wgc restart ok=1
+
+    host| 10-26 17:00:35.137 [native-video-host][desktop] adopted first frame attachment=9 desktopGen=0 captureUs=347448774593
+
+PASS  the scratch directory is cleaned up
+
+RESULT: ALL PASS  (18 checks, 0 failed)

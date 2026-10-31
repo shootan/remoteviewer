@@ -1,0 +1,95 @@
+PASS  equal text hashes equal
+PASS  one-character difference changes the hash
+PASS  empty text is the FNV offset basis
+PASS  empty: buffer is the fixed header plus two bytes per code unit
+PASS  empty: magic survives
+PASS  empty: type is ControlClipboardUpdate
+PASS  empty: header.size is the fixed part only
+PASS  empty: utf16Count matches
+PASS  empty: content hash matches
+PASS  empty: payload parses
+PASS  empty: text round-trips byte for byte
+PASS  ascii: buffer is the fixed header plus two bytes per code unit
+PASS  ascii: magic survives
+PASS  ascii: type is ControlClipboardUpdate
+PASS  ascii: header.size is the fixed part only
+PASS  ascii: utf16Count matches
+PASS  ascii: content hash matches
+PASS  ascii: payload parses
+PASS  ascii: text round-trips byte for byte
+PASS  korean: buffer is the fixed header plus two bytes per code unit
+PASS  korean: magic survives
+PASS  korean: type is ControlClipboardUpdate
+PASS  korean: header.size is the fixed part only
+PASS  korean: utf16Count matches
+PASS  korean: content hash matches
+PASS  korean: payload parses
+PASS  korean: text round-trips byte for byte
+PASS  control chars: buffer is the fixed header plus two bytes per code unit
+PASS  control chars: magic survives
+PASS  control chars: type is ControlClipboardUpdate
+PASS  control chars: header.size is the fixed part only
+PASS  control chars: utf16Count matches
+PASS  control chars: content hash matches
+PASS  control chars: payload parses
+PASS  control chars: text round-trips byte for byte
+PASS  surrogate pair (emoji): buffer is the fixed header plus two bytes per code unit
+PASS  surrogate pair (emoji): magic survives
+PASS  surrogate pair (emoji): type is ControlClipboardUpdate
+PASS  surrogate pair (emoji): header.size is the fixed part only
+PASS  surrogate pair (emoji): utf16Count matches
+PASS  surrogate pair (emoji): content hash matches
+PASS  surrogate pair (emoji): payload parses
+PASS  surrogate pair (emoji): text round-trips byte for byte
+PASS  at the size cap: buffer is the fixed header plus two bytes per code unit
+PASS  at the size cap: magic survives
+PASS  at the size cap: type is ControlClipboardUpdate
+PASS  at the size cap: header.size is the fixed part only
+PASS  at the size cap: utf16Count matches
+PASS  at the size cap: content hash matches
+PASS  at the size cap: payload parses
+PASS  at the size cap: text round-trips byte for byte
+PASS  request carries knownGeneration
+PASS  data reply with content sets the has-data bit and generation
+PASS  data reply payload round-trips
+PASS  a no-data reply carries the generation and no payload
+PASS  a count over the cap is rejected
+PASS  a count longer than the payload is rejected
+PASS  an exact-length payload is accepted
+PASS  an empty local clipboard is not synced
+PASS  an oversize clipboard is skipped whole
+PASS  a genuine change is sent
+PASS  and reports the hash to put on the wire
+PASS  the same content is not sent twice
+PASS  a new change after a duplicate is sent
+PASS  an empty remote payload is not applied
+PASS  new remote content is applied
+PASS  the same remote content is not applied twice
+PASS  the change from applying remote content is recognised as an echo, not re-sent
+PASS  A sends its new clipboard
+PASS  B applies A's clipboard
+PASS  B does NOT send the applied content back -- the loop is broken here
+PASS  A would refuse to re-apply the content it originated
+PASS  a later new copy still sends
+PASS  and B applies it
+PASS  the clipboard already present at startup is not sent
+PASS  a copy made during the session is still sent
+PASS  an empty startup clipboard seeds no baseline
+PASS  a new session asks for one initial push
+PASS  ...and only once
+PASS  the first poll is due immediately
+PASS  later polls wait for the interval
+PASS  ...and are due once it passes
+PASS  the FIRST reply is a baseline: the host's old clipboard is NOT applied
+PASS  but its generation is adopted, so later changes are noticed
+PASS  a change during the session IS applied
+PASS  a reply with no data applies nothing
+PASS  the generation keeps up
+PASS  reconnecting asks for the push again
+PASS  and its first reply is a baseline too
+PASS  adopting the newer generation
+PASS  repro: the fresh session asks for its initial push
+PASS  repro: the client's current clipboard 'b' is what gets sent to the host
+PASS  repro: the stale 'a' is NOT applied over 'b' -- this is the bug, fixed
+PASS  repro (control): that content WAS applicable -- applying it would have overwritten 'b'
+clipboard_sync_core_test: PASS (94 passed, 0 failed)

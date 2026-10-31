@@ -1,0 +1,4 @@
+{
+ "repo_path": "D:/remote/remote",
+ "message": "docs(tasks): record the loose port parse at directory_client.cpp:451\n\nSame class as the one fixed for the observe metadata, found while working\nnearby and left alone. The UDP observe reply's port goes through the shared\nJSON getter, which matches [0-9]+ and so reads 29181 out of 29181.5, and\nthis site has no upper bound either -- 65537 truncates to 1 on the cast,\nwith only port == 0 rejected. The value decides whether the host is\nreachable, and the comment three lines below already says what a wrong one\nlooks like: silence that reads as a broken host.\n\nRecorded rather than fixed. It is outside this task, and folding it in\nwould blur the diff of the one being reviewed.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+}

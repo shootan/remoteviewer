@@ -1,0 +1,14 @@
+{
+  "repo_path": "D:/remote/remote",
+  "files": [
+    "apps/native_poc/src/update_effects.hpp",
+    "apps/native_poc/src/update_effects.cpp",
+    "apps/native_poc/src/update_process_targets.hpp",
+    "apps/native_poc/src/update_process_targets.cpp",
+    "apps/native_poc/src/update_stop_process_test.cpp",
+    "apps/native_poc/src/update_effects_test.cpp",
+    "apps/native_poc/src/updater_assembly_test.cpp",
+    "apps/native_poc/CMakeLists.txt",
+    "docs/history.md"
+  ]
+}

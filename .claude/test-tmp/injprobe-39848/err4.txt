@@ -1,0 +1,2 @@
+10-28 08:54:50.201 [native-video-host] udp bind failed port=47811; trying next
+10-28 08:54:50.201 [native-video-host] udp bind failed on every candidate port

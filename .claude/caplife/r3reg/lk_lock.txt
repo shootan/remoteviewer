@@ -1,0 +1,361 @@
+﻿mode: logged-on host at its own lock screen (lockscreen-cred: test stand-ins for the lock and the service)
+PASS  the fake directory starts
+PASS  the test's own target and decoy windows are up
+PASS  lockscreen-cred: the service's stand-in (the product service code, lifecycle test build) serves its unlock pipe
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  the host (test build, staged as GNLinkStream.exe) started
+PASS  the host registered and collected the viewer's capability from its heartbeat
+PASS  the product's window procedure owns a window
+PASS  the session toolbar is created
+PASS  the viewer's directory-authenticated Hello is answered
+PASS  video is arriving  1 media datagrams
+[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=0.2.163 peerProcess=GNLinkStream peerVersion=unknown-awaiting-pong eventQpcUs=353478724149
+[native-video-client][control] seq=1 rttUs=605 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=1 rttUs=605 clockOffsetUs=-95 clientSendUs=353478724164 hostRecvUs=353478724371 hostSendUs=353478724371 clientRecvUs=353478724769 eventQpcUs=353478724897
+[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=0.2.163 peerProcess=GNLinkStream peerVersion=0.2.163 peerVersionSource=peer-report eventQpcUs=353478725062
+[native-video-client][paste] session: newest copy is this PC's
+PASS  the worker completes a round trip with the host
+PASS  the toolbar window exists
+
+--- lockscreen-cred: the host's own session at its lock screen ---
+[native-video-client][paste] baseline for this PC's copy: host copyGen=0
+[native-video-client][control] seq=2 rttUs=425 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=2 rttUs=425 clockOffsetUs=-49 clientSendUs=353479233753 hostRecvUs=353479233916 hostSendUs=353479233916 clientRecvUs=353479234178 eventQpcUs=353479234261
+PASS  THE PONG ADVERTISES kCaptureFlagLockCredV1 (0x40000) -- and not the pre-login 0x2000  1138552
+PASS  ...the host said so once it heard the service could type (capability, then advertised)
+PASS  THE TOOLBAR LAYS OUT "Windows 로그인" (item 7) AT THE LOCK SCREEN  179
+
+--- A5: a character at the lock screen ---
+[native-video-client][input-p0] windowUs=1006794 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=3 rttUs=204 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=3 rttUs=204 clockOffsetUs=-13 clientSendUs=353479746320 hostRecvUs=353479746409 hostSendUs=353479746409 clientRecvUs=353479746524 eventQpcUs=353479746598
+PASS  A5: THE VIEWER HELD THE CHARACTER BACK AND SAID WHERE TO GO (the button, Ctrl+Alt+U)  원격 PC가 로그인·잠금 화면이라 글자는 보내지 않았습니다.
+비밀번호는 툴바의 'Windows 로그인' 버튼(또는 Ctrl+Alt+U)으로 보내세요.
+PASS  ...nothing of it was sent (its up neither: its down never went)  0
+[native-video-client][control] seq=4 rttUs=275 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=4 rttUs=275 clockOffsetUs=14 clientSendUs=353480257806 hostRecvUs=353480257958 hostSendUs=353480257958 clientRecvUs=353480258081 eventQpcUs=353480258134
+PASS  A6 (host): a character that reached the host would be refused there -- nothing typed anywhere  sent=0 hostRefusals=0
+
+--- cancel ---
+[native-video-client][input-p0] windowUs=1010096 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=5 rttUs=2798 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=5 rttUs=2798 clockOffsetUs=-1304 clientSendUs=353480760167 hostRecvUs=353480760262 hostSendUs=353480760262 clientRecvUs=353480762965 eventQpcUs=353480763040
+[native-video-client][input-timing] timingSchema=2 seq=1 actionKind=10 eventKind=6 clientGeneratedUs=353480760145 clientSendUs=353480763047 clientDoneUs=353480764509 queueAgeUs=2902 exchangeUs=1462 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353480764534
+[native-video-client][input-timing] timingSchema=2 seq=2 actionKind=10 eventKind=6 clientGeneratedUs=353480760158 clientSendUs=353480764560 clientDoneUs=353480766237 queueAgeUs=4402 exchangeUs=1677 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353480766252
+[native-video-client][input-timing] timingSchema=2 seq=3 actionKind=10 eventKind=6 clientGeneratedUs=353480760159 clientSendUs=353480766272 clientDoneUs=353480767678 queueAgeUs=6113 exchangeUs=1406 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353480767691
+[native-video-client][input-timing] timingSchema=2 seq=4 actionKind=10 eventKind=6 clientGeneratedUs=353480760159 clientSendUs=353480767708 clientDoneUs=353480769209 queueAgeUs=7549 exchangeUs=1501 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353480769232
+[native-video-client][input-timing] timingSchema=2 seq=5 actionKind=10 eventKind=6 clientGeneratedUs=353480760159 clientSendUs=353480769258 clientDoneUs=353480770216 queueAgeUs=9099 exchangeUs=958 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353480770235
+[native-video-client][input-timing] timingSchema=2 seq=6 actionKind=10 eventKind=6 clientGeneratedUs=353480760159 clientSendUs=353480770260 clientDoneUs=353480771402 queueAgeUs=10101 exchangeUs=1142 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353480771413
+[native-video-client][input-timing] timingSchema=2 seq=7 actionKind=10 eventKind=6 clientGeneratedUs=353480760159 clientSendUs=353480771428 clientDoneUs=353480773549 queueAgeUs=11269 exchangeUs=2121 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353480773570
+[native-video-client][input-timing] timingSchema=2 seq=8 actionKind=10 eventKind=6 clientGeneratedUs=353480760159 clientSendUs=353480773608 clientDoneUs=353480774424 queueAgeUs=13449 exchangeUs=816 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353480774436
+[native-video-client][input-timing] timingSchema=2 seq=9 actionKind=10 eventKind=6 clientGeneratedUs=353480760160 clientSendUs=353480774456 clientDoneUs=353480777166 queueAgeUs=14296 exchangeUs=2710 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353480777179
+[native-video-client][input-timing] timingSchema=2 seq=10 actionKind=10 eventKind=6 clientGeneratedUs=353480760160 clientSendUs=353480777202 clientDoneUs=353480778008 queueAgeUs=17042 exchangeUs=806 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353480778016
+[native-video-client][input-timing] timingSchema=2 seq=11 actionKind=10 eventKind=6 clientGeneratedUs=353480760160 clientSendUs=353480778030 clientDoneUs=353480778495 queueAgeUs=17870 exchangeUs=465 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353480778507
+PASS  the click opened the password window, worded for the lock screen  GNLink — Windows 로그인
+PASS  CANCEL IS SAID ("취소했습니다") and nothing reached the host  취소했습니다. 아무것도 보내지 않았습니다.
+
+--- NEGATIVE: the password field is not the target ---
+[native-video-client][control] seq=6 rttUs=463 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=6 rttUs=463 clockOffsetUs=-68 clientSendUs=353481272076 hostRecvUs=353481272239 hostSendUs=353481272239 clientRecvUs=353481272539 eventQpcUs=353481272659
+[native-video-client][lock-cred] lock-screen login: error stage=13 win32=0 waiting=0
+[native-video-client][input-timing] timingSchema=2 seq=12 actionKind=10 eventKind=6 clientGeneratedUs=353481476828 clientSendUs=353485111810 clientDoneUs=353485112668 queueAgeUs=3634982 exchangeUs=858 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353485112678
+[native-video-client][input-p0] windowUs=4371634 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=7 rttUs=180 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=7 rttUs=180 clockOffsetUs=29 clientSendUs=353485112688 hostRecvUs=353485112807 hostSendUs=353485112807 clientRecvUs=353485112868 eventQpcUs=353485112914
+[native-video-client][input-timing] timingSchema=2 seq=13 actionKind=10 eventKind=6 clientGeneratedUs=353481476833 clientSendUs=353485112919 clientDoneUs=353485113797 queueAgeUs=3636086 exchangeUs=878 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353485113805
+[native-video-client][input-timing] timingSchema=2 seq=14 actionKind=10 eventKind=6 clientGeneratedUs=353481476833 clientSendUs=353485113817 clientDoneUs=353485114571 queueAgeUs=3636984 exchangeUs=754 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353485114580
+[native-video-client][input-timing] timingSchema=2 seq=15 actionKind=10 eventKind=6 clientGeneratedUs=353481476834 clientSendUs=353485114595 clientDoneUs=353485115282 queueAgeUs=3637761 exchangeUs=687 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353485115290
+[native-video-client][input-timing] timingSchema=2 seq=16 actionKind=10 eventKind=6 clientGeneratedUs=353481476834 clientSendUs=353485115302 clientDoneUs=353485115991 queueAgeUs=3638468 exchangeUs=689 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353485115999
+[native-video-client][input-timing] timingSchema=2 seq=17 actionKind=10 eventKind=6 clientGeneratedUs=353481476834 clientSendUs=353485116010 clientDoneUs=353485116658 queueAgeUs=3639176 exchangeUs=648 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353485116664
+[native-video-client][input-timing] timingSchema=2 seq=18 actionKind=10 eventKind=6 clientGeneratedUs=353481476834 clientSendUs=353485116676 clientDoneUs=353485117455 queueAgeUs=3639842 exchangeUs=779 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353485117466
+[native-video-client][input-timing] timingSchema=2 seq=19 actionKind=10 eventKind=6 clientGeneratedUs=353481476834 clientSendUs=353485117482 clientDoneUs=353485118284 queueAgeUs=3640648 exchangeUs=802 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353485118293
+[native-video-client][input-timing] timingSchema=2 seq=20 actionKind=10 eventKind=6 clientGeneratedUs=353481476835 clientSendUs=353485118436 clientDoneUs=353485119064 queueAgeUs=3641601 exchangeUs=628 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353485119072
+[native-video-client][input-timing] timingSchema=2 seq=21 actionKind=10 eventKind=6 clientGeneratedUs=353481476835 clientSendUs=353485119086 clientDoneUs=353485119811 queueAgeUs=3642251 exchangeUs=725 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353485119821
+[native-video-client][input-timing] timingSchema=2 seq=22 actionKind=10 eventKind=6 clientGeneratedUs=353481476835 clientSendUs=353485119836 clientDoneUs=353485120359 queueAgeUs=3643001 exchangeUs=523 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353485120366
+PASS  NEGATIVE: THE AGENT TYPED NOTHING (the focused field is not a password field) and the window says so  잠금 화면의 비밀번호 칸이 준비되지 않아 입력하지 않았습니다.
+원격 화면을 한 번 클릭해 비밀번호 칸을 띄운 뒤 다시 누르세요. | user=
+[native-video-client][control] seq=8 rttUs=382 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=8 rttUs=382 clockOffsetUs=-43 clientSendUs=353485622528 hostRecvUs=353485622676 hostSendUs=353485622676 clientRecvUs=353485622910 eventQpcUs=353485622979
+[native-video-client][input-p0] windowUs=1004311 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=9 rttUs=311 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=9 rttUs=311 clockOffsetUs=6 clientSendUs=353486132622 hostRecvUs=353486132784 hostSendUs=353486132784 clientRecvUs=353486132933 eventQpcUs=353486132992
+
+--- r3 UX-R: another host's transaction is pending -> busy, said as that ---
+PASS  UX-R setup: host A holds the service's pipe with a REAL pending lock-screen challenge  stage=3
+[native-video-client][lock-cred] challenge rejected: busy stage=16 win32=0 waiting=0
+[native-video-client][input-timing] timingSchema=2 seq=23 actionKind=10 eventKind=6 clientGeneratedUs=353486538423 clientSendUs=353487546742 clientDoneUs=353487547635 queueAgeUs=1008319 exchangeUs=893 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353487547651
+[native-video-client][input-p0] windowUs=1430671 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=10 rttUs=265 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=10 rttUs=265 clockOffsetUs=38 clientSendUs=353487547670 hostRecvUs=353487547841 hostSendUs=353487547841 clientRecvUs=353487547935 eventQpcUs=353487547998
+[native-video-client][input-timing] timingSchema=2 seq=24 actionKind=10 eventKind=6 clientGeneratedUs=353486538428 clientSendUs=353487548007 clientDoneUs=353487548435 queueAgeUs=1009579 exchangeUs=428 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353487548443
+[native-video-client][input-timing] timingSchema=2 seq=25 actionKind=10 eventKind=6 clientGeneratedUs=353486538428 clientSendUs=353487548453 clientDoneUs=353487548942 queueAgeUs=1010025 exchangeUs=489 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353487548950
+[native-video-client][input-timing] timingSchema=2 seq=26 actionKind=10 eventKind=6 clientGeneratedUs=353486538428 clientSendUs=353487548961 clientDoneUs=353487549402 queueAgeUs=1010533 exchangeUs=441 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353487549408
+[native-video-client][input-timing] timingSchema=2 seq=27 actionKind=10 eventKind=6 clientGeneratedUs=353486538429 clientSendUs=353487549420 clientDoneUs=353487549840 queueAgeUs=1010991 exchangeUs=420 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353487549847
+[native-video-client][input-timing] timingSchema=2 seq=28 actionKind=10 eventKind=6 clientGeneratedUs=353486538429 clientSendUs=353487549859 clientDoneUs=353487550368 queueAgeUs=1011430 exchangeUs=509 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353487550375
+[native-video-client][input-timing] timingSchema=2 seq=29 actionKind=10 eventKind=6 clientGeneratedUs=353486538429 clientSendUs=353487550395 clientDoneUs=353487554022 queueAgeUs=1011966 exchangeUs=3627 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353487554052
+[native-video-client][input-timing] timingSchema=2 seq=30 actionKind=10 eventKind=6 clientGeneratedUs=353486538429 clientSendUs=353487554088 clientDoneUs=353487555759 queueAgeUs=1015659 exchangeUs=1671 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353487555768
+[native-video-client][input-timing] timingSchema=2 seq=31 actionKind=10 eventKind=6 clientGeneratedUs=353486538429 clientSendUs=353487555895 clientDoneUs=353487556829 queueAgeUs=1017466 exchangeUs=934 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353487556838
+[native-video-client][input-timing] timingSchema=2 seq=32 actionKind=10 eventKind=6 clientGeneratedUs=353486538429 clientSendUs=353487556853 clientDoneUs=353487557983 queueAgeUs=1018424 exchangeUs=1130 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353487557991
+[native-video-client][input-timing] timingSchema=2 seq=33 actionKind=10 eventKind=6 clientGeneratedUs=353486538430 clientSendUs=353487558005 clientDoneUs=353487559258 queueAgeUs=1019575 exchangeUs=1253 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353487559270
+PASS  UX-R: the click opened the password window and took the password
+PASS  UX-R: THE RESULT WINDOW SAYS ANOTHER CONNECTION'S REQUEST IS IN PROGRESS -- try again after it ends -- not a general error  다른 연결이 이 원격 PC의 Windows 로그인(잠금 해제) 요청을 처리하고 있어 보내지 않았습니다.
+그 요청이 끝나거나 취소된 뒤 다시 누르세요.
+PASS  UX-R: ...NOTHING was typed anywhere (the field keeps its text)  0075 006E 0074 006F 0075 0063 0068 0065 0064 
+PASS  UX-R: ...host A's connection was left alone (the service still answers it)
+    host A's transaction ended (its connection closed)
+[native-video-client][control] seq=11 rttUs=285 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=11 rttUs=285 clockOffsetUs=19 clientSendUs=353488060550 hostRecvUs=353488060712 hostSendUs=353488060712 clientRecvUs=353488060835 eventQpcUs=353488060898
+PASS  UX-R control: a general failure is said as a failure, not as 'another connection is busy'  원격 PC가 입력하지 못했습니다 (오류 0).
+[native-video-client][input-p0] windowUs=1010629 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=12 rttUs=230 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=12 rttUs=230 clockOffsetUs=-14 clientSendUs=353488573847 hostRecvUs=353488573948 hostSendUs=353488573948 clientRecvUs=353488574077 eventQpcUs=353488574143
+[native-video-client][control] seq=13 rttUs=255 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=13 rttUs=255 clockOffsetUs=-1 clientSendUs=353489085271 hostRecvUs=353489085397 hostSendUs=353489085397 clientRecvUs=353489085526 eventQpcUs=353489085615
+
+--- the button, the password, 입력 (the field already holds an earlier attempt) ---
+[native-video-client][lock-cred] lock-screen login: typed stage=8 win32=0 waiting=1
+[native-video-client][input-timing] timingSchema=2 seq=34 actionKind=10 eventKind=6 clientGeneratedUs=353489411274 clientSendUs=353490192401 clientDoneUs=353490193282 queueAgeUs=781127 exchangeUs=881 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490193295
+[native-video-client][input-p0] windowUs=1635005 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=14 rttUs=179 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=14 rttUs=179 clockOffsetUs=21 clientSendUs=353490193304 hostRecvUs=353490193415 hostSendUs=353490193415 clientRecvUs=353490193483 eventQpcUs=353490193537
+[native-video-client][input-timing] timingSchema=2 seq=35 actionKind=10 eventKind=6 clientGeneratedUs=353489411282 clientSendUs=353490193543 clientDoneUs=353490193919 queueAgeUs=782261 exchangeUs=376 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490193925
+[native-video-client][input-timing] timingSchema=2 seq=36 actionKind=10 eventKind=6 clientGeneratedUs=353489411282 clientSendUs=353490193933 clientDoneUs=353490194391 queueAgeUs=782651 exchangeUs=458 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490194399
+[native-video-client][input-timing] timingSchema=2 seq=37 actionKind=10 eventKind=6 clientGeneratedUs=353489411283 clientSendUs=353490194409 clientDoneUs=353490194855 queueAgeUs=783126 exchangeUs=446 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490194862
+[native-video-client][input-timing] timingSchema=2 seq=38 actionKind=10 eventKind=6 clientGeneratedUs=353489411284 clientSendUs=353490194872 clientDoneUs=353490195332 queueAgeUs=783588 exchangeUs=460 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490195339
+[native-video-client][input-timing] timingSchema=2 seq=39 actionKind=10 eventKind=6 clientGeneratedUs=353489411284 clientSendUs=353490195348 clientDoneUs=353490195772 queueAgeUs=784064 exchangeUs=424 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490195779
+[native-video-client][input-timing] timingSchema=2 seq=40 actionKind=10 eventKind=6 clientGeneratedUs=353489411284 clientSendUs=353490195788 clientDoneUs=353490196139 queueAgeUs=784504 exchangeUs=351 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490196146
+[native-video-client][input-timing] timingSchema=2 seq=41 actionKind=10 eventKind=6 clientGeneratedUs=353489411285 clientSendUs=353490196155 clientDoneUs=353490196586 queueAgeUs=784870 exchangeUs=431 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490196593
+[native-video-client][input-timing] timingSchema=2 seq=42 actionKind=10 eventKind=6 clientGeneratedUs=353489411285 clientSendUs=353490196714 clientDoneUs=353490197070 queueAgeUs=785429 exchangeUs=356 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490197077
+[native-video-client][input-timing] timingSchema=2 seq=43 actionKind=10 eventKind=6 clientGeneratedUs=353489411285 clientSendUs=353490197086 clientDoneUs=353490197503 queueAgeUs=785801 exchangeUs=417 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490197510
+[native-video-client][input-timing] timingSchema=2 seq=44 actionKind=10 eventKind=6 clientGeneratedUs=353489411286 clientSendUs=353490197518 clientDoneUs=353490197921 queueAgeUs=786232 exchangeUs=403 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490197927
+PASS  ...the prompt took every character
+PASS  THE SERVICE'S AGENT REPLACED THE FIELD'S CONTENT WITH THE SECRET, BYTE FOR BYTE (the earlier attempt gone)  0050 0077 002D 0037 0051 007A 0020 0022 0021 00E4 AC00 0078 
+PASS  ...and nothing into the user-name field or the decoy
+PASS  THE RESULT WINDOW SAYS "typed -- press Enter", NOT "unlocked"  원격 PC 잠금 화면의 비밀번호 칸에 입력했습니다.
+이 창을 닫고 뷰어에서 Enter 를 누르면 로그인합니다. (입력함 = 로그인 성공이 아닙니다)
+비밀번호가 틀려 원격 화면에 Windows 메시지가 뜨면, 원격 화면에서 그 메시지를 닫은 뒤 'Windows 로그인'을 다시 누르세요.
+PASS  the service typed it once (its log, no password in it)
+
+--- lk-ux-retry: the first password was wrong; the same connection presses again ---
+PASS  THE PONG ADVERTISES kCaptureFlagLockCredRetryV1 (0x80000) -- the host and its service can end the wait  1925112
+PASS  ...the first password still waits for its unlock (the state 0.2.162 answered 'still in progress')
+[native-video-client][control] seq=15 rttUs=335 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=15 rttUs=335 clockOffsetUs=-40 clientSendUs=353490703445 hostRecvUs=353490703572 hostSendUs=353490703572 clientRecvUs=353490703780 eventQpcUs=353490703885
+[native-video-client][input-timing] timingSchema=2 seq=45 actionKind=10 eventKind=6 clientGeneratedUs=353490873424 clientSendUs=353490873455 clientDoneUs=353490878619 queueAgeUs=31 exchangeUs=5164 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490878639
+[native-video-client][input-timing] timingSchema=2 seq=46 actionKind=10 eventKind=6 clientGeneratedUs=353490873433 clientSendUs=353490878664 clientDoneUs=353490880157 queueAgeUs=5231 exchangeUs=1493 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490880172
+[native-video-client][input-timing] timingSchema=2 seq=47 actionKind=10 eventKind=6 clientGeneratedUs=353490873434 clientSendUs=353490880192 clientDoneUs=353490881296 queueAgeUs=6758 exchangeUs=1104 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490881311
+[native-video-client][input-timing] timingSchema=2 seq=48 actionKind=10 eventKind=6 clientGeneratedUs=353490873434 clientSendUs=353490881335 clientDoneUs=353490883090 queueAgeUs=7901 exchangeUs=1755 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490883111
+[native-video-client][input-timing] timingSchema=2 seq=49 actionKind=10 eventKind=6 clientGeneratedUs=353490873435 clientSendUs=353490883142 clientDoneUs=353490886055 queueAgeUs=9707 exchangeUs=2913 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490886082
+[native-video-client][input-timing] timingSchema=2 seq=50 actionKind=10 eventKind=6 clientGeneratedUs=353490873435 clientSendUs=353490886115 clientDoneUs=353490888658 queueAgeUs=12680 exchangeUs=2543 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490888675
+[native-video-client][input-timing] timingSchema=2 seq=51 actionKind=10 eventKind=6 clientGeneratedUs=353490873435 clientSendUs=353490888695 clientDoneUs=353490890383 queueAgeUs=15260 exchangeUs=1688 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490890406
+[native-video-client][input-timing] timingSchema=2 seq=52 actionKind=10 eventKind=6 clientGeneratedUs=353490873436 clientSendUs=353490890435 clientDoneUs=353490891371 queueAgeUs=16999 exchangeUs=936 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490891384
+[native-video-client][input-timing] timingSchema=2 seq=53 actionKind=10 eventKind=6 clientGeneratedUs=353490873436 clientSendUs=353490891406 clientDoneUs=353490892841 queueAgeUs=17970 exchangeUs=1435 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490892862
+[native-video-client][input-timing] timingSchema=2 seq=54 actionKind=10 eventKind=6 clientGeneratedUs=353490873437 clientSendUs=353490892887 clientDoneUs=353490893674 queueAgeUs=19450 exchangeUs=787 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490893687
+[native-video-client][input-timing] timingSchema=2 seq=55 actionKind=10 eventKind=6 clientGeneratedUs=353490873437 clientSendUs=353490893703 clientDoneUs=353490894990 queueAgeUs=20266 exchangeUs=1287 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353490895006
+[native-video-client][input-p0] windowUs=1005037 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=16 rttUs=407 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=16 rttUs=407 clockOffsetUs=25 clientSendUs=353491213989 hostRecvUs=353491214218 hostSendUs=353491214218 clientRecvUs=353491214396 eventQpcUs=353491214465
+PASS  RETRY: THE PRESS OPENS THE PASSWORD WINDOW (not "the earlier one is still in progress")  GNLink — Windows 로그인 | 취소했습니다. 아무것도 보내지 않았습니다.
+PASS  RETRY, CANCELLED: said, no retry reached the host, and the earlier wait goes on  취소했습니다. 아무것도 보내지 않았습니다.
+[native-video-client][control] seq=17 rttUs=212 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=17 rttUs=212 clockOffsetUs=0 clientSendUs=353491723033 hostRecvUs=353491723139 hostSendUs=353491723139 clientRecvUs=353491723245 eventQpcUs=353491723340
+[native-video-client][input-p0] windowUs=1004308 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=18 rttUs=343 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=18 rttUs=343 clockOffsetUs=-57 clientSendUs=353492233660 hostRecvUs=353492233774 hostSendUs=353492233774 clientRecvUs=353492234003 eventQpcUs=353492234091
+[native-video-client][lock-cred] requestId=4 superseded by requestId=5
+[native-video-client][lock-cred] lock-screen login: typed stage=8 win32=0 waiting=1
+[native-video-client][input-timing] timingSchema=2 seq=56 actionKind=10 eventKind=6 clientGeneratedUs=353492292264 clientSendUs=353492822914 clientDoneUs=353492823753 queueAgeUs=530650 exchangeUs=839 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353492823763
+[native-video-client][control] seq=19 rttUs=109 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=19 rttUs=109 clockOffsetUs=1 clientSendUs=353492823774 hostRecvUs=353492823830 hostSendUs=353492823830 clientRecvUs=353492823883 eventQpcUs=353492823923
+[native-video-client][input-timing] timingSchema=2 seq=57 actionKind=10 eventKind=6 clientGeneratedUs=353492292267 clientSendUs=353492823927 clientDoneUs=353492824473 queueAgeUs=531660 exchangeUs=546 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353492824480
+[native-video-client][input-timing] timingSchema=2 seq=58 actionKind=10 eventKind=6 clientGeneratedUs=353492292268 clientSendUs=353492824492 clientDoneUs=353492824985 queueAgeUs=532224 exchangeUs=493 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353492824995
+[native-video-client][input-timing] timingSchema=2 seq=59 actionKind=10 eventKind=6 clientGeneratedUs=353492292268 clientSendUs=353492825009 clientDoneUs=353492825467 queueAgeUs=532741 exchangeUs=458 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353492825474
+[native-video-client][input-timing] timingSchema=2 seq=60 actionKind=10 eventKind=6 clientGeneratedUs=353492292268 clientSendUs=353492825482 clientDoneUs=353492825942 queueAgeUs=533214 exchangeUs=460 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353492825949
+[native-video-client][input-timing] timingSchema=2 seq=61 actionKind=10 eventKind=6 clientGeneratedUs=353492292268 clientSendUs=353492825957 clientDoneUs=353492826327 queueAgeUs=533689 exchangeUs=370 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353492826334
+[native-video-client][input-timing] timingSchema=2 seq=62 actionKind=10 eventKind=6 clientGeneratedUs=353492292268 clientSendUs=353492826346 clientDoneUs=353492826842 queueAgeUs=534078 exchangeUs=496 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353492826848
+[native-video-client][input-timing] timingSchema=2 seq=63 actionKind=10 eventKind=6 clientGeneratedUs=353492292269 clientSendUs=353492826857 clientDoneUs=353492827307 queueAgeUs=534588 exchangeUs=450 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353492827314
+[native-video-client][input-timing] timingSchema=2 seq=64 actionKind=10 eventKind=6 clientGeneratedUs=353492292269 clientSendUs=353492827431 clientDoneUs=353492827817 queueAgeUs=535162 exchangeUs=386 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353492827824
+[native-video-client][input-timing] timingSchema=2 seq=65 actionKind=10 eventKind=6 clientGeneratedUs=353492292269 clientSendUs=353492827835 clientDoneUs=353492828253 queueAgeUs=535566 exchangeUs=418 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353492828260
+[native-video-client][input-timing] timingSchema=2 seq=66 actionKind=10 eventKind=6 clientGeneratedUs=353492292269 clientSendUs=353492828269 clientDoneUs=353492828676 queueAgeUs=536000 exchangeUs=407 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353492828685
+[native-video-client][input-p0] windowUs=1006096 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+PASS  RETRY: the password window took the new password
+PASS  THE HOST ENDED THE EARLIER WAIT FIRST -- confirmed by the service (Superseded, 17) -- THEN ASKED A NEW CHALLENGE  retries=1 | [lock-cred] retry challenge requestId=5 supersedes=4 status=3
+
+PASS  THE SERVICE'S AGENT REPLACED THE FIELD'S CONTENT WITH THE NEW PASSWORD, BYTE FOR BYTE (the first one gone)  0050 0077 002D 0037 0051 007A 002D 0072 0065 0074 0072 0079 0020 B098 0032 
+PASS  ...and nothing into the user-name field or the decoy
+PASS  THE RESULT WINDOW SAYS "typed -- press Enter" for the new password, and how to retry if Windows refuses it  원격 PC 잠금 화면의 비밀번호 칸에 입력했습니다.
+이 창을 닫고 뷰어에서 Enter 를 누르면 로그인합니다. (입력함 = 로그인 성공이 아닙니다)
+비밀번호가 틀려 원격 화면에 Windows 메시지가 뜨면, 원격 화면에서 그 메시지를 닫은 뒤 'Windows 로그인'을 다시 누르세요.
+PASS  ...AND THE WINDOW SHOWS ALL OF IT -- the retry guidance is not cut off, the 확인 button below it  text 96 px in a 100 px label; label bottom 112, button 128..154, client 166
+PASS  SAME CONNECTION: the control connection was never re-made (reconnect 0)  0 reconnects
+PASS  the service ended the first (its own line) and typed twice in all -- once per password, never re-sent  2 typed lines
+PASS  ...the new attempt is the one followed now
+
+--- lk-ux-retry r2 (N2): the earlier wait ended, the new password failed before sealing ---
+[native-video-client][control] seq=20 rttUs=259 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=20 rttUs=259 clockOffsetUs=-21 clientSendUs=353493332436 hostRecvUs=353493332544 hostSendUs=353493332544 clientRecvUs=353493332695 eventQpcUs=353493332758
+[native-video-client][control] seq=21 rttUs=343 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=21 rttUs=343 clockOffsetUs=15 clientSendUs=353493842687 hostRecvUs=353493842874 hostSendUs=353493842874 clientRecvUs=353493843030 eventQpcUs=353493843135
+[native-video-client][input-p0] windowUs=1004603 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][lock-cred] requestId=5 superseded by requestId=6
+[native-video-client][lock-cred] seal failed (test seam) stage=65530 win32=0 waiting=0
+[native-video-client][input-timing] timingSchema=2 seq=67 actionKind=10 eventKind=6 clientGeneratedUs=353494226156 clientSendUs=353494229273 clientDoneUs=353494229970 queueAgeUs=3117 exchangeUs=697 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353494229983
+[native-video-client][input-timing] timingSchema=2 seq=68 actionKind=10 eventKind=6 clientGeneratedUs=353494226162 clientSendUs=353494229994 clientDoneUs=353494230787 queueAgeUs=3832 exchangeUs=793 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353494230800
+[native-video-client][input-timing] timingSchema=2 seq=69 actionKind=10 eventKind=6 clientGeneratedUs=353494226163 clientSendUs=353494230817 clientDoneUs=353494231295 queueAgeUs=4654 exchangeUs=478 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353494231302
+[native-video-client][input-timing] timingSchema=2 seq=70 actionKind=10 eventKind=6 clientGeneratedUs=353494226163 clientSendUs=353494231312 clientDoneUs=353494231714 queueAgeUs=5149 exchangeUs=402 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353494231720
+[native-video-client][input-timing] timingSchema=2 seq=71 actionKind=10 eventKind=6 clientGeneratedUs=353494226163 clientSendUs=353494231728 clientDoneUs=353494232112 queueAgeUs=5565 exchangeUs=384 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353494232117
+[native-video-client][input-timing] timingSchema=2 seq=72 actionKind=10 eventKind=6 clientGeneratedUs=353494226163 clientSendUs=353494232125 clientDoneUs=353494232466 queueAgeUs=5962 exchangeUs=341 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353494232471
+[native-video-client][input-timing] timingSchema=2 seq=73 actionKind=10 eventKind=6 clientGeneratedUs=353494226163 clientSendUs=353494232478 clientDoneUs=353494232825 queueAgeUs=6315 exchangeUs=347 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353494232830
+[native-video-client][input-timing] timingSchema=2 seq=74 actionKind=10 eventKind=6 clientGeneratedUs=353494226163 clientSendUs=353494232836 clientDoneUs=353494233179 queueAgeUs=6673 exchangeUs=343 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353494233185
+[native-video-client][input-timing] timingSchema=2 seq=75 actionKind=10 eventKind=6 clientGeneratedUs=353494226164 clientSendUs=353494233297 clientDoneUs=353494233961 queueAgeUs=7133 exchangeUs=664 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353494233974
+[native-video-client][input-timing] timingSchema=2 seq=76 actionKind=10 eventKind=6 clientGeneratedUs=353494226164 clientSendUs=353494233990 clientDoneUs=353494234558 queueAgeUs=7826 exchangeUs=568 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353494234569
+[native-video-client][input-timing] timingSchema=2 seq=77 actionKind=10 eventKind=6 clientGeneratedUs=353494226164 clientSendUs=353494234583 clientDoneUs=353494235312 queueAgeUs=8419 exchangeUs=729 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353494235321
+[native-video-client][control] seq=22 rttUs=250 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=22 rttUs=250 clockOffsetUs=12 clientSendUs=353494352820 hostRecvUs=353494352957 hostSendUs=353494352957 clientRecvUs=353494353070 eventQpcUs=353494353147
+PASS  N2: the host ended the earlier wait and issued the new challenge (a second retry, cleared)  2 retries
+PASS  N2: THE WINDOW SAYS the earlier wait is over and the new password was NOT sent -- not "2 minutes"  앞서 입력한 비밀번호의 대기는 끝냈지만, 새 비밀번호는 이 PC에서 암호화하지 못해 보내지 않았습니다.
+'Windows 로그인'을 다시 누르세요.
+PASS  N2: ...nothing follows the earlier wait any more, and nothing new was typed (the field as it was)  0050 0077 002D 0037 0051 007A 002D 0072 0065 0074 0072 0079 0020 B098 0032 
+[native-video-client][control] seq=23 rttUs=363 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=23 rttUs=363 clockOffsetUs=-67 clientSendUs=353494863896 hostRecvUs=353494864010 hostSendUs=353494864010 clientRecvUs=353494864259 eventQpcUs=353494864376
+[native-video-client][input-p0] windowUs=1009062 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=24 rttUs=294 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=24 rttUs=294 clockOffsetUs=36 clientSendUs=353495365397 hostRecvUs=353495365580 hostSendUs=353495365580 clientRecvUs=353495365691 eventQpcUs=353495365755
+[native-video-client][control] seq=25 rttUs=283 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=25 rttUs=283 clockOffsetUs=-60 clientSendUs=353495881430 hostRecvUs=353495881511 hostSendUs=353495881511 clientRecvUs=353495881713 eventQpcUs=353495881776
+[native-video-client][input-p0] windowUs=1002581 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=26 rttUs=323 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=26 rttUs=323 clockOffsetUs=-24 clientSendUs=353496382455 hostRecvUs=353496382592 hostSendUs=353496382592 clientRecvUs=353496382778 eventQpcUs=353496382850
+[native-video-client][control] seq=27 rttUs=496 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=27 rttUs=496 clockOffsetUs=47 clientSendUs=353496898251 hostRecvUs=353496898546 hostSendUs=353496898546 clientRecvUs=353496898747 eventQpcUs=353496898879
+[native-video-client][input-p0] windowUs=1001238 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=28 rttUs=276 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=28 rttUs=276 clockOffsetUs=0 clientSendUs=353497412827 hostRecvUs=353497412965 hostSendUs=353497412965 clientRecvUs=353497413103 eventQpcUs=353497413174
+[native-video-client][control] seq=29 rttUs=358 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=29 rttUs=358 clockOffsetUs=6 clientSendUs=353497926381 hostRecvUs=353497926566 hostSendUs=353497926566 clientRecvUs=353497926739 eventQpcUs=353497926821
+[native-video-client][input-p0] windowUs=1012120 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=30 rttUs=542 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=30 rttUs=542 clockOffsetUs=-99 clientSendUs=353498437868 hostRecvUs=353498438040 hostSendUs=353498438040 clientRecvUs=353498438410 eventQpcUs=353498438542
+PASS  N2: ...and no later window reports the earlier one (no "2 minutes", no stale result)
+[native-video-client][control] seq=31 rttUs=422 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=31 rttUs=422 clockOffsetUs=69 clientSendUs=353498953030 hostRecvUs=353498953310 hostSendUs=353498953310 clientRecvUs=353498953452 eventQpcUs=353498953546
+[native-video-client][input-p0] windowUs=1010804 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=32 rttUs=284 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=32 rttUs=284 clockOffsetUs=-22 clientSendUs=353499467890 hostRecvUs=353499468010 hostSendUs=353499468010 clientRecvUs=353499468174 eventQpcUs=353499468293
+[native-video-client][lock-cred] lock-screen login: typed stage=8 win32=0 waiting=1
+[native-video-client][input-timing] timingSchema=2 seq=78 actionKind=10 eventKind=6 clientGeneratedUs=353499654615 clientSendUs=353500435143 clientDoneUs=353500436012 queueAgeUs=780528 exchangeUs=869 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353500436028
+[native-video-client][input-p0] windowUs=1186893 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=33 rttUs=197 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=33 rttUs=197 clockOffsetUs=29 clientSendUs=353500436046 hostRecvUs=353500436174 hostSendUs=353500436174 clientRecvUs=353500436243 eventQpcUs=353500436288
+[native-video-client][input-timing] timingSchema=2 seq=79 actionKind=10 eventKind=6 clientGeneratedUs=353499654625 clientSendUs=353500436294 clientDoneUs=353500436852 queueAgeUs=781669 exchangeUs=558 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353500436860
+[native-video-client][input-timing] timingSchema=2 seq=80 actionKind=10 eventKind=6 clientGeneratedUs=353499654626 clientSendUs=353500436870 clientDoneUs=353500437334 queueAgeUs=782244 exchangeUs=464 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353500437342
+[native-video-client][input-timing] timingSchema=2 seq=81 actionKind=10 eventKind=6 clientGeneratedUs=353499654626 clientSendUs=353500437353 clientDoneUs=353500438218 queueAgeUs=782727 exchangeUs=865 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353500438227
+[native-video-client][input-timing] timingSchema=2 seq=82 actionKind=10 eventKind=6 clientGeneratedUs=353499654626 clientSendUs=353500438239 clientDoneUs=353500438937 queueAgeUs=783613 exchangeUs=698 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353500438945
+[native-video-client][input-timing] timingSchema=2 seq=83 actionKind=10 eventKind=6 clientGeneratedUs=353499654627 clientSendUs=353500438957 clientDoneUs=353500439691 queueAgeUs=784330 exchangeUs=734 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353500439700
+[native-video-client][input-timing] timingSchema=2 seq=84 actionKind=10 eventKind=6 clientGeneratedUs=353499654627 clientSendUs=353500439714 clientDoneUs=353500440349 queueAgeUs=785087 exchangeUs=635 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353500440359
+[native-video-client][input-timing] timingSchema=2 seq=85 actionKind=10 eventKind=6 clientGeneratedUs=353499654628 clientSendUs=353500440371 clientDoneUs=353500440968 queueAgeUs=785743 exchangeUs=597 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353500440976
+[native-video-client][input-timing] timingSchema=2 seq=86 actionKind=10 eventKind=6 clientGeneratedUs=353499654628 clientSendUs=353500441114 clientDoneUs=353500441569 queueAgeUs=786486 exchangeUs=455 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353500441576
+[native-video-client][input-timing] timingSchema=2 seq=87 actionKind=10 eventKind=6 clientGeneratedUs=353499654629 clientSendUs=353500441587 clientDoneUs=353500442176 queueAgeUs=786958 exchangeUs=589 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353500442184
+[native-video-client][input-timing] timingSchema=2 seq=88 actionKind=10 eventKind=6 clientGeneratedUs=353499654629 clientSendUs=353500442195 clientDoneUs=353500442658 queueAgeUs=787566 exchangeUs=463 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353500442666
+PASS  N2: the next press goes through as an ordinary one: typed (the field replaced), followed for its unlock  원격 PC 잠금 화면의 비밀번호 칸에 입력했습니다.
+이 창을 닫고 뷰어에서 Enter 를 누르면 로그인합니다. (입력함 = 로그인 성공이 아닙니다)
+비밀번호가 틀려 원격 화면에 Windows 메시지가 뜨면, 원격 화면에서 그 메시지를 닫은 뒤 'Windows 로그인'을 다시 누르세요.
+
+--- lk-ux-retry r3 (N2-a): sent, its answer not come -> followed; the next press names it ---
+[native-video-client][control] seq=34 rttUs=330 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=34 rttUs=330 clockOffsetUs=-7 clientSendUs=353500948550 hostRecvUs=353500948708 hostSendUs=353500948708 clientRecvUs=353500948880 eventQpcUs=353500948951
+[native-video-client][input-p0] windowUs=1013204 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=35 rttUs=620 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=35 rttUs=620 clockOffsetUs=209 clientSendUs=353501449250 hostRecvUs=353501449769 hostSendUs=353501449769 clientRecvUs=353501449870 eventQpcUs=353501449915
+[native-video-client][lock-cred] requestId=7 superseded by requestId=8
+[native-video-client][lock-cred] lock-screen login timed out stage=65529 win32=0 waiting=1
+[native-video-client][input-timing] timingSchema=2 seq=89 actionKind=10 eventKind=6 clientGeneratedUs=353501852791 clientSendUs=353501857465 clientDoneUs=353501859315 queueAgeUs=4674 exchangeUs=1850 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353501859344
+[native-video-client][input-timing] timingSchema=2 seq=90 actionKind=10 eventKind=6 clientGeneratedUs=353501852797 clientSendUs=353501859365 clientDoneUs=353501861165 queueAgeUs=6568 exchangeUs=1800 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353501861177
+[native-video-client][input-timing] timingSchema=2 seq=91 actionKind=10 eventKind=6 clientGeneratedUs=353501852797 clientSendUs=353501861192 clientDoneUs=353501861852 queueAgeUs=8395 exchangeUs=660 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353501861862
+[native-video-client][input-timing] timingSchema=2 seq=92 actionKind=10 eventKind=6 clientGeneratedUs=353501852797 clientSendUs=353501861875 clientDoneUs=353501862326 queueAgeUs=9078 exchangeUs=451 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353501862334
+[native-video-client][input-timing] timingSchema=2 seq=93 actionKind=10 eventKind=6 clientGeneratedUs=353501852797 clientSendUs=353501862343 clientDoneUs=353501862764 queueAgeUs=9546 exchangeUs=421 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353501862774
+[native-video-client][input-timing] timingSchema=2 seq=94 actionKind=10 eventKind=6 clientGeneratedUs=353501852797 clientSendUs=353501862786 clientDoneUs=353501863390 queueAgeUs=9989 exchangeUs=604 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353501863400
+[native-video-client][input-timing] timingSchema=2 seq=95 actionKind=10 eventKind=6 clientGeneratedUs=353501852797 clientSendUs=353501863411 clientDoneUs=353501863856 queueAgeUs=10614 exchangeUs=445 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353501863865
+[native-video-client][input-timing] timingSchema=2 seq=96 actionKind=10 eventKind=6 clientGeneratedUs=353501852798 clientSendUs=353501863878 clientDoneUs=353501864336 queueAgeUs=11080 exchangeUs=458 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353501864343
+[native-video-client][input-timing] timingSchema=2 seq=97 actionKind=10 eventKind=6 clientGeneratedUs=353501852798 clientSendUs=353501864454 clientDoneUs=353501864838 queueAgeUs=11656 exchangeUs=384 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353501864846
+[native-video-client][input-timing] timingSchema=2 seq=98 actionKind=10 eventKind=6 clientGeneratedUs=353501852798 clientSendUs=353501864860 clientDoneUs=353501865337 queueAgeUs=12062 exchangeUs=477 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353501865347
+[native-video-client][input-timing] timingSchema=2 seq=99 actionKind=10 eventKind=6 clientGeneratedUs=353501852798 clientSendUs=353501865388 clientDoneUs=353501865772 queueAgeUs=12590 exchangeUs=384 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353501865780
+[native-video-client][control] seq=36 rttUs=224 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=36 rttUs=224 clockOffsetUs=8 clientSendUs=353501964219 hostRecvUs=353501964339 hostSendUs=353501964339 clientRecvUs=353501964443 eventQpcUs=353501964516
+[native-video-client][input-p0] windowUs=1009699 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=37 rttUs=254 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=37 rttUs=254 clockOffsetUs=0 clientSendUs=353502474315 hostRecvUs=353502474442 hostSendUs=353502474442 clientRecvUs=353502474569 eventQpcUs=353502474632
+PASS  N2-a: a retry (the earlier wait ended), its new password sent, its answer not come  3 retries
+PASS  N2-a: THE WINDOW SAYS it was sent and is being followed -- not "typed", not "not sent", not "2 minutes"  앞서 입력한 비밀번호의 대기는 끝냈고 새 비밀번호를 보냈습니다. 결과는 아직 오지 않아 계속 확인합니다.
+원격 화면에서 비밀번호 칸을 확인하세요. 다시 누르면 이 비밀번호를 새 비밀번호로 바꿉니다.
+PASS  N2-a: ...AND IT IS FOLLOWED (the viewer still waits on it)
+PASS  N2-a: ...the host types it a moment later (the field now holds the new password)  0050 0077 002D 0037 0051 007A 002D 0072 0065 0074 0072 0079 0020 B098 0032 
+[native-video-client][control] seq=38 rttUs=213 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=38 rttUs=213 clockOffsetUs=0 clientSendUs=353502990140 hostRecvUs=353502990247 hostSendUs=353502990247 clientRecvUs=353502990353 eventQpcUs=353502990406
+[native-video-client][input-p0] windowUs=1003091 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=39 rttUs=244 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=39 rttUs=244 clockOffsetUs=1 clientSendUs=353503492547 hostRecvUs=353503492670 hostSendUs=353503492670 clientRecvUs=353503492791 eventQpcUs=353503492853
+[native-video-client][lock-cred] requestId=8 superseded by requestId=9
+[native-video-client][lock-cred] lock-screen login: typed stage=8 win32=0 waiting=1
+[native-video-client][input-timing] timingSchema=2 seq=100 actionKind=10 eventKind=6 clientGeneratedUs=353503556873 clientSendUs=353504331141 clientDoneUs=353504332010 queueAgeUs=774268 exchangeUs=869 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353504332021
+[native-video-client][control] seq=40 rttUs=135 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=40 rttUs=135 clockOffsetUs=-11 clientSendUs=353504332032 hostRecvUs=353504332088 hostSendUs=353504332088 clientRecvUs=353504332167 eventQpcUs=353504332217
+[native-video-client][input-timing] timingSchema=2 seq=101 actionKind=10 eventKind=6 clientGeneratedUs=353503556880 clientSendUs=353504332224 clientDoneUs=353504332672 queueAgeUs=775344 exchangeUs=448 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353504332678
+[native-video-client][input-timing] timingSchema=2 seq=102 actionKind=10 eventKind=6 clientGeneratedUs=353503556880 clientSendUs=353504332692 clientDoneUs=353504333178 queueAgeUs=775812 exchangeUs=486 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353504333184
+[native-video-client][input-timing] timingSchema=2 seq=103 actionKind=10 eventKind=6 clientGeneratedUs=353503556881 clientSendUs=353504333201 clientDoneUs=353504333656 queueAgeUs=776320 exchangeUs=455 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353504333662
+[native-video-client][input-timing] timingSchema=2 seq=104 actionKind=10 eventKind=6 clientGeneratedUs=353503556881 clientSendUs=353504333672 clientDoneUs=353504334288 queueAgeUs=776791 exchangeUs=616 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353504334299
+[native-video-client][input-timing] timingSchema=2 seq=105 actionKind=10 eventKind=6 clientGeneratedUs=353503556882 clientSendUs=353504334313 clientDoneUs=353504334742 queueAgeUs=777431 exchangeUs=429 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353504334751
+[native-video-client][input-timing] timingSchema=2 seq=106 actionKind=10 eventKind=6 clientGeneratedUs=353503556882 clientSendUs=353504334772 clientDoneUs=353504335317 queueAgeUs=777890 exchangeUs=545 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353504335325
+[native-video-client][input-timing] timingSchema=2 seq=107 actionKind=10 eventKind=6 clientGeneratedUs=353503556882 clientSendUs=353504335338 clientDoneUs=353504335974 queueAgeUs=778456 exchangeUs=636 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353504335983
+[native-video-client][input-timing] timingSchema=2 seq=108 actionKind=10 eventKind=6 clientGeneratedUs=353503556883 clientSendUs=353504336120 clientDoneUs=353504336592 queueAgeUs=779237 exchangeUs=472 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353504336599
+[native-video-client][input-timing] timingSchema=2 seq=109 actionKind=10 eventKind=6 clientGeneratedUs=353503556883 clientSendUs=353504336609 clientDoneUs=353504337022 queueAgeUs=779726 exchangeUs=413 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353504337030
+[native-video-client][input-timing] timingSchema=2 seq=110 actionKind=10 eventKind=6 clientGeneratedUs=353503556883 clientSendUs=353504337042 clientDoneUs=353504337731 queueAgeUs=780159 exchangeUs=689 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=353504337742
+[native-video-client][input-p0] windowUs=1011162 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+PASS  N2-a: THE NEXT PRESS IS A RETRY OF IT -- ended first (17), then typed: field replaced, no 'pending' refusal  원격 PC 잠금 화면의 비밀번호 칸에 입력했습니다.
+이 창을 닫고 뷰어에서 Enter 를 누르면 로그인합니다. (입력함 = 로그인 성공이 아닙니다)
+비밀번호가 틀려 원격 화면에 Windows 메시지가 뜨면, 원격 화면에서 그 메시지를 닫은 뒤 'Windows 로그인'을 다시 누르세요. | retries=4
+PASS  N2-a: ...on the same connection (reconnect 0) and nothing was re-sent by itself (typed once per press)
+
+--- r2 L5: a stale result window from an earlier connection ---
+[native-video-client][login] a result of an earlier connection was not shown stage=9
+[native-video-client][control] seq=41 rttUs=269 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=41 rttUs=269 clockOffsetUs=-24 clientSendUs=353504846404 hostRecvUs=353504846514 hostSendUs=353504846514 clientRecvUs=353504846673 eventQpcUs=353504846766
+[native-video-client][control] seq=42 rttUs=343 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=42 rttUs=343 clockOffsetUs=22 clientSendUs=353505347929 hostRecvUs=353505348123 hostSendUs=353505348123 clientRecvUs=353505348272 eventQpcUs=353505348348
+[native-video-client][input-p0] windowUs=1000193 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=43 rttUs=358 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=43 rttUs=358 clockOffsetUs=-40 clientSendUs=353505849305 hostRecvUs=353505849444 hostSendUs=353505849444 clientRecvUs=353505849663 eventQpcUs=353505849744
+[native-video-client][control] seq=44 rttUs=230 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=44 rttUs=230 clockOffsetUs=2 clientSendUs=353506363964 hostRecvUs=353506364081 hostSendUs=353506364081 clientRecvUs=353506364194 eventQpcUs=353506364259
+[native-video-client][input-p0] windowUs=1014658 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=45 rttUs=288 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=45 rttUs=288 clockOffsetUs=12 clientSendUs=353506877456 hostRecvUs=353506877612 hostSendUs=353506877612 clientRecvUs=353506877744 eventQpcUs=353506877806
+PASS  L5: a queued 'unlocked' of an earlier connection is NOT shown
+[native-video-client][control] seq=46 rttUs=363 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=46 rttUs=363 clockOffsetUs=-28 clientSendUs=353507385044 hostRecvUs=353507385197 hostSendUs=353507385197 clientRecvUs=353507385407 eventQpcUs=353507385480
+[native-video-client][input-p0] windowUs=1005811 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+PASS  L5 control: the same message of THIS connection is shown  취소했습니다. 아무것도 보내지 않았습니다.
+
+--- the session unlocks ---
+[native-video-client][control] seq=47 rttUs=402 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=47 rttUs=402 clockOffsetUs=-92 clientSendUs=353507897020 hostRecvUs=353507897129 hostSendUs=353507897129 clientRecvUs=353507897422 eventQpcUs=353507897482
+[native-video-client][lock-cred] requestId=9 final stage=9
+[native-video-client][control] seq=48 rttUs=596 hostQueueUs=1 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=48 rttUs=596 clockOffsetUs=-144 clientSendUs=353508410887 hostRecvUs=353508411040 hostSendUs=353508411041 clientRecvUs=353508411483 eventQpcUs=353508411557
+[native-video-client][input-p0] windowUs=1008648 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+PASS  THE RESULT WINDOW SAYS "unlocked" -- the service saw that session unlock after the typing  원격 PC의 잠금이 해제되었습니다.
+PASS  ...and the host stops offering it (0x40000 gone)  1138680
+[native-video-client][control] seq=49 rttUs=664 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=49 rttUs=664 clockOffsetUs=25 clientSendUs=353508922240 hostRecvUs=353508922597 hostSendUs=353508922597 clientRecvUs=353508922904 eventQpcUs=353508923047
+PASS  ...so the toolbar no longer lays out "Windows 로그인"
+PASS  lockscreen-cred: the service's log carries no password
+
+--- nothing kept ---
+PASS  the password is in none of the viewer's output
+PASS  ...nor in the host's
+PASS  ...nor in any file of this run (the viewer's credential store included)
+PASS  no credential file was written by the viewer
+PASS  the scratch directory is cleaned up
+
+RESULT: ALL PASS  (68 checks, 0 failed)

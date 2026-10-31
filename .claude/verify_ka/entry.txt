@@ -1,0 +1,93 @@
+standby_entry_client_test (keepalive-r2 ②)
+
+--- admission ---
+PASS  Admit sends a StandbyHello with the capability, the device id and a saved generation
+PASS  no retransmit before its time
+PASS  a retransmit repeats the SAME Hello (gen, capability): the host's replay
+PASS  an Ack of another generation is not this admission's
+PASS  Ack Ok: parked on the issued entry
+PASS  parked: a Ping every 5 s with the entry and its secret (no capability)
+
+--- an older host (never answers) ---
+PASS  6 Hellos, then Unsupported once -- no further admission, no capability asked  hellos=6 unsupported=1
+PASS  Unsupported refuses a new Admit (no automatic connect to it)
+
+--- Busy / Superseded: a bounded backoff, then a new capability ---
+PASS  Busy: waiting, no secret
+PASS  ...nothing at once
+PASS  ...a new capability after 1 s
+PASS  the new admission is a NEW, larger generation
+PASS  Superseded: waiting again, 2 s this time
+PASS  the backoff stops growing at 30 s  30000
+
+--- an entry the host forgot, a lease whose proof is lost ---
+PASS  Ping answered Unknown (host restarted / expired): Lost, waiting for a new admission
+PASS  ...then a new capability (bounded backoff)
+PASS  Pings unanswered past 16 s: Lost once -- the entry is never kept as ready  lost=1
+PASS  Pongs keep the entry parked (a minute)
+
+--- activation: the Pong of THIS generation and the HelloAck, either order ---
+PASS  Activate (Pong first): a larger generation than the admission
+PASS  ...not complete on the first answer alone
+PASS  ...complete on the second
+PASS  active: no Ping (the session is the liveness)
+PASS  the session ended: parked again, pinging
+PASS  Activate (HelloAck first)
+PASS  ...not complete on the first answer alone
+PASS  ...complete on the second
+PASS  active: no Ping (the session is the liveness)
+PASS  the session ended: parked again, pinging
+PASS  a bare HelloAck (no activation) adopts nothing
+PASS  HelloAck + a Pong of ANOTHER generation: not complete
+PASS  HelloAck + a Pong of ANOTHER entry: not complete
+PASS  HelloAck + a plain Ping Pong: not complete
+PASS  the answer lost: Activate again with the SAME generation
+PASS  ...its Pong then completes it
+
+--- refused, timed out, cancelled ---
+PASS  refused (Superseded, naming this generation): failed, still parked
+PASS  refused (Unknown entry): failed... the entry is lost
+PASS  no answer: 10 Activates, then failed once (and the entry lost) -- bounded  sends=10
+PASS  cancel: parked again
+PASS  ...its late Pong adopts nothing
+PASS  ...its late HelloAck adopts nothing
+PASS  the next activation: a larger generation
+PASS  ...the cancelled one's Pong still adopts nothing
+PASS  A cancelled, B in flight with a larger generation
+PASS  ...A's late HelloAck: not active (no Pong of B yet)
+PASS  ...A's late granted Pong: nothing
+PASS  ...B's own granted Pong: active (once)
+
+--- release (the app leaves the screen, the PC is evicted, sign-out) ---
+PASS  parked: ONE StandbyRelease with the entry and its secret
+PASS  ...then idle: no entry, no Ping, nothing more
+PASS  ...a late Pong of it changes nothing
+PASS  active: no Release (a granted entry refuses it; its session ends by itself)
+PASS  an older host (Unsupported) stays known as such after a release
+
+--- generations across a restart ---
+PASS  after a restart the next generation is larger than any sent before  3 after 2
+PASS  ...and the same device id
+PASS  the store cannot save: nothing is sent under an unsaved generation
+PASS  nothing usable stored: a new device id, generations from 1
+
+--- the file store (device id + last generation) ---
+FAIL  the store owns its path (the one writer)
+PASS  a second store on the same path is refused -- closed, not shared
+FAIL  nothing stored (a non-ASCII directory): the first generation is 1, a device id is made
+FAIL  ...the next one is saved too (replaced, not appended)
+FAIL  after a restart: the same device id, the counter goes on (3)
+PASS  Save failing at step 0: nothing sent
+FAIL  ...reopened: the same id, the next generation above every one sent (step 0)  next=0 sentMax=0
+PASS  Save failing at step 1: nothing sent
+FAIL  ...reopened: the same id, the next generation above every one sent (step 1)  next=0 sentMax=0
+PASS  Save failing at step 2: nothing sent
+FAIL  ...reopened: the same id, the next generation above every one sent (step 2)  next=0 sentMax=0
+PASS  Save failing at step 3: nothing sent
+FAIL  ...reopened: the same id, the next generation above every one sent (step 3)  next=0 sentMax=0
+PASS  Save failing at step 4: nothing sent
+FAIL  ...reopened: the same id, the next generation above every one sent (step 4)  next=0 sentMax=0
+PASS  a damaged (short) file loads as nothing
+FAIL  ...a new device id (a new incarnation), generations from 1 -- never the old id with a smaller one
+
+RESULT: FAILED  (72 checks, 10 failed)

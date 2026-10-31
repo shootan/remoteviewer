@@ -1,0 +1,12 @@
+{
+  "repo_path": "D:/remote/remote",
+  "files": [
+    "apps/native_poc/src/directory_client.hpp",
+    "apps/native_poc/src/directory_observe.hpp",
+    "apps/native_poc/src/directory_session_bootstrap.cpp",
+    "apps/native_poc/src/directory_session_bootstrap.hpp",
+    "apps/native_poc/src/directory_session_client.cpp",
+    "apps/native_poc/src/directory_session_client.hpp",
+    "apps/native_poc/src/viewer_startup.cpp"
+  ]
+}

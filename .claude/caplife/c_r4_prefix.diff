@@ -1,0 +1,815 @@
+diff --git a/apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp b/apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp
+index 3f0fa81..654dccf 100644
+--- a/apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp
++++ b/apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp
+@@ -132,19 +132,37 @@ void AndroidVideoDecoderSink::EnsureWorkerLocked() {
+   worker_ = std::thread([this] { WorkerMain(); });
+ }
+ 
++void AndroidVideoDecoderSink::SetPrefixPolicyForTest(bool on) {
++  LockedState lock(this);
++  prefixPolicy_ = on;
++  inbox_.SetPrefixPolicy(on);
++}
++
++// C r4: the residence budget -- the time the whole inbox (kInboxMaxFrames) represents at the session's target fps,
++// floored at 250 ms (high fps: one jitter spike must not expire a valid prefix) and capped at 500 ms (low fps: the
++// picture is not allowed to trail by more). 30 fps -> 267 ms, 20 -> 400 ms, <= 16 -> 500 ms.
++uint64_t AndroidVideoDecoderSink::PrefixAgeBudgetUsLocked() const {
++  const uint64_t fps = targetFps_ == 0 ? 30u : targetFps_;
++  return std::clamp<uint64_t>(static_cast<uint64_t>(kInboxMaxFrames) * 1000000ULL / fps, 250000ULL, 500000ULL);
++}
++
+ void AndroidVideoDecoderSink::RequestCodecResetLocked() {
++  InvalidateChainLocked();  // C r4
+   ++codecResetSeq_;
+   EnsureWorkerLocked();
+   workCv_.notify_all();
+ }
+ 
+ void AndroidVideoDecoderSink::ClearInboxLocked() {
++  InvalidateChainLocked();  // C r4
++  haveFrontier_ = false;
+   inbox_.Clear();
+   committedKeyValid_ = false;  // C r2
+ }
+ 
+ // apk-inbox C (D8): every ask made before this moment is moot -- the session drops it at its held / accepted point.
+ void AndroidVideoDecoderSink::InvalidateKeyAsksLocked() {
++  InvalidateChainLocked();  // C r4
+   ++keyEpoch_;
+   committedKeyValid_ = false;  // C r2
+   coveredToken_ = 0;           // C r2 §8
+@@ -171,6 +189,7 @@ bool AndroidVideoDecoderSink::RecoveryCandidateLocked() const {
+ // it as the candidate; (a) otherwise the queued deltas before the next usable IDR are dropped (never handed out), or
+ // everything and the tail gap when none is queued.
+ void AndroidVideoDecoderSink::NoteChainLossLocked(int cause, uint32_t seq) {
++  InvalidateChainLocked();  // C r4: a loss the decoder saw -- the codec's chain is not provably intact any more
+   NoteKeyWantLocked(cause);
+   if (committedKeyValid_ && remote60::native_poc::chain_seq_after(committedKeySeq_, seq)) {
+     ++lossAlreadyRecovered_;
+@@ -264,8 +283,27 @@ void AndroidVideoDecoderSink::WorkerMain() {
+     }
+     REMOTE60_LT(ltPassFrames_ = 0; ltPassStartUs_ = LtNowUs());
+     while (!inbox_.empty() && !workerStop_ && surfaceApplied_ == surfaceSeq_ && !CodecResetPendingLocked()) {
++      // C r4 backpressure: while a frame waits in the slot for an input buffer, nothing more is taken -- the next one
++      // would only replace (lose) it; the queue keeps the chain and the overflow decides (case 3'), and the held
++      // frame is retried on this pass's pump. A held DELTA past the age budget is dropped there (finite: an IDR
++      // queued behind it waits at most that long).
++      if (prefixPolicy_ && pendingFrame_.has()) {
++        ++backpressurePasses_;
++        break;
++      }
++      // C r4 age, at the Pop: a delta past the budget is not fed -- a loss at its seq (MarkLoss then drops the deltas
++      // that reference it, up to the next IDR); never a one-frame skip.
++      if (prefixPolicy_ && inbox_.HeadExpired(steady_now_us(), PrefixAgeBudgetUsLocked())) {
++        InboxFrame expired;
++        inbox_.Pop(&expired);
++        ++ageExpiredPop_;
++        NoteChainLossLocked(kWantInboxOverflow, expired.frame.header.seq);
++        continue;
++      }
+       InboxFrame item;
+       inbox_.Pop(&item);
++      frontierSeq_ = item.frame.header.seq;  // C r4: the newest AU the codec path took
++      haveFrontier_ = true;
+       // C r2: defensive -- a delta past the open gap's loss point is not fed (the trim and the door keep it out)
+       if (inbox_.BeyondGap(item.frame.header.seq, (item.frame.header.flags & 1u) != 0)) {
+         ++beyondGapDrops_;
+@@ -295,7 +333,9 @@ void AndroidVideoDecoderSink::WorkerMain() {
+     doneCv_.notify_all();
+     if (workerStop_) break;
+     workCv_.wait_for(lk, kPumpInterval, [this] {
+-      return workerStop_ || !inbox_.empty() || surfaceApplied_ != surfaceSeq_ || CodecResetPendingLocked();
++      // C r4: a queue behind a held frame does not wake the worker (no hot loop); the pump interval retries the slot
++      return workerStop_ || (!inbox_.empty() && !(prefixPolicy_ && pendingFrame_.has())) ||
++             surfaceApplied_ != surfaceSeq_ || CodecResetPendingLocked();
+     });
+   }
+   workerLock_ = nullptr;
+@@ -335,6 +375,7 @@ void AndroidVideoDecoderSink::SetTargetFps(uint32_t fps) {
+   // A runtime FPS change starts a new presentation clock on the next frame.
+   playoutClock_.SetTargetFrameIntervalUs(
+       std::max<uint64_t>(1ULL, 1000000ULL / static_cast<uint64_t>(clampedFps)));
++  targetFps_ = clampedFps;  // C r4: the age budget's base
+ }
+ 
+ // apk-decoder-liveness r1: the UI hands the Surface's window over and returns -- the codec for it is made by the
+@@ -453,8 +494,12 @@ void AndroidVideoDecoderSink::OnEncodedH264FrameAs(uint64_t token, remote60::nat
+   const uint64_t gen = frame.header.streamGeneration;
+   InboxFrame item;
+   item.resetPts = latestInputStreamGeneration_ != 0 && latestInputStreamGeneration_ != gen;
+-  REMOTE60_LT(item.enqueueUs = LtNowUs());
++  item.enqueueUs = steady_now_us();  // C r4: always (the residence start)
+   item.frame = std::move(frame);
++  if (prefixPolicy_) {
++    inbox_.SetFrontier(chainValid_ && haveFrontier_, frontierSeq_, item.enqueueUs,
++                       PrefixAgeBudgetUsLocked());
++  }
+   const auto offer = inbox_.Offer(std::move(item));
+   if (offer.admit == remote60::native_poc::ChainAdmit::Duplicate ||
+       offer.admit == remote60::native_poc::ChainAdmit::Stale) {
+@@ -545,6 +590,7 @@ void AndroidVideoDecoderSink::ProcessFrameLocked(InboxFrame&& item) {
+   const uint32_t offeredSeq = frame.header.seq;
+   const bool offeredKey = isKeyFrame;
+   const uint32_t heldSeq = pendingFrame_.held() ? pendingFrame_.held()->header.seq : offeredSeq;
++  const uint64_t offeredEnqueueUs = item.enqueueUs;  // C r4
+   pendingFrame_.Offer(std::move(frame), gate_, [this](remote60::native_poc::UdpH264AssembledFrame& f) {
+     return TryQueueFrameLocked(f);
+   }, &keyRequest);
+@@ -552,6 +598,7 @@ void AndroidVideoDecoderSink::ProcessFrameLocked(InboxFrame&& item) {
+   if (pendingFrame_.has()) {
+     pendingFrameCount_ = 1;
+     if (!hadPending) pendingFrameQueueRetryCount_ = 0;
++    if (!hadPending || offeredKey) pendingEnqueueUs_ = offeredEnqueueUs;  // C r4: the held frame's residence start
+   }
+   PumpCodecLocked();
+ }
+@@ -1102,6 +1149,10 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
+             " recWants=" + std::to_string(recovery_.wants()) + " recSent=" + std::to_string(recovery_.sent()) +
+             " recMoot=" + std::to_string(recoveryDroppedMoot_) + " keyTaken=" + std::to_string(keyRequestsTaken_) +
+             " covered=" + std::to_string(coveredToken_ != 0 ? 1 : 0) + " coveredExh=" + std::to_string(coveredExhausted_ ? 1 : 0) +
++            " prefixPolicy=" + std::to_string(prefixPolicy_ ? 1 : 0) + " prefixKept=" + std::to_string(inbox_.prefixKeptEvents()) +
++            " prefixKeptFrames=" + std::to_string(inbox_.prefixKeptFrames()) + " tailLost=" + std::to_string(inbox_.tailLost()) +
++            " prefixRefused=" + std::to_string(inbox_.prefixRefused()) + " ageExpPop=" + std::to_string(ageExpiredPop_) +
++            " ageExpSlot=" + std::to_string(ageExpiredSlot_) + " backpressure=" + std::to_string(backpressurePasses_) + " passes=" + std::to_string(workerPasses_) +
+             " coveredStale=" + std::to_string(coveredStale_) +
+             " keyEpoch=" + std::to_string(keyEpoch_);
+   status += " resetPending=" + std::to_string(CodecResetPendingLocked() ? 1 : 0);
+@@ -1360,6 +1411,15 @@ void AndroidVideoDecoderSink::RetryCodecLocked() {
+ void AndroidVideoDecoderSink::PumpCodecLocked() {
+   const uint64_t nowUs = steady_now_us();
+ 
++  // C r4 age, at the slot: a held DELTA past the budget is dropped (a loss at its seq) -- an IDR never is.
++  if (prefixPolicy_ && pendingFrame_.has() && (pendingFrame_.held()->header.flags & 1u) == 0 && pendingEnqueueUs_ != 0 &&
++      nowUs > pendingEnqueueUs_ && nowUs - pendingEnqueueUs_ > PrefixAgeBudgetUsLocked()) {
++    const uint32_t seq = pendingFrame_.held()->header.seq;
++    pendingFrame_.Reset();
++    pendingFrameCount_ = 0;
++    ++ageExpiredSlot_;
++    NoteChainLossLocked(kWantPendingSlot, seq);
++  }
+   if (pendingFrame_.has() && codec_) {
+     // apk-0232 r2 (N2): the held frame goes in only if the gate still admits its generation; else it is dropped.
+     if (pendingFrame_.Pump(gate_, [this](remote60::native_poc::UdpH264AssembledFrame& f) { return TryQueueFrameLocked(f); })) {
+@@ -1501,6 +1561,7 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
+     committedKeyValid_ = true;
+     committedKeySeq_ = frame.header.seq;
+     inbox_.OnKeyCommitted(frame.header.seq);
++    chainValid_ = true;  // C r4: the codec's chain is intact from here (until a loss / reset / clear)
+   }
+   // apk-inbox C (design r3 §2): the episode ends only here -- an IDR after the loss point committed to the codec.
+   if (isKey && recovery_.OnKeyCommitted(frame.header.seq)) {
+diff --git a/apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp b/apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp
+index 13143d2..274a9a5 100644
+--- a/apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp
++++ b/apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp
+@@ -179,6 +179,8 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
+   uint32_t DecoderKeyRequestValidCausesAs(uint64_t token, const remote60::native_poc::DecoderKeyRequest& request);
+   void OnDecoderKeyRequestSentAs(uint64_t token, const remote60::native_poc::DecoderKeyRequest& request, uint64_t nowUs);
+   void OnDecoderKeyOwedExhaustedAs(uint64_t token, uint64_t owedToken, uint64_t nowUs);
++  // C r4 prototype: the keep-prefix overflow case + age + slot backpressure (default OFF = today's C). Tests only.
++  void SetPrefixPolicyForTest(bool on);
+   bool DrainPresentationStatsAs(uint64_t token, remote60::native_poc::ClientPresentationStats* out);
+   bool DrainDecodeStatsAs(uint64_t token, remote60::native_poc::ClientDecodeStats* out);
+   uint64_t DecodeGenerationAs(uint64_t token);
+@@ -220,7 +222,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
+   struct InboxFrame {
+     remote60::native_poc::UdpH264AssembledFrame frame;
+     bool resetPts = false;  // the receive side saw the stream generation change (the old ResetPtsStateLocked rule)
+-    uint64_t enqueueUs = 0;  // apk-decoder-inbox r1: set only in test builds (GNLINK_LIVENESS_TRACE)
++    uint64_t enqueueUs = 0;  // C r4: set always -- the frame's local residence starts here (keep-prefix, age)
+   };
+   void EnsureWorkerLocked();
+   void WorkerMain();
+@@ -382,7 +384,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
+   struct InboxInfo {
+     remote60::native_poc::ChainAuInfo operator()(const InboxFrame& f) const {
+       return remote60::native_poc::ChainAuInfo{f.frame.header.streamGeneration, f.frame.header.seq,
+-                                                (f.frame.header.flags & 1u) != 0, f.frame.payload.size()};
++                                                (f.frame.header.flags & 1u) != 0, f.frame.payload.size(), f.enqueueUs};
+     }
+   };
+   remote60::native_poc::ChainInbox<InboxFrame, InboxInfo> inbox_{kInboxMaxFrames, kInboxMaxBytes, InboxInfo{}};
+@@ -402,6 +404,16 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
+   // C r2 (Codex §8 (a)): the owed duty the session spent its asks on (covered) -- its token, the end of the final
+   // answer window, and whether it ran out with no usable IDR (coveredExhausted). Ends when the gate's token moves (paid,
+   // re-armed, reset). A stale token's notice changes nothing (coveredStale counts it).
++  // C r4 keep-prefix prototype (Codex codex_apk_inbox_prefix_design_go_r1.md) -- OFF unless SetPrefixPolicyForTest.
++  bool prefixPolicy_ = false;
++  bool chainValid_ = false;        // the codec's chain intact since a committed IDR (no loss / reset / drop since)
++  bool haveFrontier_ = false;
++  uint32_t frontierSeq_ = 0;       // the newest AU the worker took to feed (popped, under mu_)
++  uint32_t targetFps_ = 30;        // SetTargetFps (the age budget's base)
++  uint64_t pendingEnqueueUs_ = 0;  // the held frame's residence start
++  uint64_t ageExpiredPop_ = 0, ageExpiredSlot_ = 0, backpressurePasses_ = 0;
++  uint64_t PrefixAgeBudgetUsLocked() const;
++  void InvalidateChainLocked() { chainValid_ = false; }
+   uint64_t coveredToken_ = 0;
+   uint64_t coveredDeadlineUs_ = 0;
+   bool coveredExhausted_ = false;
+diff --git a/apps/native_poc/CMakeLists.txt b/apps/native_poc/CMakeLists.txt
+index 963c4ff..df1a17e 100644
+--- a/apps/native_poc/CMakeLists.txt
++++ b/apps/native_poc/CMakeLists.txt
+@@ -1201,6 +1201,21 @@ target_include_directories(remote60_android_decoder_inbox_c_test PRIVATE
+ )
+ target_compile_definitions(remote60_android_decoder_inbox_c_test PRIVATE NOMINMAX)
+ 
++# apk-inbox C r4 prototype (Codex codex_apk_inbox_prefix_design_go_r1.md): keep-prefix vs today's C on the product sink,
++# one binary (a runtime switch, default OFF), an independent reference oracle over what the codec was handed. TEST ONLY.
++add_executable(remote60_android_decoder_inbox_prefix_test
++  src/android_decoder_inbox_prefix_test.cpp
++  src/test_fake_ndk/fake_ndk.cpp
++  ${REMOTE60_LIVENESS_SINK_DIR}/android_video_decoder.cpp
++)
++target_include_directories(remote60_android_decoder_inbox_prefix_test PRIVATE
++  ${CMAKE_CURRENT_SOURCE_DIR}/src/test_fake_ndk
++  ${REMOTE60_LIVENESS_SINK_DIR}
++  ${REMOTE60_CHAIN_INBOX_DIR}
++  src
++)
++target_compile_definitions(remote60_android_decoder_inbox_prefix_test PRIVATE NOMINMAX)
++
+ # apk-inbox C: the episode and the D8 descriptors through the PRODUCT shared session into the APK sink (its binding
+ # adapter), a fake host on loopback -- the schedule as the host receives it, and the held / accepted points with a race
+ # put there by the session's test hook (REMOTE60_CLIENT_SESSION_TEST_HOOKS). TEST ONLY.
+diff --git a/apps/native_poc/src/android_decoder_inbox_prefix_test.cpp b/apps/native_poc/src/android_decoder_inbox_prefix_test.cpp
+new file mode 100644
+index 0000000..9556888
+--- /dev/null
++++ b/apps/native_poc/src/android_decoder_inbox_prefix_test.cpp
+@@ -0,0 +1,469 @@
++// apk-inbox C r4 (Codex codex_apk_inbox_prefix_design_go_r1.md): the keep-prefix prototype against today's C, on the
++// PRODUCT sink + the stand-in NDK, the SAME schedule for both policies (SetPrefixPolicyForTest: one binary, one
++// definition, a runtime switch -- default OFF). Judged by an INDEPENDENT reference oracle that reads only what the
++// codec was handed (fake_ndk's queued payloads: the NAL type and the AU seq each test frame carries) and knows nothing
++// of the inbox: an IDR is decodable; a delta is decodable only if it is the very next AU after the last decodable one
++// since an IDR on this codec instance. "corrupt" = a delta handed to the codec that is not decodable.
++//   [P0] no loss: the same inputs both ways, nothing recovered, nothing corrupt
++//   [P1] a burst while the codec is busy inside its API (the inbox overflows with no IDR): today's C drops the whole
++//        queue; keep-prefix feeds the valid prefix -- more decodable inputs, none corrupt
++//   [P2] no input buffer for a while (< the age budget): backpressure keeps the queue; no hot loop
++//   [P3] no input buffer past the age budget: nothing past the budget is fed; recovery; none corrupt
++//   [P4] an IDR arrives while a prefix is kept: the IDR wins (case 1), none corrupt
++//   [P5] the codec reset while a prefix is kept: no delta reaches the new codec before an IDR
++//   [P6] a hole in the queued AUs (an assembler loss the sink was not told of): not provable -> today's case 3
++//   [P7] sustained overload: bounded inbox, bounded asks; afterwards the current frame again
++// Tag: pure-logic (stand-in NDK). Tests only.
++//
++//   remote60_android_decoder_inbox_prefix_test
++
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <mutex>
++#include <string>
++#include <thread>
++#include <vector>
++
++#include "android_video_decoder.hpp"
++#include "fake_ndk.hpp"
++#include "poc_protocol.hpp"
++
++using remote60::android_direct::AndroidVideoDecoderSink;
++using namespace remote60::native_poc;
++using Clock = std::chrono::steady_clock;
++
++namespace {
++int gFailures = 0, gChecks = 0;
++void check(const std::string& name, bool cond, const std::string& detail = {}) {
++  ++gChecks;
++  std::printf("%s  %s%s%s\n", cond ? "PASS" : "FAIL", name.c_str(), detail.empty() ? "" : "  ", detail.c_str());
++  std::fflush(stdout);
++  if (!cond) ++gFailures;
++}
++uint32_t gSeq = 0;
++// a test AU: its NAL (IDR 0x65 with SPS/PPS / delta 0x41), then the marker EE EE and its seq (4 bytes LE) last
++UdpH264AssembledFrame au(uint64_t gen, bool key, uint32_t seq) {
++  UdpH264AssembledFrame f;
++  f.header.width = 1280;
++  f.header.height = 720;
++  f.header.flags = key ? 0x1u : 0u;
++  f.header.streamGeneration = gen;
++  f.header.seq = seq;
++  static std::atomic<uint64_t> capture{1000000};
++  f.header.captureQpcUs = capture.fetch_add(33333);
++  const uint8_t sc[] = {0, 0, 0, 1};
++  auto put = [&](std::initializer_list<uint8_t> nal) {
++    f.payload.insert(f.payload.end(), sc, sc + 4);
++    f.payload.insert(f.payload.end(), nal.begin(), nal.end());
++  };
++  if (key) {
++    put({0x67, 0x42, 0x00, 0x28, 0xAB});
++    put({0x68, 0xCE, 0x3C, 0x80});
++    put({0x65});
++  } else {
++    put({0x41});
++  }
++  const uint8_t m[] = {0xEE, 0xEE, uint8_t(seq), uint8_t(seq >> 8), uint8_t(seq >> 16), uint8_t(seq >> 24)};
++  f.payload.insert(f.payload.end(), m, m + 6);
++  return f;
++}
++UdpH264AssembledFrame next(uint64_t gen, bool key) { return au(gen, key, ++gSeq); }
++
++template <class F>
++bool wait_until(F&& f, int ms) {
++  const auto end = Clock::now() + std::chrono::milliseconds(ms);
++  while (Clock::now() < end) {
++    if (f()) return true;
++    std::this_thread::sleep_for(std::chrono::milliseconds(2));
++  }
++  return f();
++}
++void sleep_ms(int ms) { std::this_thread::sleep_for(std::chrono::milliseconds(ms)); }
++void hold(uint32_t which) {
++  fake_ndk::barrier().which.store(which);
++  fake_ndk::barrier().held.store(true);
++}
++void let_go() { fake_ndk::barrier().held.store(false); }
++bool held_now() { return fake_ndk::barrier().waiting.load() > 0; }
++void input_available(bool on) {
++  std::lock_guard<std::mutex> lk(fake_ndk::mu());
++  fake_ndk::controls().inputAvailable = on;
++}
++size_t queued() {
++  std::lock_guard<std::mutex> lk(fake_ndk::mu());
++  return fake_ndk::controls().queued.size();
++}
++uint64_t field(const std::string& status, const char* key) {
++  const std::string k = std::string(" ") + key + "=";
++  const size_t at = status.find(k);
++  return at == std::string::npos ? ~0ull : std::strtoull(status.c_str() + at + k.size(), nullptr, 10);
++}
++ControlWindowSelectedMessage answer(uint64_t gen) {
++  ControlWindowSelectedMessage m{};
++  m.flags = 0x1u;
++  m.streamGeneration = gen;
++  return m;
++}
++JNIEnv* env = nullptr;
++int surfaceA = 1;
++
++// ---- the independent oracle: only the codec's inputs ----
++struct Fed {
++  bool key = false;
++  uint32_t seq = 0;
++};
++std::vector<Fed> fed_from(size_t from) {
++  std::lock_guard<std::mutex> lk(fake_ndk::mu());
++  std::vector<Fed> out;
++  const auto& q = fake_ndk::controls().queued;
++  for (size_t i = from; i < q.size(); ++i) {
++    const auto& p = q[i];
++    Fed f;
++    for (size_t j = 0; j + 4 < p.size(); ++j) {
++      if (p[j] == 0 && p[j + 1] == 0 && p[j + 2] == 0 && p[j + 3] == 1 && (p[j + 4] & 0x1F) == 5) f.key = true;
++    }
++    if (p.size() >= 6 && p[p.size() - 6] == 0xEE && p[p.size() - 5] == 0xEE) {
++      f.seq = uint32_t(p[p.size() - 4]) | uint32_t(p[p.size() - 3]) << 8 | uint32_t(p[p.size() - 2]) << 16 |
++              uint32_t(p[p.size() - 1]) << 24;
++    }
++    out.push_back(f);
++  }
++  return out;
++}
++struct Verdict {
++  int decodable = 0, corrupt = 0, keys = 0, deltas = 0;
++  uint32_t lastSeq = 0;
++};
++// `resetAt`: indexes (into the list) where a new codec instance begins -- the chain starts over there
++Verdict oracle(const std::vector<Fed>& in, bool chainAtStart, uint32_t lastAtStart, std::vector<size_t> resetAt = {}) {
++  Verdict v;
++  bool chain = chainAtStart;
++  uint32_t last = lastAtStart;
++  for (size_t i = 0; i < in.size(); ++i) {
++    if (std::find(resetAt.begin(), resetAt.end(), i) != resetAt.end()) chain = false;
++    const Fed& f = in[i];
++    if (f.key) {
++      ++v.keys;
++      ++v.decodable;
++      chain = true;
++      last = f.seq;
++    } else {
++      ++v.deltas;
++      if (chain && f.seq == last + 1) {
++        ++v.decodable;
++        last = f.seq;
++      } else {
++        ++v.corrupt;
++        chain = false;
++      }
++    }
++    v.lastSeq = f.seq;
++  }
++  return v;
++}
++std::string list(const std::vector<Fed>& in) {
++  std::string out;
++  for (const Fed& f : in) out += std::to_string(f.seq) + (f.key ? "K " : " ");
++  return out;
++}
++std::string show(const Verdict& v) {
++  return "decodable=" + std::to_string(v.decodable) + " corrupt=" + std::to_string(v.corrupt) + " keys=" +
++         std::to_string(v.keys) + " deltas=" + std::to_string(v.deltas) + " lastSeq=" + std::to_string(v.lastSeq);
++}
++
++// one fresh sink per run: surface, a selection answered, its IDR + 3 deltas fed and decoded; the policy set before
++struct Run {
++  AndroidVideoDecoderSink sink;
++  uint64_t gen;
++  size_t q0 = 0;         // the queue index the schedule starts at
++  uint32_t seqAtStart = 0;
++  explicit Run(bool prefix, uint64_t sel, uint64_t g) : gen(g) {
++    input_available(true);
++    let_go();
++    sink.SetPrefixPolicyForTest(prefix);
++    sink.SetTargetFps(30);  // the age budget: 8 / 30 fps -> 267 ms
++    sink.SetSurface(env, &surfaceA);
++    sink.PrepareForWindowSelection(sel);
++    sink.OnWindowSelectionControlResultFor(answer(g), sel);
++    const size_t a = queued();
++    send(next(g, true));
++    wait_until([&] { return queued() > a; }, 2000);
++    // the codec shows its first picture (a format, then one output): the selection is on screen, as on a device. With
++    // none at all the sink's bootstrap replay (apk-0232: re-queue the selection's IDR while no picture came) would
++    // re-feed an OLD IDR in the middle of these schedules -- a stand-in artefact, not either policy.
++    {
++      std::lock_guard<std::mutex> lk(fake_ndk::mu());
++      fake_ndk::Controls::Output fmt;
++      fmt.formatChange = true;
++      fmt.width = 1280;
++      fmt.height = 720;
++      fake_ndk::controls().outputs.push_back(fmt);
++      fake_ndk::Controls::Output pic;
++      pic.presentationTimeUs = 1;
++      fake_ndk::controls().outputs.push_back(pic);
++    }
++    for (int i = 0; i < 3; ++i) {
++      send(next(g, false));
++      sleep_ms(5);
++    }
++    wait_until([&] { return field(sink.DebugStatus(), "inbox") == 0 && queued() >= a + 4; }, 1000);
++    q0 = queued();
++    seqAtStart = gSeq;
++  }
++  ~Run() {
++    let_go();
++    input_available(true);
++    sink.SetSurface(env, nullptr);
++  }
++  void send(UdpH264AssembledFrame&& f) {
++    sink.OnEncodedH264Frame(std::move(f));
++    DecoderKeyRequest r;
++    while (sink.TakeDecoderKeyRequest(&r)) sink.OnDecoderKeyRequestSent(r, 0);
++  }
++  void deltas(int n, int gapMs) {
++    for (int i = 0; i < n; ++i) {
++      send(next(gen, false));
++      if (gapMs) sleep_ms(gapMs);
++    }
++  }
++  // the host's answer: an IDR and `n` paced deltas, then everything handed out
++  void recover(int n) {
++    send(next(gen, true));
++    sleep_ms(10);
++    deltas(n, 5);
++    wait_until([&] { return field(sink.DebugStatus(), "inbox") == 0; }, 1500);
++    sleep_ms(30);
++  }
++  Verdict verdict(std::vector<size_t> resetAt = {}) { return oracle(fed_from(q0), true, seqAtStart, resetAt); }
++};
++
++// [P1] the codec busy inside its API (dequeueInputBuffer held, mu_ released) while 12 deltas arrive
++Verdict burst(bool prefix, std::string* st, uint64_t sel) {
++  Run r(prefix, sel, sel * 10 + 1);
++  hold(fake_ndk::kHoldDequeueInput);
++  r.deltas(1, 0);
++  wait_until(held_now, 2000);
++  r.deltas(12, 1);
++  sleep_ms(20);
++  let_go();
++  wait_until([&] { return field(r.sink.DebugStatus(), "inbox") == 0; }, 1500);
++  sleep_ms(30);
++  r.recover(5);
++  *st = r.sink.DebugStatus();
++  return r.verdict();
++}
++// [P2] / [P3] no input buffer for `stallMs`, deltas arriving 33 ms apart meanwhile
++std::vector<uint32_t> gStale;  // [P3] AUs whose residence was over the budget (+ margin) when the buffers came back
++Verdict nobuf(bool prefix, int stallMs, std::string* st, uint64_t* passesDuring, uint64_t sel,
++              std::vector<Fed>* fedOut = nullptr) {
++  Run r(prefix, sel, sel * 10 + 1);
++  input_available(false);
++  const uint64_t p0 = field(r.sink.DebugStatus(), "passes");
++  const auto t0 = Clock::now();
++  std::vector<std::pair<uint32_t, Clock::time_point>> sentAt;
++  while (std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - t0).count() < stallMs) {
++    r.deltas(1, 0);
++    sentAt.push_back({gSeq, Clock::now()});
++    sleep_ms(33);
++  }
++  *passesDuring = field(r.sink.DebugStatus(), "passes") - p0;
++  const auto back = Clock::now();
++  gStale.clear();
++  for (const auto& [seq, at] : sentAt) {
++    if (std::chrono::duration_cast<std::chrono::milliseconds>(back - at).count() > 267 + 60) gStale.push_back(seq);
++  }
++  input_available(true);
++  wait_until([&] { return field(r.sink.DebugStatus(), "inbox") == 0; }, 1500);
++  sleep_ms(30);
++  r.recover(5);
++  *st = r.sink.DebugStatus();
++  if (fedOut) *fedOut = fed_from(r.q0);
++  return r.verdict();
++}
++}  // namespace
++
++int main() {
++  std::printf("android_decoder_inbox_prefix_test (C r4 keep-prefix prototype vs today's C, one oracle)\n");
++
++  std::puts("\n--- [P0] no loss: the same inputs, nothing recovered, nothing corrupt");
++  for (const bool prefix : {false, true}) {
++    Run r(prefix, 100 + prefix, 1001 + prefix * 10);
++    r.deltas(20, 10);
++    wait_until([&] { return field(r.sink.DebugStatus(), "inbox") == 0; }, 1000);
++    sleep_ms(20);
++    const Verdict v = r.verdict();
++    const std::string st = r.sink.DebugStatus();
++    check(std::string("[P0 ") + (prefix ? "prefix" : "current") + "] 20 deltas in order: all decodable, none corrupt, "
++          "no recovery", v.decodable == 20 && v.corrupt == 0 && field(st, "episodes") == 0, show(v));
++  }
++
++  std::puts("\n--- [P1] a burst while the codec is busy (the inbox overflows with no IDR)");
++  std::string s0, s1;
++  const Verdict b0 = burst(false, &s0, 110);
++  const Verdict b1 = burst(true, &s1, 111);
++  check("[P1 current] today's C: the queue dropped whole (case 3), the next IDR recovers; none corrupt",
++        b0.corrupt == 0 && field(s0, "prefixKept") == 0, show(b0) + " inboxDrops=" + std::to_string(field(s0, "inboxDrops")));
++  check("[P1 prefix] the valid prefix kept (case 3') and fed after the codec came back; none corrupt",
++        b1.corrupt == 0 && field(s1, "prefixKept") >= 1 && field(s1, "prefixKeptFrames") >= 7,
++        show(b1) + " prefixKept=" + std::to_string(field(s1, "prefixKept")) + " frames=" +
++            std::to_string(field(s1, "prefixKeptFrames")) + " tailLost=" + std::to_string(field(s1, "tailLost")));
++  check("[P1] the same schedule: keep-prefix hands the codec MORE decodable inputs than today's C (oracle)",
++        b1.decodable > b0.decodable, std::to_string(b0.decodable) + " -> " + std::to_string(b1.decodable));
++  check("[P1] both recover to the newest AU sent (the host's IDR and its deltas)", b0.lastSeq != 0 && b1.lastSeq != 0);
++
++  std::puts("\n--- [P2] no input buffer for 150 ms (< the 267 ms budget)");
++  uint64_t pp0 = 0, pp1 = 0;
++  const Verdict n0 = nobuf(false, 150, &s0, &pp0, 120);
++  const Verdict n1 = nobuf(true, 150, &s1, &pp1, 121);
++  check("[P2 current] none corrupt", n0.corrupt == 0, show(n0));
++  check("[P2 prefix] backpressure: the queue waits behind the held frame and is fed after; none corrupt; more decodable",
++        n1.corrupt == 0 && field(s1, "backpressure") >= 1 && n1.decodable >= n0.decodable,
++        show(n1) + " vs current " + std::to_string(n0.decodable) + " backpressure=" + std::to_string(field(s1, "backpressure")));
++  check("[P2 prefix] no hot loop: worker passes during the 150 ms stall stay at the pump interval's rate (<= 2 per 3 ms)",
++        pp1 <= 150 / 3 * 2 + 10, "passes=" + std::to_string(pp1) + " (current " + std::to_string(pp0) + ")");
++
++  std::puts("\n--- [P3] no input buffer for 700 ms (past the budget)");
++  std::vector<Fed> fa1, fa0;
++  const uint32_t a0start = gSeq;
++  const Verdict a0 = nobuf(false, 700, &s0, &pp0, 130, &fa0);
++  const Verdict a1 = nobuf(true, 700, &s1, &pp1, 131, &fa1);
++  const std::vector<uint32_t> stale1 = gStale;
++  int staleFed = 0;
++  for (const Fed& f : fa1) {
++    if (std::find(stale1.begin(), stale1.end(), f.seq) != stale1.end()) ++staleFed;
++  }
++  check("[P3 prefix] no AU that had waited longer than the budget (267 ms + 60 ms margin) when the buffers came back was "
++        "handed to the codec", !stale1.empty() && staleFed == 0,
++        "stale AUs=" + std::to_string(stale1.size()) + " of them fed=" + std::to_string(staleFed));
++  check("[P3 current] none corrupt", a0.corrupt == 0,
++        show(a0) + " bootstrapReplay=" + std::to_string(field(s0, "bootstrapReplay")) + (a0.corrupt ? " fed(seq,K=IDR) after start " + std::to_string(a0start) + ": " + list(fa0) +
++                                     " status: " + s0.substr(s0.find(" inbox="), 400) : std::string()));
++  check("[P3 prefix] what waited past the budget was not fed (age expiry at the slot / the Pop / the overflow); none "
++        "corrupt; recovered", a1.corrupt == 0 && (field(s1, "ageExpSlot") + field(s1, "ageExpPop") + field(s1, "prefixRefused")) >= 1,
++        show(a1) + " ageExpSlot=" + std::to_string(field(s1, "ageExpSlot")) + " ageExpPop=" + std::to_string(field(s1, "ageExpPop")) +
++            " prefixRefused=" + std::to_string(field(s1, "prefixRefused")));
++  check("[P3 prefix] no hot loop over 700 ms", pp1 <= 700 / 3 * 2 + 10, "passes=" + std::to_string(pp1));
++
++  std::puts("\n--- [P4] an IDR arrives while a prefix is kept");
++  {
++    Run r(true, 140, 1401);
++    hold(fake_ndk::kHoldDequeueInput);
++    r.deltas(1, 0);
++    wait_until(held_now, 2000);
++    r.deltas(10, 1);  // a prefix kept, the tail lost
++    r.send(next(r.gen, true));  // the host's IDR while still busy
++    r.deltas(2, 1);
++    sleep_ms(10);
++    let_go();
++    wait_until([&] { return field(r.sink.DebugStatus(), "inbox") == 0; }, 1500);
++    sleep_ms(30);
++    const Verdict v = r.verdict();
++    check("[P4] the IDR is fed (case 1 keeps it with its suffix); none corrupt", v.corrupt == 0 && v.keys >= 1, show(v));
++  }
++
++  std::puts("\n--- [P5] the codec reset while a prefix is kept");
++  {
++    Run r(true, 150, 1501);
++    hold(fake_ndk::kHoldDequeueInput);
++    r.deltas(1, 0);
++    wait_until(held_now, 2000);
++    r.deltas(10, 1);
++    const size_t at = queued() - r.q0;  // the next input goes to the new codec
++    r.sink.OnVideoDiscontinuity();      // references gone
++    let_go();
++    wait_until([&] { return field(r.sink.DebugStatus(), "inbox") == 0; }, 1500);
++    sleep_ms(30);
++    r.recover(3);
++    const auto in = fed_from(r.q0);
++    const uint32_t inflight = r.seqAtStart + 1;  // the AU the worker had taken before the reset (old codec, if any)
++    size_t firstNew = in.size();
++    bool deltaBeforeKey = false;
++    for (size_t i = at; i < in.size(); ++i) {
++      if (in[i].seq == inflight) continue;
++      if (in[i].key) {
++        firstNew = i;
++        break;
++      }
++      deltaBeforeKey = true;
++    }
++    const Verdict v = firstNew < in.size() ? oracle(std::vector<Fed>(in.begin() + firstNew, in.end()), false, 0)
++                                            : Verdict{};
++    check("[P5] after the reset no delta reaches the new codec before an IDR (the kept prefix is not fed); from that IDR "
++          "on, none corrupt", !deltaBeforeKey && firstNew < in.size() && v.corrupt == 0,
++          show(v) + " inputs after the reset point=" + std::to_string(in.size() - at));
++  }
++
++  std::puts("\n--- [P6] a hole in the queued AUs (an AU never delivered, the sink not told)");
++  for (const bool prefix : {false, true}) {
++    Run r(prefix, 160 + prefix, 1601 + prefix * 10);
++    hold(fake_ndk::kHoldDequeueInput);
++    r.deltas(1, 0);
++    wait_until(held_now, 2000);
++    r.deltas(4, 1);
++    ++gSeq;  // this AU is never sent
++    r.deltas(7, 1);
++    sleep_ms(10);
++    let_go();
++    wait_until([&] { return field(r.sink.DebugStatus(), "inbox") == 0; }, 1500);
++    sleep_ms(30);
++    r.recover(3);
++    const Verdict v = r.verdict();
++    const std::string st = r.sink.DebugStatus();
++    check(std::string("[P6 ") + (prefix ? "prefix" : "current") + "] not provable (not consecutive) -> today's case 3: "
++          "none corrupt", v.corrupt == 0 && field(st, "prefixKept") == 0, show(v) + " prefixRefused=" +
++          std::to_string(field(st, "prefixRefused")));
++  }
++
++  std::puts("\n--- [P6b] the AU right after the one in flight never delivered (head != frontier + 1)");
++  for (const bool prefix : {false, true}) {
++    Run r(prefix, 165 + prefix, 1651 + prefix * 10);
++    hold(fake_ndk::kHoldDequeueInput);
++    r.deltas(1, 0);
++    wait_until(held_now, 2000);
++    ++gSeq;  // never sent
++    r.deltas(11, 1);
++    sleep_ms(10);
++    let_go();
++    wait_until([&] { return field(r.sink.DebugStatus(), "inbox") == 0; }, 1500);
++    sleep_ms(30);
++    r.recover(3);
++    const Verdict v = r.verdict();
++    const std::string st = r.sink.DebugStatus();
++    check(std::string("[P6b ") + (prefix ? "prefix" : "current") + "] the queue does not follow the frontier -> not "
++          "provable -> today's case 3: none corrupt", v.corrupt == 0 && field(st, "prefixKept") == 0, show(v));
++  }
++
++  std::puts("\n--- [P7] sustained overload, then the current frame again");
++  for (const bool prefix : {false, true}) {
++    Run r(prefix, 170 + prefix, 1701 + prefix * 10);
++    uint64_t maxInbox = 0;
++    for (int round = 0; round < 5; ++round) {
++      hold(fake_ndk::kHoldDequeueInput);
++      r.deltas(1, 0);
++      wait_until(held_now, 2000);
++      for (int i = 0; i < 12; ++i) {
++        r.deltas(1, 1);
++        maxInbox = std::max<uint64_t>(maxInbox, field(r.sink.DebugStatus(), "inbox"));
++      }
++      let_go();
++      sleep_ms(40);
++    }
++    const std::string mid = r.sink.DebugStatus();
++    r.recover(5);
++    const Verdict v = r.verdict();
++    const auto in = fed_from(r.q0);
++    check(std::string("[P7 ") + (prefix ? "prefix" : "current") + "] bounded (inbox <= 8, asks <= 4 per episode), none "
++          "corrupt, and the newest AU sent is the last one fed (the current frame again)",
++          maxInbox <= 8 && field(mid, "asks") <= 4 && v.corrupt == 0 && !in.empty() && in.back().seq == gSeq,
++          show(v) + " maxInbox=" + std::to_string(maxInbox) + " asks=" + std::to_string(field(mid, "asks")) + " newest=" +
++              std::to_string(gSeq));
++  }
++
++  std::printf("\nandroid_decoder_inbox_prefix_test: %d checks, %d failed\nRESULT: %s\n", gChecks, gFailures,
++              gFailures == 0 ? "PASS" : "FAIL");
++  return gFailures == 0 ? 0 : 1;
++}
+diff --git a/apps/native_poc/src/decoder_chain_inbox.hpp b/apps/native_poc/src/decoder_chain_inbox.hpp
+index be91d11..36c95b2 100644
+--- a/apps/native_poc/src/decoder_chain_inbox.hpp
++++ b/apps/native_poc/src/decoder_chain_inbox.hpp
+@@ -23,6 +23,12 @@
+ //   2. an IDR in the inbox but no IDR's suffix fits: from the LAST IDR on is kept and the NEWEST frames go until it
+ //      fits -- the cut is a loss at the tail (the kept IDR + its shortened suffix still decode) and the tail gap opens;
+ //   3. no IDR in the inbox: everything goes (all of it continues a chain whose next reference is gone) -- a loss.
++//   3'. C r4 KEEP-PREFIX (off unless SetPrefixPolicy(true); Codex codex_apk_inbox_prefix_design_go_r1.md): no IDR in
++//      the inbox, and the owner PROVES the queue continues what its codec holds -- SetFrontier(valid, seq, now,
++//      budget) before the Offer: the codec's chain intact since a committed IDR, the queue's head the very next AU
++//      after the newest one the codec took (frontier + 1), every queued AU the next of the one before it, one
++//      generation, the head no older than the budget. Then the PREFIX is kept and the NEWEST frames go until it fits
++//      -- a tail loss (the gap opens after them; the recovery asks as for any loss). Not proven: case 3.
+ // A loss opens the tail gap; `gapAfterSeq` is the newest AU lost, and only an IDR after it is usable.
+ //
+ // THE EPISODE (§2, §3, r3 보충). A chain loss opens a recovery episode (if none is open). It asks for an IDR at most
+@@ -51,6 +57,7 @@ struct ChainAuInfo {
+   uint32_t seq = 0;
+   bool key = false;
+   size_t bytes = 0;
++  uint64_t enqueueUs = 0;  // C r4: when the owner queued it (its local residence starts here); 0 = unknown
+ };
+ 
+ enum class ChainAdmit : uint8_t {
+@@ -118,6 +125,28 @@ class ChainInbox {
+     return r;
+   }
+ 
++  // ---- C r4 keep-prefix (Codex codex_apk_inbox_prefix_design_go_r1.md) ----
++  void SetPrefixPolicy(bool on) { prefixPolicy_ = on; }
++  bool prefixPolicy() const { return prefixPolicy_; }
++  // What the owner has proven at this moment (read only by case 3'): the codec's chain is intact and `frontierSeq` is
++  // the newest AU it took to feed; `nowUs` / `ageBudgetUs` for the head's residence.
++  void SetFrontier(bool valid, uint32_t frontierSeq, uint64_t nowUs, uint64_t ageBudgetUs) {
++    frontierValid_ = valid;
++    frontierSeq_ = frontierSeq;
++    frontierNowUs_ = nowUs;
++    ageBudgetUs_ = ageBudgetUs;
++  }
++  // The head is a delta whose residence is over the budget (an IDR never expires here: it starts a chain).
++  bool HeadExpired(uint64_t nowUs, uint64_t budgetUs) const {
++    if (items_.empty()) return false;
++    const ChainAuInfo a = info_(items_.front());
++    return !a.key && a.enqueueUs != 0 && nowUs > a.enqueueUs && nowUs - a.enqueueUs > budgetUs;
++  }
++  uint64_t prefixKeptEvents() const { return prefixKeptEvents_; }
++  uint64_t prefixKeptFrames() const { return prefixKeptFrames_; }
++  uint64_t tailLost() const { return tailLost_; }
++  uint64_t prefixRefused() const { return prefixRefused_; }
++
+   bool Pop(T* out) {
+     if (items_.empty()) return false;
+     const ChainAuInfo a = info_(items_.front());
+@@ -273,9 +302,36 @@ class ChainInbox {
+       while (items_.size() > maxFrames_ || bytes_ > maxBytes_) DropBack(r);
+       return;
+     }
++    // case 3': C r4 -- the queue PROVABLY continues the codec's chain: keep it, cut the newest (a tail loss)
++    if (prefixPolicy_) {
++      if (PrefixProvable()) {
++        while (!items_.empty() && (items_.size() > maxFrames_ || bytes_ > maxBytes_)) {
++          DropBack(r);
++          ++tailLost_;
++        }
++        ++prefixKeptEvents_;
++        prefixKeptFrames_ += items_.size();
++        return;
++      }
++      ++prefixRefused_;
++    }
+     // case 3: no IDR -- the whole chain in here is undecodable once its head goes
+     while (!items_.empty()) DropFront(true, r);
+   }
++  // C r4: the proof case 3' needs, from the owner's frontier and the queue itself.
++  bool PrefixProvable() const {
++    if (!frontierValid_ || items_.empty()) return false;
++    const ChainAuInfo head = info_(items_.front());
++    if (head.key || head.seq != frontierSeq_ + 1u) return false;
++    if (head.enqueueUs == 0 || frontierNowUs_ < head.enqueueUs || frontierNowUs_ - head.enqueueUs > ageBudgetUs_) return false;
++    uint32_t prev = head.seq;
++    for (size_t i = 1; i < items_.size(); ++i) {
++      const ChainAuInfo a = info_(items_[i]);
++      if (a.gen != head.gen || a.seq != prev + 1u) return false;
++      prev = a.seq;
++    }
++    return true;
++  }
+ 
+   size_t maxFrames_;
+   size_t maxBytes_;
+@@ -288,6 +344,12 @@ class ChainInbox {
+   uint64_t lastGen_ = 0;
+   uint32_t lastSeq_ = 0;
+   uint64_t duplicates_ = 0, stale_ = 0, oversize_ = 0, gapDeltas_ = 0, skipped_ = 0, lost_ = 0, trimmed_ = 0;
++  // C r4 keep-prefix
++  bool prefixPolicy_ = false;
++  bool frontierValid_ = false;
++  uint32_t frontierSeq_ = 0;
++  uint64_t frontierNowUs_ = 0, ageBudgetUs_ = 0;
++  uint64_t prefixKeptEvents_ = 0, prefixKeptFrames_ = 0, tailLost_ = 0, prefixRefused_ = 0;
+ };
+ 
+ class KeyRecoveryEpisode {

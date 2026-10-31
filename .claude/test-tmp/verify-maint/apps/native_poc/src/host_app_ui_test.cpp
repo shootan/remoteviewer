@@ -1,0 +1,118 @@
+// GNLinkHost's own window, in a build a test can start without touching the installed host.
+//
+// The whole of host_app_main.cpp is compiled in -- the form, the layout, the sign-in worker, the
+// HTTP, the cache, the supervisor -- and only the process entry is renamed. What differs from
+// GNLinkHost.exe is exactly what REMOTE60_HOST_TEST_SEAM replaces, and the manifest:
+//
+//   * the directory is the fixture's, named by the runner, instead of kFixedDirectoryUrl,
+//     and so is the list of its former names (kMigratableDirectoryOrigins)
+//   * host.json is the fixture's, not %LOCALAPPDATA%\remote60\host.json
+//   * the streaming child is this executable in stand-in mode, not GNLinkStream.exe
+//   * asInvoker, so a runner without elevation can start it and UI Automation can reach it
+//
+// So this does not show requireAdministrator, UAC, UIPI, the real streaming host, or the real
+// server. It shows what the window asks for and what signing in through it does.
+//
+// Nothing is driven from in here. The runner (apps/directory/test/host_login_ui_runner.js)
+// starts this process and automation/gnlink_host_login_uia.ps1 works the window from outside,
+// through UI Automation, the way a person's hands would reach it.
+
+#define wWinMain host_product_entry
+#include "host_app_main.cpp"
+#undef wWinMain
+
+#include <filesystem>
+#include <fstream>
+
+namespace {
+
+std::wstring test_env(const wchar_t* name) {
+  wchar_t value[1024] = {};
+  const DWORD n = GetEnvironmentVariableW(name, value, 1024);
+  return (n > 0 && n < 1024) ? std::wstring(value) : std::wstring();
+}
+
+bool inside(const std::filesystem::path& root, const std::filesystem::path& candidate) {
+  const std::wstring rel =
+      std::filesystem::weakly_canonical(candidate).lexically_relative(root).wstring();
+  return !rel.empty() && rel.rfind(L"..", 0) != 0;
+}
+
+/**
+ * Stand-in streaming host: writes down what it was started with and waits to be stopped.
+ *
+ * It reports nothing on stdout, so the window never reads "online" from it -- the status card
+ * this build shows is signed in and STARTING / NOT REACHABLE, never REACHABLE.
+ */
+int run_stand_in_stream(const std::filesystem::path& root, int argc, LPWSTR* argv) {
+  std::ofstream seen(root / "stream-launches.txt", std::ios::app);
+  for (int i = 1; i < argc; ++i) seen << (i > 1 ? "\t" : "") << narrow(argv[i]);
+  seen << "\n";
+  seen.close();
+  Sleep(INFINITE);  // ended by the supervisor, or by its job when the window's process goes
+  return 0;
+}
+
+}  // namespace
+
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous, LPWSTR commandLine, int show) {
+  // Refused before a window exists unless everything this process can write is the runner's.
+  const std::wstring rootText = test_env(L"GNLINK_HOST_TEST_ROOT");
+  if (rootText.empty() || !std::filesystem::exists(std::filesystem::path(rootText) / ".fixture")) {
+    return 2;
+  }
+  const std::filesystem::path root = std::filesystem::weakly_canonical(rootText);
+
+  int argc = 0;
+  LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+  for (int i = 1; argv && i < argc; ++i) {
+    if (std::wstring(argv[i]) == L"--transport") return run_stand_in_stream(root, argc, argv);
+  }
+
+  const std::wstring appData = test_env(L"LOCALAPPDATA");
+  const std::string directoryUrl = narrow(test_env(L"GNLINK_HOST_TEST_DIRECTORY"));
+  if (appData.empty() || !inside(root, appData) ||
+      directoryUrl.rfind("http://127.0.0.1:", 0) != 0) {
+    return 2;
+  }
+  gHostTest.directoryUrl = directoryUrl;
+  // Optional: a second loopback address standing in for a former name of the server.
+  const std::string formerName = narrow(test_env(L"GNLINK_HOST_TEST_FORMER_NAME"));
+  if (!formerName.empty()) {
+    if (formerName.rfind("http://127.0.0.1:", 0) != 0) return 2;
+    gHostTest.migratableOrigins.push_back(formerName);
+  }
+  gHostTest.cachePath = narrow((std::filesystem::path(appData) / "remote60" / "host.json").wstring());
+  // prelogin-ui r1 (item 4): the runner's stand-in for the service's admin pipe; only a test pipe.
+  const std::wstring adminPipe = test_env(L"GNLINK_HOST_TEST_PRELOGIN_PIPE");
+  if (!adminPipe.empty()) {
+    if (adminPipe.rfind(L"\\\\.\\pipe\\GNLinkTest-", 0) != 0) return 2;
+    gHostTest.preloginPipe = adminPipe;
+    // r5 G3: and the only server this build trusts on it -- the test that serves it, by process id.
+    gHostTest.preloginServerPid = static_cast<uint32_t>(wcstoul(test_env(L"GNLINK_HOST_TEST_PRELOGIN_SERVER_PID").c_str(), nullptr, 10));
+    // r14 H2: "start the service" is the test's event (only a GNLinkTest- name).
+    const std::wstring startEvent = test_env(L"GNLINK_HOST_TEST_PRELOGIN_START_EVENT");
+    if (!startEvent.empty()) {
+      if (startEvent.rfind(L"GNLinkTest-", 0) != 0) return 2;
+      gHostTest.preloginStartEvent = startEvent;
+    }
+  }
+  gHostTest.streamExe = own_executable_path();
+  // r9 W3: a real streaming TEST build (GNLinkStreamMigrationTest, staged inside the fixture root) in place
+  // of the stand-in -- for the GNLinkHost -> GNLinkStream -> service ready chain. Only inside the root.
+  const std::wstring realStream = test_env(L"GNLINK_HOST_TEST_STREAM_EXE");
+  if (!realStream.empty()) {
+    if (!inside(root, realStream) || !std::filesystem::exists(realStream)) return 2;
+    gHostTest.streamExe = realStream;
+    // dxgi-wedge-fix r1: the real streaming test build must not take the installed host's ports or
+    // inject into this desktop. GNLINK_HOST_TEST_STREAM_PORT names a free UDP port; control rides it.
+    const std::wstring port = test_env(L"GNLINK_HOST_TEST_STREAM_PORT");
+    if (port.empty() || port.find_first_not_of(L"0123456789") != std::wstring::npos) return 2;
+    // Loopback only: a test build at a new path that listens on all interfaces makes Windows Firewall ask the
+    // user (seen 2026-10-22 01:35 -- a dialog nobody here may answer, and an unanswered one becomes a Block
+    // rule). The fixture directory, on loopback too, observes 127.0.0.1 as the public candidate.
+    gHostTest.streamExtraArgs = {L"--bind-port", port, L"--bind-address", L"127.0.0.1", L"--control-port", L"0",
+                                 L"--input-injection-mode", L"none"};
+  }
+  return host_product_entry(instance, previous, commandLine, show);
+}

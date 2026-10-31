@@ -1,0 +1,9 @@
+{
+  "repo_path": "D:/remote/remote",
+  "files": [
+    "apps/native_poc/src/product_version.hpp",
+    "apps/android_direct_client/app/build.gradle.kts",
+    "docs/history.md",
+    "docs/구현계획.md"
+  ]
+}

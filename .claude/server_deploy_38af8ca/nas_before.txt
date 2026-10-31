@@ -1,0 +1,13 @@
+>>> remote: cd /opt/gnlink/remote60-directory && sha256sum server.js relay_diag.js accounts.js device_credentials.js update_manifest.js version_compare.js wake_target.js package.json 2>&1; XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user show remote60-directory -p MainPID -p ActiveEnterTimestamp
+8fde4171bd4c494b93ea1c40bb440e19784369e63b231e92884285badc2afb82  server.js
+sha256sum: relay_diag.js: No such file or directory
+e69e862e9b53d0144e49fdbcacd8084a9011bd73a7ee89195303b41849514ad3  accounts.js
+d5ca2991250013159594282a93f1d703d9718f8492804e5a7e84237c58f186f5  device_credentials.js
+a11254aa3fb007b6c00f184d6ad7aaa36f1a1e181ae083ad238e2eb658b641bf  update_manifest.js
+5117b0a4a825c85c5da07ab3b09ef96a591d3cf62e3a9ba70423e775f54139d3  version_compare.js
+48d3b480ffe710976b94c40eb0148cb6771d7c906255fac2e2eee494f8936c45  wake_target.js
+ceafbdf2a1d14a4fab07701427cb760aee7e9f1cdc2e373211f741fe0da40680  package.json
+MainPID=3142968
+ActiveEnterTimestamp=Wed 2026-09-30 14:58:02 KST
+>>> remote: cp -a /opt/gnlink/remote60-directory /opt/gnlink/remote60-directory-backup-20261011T034305Z && ls -d /opt/gnlink/remote60-directory-backup-20261011T034305Z
+/opt/gnlink/remote60-directory-backup-20261011T034305Z

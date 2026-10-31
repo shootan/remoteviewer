@@ -1,0 +1,12 @@
+07:48:15 mInputShown=false mWindowVisible=false mDecorViewVisible=false
+07:48:15 mInputShown=false mWindowVisible=false mDecorViewVisible=false mIsInputViewShown=true
+07:48:15 mInputShown=false mWindowVisible=false mDecorViewVisible=false isInputViewShown=true
+07:48:15 mInputShown=true mWindowVisible=false mDecorViewVisible=false
+07:48:15 mInputShown=false mWindowVisible=true mDecorViewVisible=false
+07:48:15 mInputShown=false mWindowVisible=false mDecorViewVisible=true
+07:48:15 mInputShown=false
+07:48:15 mWindowVisible=false mDecorViewVisible=false
+07:48:15 mInputShown=false mDecorViewVisible=false
+07:48:15 mInputShown=false mWindowVisible=false
+07:48:15 
+07:48:15 mInputShown=false mInputShown=true mWindowVisible=false mDecorViewVisible=false

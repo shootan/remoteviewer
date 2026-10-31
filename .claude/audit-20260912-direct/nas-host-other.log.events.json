@@ -1,0 +1,44 @@
+[
+  {
+    "line": 51903,
+    "preceding_timestamp": "09-12 11:30:02.644",
+    "following_timestamp": "09-12 11:30:08.226",
+    "message": "[native-video-host][dxgi-watchdog] dxgi-worker-wedge phase=acquire phaseAgeUs=5154990 ageUs=5154990 generation=2 loopCount=5537 acquireHr=0x00000000 releaseHr=0x00000000 accumulated=1; terminating (exit 44) for supervisor relaunch"
+  },
+  {
+    "line": 54209,
+    "preceding_timestamp": "09-12 13:10:35.989",
+    "following_timestamp": "09-12 13:10:36.420",
+    "message": "[native-video-host][dxgi-watchdog] dxgi-worker-wedge phase=release phaseAgeUs=5070304 ageUs=5070304 generation=2 loopCount=5593 acquireHr=0x00000000 releaseHr=0x00000000 accumulated=1; terminating (exit 44) for supervisor relaunch"
+  },
+  {
+    "line": 62213,
+    "preceding_timestamp": "09-12 13:16:25.859",
+    "following_timestamp": "09-12 13:16:26.679",
+    "message": "[native-video-host][dxgi-watchdog] dxgi-worker-wedge phase=release phaseAgeUs=5437031 ageUs=5437031 generation=2 loopCount=20067 acquireHr=0x00000000 releaseHr=0x00000000 accumulated=1; terminating (exit 44) for supervisor relaunch"
+  },
+  {
+    "line": 63794,
+    "preceding_timestamp": "09-12 13:17:53.210",
+    "following_timestamp": "09-12 13:17:54.596",
+    "message": "[native-video-host][dxgi-watchdog] dxgi-worker-wedge phase=release phaseAgeUs=5016238 ageUs=5016238 generation=2 loopCount=3750 acquireHr=0x00000000 releaseHr=0x00000000 accumulated=1; terminating (exit 44) for supervisor relaunch"
+  },
+  {
+    "line": 72209,
+    "preceding_timestamp": "09-12 13:23:56.290",
+    "following_timestamp": "09-12 13:23:57.039",
+    "message": "[native-video-host][dxgi-watchdog] dxgi-worker-wedge phase=release phaseAgeUs=5393935 ageUs=5393935 generation=2 loopCount=21038 acquireHr=0x00000000 releaseHr=0x00000000 accumulated=1; terminating (exit 44) for supervisor relaunch"
+  },
+  {
+    "line": 72528,
+    "preceding_timestamp": "09-12 13:34:05.215",
+    "following_timestamp": "09-12 13:34:07.466",
+    "message": "[native-video-host][dxgi-watchdog] dxgi-worker-wedge phase=acquire phaseAgeUs=5221914 ageUs=5221914 generation=2 loopCount=3452 acquireHr=0x00000000 releaseHr=0x00000000 accumulated=1; terminating (exit 44) for supervisor relaunch"
+  },
+  {
+    "line": 73830,
+    "preceding_timestamp": "09-12 14:40:46.033",
+    "following_timestamp": "09-12 14:40:47.485",
+    "message": "[native-video-host][dxgi-watchdog] dxgi-worker-wedge phase=release phaseAgeUs=5052670 ageUs=5052670 generation=2 loopCount=15782 acquireHr=0x00000000 releaseHr=0x00000000 accumulated=1; terminating (exit 44) for supervisor relaunch"
+  }
+]

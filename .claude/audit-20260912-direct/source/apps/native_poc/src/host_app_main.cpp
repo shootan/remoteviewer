@@ -1,0 +1,2057 @@
+// GNLink host application.
+//
+// The streaming host is a console program driven by flags, which is fine for development and
+// wrong for the thing a person installs on their PC. This wraps it: sign in once, then it sits
+// in the tray, keeps the streaming process alive, and shows whether the PC is reachable.
+//
+// It deliberately does not stream anything itself. Capture, encode and input injection stay in
+// GNLinkStream.exe, launched as a child process, so a crash there cannot take
+// the sign-in state with it and the two can be developed independently.
+//
+// The window has exactly two states with their own layouts: signed out is a sign-in form,
+// signed in is a small status card. Every control lives in AppState so a state switch can hide
+// all of one set and show the other; an anonymous label that nothing owns cannot be hidden,
+// which is how sign-in labels used to bleed into the signed-in screen.
+
+#ifndef UNICODE
+#define UNICODE
+#endif
+#ifndef _UNICODE
+#define _UNICODE
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+// winsock2 must precede windows.h: windows.h otherwise pulls in the original winsock, whose
+// declarations collide with it.
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#include <windows.h>
+
+#include <shellapi.h>
+#include <shlwapi.h>
+
+#include <atomic>
+#include <cstdio>
+#include <memory>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "directory_client.hpp"
+#include "log_upload.hpp"
+#include "host_command_line.hpp"
+#include "product_version.hpp"
+#include "env_util.hpp"
+#include "update_check.hpp"
+#include "update_credential_channel.hpp"
+#include "update_handoff.hpp"
+#include "update_job_guard.hpp"
+
+#pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "shlwapi.lib")
+
+namespace {
+
+/** Defined below, beside the health report it writes; declared here for the pipe reader. */
+void note_child_log_line(const std::string& line);
+
+namespace directory = remote60::native_poc::directory;
+using remote60::native_poc::build_windows_command_line;
+
+constexpr wchar_t kWindowClass[] = L"Remote60HostApp";
+constexpr UINT kTrayMessage = WM_APP + 1;
+// An update check finishes on a worker thread, and a worker thread must not touch this
+// window. The answer comes back as a posted message carrying a heap-allocated string the
+// UI thread takes ownership of.
+constexpr UINT kUpdateCheckDoneMessage = WM_APP + 3;
+// The waiter thread's verdict. Posted rather than acted on directly because deciding to exit is
+// a UI-thread decision, and because the wait can outlive the dialog the user answered.
+constexpr UINT kUpdateHandoffDoneMessage = WM_APP + 4;
+constexpr UINT_PTR kStatusTimer = 1;
+constexpr UINT kStatusIntervalMs = 2000;
+// Matches IDI_GNLINK in host_app.rc.
+constexpr int kIconResource = 101;
+// What the user sees. Internal identifiers (window class, Run value, cache folder) keep the
+// remote60 name so existing installs migrate without special handling.
+constexpr wchar_t kProductName[] = L"GNLink Host";
+
+using remote60::native_poc::kProductVersion;
+
+enum ControlId : int {
+  IdServer = 1001,
+  IdAccount,
+  IdPassword,
+  IdHostName,
+  IdSignIn,
+  IdStatus,
+  IdHint,
+  IdStartWithWindows,
+  IdCreateAccount,
+  IdSignupKey,
+  IdSignupKeyLabel,
+  IdSignOut,
+  IdSwitchAccount,
+  IdTitle,
+  IdServerLabel,
+  IdAccountLabel,
+  IdPasswordLabel,
+  IdHostNameLabel,
+  IdAdvanced,
+  IdSignedAccount,
+  IdSignedHost,
+  IdBadge,
+  IdOpenLog,
+  IdVersion,
+};
+
+enum MenuId : int {
+  IdMenuOpen = 2001,
+  IdMenuChangeAccount,
+  IdMenuSignOut,
+  IdMenuCheckUpdate,
+  IdMenuExit,
+};
+
+std::wstring widen(const std::string& value) {
+  if (value.empty()) return {};
+  const int need = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, nullptr, 0);
+  if (need <= 1) return {};
+  std::wstring out(static_cast<size_t>(need - 1), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, out.data(), need);
+  return out;
+}
+
+std::string narrow(const std::wstring& value) {
+  if (value.empty()) return {};
+  const int need = WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, nullptr, 0, nullptr, nullptr);
+  if (need <= 1) return {};
+  std::string out(static_cast<size_t>(need - 1), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, value.c_str(), -1, out.data(), need, nullptr, nullptr);
+  return out;
+}
+
+std::wstring window_text(HWND control) {
+  if (!control) return {};
+  const int length = GetWindowTextLengthW(control);
+  if (length <= 0) return {};
+  // Sized for the terminator as well, then trimmed to what was actually copied: writing the
+  // terminator into the last usable slot of an exactly-sized buffer is not something to rely on.
+  std::vector<wchar_t> buffer(static_cast<size_t>(length) + 1, L'\0');
+  const int copied = GetWindowTextW(control, buffer.data(), length + 1);
+  if (copied <= 0) return {};
+  return std::wstring(buffer.data(), static_cast<size_t>(copied));
+}
+
+std::wstring executable_dir() {
+  wchar_t path[MAX_PATH] = {};
+  GetModuleFileNameW(nullptr, path, MAX_PATH);
+  PathRemoveFileSpecW(path);
+  return path;
+}
+
+std::wstring own_executable_path() {
+  wchar_t path[MAX_PATH] = {};
+  GetModuleFileNameW(nullptr, path, MAX_PATH);
+  return path;
+}
+
+std::wstring default_host_name() {
+  wchar_t name[MAX_COMPUTERNAME_LENGTH + 1] = {};
+  DWORD length = MAX_COMPUTERNAME_LENGTH + 1;
+  if (GetComputerNameW(name, &length) && name[0] != L'\0') return name;
+  return L"PC";
+}
+
+/**
+ * %LOCALAPPDATA%\GNLink\host_app.log -- the child's stdout, which is otherwise invisible in a
+ * windowed app. When the status card says "not reachable" this is the only place with the why.
+ * Credentials never appear here: the child is handed a token, not a password.
+ */
+std::wstring log_file_path() {
+  wchar_t base[MAX_PATH] = {};
+  const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH) return {};
+  std::wstring dir = std::wstring(base) + L"\\GNLink";
+  CreateDirectoryW(dir.c_str(), nullptr);
+  return dir + L"\\host_app.log";
+}
+
+/** One stamped line into host_app.log. Free function because the supervisor's own is a member. */
+void append_host_app_log(const std::string& line) {
+  const std::wstring path = log_file_path();
+  if (path.empty()) return;
+  std::FILE* file = nullptr;
+  if (_wfopen_s(&file, path.c_str(), L"a") != 0 || !file) return;
+  SYSTEMTIME now{};
+  GetLocalTime(&now);
+  std::fprintf(file, "%02d-%02d %02d:%02d:%02d %s\n", now.wMonth, now.wDay, now.wHour,
+               now.wMinute, now.wSecond, line.c_str());
+  std::fclose(file);
+}
+
+// Everything the sign-in worker produces, handed to the UI thread by value. Deliberately plain
+// data: the worker must not reach into shared state, and the UI thread is the only writer of
+// g.cache. (Ledger H-07.)
+struct SignInResult {
+  bool ok = false;
+  std::string url;
+  std::string account;
+  std::string hostName;
+  std::string machineId;
+  std::string hostId;
+  std::string hostToken;
+  std::wstring error;
+};
+
+// ---------------------------------------------------------------- streaming child
+
+/**
+ * Owns the streaming process. Restarting it is the correct response to almost any failure it
+ * can hit -- a lost capture device, a driver reset -- so the supervisor simply relaunches, with
+ * a delay so a process that dies instantly cannot spin.
+ */
+class StreamingHostProcess {
+ public:
+  void Configure(const std::wstring& directoryUrl, const std::wstring& accountId,
+                 const std::wstring& hostName) {
+    directoryUrl_ = directoryUrl;
+    accountId_ = accountId;
+    hostName_ = hostName;
+  }
+
+  void Start() {
+    if (running_.exchange(true)) return;
+    // Opt-in GPU surface encode via the shell's own environment, so a user can try it on a
+    // contended GPU without a rebuild while it stays off for everyone else. A tray toggle is
+    // the eventual home; the environment is the seam until then.
+    {
+      wchar_t buf[8]{};
+      const DWORD n = GetEnvironmentVariableW(L"GNLINK_HOST_NV12_SURFACE", buf, 8);
+      const bool on = n > 0 && n < 8 && (buf[0] == L'1' || buf[0] == L't' || buf[0] == L'T');
+      nv12SurfaceRequested_.store(on, std::memory_order_relaxed);
+    }
+    RotateLog();
+    supervisor_ = std::thread([this] { Supervise(); });
+  }
+
+  /**
+   * Stops supervising and does not return until the child is gone.
+   *
+   * It used to ask and leave: clear the flag, TerminateProcess, join. That is enough when the join
+   * is reached, and the join is what actually waits -- but a process leaving for an update needs
+   * more than "enough when nothing goes wrong". On 2026-09-11 a Host stood down for an update and a
+   * GNLinkStream created one second after its acknowledgement was still running afterwards, holding
+   * UDP 43000 and 3478. The replacement Host could not bind, died with code 3, and retried until
+   * the machine was unusable -- twice. Recovery took a person killing the orphan by hand.
+   *
+   * So this reports what it actually achieved. `outDetail` is for the log: which pid, and whether
+   * it really went. A caller that is about to exit can then say so instead of assuming.
+   */
+  bool Stop(std::string* outDetail = nullptr) {
+    const uint32_t pid = ChildPid();
+    if (!running_.exchange(false)) {
+      // Already stopped -- but "already" is not the same as "gone", and this is the path that used
+      // to return without looking. If a child is somehow still there, the caller must hear it.
+      if (pid != 0 && ChildAlive()) {
+        if (outDetail) {
+          *outDetail = "child pid " + std::to_string(pid) +
+                       " is still alive although supervision had already stopped";
+        }
+        TerminateChild();
+        const bool gone = WaitForChildExit(kChildExitBudgetMs);
+        if (outDetail && gone) *outDetail += "; it exited after being asked again";
+        return gone;
+      }
+      if (outDetail) *outDetail = "already stopped, no child";
+      return true;
+    }
+    TerminateChild();
+    if (supervisor_.joinable()) supervisor_.join();
+    // The join is the real guarantee: Supervise() only returns once its wait on the child has
+    // returned. Checked anyway, because this is the one place whose failure leaves a process
+    // holding the ports the next one needs.
+    const bool gone = !ChildAlive();
+    if (outDetail) {
+      if (pid == 0) {
+        *outDetail = "no child was running";
+      } else if (gone) {
+        *outDetail = "child pid " + std::to_string(pid) + " exited";
+      } else {
+        *outDetail = "child pid " + std::to_string(pid) + " is STILL RUNNING after the stop";
+      }
+    }
+    return gone;
+  }
+
+  /** The child's pid, or 0. Taken under the lock that publishes it. */
+  uint32_t ChildPid() {
+    std::lock_guard<std::mutex> lock(mu_);
+    return child_.hProcess ? child_.dwProcessId : 0;
+  }
+
+  bool Running() const { return running_.load(std::memory_order_relaxed); }
+  uint32_t Restarts() const { return restarts_.load(std::memory_order_relaxed); }
+  bool ChildAlive() const { return childAlive_.load(std::memory_order_relaxed); }
+
+  /**
+   * Last thing the streaming host said about the directory, verbatim.
+   *
+   * Without this the window reported "running" whether or not the PC was actually reachable,
+   * which is the worst possible answer: the user believes they are set up and only finds out
+   * when the phone shows nothing.
+   */
+  std::string DirectoryStatus() const {
+    std::lock_guard<std::mutex> lock(statusMu_);
+    return directoryStatus_;
+  }
+
+ private:
+  void RotateLog() {
+    const std::wstring path = log_file_path();
+    if (path.empty()) return;
+    WIN32_FILE_ATTRIBUTE_DATA info{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info)) return;
+    ULARGE_INTEGER size{};
+    size.LowPart = info.nFileSizeLow;
+    size.HighPart = info.nFileSizeHigh;
+    if (size.QuadPart > 2ULL * 1024 * 1024) {
+      // Numbered generations instead of one .old: a single backup meant the second rotation
+      // destroyed the very window a long repro needed (the freeze evidence was in the overwritten
+      // generation). host_app.log.1 is the newest backup ... .10 the oldest; the oldest is deleted.
+      constexpr int kMaxLogBackups = 10;
+      DeleteFileW((path + L"." + std::to_wstring(kMaxLogBackups)).c_str());
+      for (int i = kMaxLogBackups - 1; i >= 1; --i) {
+        const std::wstring from = path + L"." + std::to_wstring(i);
+        const std::wstring to = path + L"." + std::to_wstring(i + 1);
+        MoveFileExW(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING);
+      }
+      MoveFileExW(path.c_str(), (path + L".1").c_str(), MOVEFILE_REPLACE_EXISTING);
+      // Adopt the legacy single-generation .old AFTER the shift, into the FIRST free slot
+      // ascending (.2 upward, no replace). The rotation assumes generations are contiguous from
+      // .1 and always deletes .10 first, so parking the legacy at a sparse high slot (.10) would
+      // erase it on the very next rotation; placed contiguously it ages one slot per rotation
+      // like every generation. If every slot is taken, .old stays on disk rather than being lost.
+      const std::wstring legacy = path + L".old";
+      if (GetFileAttributesW(legacy.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        for (int i = 2; i <= kMaxLogBackups; ++i) {
+          if (MoveFileExW(legacy.c_str(), (path + L"." + std::to_wstring(i)).c_str(), 0)) break;
+        }
+      }
+    }
+  }
+
+  void AppendLogLine(FILE* log, const std::string& line) {
+    if (!log) return;
+    std::fputs(line.c_str(), log);
+    std::fputc('\n', log);
+    std::fflush(log);
+  }
+
+  FILE* OpenLog() {
+    const std::wstring path = log_file_path();
+    if (path.empty()) return nullptr;
+    // Shared open: the whole point of this file is reading it while the host runs, and the
+    // Open log button (or a curious tail) must not be locked out by our writer handle.
+    return _wfsopen(path.c_str(), L"ab", _SH_DENYNO);
+  }
+
+  /** One-off lines open their own handle; only the child-output reader keeps one. */
+  void AppendLogLineOnce(const std::string& line) {
+    FILE* log = OpenLog();
+    if (!log) return;
+    AppendLogLine(log, line);
+    std::fclose(log);
+  }
+
+  // Owns the log handle for the child's lifetime. Ownership lives here and nowhere else
+  // because rotation replaces the handle mid-run: a copy held by another thread would keep
+  // writing through a closed FILE after the swap.
+  void ReadChildOutput(HANDLE readEnd) {
+    FILE* log = OpenLog();
+    std::string pending;
+    char buffer[512];
+    DWORD read = 0;
+    while (ReadFile(readEnd, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
+      pending.append(buffer, read);
+      size_t newline;
+      while ((newline = pending.find('\n')) != std::string::npos) {
+        std::string line = pending.substr(0, newline);
+        pending.erase(0, newline + 1);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        // Rotation used to run only at Start(), which bounded nothing: a host that stays up
+        // for weeks passes the cap once and then grows for the rest of its uptime. The size
+        // check is a position query on our own append handle, cheap enough per line. When a
+        // log viewer holds the file open the rename fails and the file runs past the cap
+        // until the viewer closes; the next line's check picks it up again.
+        if (log && _ftelli64(log) > 2LL * 1024 * 1024) {
+          std::fclose(log);
+          RotateLog();
+          log = OpenLog();
+        }
+        AppendLogLine(log, line);
+        note_child_log_line(line);
+        remote60::native_poc::log_upload_enqueue("host", line);
+        const size_t marker = line.find("directory ");
+        if (marker != std::string::npos) {
+          std::lock_guard<std::mutex> lock(statusMu_);
+          directoryStatus_ = line.substr(marker + 10);
+        }
+      }
+      if (pending.size() > 4096) pending.clear();
+    }
+    if (log) std::fclose(log);
+  }
+
+  // Kill the child, but do NOT close its handles: the supervisor is parked in
+  // WaitForSingleObject on the very same handle value, and closing a handle another thread is
+  // waiting on is undefined -- the wait can return on a recycled object, and the
+  // GetExitCodeProcess that follows would query it. mu_ does not help, because the waiter
+  // cannot hold it while it blocks. Handle ownership therefore sits with Supervise() alone,
+  // which closes only after its wait has returned. (Ledger H-01.)
+  void TerminateChild() {
+    std::lock_guard<std::mutex> lock(mu_);
+    if (child_.hProcess) TerminateProcess(child_.hProcess, 0);
+  }
+
+  /** How long Stop() waits for a child on the path where the supervisor is not there to join. */
+  static constexpr DWORD kChildExitBudgetMs = 5000;
+
+  /**
+   * Waits for childAlive_ to clear, bounded.
+   *
+   * Deliberately not a wait on the handle: ownership of that handle belongs to Supervise() alone
+   * (Ledger H-01), and this is called on paths where Supervise() may not be running to close it.
+   * The flag is what both sides already agree on.
+   */
+  bool WaitForChildExit(DWORD budgetMs) {
+    const DWORD deadline = GetTickCount() + budgetMs;
+    while (ChildAlive() && GetTickCount() < deadline) Sleep(50);
+    return !ChildAlive();
+  }
+
+  void Supervise() {
+    const std::wstring exe = executable_dir() + L"\\GNLinkStream.exe";
+    // A streaming host that dies within seconds and keeps dying is a crash loop, not an
+    // ordinary reconnect. Two things follow from noticing it: back off the relaunch so a
+    // wedged driver does not spin the CPU and flood the log, and -- once the GPU surface
+    // encode path is opt-in-enabled -- fall back off it, since a driver that crashes on the
+    // DXGI surface path is exactly the failure that path was left opt-in to avoid, and the
+    // automatic in-process fallback only catches rejection and slowness, not a hard crash.
+    uint32_t crashStreak = 0;
+    // The child's main-loop liveness watchdog terminates a wedged (hung, not crashed) capture/encode
+    // loop with this exit code. It is a recovery, not a crash, so it must NOT feed the crash streak
+    // or nv12 auto-disable -- but a machine that keeps wedging still needs a backoff, so repeats
+    // inside a window are counted separately.
+    constexpr DWORD kChildWatchdogExitCode = 43;
+    // The child's independent DXGI capture-worker watchdog terminates a worker wedged inside a DXGI
+    // call with this distinct code. Same recovery class as 43 (fast relaunch, no crash streak, no
+    // nv12 auto-disable); the separate code only tells the two hang sites apart in the log.
+    constexpr DWORD kChildDxgiWorkerWatchdogExitCode = 44;
+    uint32_t watchdogRecoveries = 0;
+    uint64_t watchdogWindowStartMs = 0;
+    while (running_.load(std::memory_order_relaxed)) {
+      const bool nv12SurfaceForcedOff = crashStreak >= 2;
+      // The control port serves clients on the same network that dial this PC directly. One
+      // arriving through the directory tunnels control over the media socket instead, but with
+      // no port open a LAN connection showed a picture that could not be controlled.
+      // An ordered candidate list, not one port. Two different networks constrain this, at
+      // opposite ends of the connection, and only one port satisfies both.
+      //
+      // Restrictive networks -- company Wi-Fi, guest networks -- allow outbound UDP only to a
+      // whitelist of destination ports, so a host on 43000 is unreachable from them however
+      // healthy the rest of the path is. That argues for a well-known port.
+      //
+      // But a residential ISP restricts the other direction, and 443 is exactly the port it
+      // blocks inbound to stop people running servers at home. Measured here: with the host bound
+      // to 443 and NAT preserving it, a phone on mobile data that had connected on 43000 could no
+      // longer get through at all -- four punches, nothing arrived, and the Windows Firewall rule
+      // was a program-based allow that could not have been the cause.
+      //
+      // So 43000 is primary again: it is the only port measured to work end to end here, and a
+      // reachable host beats a theoretically friendlier one. 3478 (STUN) is bound as the second
+      // listener -- restrictive networks permit it outbound and ISPs do not filter it inbound the
+      // way they filter 443 -- but nothing dials it yet, because the directory publishes exactly
+      // one address. Making both reachable is N5's job, and until it lands the friendlier port
+      // can only be reached by someone who already knows to ask for it.
+      // Built from argument VALUES, not string concatenation. hostName_ comes from an edit box
+      // and the URL / account id are user input as well; a value containing a quote used to break
+      // the argument boundary and inject or corrupt the child's options. (Ledger H-20.)
+      const std::wstring command = build_windows_command_line(
+          exe, {L"--transport", L"udp",
+                L"--codec", L"h264",
+                L"--bind-port", L"43000,3478",
+                L"--control-port", L"43001",
+                L"--directory-url", directoryUrl_,
+                L"--directory-id", accountId_,
+                L"--host-name", hostName_});
+
+      // The child's stdout is the only place the directory result is reported, so it is piped
+      // back here rather than discarded.
+      SECURITY_ATTRIBUTES sa{};
+      sa.nLength = sizeof(sa);
+      sa.bInheritHandle = TRUE;
+      HANDLE readEnd = nullptr;
+      HANDLE writeEnd = nullptr;
+      if (!CreatePipe(&readEnd, &writeEnd, &sa, 0)) {
+        readEnd = writeEnd = nullptr;
+      } else {
+        SetHandleInformation(readEnd, HANDLE_FLAG_INHERIT, 0);
+      }
+
+      STARTUPINFOW si{};
+      si.cb = sizeof(si);
+      si.dwFlags = STARTF_USESHOWWINDOW | (writeEnd ? STARTF_USESTDHANDLES : 0);
+      si.wShowWindow = SW_HIDE;
+      si.hStdOutput = writeEnd;
+      si.hStdError = writeEnd;
+      PROCESS_INFORMATION pi{};
+      std::vector<wchar_t> mutableCommand(command.begin(), command.end());
+      mutableCommand.push_back(L'\0');
+
+      // H.264 is still behind a build-time experiment switch in the streaming host, and a
+      // build without it refuses --codec h264 and exits immediately. The product has no other
+      // path, so the switch is turned on for the child rather than left to how it was built.
+      SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
+      // The product encoder preset, stated instead of inherited: whatever happens to be in
+      // the parent environment must not silently change how every session encodes. Chosen by
+      // A/B on 1080p30 scroll (2026-07-31): stable_text bought no decoded fps and doubled
+      // latency p95; text legibility is already protected by the peak-constrained VBR policy.
+      SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODER_TUNE_MODE", L"low_latency");
+      // GPU surface encode bypasses the CPU readback that stalls (captureUnmapWait) when
+      // another app -- a game -- holds the GPU. It is opt-in (nv12SurfaceRequested_, default
+      // off) because it depends on the driver, and it is forced off after repeated crashes so
+      // a bad driver cannot lock the host into a crash loop. Passed explicitly each launch so
+      // the value the child sees is always this decision, not whatever the environment held.
+      const bool nv12Surface = nv12SurfaceRequested_.load(std::memory_order_relaxed) &&
+                               !nv12SurfaceForcedOff;
+      SetEnvironmentVariableW(L"REMOTE60_NATIVE_NV12_SURFACE", nv12Surface ? L"1" : L"0");
+
+      AppendLogLineOnce(nv12Surface
+                            ? "[host-app] starting the streaming host (tune=low_latency, nv12-surface=on)"
+                            : "[host-app] starting the streaming host (tune=low_latency)");
+      const uint64_t spawnTickMs = GetTickCount64();
+
+      // lpApplicationName names the exe by path, so the child is chosen outright instead of by
+      // parsing the first token of the command line. (Ledger H-20.)
+      if (!CreateProcessW(exe.c_str(), mutableCommand.data(), nullptr, nullptr, TRUE,
+                          CREATE_NO_WINDOW, nullptr, executable_dir().c_str(), &si, &pi)) {
+        if (readEnd) CloseHandle(readEnd);
+        if (writeEnd) CloseHandle(writeEnd);
+        childAlive_.store(false, std::memory_order_relaxed);
+        AppendLogLineOnce("[host-app] cannot start the streaming host");
+        {
+          std::lock_guard<std::mutex> lock(statusMu_);
+          directoryStatus_ = "cannot start the streaming host";
+        }
+        for (int i = 0; i < 30 && running_.load(std::memory_order_relaxed); ++i) {
+          Sleep(100);
+        }
+        continue;
+      }
+
+      // Ours must close or the reader never sees end-of-file when the child exits.
+      if (writeEnd) CloseHandle(writeEnd);
+      std::thread reader;
+      if (readEnd) reader = std::thread([this, readEnd] { ReadChildOutput(readEnd); });
+
+      {
+        std::lock_guard<std::mutex> lock(mu_);
+        child_ = pi;
+        // Stop() clears running_ and then calls TerminateChild(). If it did both while this
+        // thread was still inside CreateProcessW, TerminateChild found child_ empty and killed
+        // nothing -- and this thread would then publish the child and block in
+        // WaitForSingleObject(INFINITE) with no one left to end it, hanging Stop()'s join
+        // forever. Re-checking under the same lock that publishes closes that: either the
+        // publish wins and TerminateChild sees the child, or this does. (Ledger H-01.)
+        if (!running_.load(std::memory_order_relaxed)) TerminateProcess(pi.hProcess, 0);
+      }
+      childAlive_.store(true, std::memory_order_relaxed);
+      WaitForSingleObject(pi.hProcess, INFINITE);
+      childAlive_.store(false, std::memory_order_relaxed);
+      DWORD childExitCode = 0;
+      GetExitCodeProcess(pi.hProcess, &childExitCode);
+      const uint64_t ranMs = GetTickCount64() - spawnTickMs;
+      if (reader.joinable()) reader.join();
+      if (readEnd) CloseHandle(readEnd);
+      // A nonzero exit within a few seconds is a crash, not a session that ran and ended.
+      // Only those count toward the streak; a host that streamed for a while and then a
+      // client left is a clean exit and resets it.
+      const bool dxgiWorkerWatchdog = (childExitCode == kChildDxgiWorkerWatchdogExitCode);
+      const bool watchdogRecovery =
+          (childExitCode == kChildWatchdogExitCode) || dxgiWorkerWatchdog;
+      const bool crashed = !watchdogRecovery && (childExitCode != 0) && (ranMs < 15000);
+      if (watchdogRecovery) {
+        // Count repeats in a rolling 5-minute window; a persistently wedging host still backs off.
+        if (watchdogWindowStartMs == 0 || (GetTickCount64() - watchdogWindowStartMs) > 300000ULL) {
+          watchdogWindowStartMs = GetTickCount64();
+          watchdogRecoveries = 0;
+        }
+        ++watchdogRecoveries;
+        char line[192];
+        std::snprintf(line, sizeof(line),
+                      "[host-app] streaming host self-terminated (%s) code=%lu "
+                      "ranMs=%llu recoveries5m=%u -- relaunching",
+                      dxgiWorkerWatchdog ? "dxgi-worker watchdog" : "main-loop watchdog",
+                      static_cast<unsigned long>(childExitCode),
+                      static_cast<unsigned long long>(ranMs), watchdogRecoveries);
+        AppendLogLineOnce(line);
+        // A watchdog kill is not evidence the surface path is bad, so leave crashStreak alone.
+      } else if (crashed) {
+        ++crashStreak;
+        char line[160];
+        std::snprintf(line, sizeof(line),
+                      "[host-app] streaming host exited abnormally code=%lu ranMs=%llu streak=%u%s",
+                      static_cast<unsigned long>(childExitCode),
+                      static_cast<unsigned long long>(ranMs), crashStreak,
+                      (crashStreak >= 2 && nv12Surface) ? " -- disabling nv12 surface" : "");
+        AppendLogLineOnce(line);
+      } else {
+        crashStreak = 0;
+        AppendLogLineOnce("[host-app] the streaming host exited");
+      }
+      {
+        // Sole owner of these handles (see TerminateChild). Clearing child_ first, under the
+        // same lock, means a TerminateChild racing this point finds nothing to terminate
+        // rather than a handle that is about to close.
+        std::lock_guard<std::mutex> lock(mu_);
+        child_ = PROCESS_INFORMATION{};
+        if (pi.hProcess) CloseHandle(pi.hProcess);
+        if (pi.hThread) CloseHandle(pi.hThread);
+        pi = PROCESS_INFORMATION{};
+      }
+      if (!running_.load(std::memory_order_relaxed)) break;
+      restarts_.fetch_add(1, std::memory_order_relaxed);
+      // Ordinary relaunch is 2s. A crash streak backs off so a wedged driver or a boot-time
+      // failure does not spin: 2s, 4s, 6s ... capped at 30s. A watchdog recovery relaunches fast
+      // (~300ms) so a wedge is barely visible, but repeats inside the 5-minute window back off too.
+      int relaunchTicks;
+      if (watchdogRecovery) {
+        relaunchTicks = watchdogRecoveries > 3 ? std::min<int>(300, 30 * watchdogRecoveries) : 3;
+      } else if (crashStreak >= 2) {
+        relaunchTicks = std::min<int>(300, 20 * crashStreak);
+      } else {
+        relaunchTicks = 20;
+      }
+      for (int i = 0; i < relaunchTicks && running_.load(std::memory_order_relaxed); ++i) {
+        Sleep(100);
+      }
+    }
+  }
+
+  std::wstring directoryUrl_;
+  std::wstring accountId_;
+  std::wstring hostName_;
+  std::mutex mu_;
+  mutable std::mutex statusMu_;
+  std::string directoryStatus_ = "starting";
+  PROCESS_INFORMATION child_{};
+  std::thread supervisor_;
+  std::atomic<bool> running_{false};
+  std::atomic<bool> childAlive_{false};
+  std::atomic<uint32_t> restarts_{0};
+  // GPU surface encode, opt-in. Off by default because it depends on the driver; a user whose
+  // GPU is contended by a game can turn it on to skip the CPU readback that stalls there, and
+  // the supervisor forces it back off if the host starts crash-looping. Takes effect on the
+  // next relaunch of the streaming host.
+  std::atomic<bool> nv12SurfaceRequested_{false};
+
+ public:
+  void SetNv12SurfaceRequested(bool on) {
+    nv12SurfaceRequested_.store(on, std::memory_order_relaxed);
+  }
+  bool Nv12SurfaceRequested() const {
+    return nv12SurfaceRequested_.load(std::memory_order_relaxed);
+  }
+};
+
+// ---------------------------------------------------------------- app state
+
+enum class BadgeState { Starting, Reachable, SignInAgain, Error };
+
+struct AppState {
+  HWND window = nullptr;
+
+  // Sign-in form. Labels are owned like everything else: an anonymous label cannot be hidden
+  // when the state flips, and a stray "Password" caption on the signed-in card is exactly the
+  // bug this design replaces.
+  HWND titleLabel = nullptr;
+  HWND hintLabel = nullptr;
+  HWND accountLabel = nullptr;
+  HWND accountEdit = nullptr;
+  HWND passwordLabel = nullptr;
+  HWND passwordEdit = nullptr;
+  HWND hostNameLabel = nullptr;
+  HWND hostNameEdit = nullptr;
+  HWND advancedToggle = nullptr;
+  HWND serverLabel = nullptr;
+  HWND serverEdit = nullptr;
+  HWND createAccountCheck = nullptr;
+  HWND signupKeyLabel = nullptr;
+  HWND signupKeyEdit = nullptr;
+  HWND signInButton = nullptr;
+
+  // Status card, shown once signed in.
+  HWND signedAccountLabel = nullptr;
+  HWND signedHostLabel = nullptr;
+  HWND statusBadge = nullptr;
+  HWND startWithWindowsCheck = nullptr;
+  HWND switchAccountButton = nullptr;
+  HWND signOutButton = nullptr;
+  HWND openLogButton = nullptr;
+
+  // Both states.
+  HWND statusLabel = nullptr;
+  // Bottom corner, both states. An update that installs cleanly and a failed one look identical
+  // from outside, and several releases in a row were diagnostic-only -- so "is the new build
+  // actually running?" needed an answer that did not involve reading a log.
+  HWND versionLabel = nullptr;
+
+  HFONT font = nullptr;
+  HFONT titleFont = nullptr;
+  HBRUSH badgeBrushes[4] = {};
+  BadgeState badgeState = BadgeState::Starting;
+  UINT dpi = 96;
+  bool advancedOpen = false;
+  NOTIFYICONDATAW tray{};
+  bool trayAdded = false;
+  bool signedIn = false;
+  bool uiPreview = false;
+  std::string cachePath;
+  directory::HostCache cache;
+  /**
+   * Counts sign-ins in this process.
+   *
+   * A re-register issues a NEW host token for the same account on the same machine, so the
+   * account name, the machine id and the url are all identical across it. An attempt authorised
+   * before that must not be handed the token issued after it, and no comparison of the
+   * destination can see the difference.
+   */
+  uint64_t ownerEpoch = 0;
+  /**
+   * Guards `cache` and `ownerEpoch` against the background threads that read them.
+   *
+   * The update handover reads the account, the machine id, the server address, the token and the
+   * epoch from a thread that is not the UI thread, while signing in and signing out write those
+   * same fields. std::string is not safe to read while another thread assigns it, so this was a
+   * data race -- undefined behaviour, not merely a stale value.
+   */
+  std::mutex ownerMu;
+  StreamingHostProcess streaming;
+  std::atomic<bool> signInBusy{false};
+};
+
+AppState g;
+
+void relayout();
+
+int sc(int value) { return MulDiv(value, static_cast<int>(g.dpi), 96); }
+
+void set_status(const std::wstring& text) {
+  if (g.statusLabel) SetWindowTextW(g.statusLabel, text.c_str());
+}
+
+// ---------------------------------------------------------------- autostart
+
+const wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+/**
+ * The name Task Manager's Startup tab shows, which is why it matters what it says.
+ *
+ * `kLegacyRunValue` is what every machine installed before this has. Both are read and both are
+ * removed on the way out: renaming without that would leave the old entry launching the program
+ * at boot while the app believed autostart was off.
+ */
+const wchar_t kRunValue[] = L"GNLink";
+const wchar_t kLegacyRunValue[] = L"remote60";
+
+bool run_value_present(HKEY key, const wchar_t* name) {
+  wchar_t value[MAX_PATH * 2] = {};
+  DWORD size = sizeof(value);
+  return RegQueryValueExW(key, name, nullptr, nullptr, reinterpret_cast<LPBYTE>(value), &size) ==
+             ERROR_SUCCESS &&
+         value[0] != L'\0';
+}
+
+bool autostart_enabled() {
+  HKEY key = nullptr;
+  if (RegOpenKeyExW(HKEY_CURRENT_USER, kRunKey, 0, KEY_READ, &key) != ERROR_SUCCESS) return false;
+  // Either name counts. A machine that was set up before the rename is still set to start.
+  const bool present =
+      run_value_present(key, kRunValue) || run_value_present(key, kLegacyRunValue);
+  RegCloseKey(key);
+  return present;
+}
+
+void set_autostart(bool enabled) {
+  HKEY key = nullptr;
+  if (RegCreateKeyExW(HKEY_CURRENT_USER, kRunKey, 0, nullptr, 0, KEY_WRITE, nullptr, &key,
+                      nullptr) != ERROR_SUCCESS) {
+    return;
+  }
+  if (enabled) {
+    // Quoted: the install path routinely contains spaces, and an unquoted entry silently
+    // launches the wrong thing.
+    const std::wstring command = L"\"" + own_executable_path() + L"\" --tray";
+    const LSTATUS wrote =
+        RegSetValueExW(key, kRunValue, 0, REG_SZ,
+                       reinterpret_cast<const BYTE*>(command.c_str()),
+                       static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)));
+    // Only once the replacement is actually there. Deleting the old name unconditionally meant a
+    // failed write took away a working autostart and put nothing in its place -- the user would
+    // have ended up with the feature switched on in the UI and nothing starting at boot.
+    if (wrote == ERROR_SUCCESS) {
+      RegDeleteValueW(key, kLegacyRunValue);
+    } else {
+      append_host_app_log("[host-app] autostart: could not write the new Run value (" +
+                          std::to_string(static_cast<long>(wrote)) +
+                          "); leaving the existing entry alone");
+    }
+  } else {
+    RegDeleteValueW(key, kRunValue);
+    // Off has to mean off even on a machine that only ever had the old name.
+    RegDeleteValueW(key, kLegacyRunValue);
+  }
+  RegCloseKey(key);
+}
+
+// ---------------------------------------------------------------- tray
+
+/** True when the directory has stopped accepting us and only a password can fix it. */
+bool needs_sign_in_again(const std::string& directoryStatus);
+
+void update_tray_tip() {
+  if (!g.trayAdded) return;
+  std::wstring tip = kProductName;
+  if (g.signedIn) {
+    const std::string directoryStatus = g.streaming.DirectoryStatus();
+    tip += L" - " + widen(g.cache.hostName);
+    if (!g.streaming.ChildAlive()) {
+      tip += L" (starting)";
+    } else if (directoryStatus.rfind("online", 0) == 0) {
+      tip += L" (online)";
+    } else if (needs_sign_in_again(directoryStatus)) {
+      tip += L" (sign in again)";
+    } else {
+      tip += L" (not reachable)";
+    }
+  } else {
+    tip += L" - signed out";
+  }
+  wcsncpy_s(g.tray.szTip, tip.c_str(), _TRUNCATE);
+  Shell_NotifyIconW(NIM_MODIFY, &g.tray);
+}
+
+void add_tray_icon(HWND window) {
+  g.tray = {};
+  g.tray.cbSize = sizeof(g.tray);
+  g.tray.hWnd = window;
+  g.tray.uID = 1;
+  g.tray.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+  g.tray.uCallbackMessage = kTrayMessage;
+  HICON smallIcon = static_cast<HICON>(
+      LoadImageW(GetModuleHandleW(nullptr), MAKEINTRESOURCEW(kIconResource), IMAGE_ICON,
+                 GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
+  g.tray.hIcon = smallIcon ? smallIcon : LoadIconW(GetModuleHandleW(nullptr),
+                                                   MAKEINTRESOURCEW(kIconResource));
+  wcscpy_s(g.tray.szTip, kProductName);
+  g.trayAdded = Shell_NotifyIconW(NIM_ADD, &g.tray) != FALSE;
+  update_tray_tip();
+}
+
+void remove_tray_icon() {
+  if (!g.trayAdded) return;
+  Shell_NotifyIconW(NIM_DELETE, &g.tray);
+  g.trayAdded = false;
+}
+
+/**
+ * The update endpoint as it stands right now, read once under the lock.
+ *
+ * A function rather than four reads at each call site: read separately, the account, the machine
+ * id, the server address, the token and the epoch can come from either side of a sign-out, and
+ * the answer is then a mixture of two owners that never existed together.
+ */
+remote60::native_poc::update::UpdateEndpoint current_update_endpoint() {
+  std::lock_guard<std::mutex> lock(g.ownerMu);
+  return directory::update_endpoint_for(
+      remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+      g.cache.directoryUrl, "windows",
+      g.cache.hostToken.empty() ? std::string() : "x-host-token: " + g.cache.hostToken,
+      g.cache.accountId + "|" + g.cache.machineId, g.ownerEpoch);
+}
+
+/**
+ * Asks whether there is a newer build, without blocking the tray.
+ *
+ * The check runs on a detached thread and posts its answer back; the menu closes immediately
+ * either way. That matters more than it looks: the failure this guards against is a socket
+ * timeout freezing the tray icon of a product whose whole job is to be running quietly.
+ *
+ * With no trusted key compiled in, the honest answer is that this build cannot check -- said
+ * plainly rather than dressed up as a server error.
+ */
+void start_update_check(HWND window) {
+  namespace upd = remote60::native_poc::update;
+
+  // One snapshot: the url, the shape it answers with, and what may be sent to it. Built here,
+  // where the account and the server address are known, rather than read back later from state
+  // that can have changed by then.
+  //
+  // A host authenticates with its own token, not a session -- it has no session, and the server
+  // accepts either on this route.
+  const upd::UpdateEndpoint endpoint = current_update_endpoint();
+
+  upd::CheckConfig config;
+  config.manifestUrl = endpoint.url;
+  config.derivedEndpoint = endpoint.derived;
+  config.credentialHeader = endpoint.credentialHeader;
+  config.credentialOrigin = endpoint.origin;
+  config.trustedPublicKeyHex = upd::trusted_public_key_hex();
+  config.platform = "windows";
+  config.installedVersion = narrow(kProductVersion);
+
+  upd::check_for_update_async(
+      config, upd::manifest_fetcher_for(config), upd::default_verifier(),
+      [window](upd::CheckResult result) {
+        std::wstring text;
+        switch (result.outcome) {
+          case upd::CheckOutcome::UpdateAvailable:
+            text = L"새 버전 " + widen(result.availableVersion) + L" 이 있습니다.\n\n"
+                   L"지금 업데이트하시겠습니까?\n"
+                   L"업데이트 중에는 원격 연결이 잠시 끊깁니다.";
+            break;
+          case upd::CheckOutcome::UpToDate:
+            text = L"This is the latest version.";
+            break;
+          case upd::CheckOutcome::NotConfigured:
+            // Not an error, and not "up to date" either. Saying which is the point.
+            text = L"This build cannot check for updates.\n\n" + widen(result.detail);
+            break;
+          case upd::CheckOutcome::Unreachable:
+            text = L"Could not reach the update server, so it is not known whether a newer "
+                   L"version exists.\n\n" + widen(result.detail);
+            break;
+          case upd::CheckOutcome::Rejected:
+            text = L"The update information could not be trusted and was ignored.\n\n" +
+                   widen(result.detail);
+            break;
+        }
+        append_host_app_log(std::string("[host-app] update check: ") +
+                            upd::check_outcome_name(result.outcome) +
+                            (result.detail.empty() ? "" : " " + result.detail));
+        // Posted, not called: this runs on the worker thread. wParam says whether there is a
+        // decision to offer -- only UpdateAvailable is a question, the rest are statements.
+        const WPARAM actionable = result.actionable() ? 1u : 0u;
+        PostMessageW(window, kUpdateCheckDoneMessage, actionable,
+                     reinterpret_cast<LPARAM>(new std::wstring(std::move(text))));
+      });
+}
+
+void show_tray_menu(HWND window) {
+  HMENU menu = CreatePopupMenu();
+  if (!menu) return;
+  AppendMenuW(menu, MF_STRING, IdMenuOpen, L"Open GNLink Host");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING | (g.signedIn ? 0 : MF_GRAYED), IdMenuChangeAccount,
+              L"Change account");
+  AppendMenuW(menu, MF_STRING | (g.signedIn ? 0 : MF_GRAYED), IdMenuSignOut, L"Sign out");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  // Always enabled, including when signed out: "is there a newer build" does not depend on being
+  // signed in, and greying it out would make an unconfigured build look like a broken one.
+  AppendMenuW(menu, MF_STRING, IdMenuCheckUpdate, L"Check for updates");
+  AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(menu, MF_STRING, IdMenuExit, L"Exit");
+
+  POINT cursor{};
+  GetCursorPos(&cursor);
+  // Required so the menu closes when the user clicks elsewhere.
+  SetForegroundWindow(window);
+  TrackPopupMenu(menu, TPM_RIGHTBUTTON, cursor.x, cursor.y, 0, window, nullptr);
+  PostMessageW(window, WM_NULL, 0, 0);
+  DestroyMenu(menu);
+}
+
+// ---------------------------------------------------------------- sign in
+
+void apply_signed_in_ui(bool signedIn) {
+  g.signedIn = signedIn;
+  const int form = signedIn ? SW_HIDE : SW_SHOW;
+  const int card = signedIn ? SW_SHOW : SW_HIDE;
+
+  ShowWindow(g.hintLabel, form);
+  ShowWindow(g.accountLabel, form);
+  ShowWindow(g.accountEdit, form);
+  ShowWindow(g.passwordLabel, form);
+  ShowWindow(g.passwordEdit, form);
+  ShowWindow(g.hostNameLabel, form);
+  ShowWindow(g.hostNameEdit, form);
+  ShowWindow(g.advancedToggle, form);
+  const bool serverVisible = !signedIn && g.advancedOpen;
+  ShowWindow(g.serverLabel, serverVisible ? SW_SHOW : SW_HIDE);
+  ShowWindow(g.serverEdit, serverVisible ? SW_SHOW : SW_HIDE);
+  ShowWindow(g.createAccountCheck, form);
+  const bool creating =
+      !signedIn && SendMessageW(g.createAccountCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  ShowWindow(g.signupKeyLabel, creating ? SW_SHOW : SW_HIDE);
+  ShowWindow(g.signupKeyEdit, creating ? SW_SHOW : SW_HIDE);
+  ShowWindow(g.signInButton, form);
+
+  ShowWindow(g.signedAccountLabel, card);
+  ShowWindow(g.signedHostLabel, card);
+  ShowWindow(g.statusBadge, card);
+  ShowWindow(g.startWithWindowsCheck, card);
+  // Signing out belonged in the window, not buried in the tray menu where nobody looks.
+  ShowWindow(g.switchAccountButton, card);
+  ShowWindow(g.signOutButton, card);
+  ShowWindow(g.openLogButton, card);
+
+  update_tray_tip();
+  relayout();
+}
+
+/**
+ * Hands this machine's log to the directory with the token it holds right now.
+ *
+ * Called from both places a token appears -- a fresh sign-in and a cache loaded at startup.
+ * The second call is not a no-op: a sign-in re-registers the host, and the server retires the
+ * previous token that instant (server.js handleHostRegister), so an uploader still holding it
+ * gets 401 for the rest of the process's life -- which is what emptied the NAS of host logs on
+ * 2026-09-07 (P10). The uploader is re-pointed; what it queued under the same account stays.
+ */
+bool start_log_upload() {
+  remote60::native_poc::LogUploadConfig upload;
+  upload.directoryUrl = g.cache.directoryUrl;
+  upload.hostToken = g.cache.hostToken;
+  upload.device = g.cache.machineId;
+  upload.identity = g.cache.accountId + "/" + g.cache.machineId;
+  std::string reason;
+  const bool on = remote60::native_poc::log_upload_configure(upload, &reason);
+  std::printf("[gnlink-host] log upload %s %s\n", on ? "on" : "off", reason.c_str());
+  return on;
+}
+
+/**
+ * The one line an updater reads to decide whether this build came up.
+ *
+ * An updater cannot learn this by looking at the process list: a host that starts and then fails
+ * to do its job is exactly the failure a health check exists for, and its existence proves
+ * nothing. So the host says, about itself, which version it is and whether it has reached the
+ * directory. Written more than once as the answer becomes known; the reader takes the last.
+ *
+ * `directory=not-configured` is not a failure. No account signed in means there is nothing to
+ * reach, and an updater that rolled back for that would be inventing a fault it did not cause.
+ *
+ * Format is parsed by update_health.cpp -- keep them together.
+ */
+void write_health_report(const char* directoryState) {
+  append_host_app_log(std::string("[host-app] health version=") + narrow(kProductVersion) +
+                      " directory=" + directoryState);
+}
+
+/**
+ * True once the directory has accepted something from us, so the report is written only once.
+ *
+ * Atomic because two different threads can be the first to know: the status timer on the UI
+ * thread, and the pipe reader that carries the child's output.
+ */
+std::atomic<bool> gDirectoryReported{false};
+
+/**
+ * The child says "directory online" and that is the fact the updater is waiting for.
+ *
+ * 2026-09-11: an update rolled back because health stayed `pending` for thirty seconds while the
+ * host was, in fact, online the whole time -- `directory online public=...` was in the log one
+ * second after the new host started. Health only ever turned `ok` when the LOG UPLOADER sent its
+ * first batch, which is a different subsystem with its own credentials and its own schedule. The
+ * report said "waiting for the directory" and was waiting for something else.
+ *
+ * The child's stdout already passes through this process. This reads the one line that answers
+ * the question.
+ */
+void note_child_log_line(const std::string& line) {
+  if (line.find("directory online") == std::string::npos) return;
+  if (gDirectoryReported.exchange(true)) return;
+  write_health_report("ok");
+}
+
+/**
+ * Hands the update over to GNLinkUpdater.exe and waits for permission to exit.
+ *
+ * The host is one of the files being replaced, so it has to leave for the swap to happen. When it
+ * leaves is the whole question. If it exits as soon as the updater starts and the update then
+ * fails -- unreachable server, hash mismatch, a file that will not move -- there is nothing left
+ * running to put the product back, and what the user sees is that their program is gone. So the
+ * updater signals only after it holds the lock and has a verified download, and only then does
+ * this window close. Everything before that point is undone by doing nothing.
+ *
+ * Every way of not getting that signal is treated the same, on purpose: the host keeps running
+ * and the update does not happen this time.
+ */
+void start_update_handoff(HWND window) {
+  namespace upd = remote60::native_poc::update;
+
+  const std::wstring installDir = executable_dir();
+  // A sibling of the install directory, never a child: a child would be inside the directory the
+  // updater is about to replace, and it refuses to run from there.
+  const std::wstring workDir = installDir + L".update";
+
+  upd::UpdaterLaunchSpec spec;
+  spec.installDir = installDir;
+  spec.stagingDir = workDir + L"\\staging";
+  spec.workDir = workDir;
+  // The same snapshot the check used: the updater must fetch what the user was told about, not
+  // a second opinion about where updates live.
+  //
+  const upd::UpdateEndpoint launchEndpoint = current_update_endpoint();
+  spec.manifestUrl = launchEndpoint.url;
+  spec.derivedEndpoint = launchEndpoint.derived;
+  // A name, not the credential. The credential goes over the pipe, and only after the process
+  // that connects has been shown to be the one this launch started.
+  if (!launchEndpoint.credentialHeader.empty()) {
+    spec.credentialPipeName =
+        upd::make_credential_pipe_name(GetCurrentProcessId(), GetTickCount64());
+  }
+  spec.platform = "windows";
+  spec.installedVersion = narrow(kProductVersion);
+  spec.healthLogPath = log_file_path();
+  spec.logPath = workDir + L"\\updater.log";
+  spec.serviceName = L"GNLinkSecureInput";
+  spec.registryRoot = L"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GNLink";
+  spec.parentPid = GetCurrentProcessId();
+  spec.readyEventName =
+      upd::make_ready_event_name(GetCurrentProcessId(), GetTickCount64());
+
+  // Created before the updater starts, so there is no window in which it signals an event nobody
+  // is listening on. Manual-reset: the waiter must not consume it before it has been observed.
+  // Both events, made together and named from the same stem, so one attempt cannot end up
+  // answering on another's channel. The acknowledgement exists because signalling ready tells the
+  // host something; it does not tell the updater that anyone heard.
+  const std::wstring ackEventName = upd::make_ack_event_name(spec.readyEventName);
+  HANDLE ackEvent = CreateEventW(nullptr, TRUE, FALSE, ackEventName.c_str());
+  HANDLE readyEvent = CreateEventW(nullptr, TRUE, FALSE, spec.readyEventName.c_str());
+  if (!readyEvent || !ackEvent) {
+    if (readyEvent) CloseHandle(readyEvent);
+    if (ackEvent) CloseHandle(ackEvent);
+    append_host_app_log("[host-app] update: could not create the handshake events");
+    MessageBoxW(window, L"업데이트를 시작하지 못했습니다.", kProductName, MB_OK | MB_ICONWARNING);
+    return;
+  }
+
+  std::wstring commandLine = L"\"" + installDir + L"\\GNLinkUpdater.exe\"";
+  for (const std::wstring& arg : upd::updater_arguments(spec)) {
+    commandLine += L" \"";
+    commandLine += arg;
+    commandLine += L"\"";
+  }
+
+  // Created BEFORE the updater starts, for the same reason as the handshake events: a name that
+  // exists with nobody owning it is a name somebody else can own.
+  // Shared because the thread below outlives this function and the pipe has to live as long as
+  // the exchange does.
+  auto credentialServer = std::make_shared<upd::CredentialServer>();
+  if (!spec.credentialPipeName.empty()) {
+    std::string error;
+    if (!credentialServer->Create(spec.credentialPipeName, &error)) {
+      append_host_app_log("[host-app] update: could not open the credential channel -- " + error);
+      CloseHandle(readyEvent);
+      CloseHandle(ackEvent);
+      MessageBoxW(window, L"업데이트를 시작하지 못했습니다.", kProductName, MB_OK | MB_ICONWARNING);
+      return;
+    }
+  }
+
+  STARTUPINFOW si{};
+  si.cb = sizeof(si);
+  PROCESS_INFORMATION pi{};
+  // The host is already elevated, so the child inherits the token and no prompt appears.
+  // CREATE_BREAKAWAY_FROM_JOB because an updater inside this process's job object would die when
+  // this process is asked to stop -- which is the next thing that happens (design 3.2 (2)).
+  BOOL started = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE,
+                                CREATE_BREAKAWAY_FROM_JOB, nullptr, installDir.c_str(), &si, &pi);
+  if (!started) {
+    // Refused breakaway only matters if this process is in a job that would take its children
+    // down. Asked rather than assumed, and answered no by default: an updater that dies when this
+    // process stops -- which is the very next step -- leaves files half replaced and nothing
+    // running to restore them (ledger (b)).
+    namespace upd = remote60::native_poc::update;
+    const upd::JobKind kind = upd::job_kind_of_current_process();
+    const upd::LaunchGuardVerdict verdict = upd::judge_launch(kind, false);
+    if (verdict != upd::LaunchGuardVerdict::Ok) {
+      append_host_app_log(std::string("[host-app] update: refusing to start the updater -- ") +
+                          upd::launch_guard_verdict_name(verdict));
+      CloseHandle(readyEvent);
+      CloseHandle(ackEvent);
+      MessageBoxW(window,
+                  L"지금은 업데이트를 시작할 수 없습니다.\n\n"
+                  L"설치된 버전은 그대로이며 계속 사용할 수 있습니다.",
+                  kProductName, MB_OK | MB_ICONINFORMATION);
+      return;
+    }
+    started = CreateProcessW(nullptr, commandLine.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                             installDir.c_str(), &si, &pi);
+  }
+  if (!started) {
+    append_host_app_log("[host-app] update: could not start the updater (error " +
+                        std::to_string(GetLastError()) + ")");
+    CloseHandle(readyEvent);
+    CloseHandle(ackEvent);
+    MessageBoxW(window, L"업데이터를 시작하지 못했습니다.", kProductName, MB_OK | MB_ICONWARNING);
+    return;
+  }
+  CloseHandle(pi.hThread);
+
+  append_host_app_log("[host-app] update: handed over to the updater, waiting for its signal");
+
+  // Waits off the UI thread: this window has to keep responding while the download runs, and the
+  // user may still be using the product right up to the moment it is replaced.
+  // Everything after the launch runs here, including the credential handover. It used to be
+  // inline: the menu item's handler waited up to two minutes on the UI thread while the elevated
+  // process connected. Moving only the client left the host doing exactly that.
+  //
+  // The process handle travels with it and is closed here, not before: the handle is what pins
+  // the process id the channel's check compares against.
+  std::thread([window, readyEvent, ackEvent, bootstrap = pi.hProcess,
+               readyName = spec.readyEventName, launchEndpoint, credentialServer,
+               pipeName = spec.credentialPipeName]() {
+    if (!pipeName.empty()) {
+      // Re-read at the moment of sending, not reused from the snapshot built before the user
+      // answered. The owner is the question, not the destination: a re-register keeps the url and
+      // the origin and changes the token.
+      const upd::UpdateEndpoint nowEndpoint = current_update_endpoint();
+      std::string payload;
+      if (nowEndpoint.same_owner_as(launchEndpoint) && nowEndpoint.url == launchEndpoint.url &&
+          nowEndpoint.origin == launchEndpoint.origin &&
+          !nowEndpoint.credentialHeader.empty()) {
+        payload = upd::encode_update_descriptor(nowEndpoint);
+        if (payload.empty()) {
+          append_host_app_log("[host-app] update: the credential descriptor could not be built");
+        }
+      } else {
+        append_host_app_log("[host-app] update: the owner changed after the updater was started; "
+                            "no credential sent");
+      }
+      std::string error;
+      if (payload.empty() ||
+          !credentialServer->Serve(bootstrap, payload, 120000, &error)) {
+        append_host_app_log("[host-app] update: the updater did not receive the credential -- " +
+                            (error.empty() ? std::string("owner changed") : error));
+      }
+      credentialServer->Close();
+    }
+
+    // Long enough for a download on a slow link, short enough that a wedged updater does not keep
+    // the host waiting forever. Running out is not an error -- it just means no update today.
+    std::string why;
+    const upd::HandoffStep step = upd::await_handoff(
+        readyEvent, ackEvent, bootstrap, readyName, 10 * 60 * 1000, nullptr, &why, [&]() {
+          // Asked at the acknowledgement, not at the launch. A re-register during the download
+          // issues a new token for the same account on the same machine -- identical url,
+          // identical origin -- so only the owner comparison can see it.
+          //
+          // And a credential has to still exist. Signing out clears the token and bumps the
+          // epoch; without the emptiness check a build where the epoch did not move would
+          // acknowledge an attempt for a user who is no longer signed in.
+          const upd::UpdateEndpoint atReady = current_update_endpoint();
+          return atReady.same_owner_as(launchEndpoint) && atReady.url == launchEndpoint.url &&
+                 !atReady.credentialHeader.empty();
+        });
+
+    CloseHandle(bootstrap);
+    if (ackEvent) CloseHandle(ackEvent);
+    CloseHandle(readyEvent);
+
+    auto* detail = new std::string(std::string(upd::handoff_step_name(step)) + ": " + why);
+    PostMessageW(window, kUpdateHandoffDoneMessage,
+                 static_cast<WPARAM>(step == upd::HandoffStep::ExitNow),
+                 reinterpret_cast<LPARAM>(detail));
+  }).detach();
+}
+
+void start_streaming() {
+  if (g.uiPreview) return;
+  g.streaming.Configure(widen(g.cache.directoryUrl), widen(g.cache.accountId),
+                        widen(g.cache.hostName));
+  g.streaming.Start();
+}
+
+void open_advanced_settings() {
+  g.advancedOpen = true;
+  SendMessageW(g.advancedToggle, BM_SETCHECK, BST_CHECKED, 0);
+  ShowWindow(g.serverLabel, SW_SHOW);
+  ShowWindow(g.serverEdit, SW_SHOW);
+  relayout();
+}
+
+void perform_sign_in() {
+  if (g.signInBusy.exchange(true)) return;
+
+  const std::string url = narrow(window_text(g.serverEdit));
+  const std::string account = narrow(window_text(g.accountEdit));
+  const std::string password = narrow(window_text(g.passwordEdit));
+  std::string hostName = narrow(window_text(g.hostNameEdit));
+  if (hostName.empty()) hostName = narrow(default_host_name());
+
+  if (url.empty()) {
+    // The field lives behind the advanced toggle; asking for it while keeping it hidden
+    // would send the user hunting.
+    if (!g.advancedOpen) open_advanced_settings();
+    set_status(L"Enter the server address under Advanced settings.");
+    SetFocus(g.serverEdit);
+    g.signInBusy.store(false);
+    return;
+  }
+  if (account.empty() || password.empty()) {
+    set_status(L"Enter your ID and password.");
+    g.signInBusy.store(false);
+    return;
+  }
+
+  const bool creating =
+      SendMessageW(g.createAccountCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  const std::string signupKey = creating ? narrow(window_text(g.signupKeyEdit)) : std::string();
+  if (creating && signupKey.empty()) {
+    set_status(L"Enter the signup key from whoever set up the server.");
+    g.signInBusy.store(false);
+    return;
+  }
+
+  // Remember where they were signing in to before knowing whether it worked; retyping the
+  // server address after every failed attempt is needless. The token goes with the account it
+  // was issued for, so it is dropped when either the account or the server changes.
+  if (g.cache.accountId != account ||
+      directory::directory_origin_key(g.cache.directoryUrl) !=
+          directory::directory_origin_key(url)) {
+    g.cache.hostToken.clear();
+    g.cache.hostId.clear();
+  }
+  g.cache.directoryUrl = url;
+  g.cache.accountId = account;
+  g.cache.hostName = hostName;
+  g.cache.machineId = directory::machine_id();
+  (void)directory::save_host_cache(g.cachePath, g.cache);
+
+  set_status(creating ? L"Creating the account..." : L"Signing in...");
+  EnableWindow(g.signInButton, FALSE);
+
+  // Off the UI thread: this makes a network round trip and the window must stay responsive.
+  //
+  // The worker produces a value and nothing else. It used to write g.cache's std::strings
+  // directly -- directoryUrl / accountId / machineId / hostName / hostId / hostToken -- while the
+  // UI thread read the same strings from the status timer, the tray tip and start_streaming().
+  // That is a data race on std::string, not just a stale read, and it was not covered by the
+  // "don't touch windows from a worker" rule the old comment stated. Now the UI thread performs
+  // every g.cache write and the disk save, in the WM_APP+2 handler. (Ledger H-07.)
+  std::thread([url, account, password, hostName, creating, signupKey]() {
+    auto* result = new SignInResult{};
+    result->url = url;
+    result->account = account;
+    result->hostName = hostName;
+    std::string error;
+    if (creating && !directory::create_account(url, account, password, signupKey, &error)) {
+      result->error = widen(error);
+      PostMessageW(g.window, WM_APP + 2, 0, reinterpret_cast<LPARAM>(result));
+      return;
+    }
+    result->ok = directory::register_host(url, account, password, hostName,
+                                          directory::machine_id(), &result->hostId,
+                                          &result->hostToken, &error);
+    result->machineId = directory::machine_id();
+    result->error = widen(error);
+    PostMessageW(g.window, WM_APP + 2, result->ok ? 1 : 0, reinterpret_cast<LPARAM>(result));
+  }).detach();
+}
+
+
+void sign_out(bool keepAccount) {
+  g.streaming.Stop();
+  {
+    std::lock_guard<std::mutex> lock(g.ownerMu);
+    g.cache.hostToken.clear();
+    g.cache.hostId.clear();
+    // Signing out is an owner change. Without this the account and the machine id are unchanged
+    // and the epoch is unchanged, so `same_owner_as` stays true and an attempt authorised while
+    // signed in would still be acknowledged -- after the user had signed out.
+    ++g.ownerEpoch;
+  }
+  (void)directory::save_host_cache(g.cachePath, g.cache);
+  // The token is gone; so is the owner of whatever the uploader still holds.
+  remote60::native_poc::log_upload_clear_credentials("signed out");
+  apply_signed_in_ui(false);
+  SetWindowTextW(g.passwordEdit, L"");
+  if (!keepAccount) SetWindowTextW(g.accountEdit, L"");
+  set_status(L"Signed out.");
+}
+
+// ---------------------------------------------------------------- window
+
+void create_fonts() {
+  if (g.font) DeleteObject(g.font);
+  if (g.titleFont) DeleteObject(g.titleFont);
+  g.font = CreateFontW(-sc(15), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                       OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                       DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+  g.titleFont = CreateFontW(-sc(21), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                            OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                            DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
+}
+
+void apply_fonts() {
+  const HWND bodyControls[] = {
+      g.hintLabel,       g.accountLabel,       g.accountEdit,      g.passwordLabel,
+      g.passwordEdit,    g.hostNameLabel,      g.hostNameEdit,     g.advancedToggle,
+      g.serverLabel,     g.serverEdit,         g.createAccountCheck, g.signupKeyLabel,
+      g.signupKeyEdit,   g.signInButton,       g.signedAccountLabel, g.signedHostLabel,
+      g.statusBadge,     g.startWithWindowsCheck, g.switchAccountButton, g.signOutButton,
+      g.openLogButton,   g.statusLabel,     g.versionLabel,
+  };
+  for (HWND control : bodyControls) {
+    if (control) SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
+  }
+  if (g.titleLabel) {
+    SendMessageW(g.titleLabel, WM_SETFONT, reinterpret_cast<WPARAM>(g.titleFont), TRUE);
+  }
+}
+
+HWND make_label(HWND parent, int id, const wchar_t* text) {
+  HWND control = CreateWindowExW(0, L"STATIC", text, WS_CHILD | WS_VISIBLE, 0, 0, 10, 10, parent,
+                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr,
+                                 nullptr);
+  SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
+  return control;
+}
+
+HWND make_edit(HWND parent, int id, DWORD extraStyle) {
+  HWND control = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL | extraStyle,
+                                 0, 0, 10, 10, parent,
+                                 reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), nullptr,
+                                 nullptr);
+  SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
+  return control;
+}
+
+HWND make_button(HWND parent, int id, const wchar_t* text, DWORD style) {
+  HWND control = CreateWindowExW(0, L"BUTTON", text, WS_CHILD | WS_TABSTOP | style, 0, 0, 10, 10,
+                                 parent, reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)),
+                                 nullptr, nullptr);
+  SendMessageW(control, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
+  return control;
+}
+
+// Creation order is tab order; the layout functions only assign positions.
+void build_controls(HWND window) {
+  g.titleLabel = make_label(window, IdTitle, kProductName);
+  SendMessageW(g.titleLabel, WM_SETFONT, reinterpret_cast<WPARAM>(g.titleFont), TRUE);
+  g.hintLabel = make_label(window, IdHint,
+                           L"Sign in once. This PC then appears in the phone app "
+                           L"wherever you are.");
+
+  g.accountLabel = make_label(window, IdAccountLabel, L"ID");
+  g.accountEdit = make_edit(window, IdAccount, 0);
+  g.passwordLabel = make_label(window, IdPasswordLabel, L"Password");
+  g.passwordEdit = make_edit(window, IdPassword, ES_PASSWORD);
+  g.hostNameLabel = make_label(window, IdHostNameLabel, L"This PC's name");
+  g.hostNameEdit = make_edit(window, IdHostName, 0);
+
+  // The server address is real configuration, but 99% of sign-ins reuse the cached one, so it
+  // hides behind a toggle instead of being the first thing on the form.
+  g.advancedToggle =
+      make_button(window, IdAdvanced, L"Advanced settings (server address)",
+                  WS_VISIBLE | BS_AUTOCHECKBOX);
+  g.serverLabel = make_label(window, IdServerLabel, L"Server");
+  g.serverEdit = make_edit(window, IdServer, 0);
+  ShowWindow(g.serverLabel, SW_HIDE);
+  ShowWindow(g.serverEdit, SW_HIDE);
+
+  // Without this the only accounts that work are ones somebody created on the server by hand,
+  // and picking your own id gets rejected as "not correct", which reads like a typo.
+  g.createAccountCheck =
+      make_button(window, IdCreateAccount, L"I don't have an account yet - create one",
+                  WS_VISIBLE | BS_AUTOCHECKBOX);
+  g.signupKeyLabel = make_label(window, IdSignupKeyLabel, L"Signup key");
+  g.signupKeyEdit = make_edit(window, IdSignupKey, 0);
+  ShowWindow(g.signupKeyLabel, SW_HIDE);
+  ShowWindow(g.signupKeyEdit, SW_HIDE);
+
+  g.signInButton = make_button(window, IdSignIn, L"Sign in", WS_VISIBLE | BS_DEFPUSHBUTTON);
+
+  g.signedAccountLabel = make_label(window, IdSignedAccount, L"");
+  g.signedHostLabel = make_label(window, IdSignedHost, L"");
+  g.statusBadge = CreateWindowExW(0, L"STATIC", L"STARTING",
+                                  WS_CHILD | SS_CENTER | SS_CENTERIMAGE, 0, 0, 10, 10, window,
+                                  reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdBadge)), nullptr,
+                                  nullptr);
+  SendMessageW(g.statusBadge, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
+
+  g.startWithWindowsCheck = make_button(
+      // Says "sign in" rather than "starts": this is an HKCU\Run entry, so it fires when this
+      // user logs on, not at boot. Promising boot-time start would be a lie -- reaching a PC
+      // sitting at the lock screen needs a service, which does not exist yet.
+      window, IdStartWithWindows, L"Start automatically when I sign in to Windows",
+      BS_AUTOCHECKBOX);
+  SendMessageW(g.startWithWindowsCheck, BM_SETCHECK,
+               autostart_enabled() ? BST_CHECKED : BST_UNCHECKED, 0);
+  g.switchAccountButton = make_button(window, IdSwitchAccount, L"Change account", 0);
+  g.signOutButton = make_button(window, IdSignOut, L"Sign out", 0);
+  g.openLogButton = make_button(window, IdOpenLog, L"Open log", 0);
+
+  g.statusLabel = make_label(window, IdStatus, L"");
+  // Right-aligned so it sits in the corner rather than reading as content.
+  g.versionLabel = CreateWindowExW(0, L"STATIC", (std::wstring(L"v") + kProductVersion).c_str(),
+                                   WS_CHILD | WS_VISIBLE | SS_RIGHT, 0, 0, 10, 10, window,
+                                   reinterpret_cast<HMENU>(static_cast<INT_PTR>(IdVersion)),
+                                   nullptr, nullptr);
+  SendMessageW(g.versionLabel, WM_SETFONT, reinterpret_cast<WPARAM>(g.font), TRUE);
+}
+
+// ---------------------------------------------------------------- layout
+
+void place(HWND control, int x, int y, int w, int h) {
+  if (control) MoveWindow(control, x, y, w, h, TRUE);
+}
+
+/** Positions the sign-in form and returns the required client height. */
+int layout_signed_out() {
+  const int margin = sc(18);
+  const int labelW = sc(110);
+  const int fieldX = margin + labelW;
+  const int fieldW = sc(300);
+  const int rowH = sc(26);
+  const int labelH = sc(20);
+  const int contentW = fieldX + fieldW - margin;
+  int y = sc(14);
+
+  place(g.titleLabel, margin, y, contentW, sc(30));
+  y += sc(36);
+  // Three lines: the account-creation explanation is the longest thing shown here.
+  place(g.hintLabel, margin, y, contentW, sc(58));
+  y += sc(66);
+
+  place(g.accountLabel, margin, y + sc(4), labelW, labelH);
+  place(g.accountEdit, fieldX, y, fieldW, rowH);
+  y += rowH + sc(10);
+  place(g.passwordLabel, margin, y + sc(4), labelW, labelH);
+  place(g.passwordEdit, fieldX, y, fieldW, rowH);
+  y += rowH + sc(10);
+  place(g.hostNameLabel, margin, y + sc(4), labelW, labelH);
+  place(g.hostNameEdit, fieldX, y, fieldW, rowH);
+  y += rowH + sc(10);
+
+  place(g.advancedToggle, margin, y, contentW, sc(22));
+  y += sc(28);
+  if (g.advancedOpen) {
+    place(g.serverLabel, margin, y + sc(4), labelW, labelH);
+    place(g.serverEdit, fieldX, y, fieldW, rowH);
+    y += rowH + sc(10);
+  }
+
+  place(g.createAccountCheck, margin, y, contentW, sc(22));
+  y += sc(28);
+  const bool creating = SendMessageW(g.createAccountCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+  if (creating) {
+    place(g.signupKeyLabel, margin, y + sc(4), labelW, labelH);
+    place(g.signupKeyEdit, fieldX, y, fieldW, rowH);
+    y += rowH + sc(10);
+  }
+  y += sc(6);
+
+  place(g.signInButton, fieldX, y, sc(150), sc(30));
+  y += sc(40);
+
+  // Three lines minimum: sign-in errors from the server are sentences, not words.
+  place(g.statusLabel, margin, y, contentW, sc(62));
+  y += sc(70);
+
+  place(g.versionLabel, margin, y, contentW, sc(16));
+  y += sc(22);
+
+  return y;
+}
+
+/** Positions the signed-in status card and returns the required client height. */
+int layout_signed_in() {
+  const int margin = sc(18);
+  const int contentW = sc(470) - margin * 2;
+  int y = sc(14);
+
+  place(g.titleLabel, margin, y, contentW, sc(30));
+  y += sc(40);
+
+  place(g.signedAccountLabel, margin, y, contentW, sc(22));
+  y += sc(26);
+  place(g.signedHostLabel, margin, y, contentW, sc(22));
+  y += sc(30);
+
+  place(g.statusBadge, margin, y, sc(150), sc(26));
+  y += sc(34);
+
+  place(g.statusLabel, margin, y, contentW, sc(62));
+  y += sc(70);
+
+  place(g.startWithWindowsCheck, margin, y, contentW, sc(24));
+  y += sc(34);
+
+  place(g.switchAccountButton, margin, y, sc(140), sc(30));
+  place(g.signOutButton, margin + sc(150), y, sc(110), sc(30));
+  place(g.openLogButton, margin + sc(270), y, sc(110), sc(30));
+  y += sc(38);
+
+  place(g.versionLabel, margin, y, contentW, sc(16));
+  y += sc(22);
+
+  return y;
+}
+
+void relayout() {
+  if (!g.window) return;
+  const int clientH = g.signedIn ? layout_signed_in() : layout_signed_out();
+  RECT desired{0, 0, sc(470), clientH};
+  const DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+  AdjustWindowRectExForDpi(&desired, style, FALSE, 0, g.dpi);
+  SetWindowPos(g.window, nullptr, 0, 0, desired.right - desired.left,
+               desired.bottom - desired.top,
+               SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+  InvalidateRect(g.window, nullptr, TRUE);
+}
+
+// ---------------------------------------------------------------- status card
+
+bool needs_sign_in_again(const std::string& directoryStatus) {
+  return directoryStatus.find("token rejected") != std::string::npos ||
+         directoryStatus.find("registration needs") != std::string::npos;
+}
+
+COLORREF badge_color(BadgeState state) {
+  switch (state) {
+    case BadgeState::Starting: return RGB(96, 96, 96);
+    case BadgeState::Reachable: return RGB(22, 128, 58);
+    case BadgeState::SignInAgain: return RGB(178, 108, 0);
+    case BadgeState::Error: return RGB(178, 32, 32);
+  }
+  return RGB(96, 96, 96);
+}
+
+HBRUSH badge_brush(BadgeState state) {
+  const int index = static_cast<int>(state);
+  if (!g.badgeBrushes[index]) g.badgeBrushes[index] = CreateSolidBrush(badge_color(state));
+  return g.badgeBrushes[index];
+}
+
+void set_badge(BadgeState state, const wchar_t* text) {
+  // The words carry the state on their own; the color is reinforcement, so high-contrast
+  // themes and monochrome screenshots still read correctly.
+  if (g.badgeState != state || window_text(g.statusBadge) != text) {
+    g.badgeState = state;
+    SetWindowTextW(g.statusBadge, text);
+    InvalidateRect(g.statusBadge, nullptr, TRUE);
+  }
+}
+
+void refresh_status_text() {
+  if (!g.signedIn) return;
+  const std::string directoryStatus = g.streaming.DirectoryStatus();
+
+  SetWindowTextW(g.signedAccountLabel, (L"Account:  " + widen(g.cache.accountId)).c_str());
+  SetWindowTextW(g.signedHostLabel, (L"This PC:  " + widen(g.cache.hostName)).c_str());
+
+  std::wstring detail;
+  if (g.uiPreview) {
+    set_badge(BadgeState::Starting, L"STARTING");
+    detail = L"UI preview - the streaming host is not running.";
+  } else if (!g.streaming.ChildAlive()) {
+    set_badge(BadgeState::Starting, L"STARTING");
+    detail = L"The streaming host is starting...";
+  } else if (directoryStatus.rfind("online", 0) == 0) {
+    set_badge(BadgeState::Reachable, L"REACHABLE");
+    detail = L"This PC is reachable from your phone.";
+  } else if (needs_sign_in_again(directoryStatus)) {
+    // Saying "running" here would be a lie the user only discovers on the phone.
+    set_badge(BadgeState::SignInAgain, L"SIGN IN AGAIN");
+    detail = L"The server signed this PC out.\nUse Change account to sign in again.";
+  } else {
+    set_badge(BadgeState::Error, L"NOT REACHABLE");
+    detail = L"Directory: " + widen(directoryStatus);
+  }
+  const uint32_t restarts = g.streaming.Restarts();
+  if (restarts > 0) detail += L"\nStreaming host restarts: " + std::to_wstring(restarts);
+  // The uploader learns about a retired token before the heartbeat does (it posts every few
+  // seconds); a pause there is the same "sign in again" and must not stay invisible.
+  if (remote60::native_poc::log_upload_status().authRejected) {
+    detail += L"\nLog upload: the server rejected this PC's token. Use Change account to sign in again.";
+  }
+  set_status(detail);
+}
+
+void open_log_file() {
+  const std::wstring path = log_file_path();
+  if (path.empty()) return;
+  // Open the log FOLDER, not the file: with numbered rotation there are up to eleven
+  // host_app.log* generations plus the client's files, and opening just the live file made
+  // reaching the others a chore. log_file_path() already ensured the directory exists.
+  const size_t slash = path.find_last_of(L'\\');
+  const std::wstring dir = (slash == std::wstring::npos) ? path : path.substr(0, slash);
+  ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+LRESULT CALLBACK window_proc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+  switch (message) {
+    case WM_CREATE:
+      g.window = window;
+      g.dpi = GetDpiForWindow(window);
+      create_fonts();
+      build_controls(window);
+      add_tray_icon(window);
+      SetTimer(window, kStatusTimer, kStatusIntervalMs, nullptr);
+      return 0;
+
+    case WM_DPICHANGED: {
+      g.dpi = HIWORD(wParam);
+      create_fonts();
+      apply_fonts();
+      // Take the suggested position, then let relayout set the size the content needs at the
+      // new DPI -- this window is fixed-size, so the suggested size is not authoritative.
+      const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
+      SetWindowPos(window, nullptr, suggested->left, suggested->top,
+                   suggested->right - suggested->left, suggested->bottom - suggested->top,
+                   SWP_NOZORDER | SWP_NOACTIVATE);
+      relayout();
+      return 0;
+    }
+
+    case WM_CTLCOLORSTATIC: {
+      HDC dc = reinterpret_cast<HDC>(wParam);
+      if (reinterpret_cast<HWND>(lParam) == g.statusBadge) {
+        SetBkColor(dc, badge_color(g.badgeState));
+        SetTextColor(dc, RGB(255, 255, 255));
+        return reinterpret_cast<LRESULT>(badge_brush(g.badgeState));
+      }
+      // Muted, because the version is there to be checked when something looks wrong, not to
+      // compete with the status it sits under.
+      if (reinterpret_cast<HWND>(lParam) == g.versionLabel) {
+        SetTextColor(dc, RGB(140, 140, 140));
+      }
+      // Labels and checkboxes otherwise paint on the grey dialog color, which reads as
+      // stripes against this window's white background.
+      SetBkMode(dc, TRANSPARENT);
+      return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+    }
+
+    case WM_COMMAND: {
+      const int id = LOWORD(wParam);
+      if (id == IdSignIn) {
+        perform_sign_in();
+        return 0;
+      }
+      if (id == IdStartWithWindows) {
+        const bool checked =
+            SendMessageW(g.startWithWindowsCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        set_autostart(checked);
+        return 0;
+      }
+      if (id == IdAdvanced) {
+        g.advancedOpen = SendMessageW(g.advancedToggle, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        ShowWindow(g.serverLabel, g.advancedOpen ? SW_SHOW : SW_HIDE);
+        ShowWindow(g.serverEdit, g.advancedOpen ? SW_SHOW : SW_HIDE);
+        relayout();
+        return 0;
+      }
+      if (id == IdCreateAccount) {
+        const bool checked =
+            SendMessageW(g.createAccountCheck, BM_GETCHECK, 0, 0) == BST_CHECKED;
+        ShowWindow(g.signupKeyLabel, checked ? SW_SHOW : SW_HIDE);
+        ShowWindow(g.signupKeyEdit, checked ? SW_SHOW : SW_HIDE);
+        SetWindowTextW(g.signInButton, checked ? L"Create and sign in" : L"Sign in");
+        // Spelling out which field is which: "Signup key" on its own reads like somewhere to
+        // put the account details, and there is no second chance to explain it.
+        SetWindowTextW(g.hintLabel,
+                       checked ? L"The ID and password above become your new account - pick "
+                                 L"anything you like. The signup key is a separate password "
+                                 L"for the server itself."
+                               : L"Sign in once. This PC then appears in the phone app "
+                                 L"wherever you are.");
+        set_status(checked ? L"" : L"Sign in to make this PC reachable.");
+        relayout();
+        return 0;
+      }
+      if (id == IdOpenLog) {
+        open_log_file();
+        return 0;
+      }
+      if (id == IdMenuOpen) {
+        ShowWindow(window, SW_SHOW);
+        SetForegroundWindow(window);
+        return 0;
+      }
+      if (id == IdSwitchAccount || id == IdMenuChangeAccount) {
+        sign_out(/*keepAccount=*/true);
+        ShowWindow(window, SW_SHOW);
+        SetForegroundWindow(window);
+        SetFocus(g.passwordEdit);
+        return 0;
+      }
+      if (id == IdSignOut || id == IdMenuSignOut) {
+        sign_out(/*keepAccount=*/false);
+        ShowWindow(window, SW_SHOW);
+        SetForegroundWindow(window);
+        return 0;
+      }
+      if (id == IdMenuCheckUpdate) {
+        start_update_check(window);
+        return 0;
+      }
+      if (id == IdMenuExit) {
+        DestroyWindow(window);
+        return 0;
+      }
+      break;
+    }
+
+    case kUpdateCheckDoneMessage: {
+      // Ownership of the string transfers here. Shown from the UI thread, which is the reason
+      // the worker posts instead of calling MessageBox itself.
+      std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lParam));
+      if (!text) return 0;
+      // wParam is set when there is actually a newer version. Only then is there a decision to
+      // make; the other four outcomes are statements, and offering to "update" after "could not
+      // reach the server" would be offering something that cannot happen.
+      if (wParam != 0) {
+        const int answer = MessageBoxW(window, text->c_str(), kProductName,
+                                       MB_YESNO | MB_ICONQUESTION);
+        // Later is an ordinary answer, not a dismissal to work around. Nothing happens and the
+        // product keeps running exactly as it was.
+        if (answer == IDYES) start_update_handoff(window);
+        else append_host_app_log("[host-app] update: the user chose later");
+        return 0;
+      }
+      MessageBoxW(window, text->c_str(), kProductName, MB_OK | MB_ICONINFORMATION);
+      return 0;
+    }
+
+    case kUpdateHandoffDoneMessage: {
+      std::unique_ptr<std::string> detail(reinterpret_cast<std::string*>(lParam));
+      append_host_app_log("[host-app] update: " + (detail ? *detail : std::string("no detail")));
+      if (wParam != 0) {
+        // The updater holds the lock and has a verified download, so leaving is safe and
+        // necessary -- this process is one of the files it is about to replace.
+        //
+        // The child goes first, and whether it went is written down.
+        //
+        // Leaving it to WM_DESTROY was not wrong so much as unverified: on 2026-09-11 a Stream
+        // created a second after this acknowledgement outlived the Host that owned it and kept UDP
+        // 43000 and 3478, so the Host the updater started next could not bind and died in a loop.
+        // Nothing in the log said a child had been left behind -- the updater only reported that it
+        // could not ask some pid to stop. A supervisor that is leaving has one job on the way out,
+        // and now it reports whether it did it.
+        std::string detail;
+        const bool childGone = g.streaming.Stop(&detail);
+        append_host_app_log(std::string("[host-app] update: standing down -- ") + detail);
+        if (!childGone) {
+          // Said plainly, because the consequence lands on the next process rather than this one:
+          // whatever is still holding the streaming ports will stop the new build from starting.
+          append_host_app_log(
+              "[host-app] update: WARNING a streaming child outlived this process; the next host "
+              "may fail to bind its ports");
+        }
+        DestroyWindow(window);
+        return 0;
+      }
+      // Every other outcome means nothing on disk changed. Say so rather than leaving the user
+      // wondering whether an update half happened.
+      MessageBoxW(window,
+                  L"업데이트를 시작하지 못했습니다.\n\n"
+                  L"설치된 버전은 그대로이며 계속 사용할 수 있습니다.",
+                  kProductName, MB_OK | MB_ICONINFORMATION);
+      return 0;
+    }
+
+    case WM_APP + 2: {
+      // Sign-in result, marshalled back from the worker thread. The worker only produces this
+      // value; every g.cache mutation and the disk save happen here, on the UI thread, so the
+      // strings the status timer and the tray tip read have exactly one writer. (Ledger H-07.)
+      std::unique_ptr<SignInResult> result(reinterpret_cast<SignInResult*>(lParam));
+      g.signInBusy.store(false);
+      EnableWindow(g.signInButton, TRUE);
+      if (result && result->ok) {
+        g.cache.directoryUrl = result->url;
+        g.cache.accountId = result->account;
+        g.cache.machineId = result->machineId;
+        g.cache.hostName = result->hostName;
+        g.cache.hostId = result->hostId;
+        {
+          std::lock_guard<std::mutex> lock(g.ownerMu);
+          g.cache.hostToken = result->hostToken;
+          ++g.ownerEpoch;
+        }
+        // A fresh sign-in changes the answer to "is a directory reachable", so the report is
+        // renewed rather than left saying what was true before signing in.
+        gDirectoryReported = false;
+        write_health_report(start_log_upload() ? "pending" : "not-configured");
+        // Only the token is written; the password never reaches disk.
+        (void)directory::save_host_cache(g.cachePath, g.cache);
+        SetWindowTextW(g.passwordEdit, L"");
+        apply_signed_in_ui(true);
+        start_streaming();
+        refresh_status_text();
+      } else {
+        set_status(result && !result->error.empty() ? result->error : L"Sign in failed.");
+      }
+      return 0;
+    }
+
+    case kTrayMessage:
+      if (LOWORD(lParam) == WM_LBUTTONDBLCLK) {
+        ShowWindow(window, SW_SHOW);
+        SetForegroundWindow(window);
+      } else if (LOWORD(lParam) == WM_RBUTTONUP) {
+        show_tray_menu(window);
+      }
+      return 0;
+
+    case WM_TIMER:
+      if (wParam == kStatusTimer) {
+        refresh_status_text();
+        update_tray_tip();
+        // The first batch the directory accepts is the observable fact that this build can reach
+        // it. Reported once; an updater waiting on it stops waiting here.
+        // Still a valid answer -- an accepted batch also proves this build reaches the server --
+        // but no longer the only one. The child's "directory online" usually arrives first.
+        if (remote60::native_poc::log_upload_status().sentBatches > 0 &&
+            !gDirectoryReported.exchange(true)) {
+          write_health_report("ok");
+        }
+      }
+      return 0;
+
+    // Closing the window means "get out of my way", not "stop sharing this PC"; the tray icon
+    // is what actually represents the app running.
+    case WM_CLOSE:
+      ShowWindow(window, SW_HIDE);
+      return 0;
+
+    case WM_DESTROY: {
+      KillTimer(window, kStatusTimer);
+      // Ordinarily a no-op by now: the handoff path above already stopped it. Still reported,
+      // because "already stopped, no child" and "a child is somehow still alive" are different
+      // answers and only one of them is fine.
+      std::string stopDetail;
+      if (!g.streaming.Stop(&stopDetail)) {
+        append_host_app_log("[host-app] shutting down -- " + stopDetail);
+      }
+      remove_tray_icon();
+      for (HBRUSH& brush : g.badgeBrushes) {
+        if (brush) {
+          DeleteObject(brush);
+          brush = nullptr;
+        }
+      }
+      PostQuitMessage(0);
+      return 0;
+    }
+
+    default:
+      break;
+  }
+  return DefWindowProcW(window, message, wParam, lParam);
+}
+
+}  // namespace
+
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR commandLine, int) {
+  SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+  WSADATA wsa{};
+  WSAStartup(MAKEWORD(2, 2), &wsa);
+
+  // The three things this process owns, unwound in the order they depend on each other. Written
+  // as scope guards rather than as lines at the end of the function because destructors run after
+  // those lines, not before -- so a join written at the end would happen after WSACleanup, with
+  // the uploader's worker still inside a socket call. Declared first is destroyed last.
+  //
+  // 1. sockets, 2. the window's GDI objects, 3. the uploader -- joined before either.
+  struct WsaScope {
+    ~WsaScope() { WSACleanup(); }
+  } wsaScope;
+  struct UiScope {
+    ~UiScope() {
+      if (g.font) DeleteObject(g.font);
+      if (g.titleFont) DeleteObject(g.titleFont);
+    }
+  } uiScope;
+  // Nothing in this product called log_upload_stop(); the static holding the worker was destroyed
+  // with the thread still joinable, which is std::terminate. This is the call, on the message
+  // loop's own thread and holding no lock -- the worker's auth callback marshals to this thread.
+  const remote60::native_poc::LogUploadShutdown uploaderShutdown;
+
+  WNDCLASSEXW wc{};
+  wc.cbSize = sizeof(wc);
+  wc.lpfnWndProc = window_proc;
+  wc.hInstance = instance;
+  wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+  wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+  wc.lpszClassName = kWindowClass;
+  wc.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(kIconResource));
+  wc.hIconSm = static_cast<HICON>(LoadImageW(instance, MAKEINTRESOURCEW(kIconResource),
+                                             IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                             GetSystemMetrics(SM_CYSMICON), 0));
+  RegisterClassExW(&wc);
+
+  HWND window = CreateWindowExW(0, kWindowClass, kProductName,
+                                WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+                                CW_USEDEFAULT, CW_USEDEFAULT, 100, 100, nullptr, nullptr,
+                                instance, nullptr);
+  if (!window) return 1;
+
+  // Layout verification without touching the cache or launching the streaming child:
+  //   --ui-preview            the sign-in form with sample data
+  //   --ui-preview=signedin   the status card with sample data
+  const bool uiPreview = commandLine && wcsstr(commandLine, L"--ui-preview") != nullptr;
+  const bool previewSignedIn = commandLine && wcsstr(commandLine, L"--ui-preview=signedin") != nullptr;
+
+  bool haveToken = false;
+  if (uiPreview) {
+    g.uiPreview = true;
+    g.cache.accountId = "preview-account";
+    g.cache.hostName = "PREVIEW-PC";
+    g.cache.directoryUrl = "http://127.0.0.1:8080";
+    haveToken = previewSignedIn;
+  } else {
+    g.cachePath = directory::default_host_cache_path();
+    haveToken = directory::load_host_cache(g.cachePath, &g.cache);
+    bool uploaderOn = false;
+    if (haveToken) uploaderOn = start_log_upload();
+    // Said as soon as it is known, so an updater is not waiting on a machine that has nothing to
+    // report. `pending` means an answer is coming; the other two mean none is.
+    write_health_report(uploaderOn ? "pending" : "not-configured");
+  }
+  SetWindowTextW(g.serverEdit, widen(g.cache.directoryUrl).c_str());
+  SetWindowTextW(g.accountEdit, widen(g.cache.accountId).c_str());
+  SetWindowTextW(g.hostNameEdit,
+                 g.cache.hostName.empty() ? default_host_name().c_str()
+                                          : widen(g.cache.hostName).c_str());
+
+  // Launched by the autostart entry: come up in the tray rather than in the user's face.
+  const bool startHidden = commandLine && wcsstr(commandLine, L"--tray") != nullptr;
+
+  if (haveToken) {
+    apply_signed_in_ui(true);
+    start_streaming();
+    refresh_status_text();
+  } else {
+    apply_signed_in_ui(false);
+    set_status(L"Sign in to make this PC reachable.");
+  }
+  ShowWindow(window, (haveToken && startHidden && !uiPreview) ? SW_HIDE : SW_SHOW);
+  UpdateWindow(window);
+
+  MSG message{};
+  while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+    if (!IsDialogMessageW(window, &message)) {
+      TranslateMessage(&message);
+      DispatchMessageW(&message);
+    }
+  }
+
+  return 0;  // uploaderShutdown -> uiScope -> wsaScope, in that order
+}

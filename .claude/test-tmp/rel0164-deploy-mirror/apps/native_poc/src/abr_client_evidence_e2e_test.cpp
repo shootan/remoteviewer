@@ -1,0 +1,1446 @@
+// quality r1, end to end: what ABR does with a client that never sends decode metrics, with one
+// that sends them the way the Android APK does (present* only, decode fields 0), and with one that
+// reports properly and then goes silent. A real isolated host, the product control scheduler and
+// serializer on this side; no phone.
+//
+// The field case (2026-09-27): this PC -> APK 0.2.21, bitrate 6000 or 3000 at 30 fps, fell to the
+// lowest rung within 5-11 s ("high_to_mid_severe" then "mid_to_low_severe") with
+// clientDecodedFps=0 clientAvgLatUs=0 clientMbps=0 and nothing wrong on the host. The APK sends
+// ControlClientMetrics every second with only the present* block (native_video_client_session.cpp
+// fills nothing else), and the host read its zero decode fps as a relay collapse.
+//
+// Modes (one host run each, --mode):
+//   none     never sends ControlClientMetrics           -> must not demote
+//   present  sends it APK-style, present* only            -> must not demote
+//   stop     sends full Windows-style metrics, then stops -> must demote on stale_active (P7 kept)
+//   recover  full metrics, 12 s of silence, then full again -> demotes, then climbs back to high
+//            through the ABR's own hold times (r2: DesktopText restores fps and the 1080p floor)
+// All modes also check the r1 instrumentation is live: [keyframe] lines with reasons, and the
+// per-flow byte keys on the stats line.
+//
+// THE CADENCE. ABR only judges seconds in which the host sent a real cadence (>= fps/2 real
+// frames); a sparse second holds. So this capture target is a window of this process that IS
+// composed -- on screen, alpha 1/255, click-through, never activated, repainted at 60 Hz -- and the
+// test counts real (non-synthetic) frames per second itself. If the host did not send a real
+// cadence, the ABR checks are NOT JUDGED rather than passed.
+//
+// quality r2 adds the encode-size question: with --desktop the host captures the monitor instead of
+// the test window (DesktopText priority applies), --bitrate sets the user's budget, --text-off sets
+// the rollback switch, and --expect-size WxH asserts what the host actually encoded (its own stats
+// line and [keyframe] lines). Nothing captured is kept: only sizes and byte counts are read.
+//
+//   remote60_abr_client_evidence_e2e_test --mode none|present|stop [--host <GNLinkStream.exe>]
+//       [--desktop [--monitor N]] [--bitrate N] [--text-off] [--expect-size WxH]
+//   --select-at SEC:window|desktop (r3, repeatable): at second SEC select this test's window or the
+//   desktop with the product's ControlWindowSelect, the way a viewer does at runtime (a host started
+//   with --capture-window-title refuses selection, so pair it with --desktop --cadence-window).
+//   --tune-at SEC:BITRATE (r3, repeatable): a runtime tune (bitrate, fps kept at 30) through the
+//   product scheduler, as the viewer's quality control sends it.
+//   --request-key-at SEC (r4, repeatable): the viewer asks for a keyframe (product KeyframeRequestState).
+//   Every one must be answered by a [keyframe] carrying reason "viewer" -- the recovery IDR the
+//   r4 cadence change must not take away. --run-sec N overrides the run length.
+//   --expect-final WxH asserts the size on the LAST stats line: the box re-chosen for the last capture.
+//   --monitor selects the host's monitor N (primary first, then left to right) with the product's
+//   ControlMonitorSelect, before the measured run -- a 4K panel that is not the primary.
+//   quality r5, rate control: --fps N, --keyint N (frames, as the viewer sends it), --max-qp N (0 =
+//   the ceiling off; unset = the host default), --pattern pan|noise and --window WxH turn the target
+//   into a high-motion source -- pan: a large detailed texture panned a few pixels a frame (camera
+//   motion over a busy scene, like video); noise: fresh noise every frame (the worst case). The
+//   run ends with one R5MEASURE line: payload / parity / header Mbps over the seconds after warmup,
+//   payload against the target, and the IDRs in that span, all from the host's own stats lines.
+//   clip-image r2 (direction A, plan ⑧ performance): --clip-bench runs the host as the test build
+//   GNLinkStreamClipSink (--host), clipboard sync off and received images written to <run>/sink --
+//   never a clipboard; this side negotiates the bulk channel and runs the product ClipImageClient.
+//   --clip-mib N --clip-at SEC offers an N MiB image at second SEC (0 = a baseline run, same setup).
+//   --proxy DELAYMS:LOSSPERMILLE:RATEKBPS puts the loopback impairment proxy (udp_impair_proxy.hpp)
+//   between this viewer and the host. --run-dir DIR stages inside DIR instead of %TEMP%. The run
+//   ends with R7CLIP: the transfer's outcome and time, the control ping RTT, frame gaps and memory
+//   over the measured span (--measure-from), for comparison with a baseline run of the same span.
+//   file copy R->P (t-zdmsd4gb step 2, docs/file_copy_r2p_gates.md): --file-bench runs the host as the
+//   test build GNLinkStreamClipSink (--host) whose folder source hands a copy of files to the product
+//   HostFileCopyService at --file-at SEC (--file-mib N, 0 = a baseline run, same setup); this side runs
+//   the product FileCopyClient (700 ms query, publish through the clipboard helper on a private window
+//   station, prepare, chunk checks) and a real paste consumer there. Use it with --mode measured: the
+//   metrics this viewer reports each second are the ones it measured (real frames received, capture ->
+//   receive latency; decode tail fixed -- nothing decodes here), so the host's ABR can react to what
+//   the file transfer does to the picture. The run ends with R9FILE; the host log (--run-dir) keeps
+//   the ABR lines and the file sender's RATETRACE lines in order.
+//   (REMOTE60_ALLOW_HOST_E2E=1)
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <fstream>
+#include <functional>
+#include <iostream>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <set>
+#include <sstream>
+#include <string>
+#include <thread>
+#include <vector>
+
+
+#include "e2e_isolation.hpp"
+#include "native_video_client_shared_core.hpp"
+#include "native_video_client_tcp_control.hpp"
+#include "poc_protocol.hpp"
+#include "time_utils.hpp"
+#include "udp_control_channel.hpp"
+#include "control_resume_e2e_support.hpp"
+#include "clip_image_client.hpp"
+#include "file_copy_client.hpp"
+#include "file_copy_helper_host.hpp"
+#include "clip_image_wic.hpp"
+#include "udp_impair_proxy.hpp"
+#include <psapi.h>
+
+#include <mmsystem.h>  // timeBeginPeriod (r5); after the project headers, which bring winsock2/windows
+#include "e2e_station_lock.hpp"
+
+using namespace remote60::native_poc;
+using namespace remote60::native_poc::e2e;
+
+namespace {
+
+uint16_t kHostPort = 0;  // picked at run time (e2e_pick_free_udp_port): tests run side by side
+uint32_t kFps = 30;  // --fps (r5); 30 for every earlier mode
+
+// r5: the source the host captures. Default is the small cadence animation of r1-r4.
+enum class Pattern { Default, Pan, Noise };
+Pattern gPattern = Pattern::Default;
+int gWinW = 480;
+int gWinH = 270;
+int gStillAfterMs = 0;
+double gMeasureFromSec = 8.0;  // r5 --measure-from SEC: the measured span starts SEC after the first stats line  // r5 --still-after SEC: the motion stops (the picture freezes) after SEC
+int gBlock = 4;  // r5 --block: pan texture detail, px per random block (4 = very busy, 16 = video-like)
+constexpr uint32_t kDefaultBitrate = 6000000;
+std::wstring kTargetTitle;  // unique to this process, set in wmain (e2e_unique_window_title)
+
+// An on-screen window the user cannot see or hit: alpha 1/255, WS_EX_TRANSPARENT, never activated.
+// On screen because an off-screen window is never composed and the host then sends only synthetic
+// refresh frames (C0 measured about one a second), which ABR treats as sparse and ignores.
+class CadenceTarget {
+ public:
+  // selectable: leave out WS_EX_TOOLWINDOW, which the host's window list excludes -- needed only
+  // when the test selects this window at runtime (it then shows a taskbar button for the run).
+  bool selectable = false;
+  bool Start() {
+    thread_ = std::thread([this] { Run(); });
+    return wait_until([this] { return ready_.load(); }, 5000) && hwnd_ != nullptr;
+  }
+  void Stop() {
+    if (hwnd_) PostMessageW(hwnd_, WM_CLOSE, 0, 0);
+    if (thread_.joinable()) thread_.join();
+  }
+  HWND hwnd() const { return hwnd_; }
+
+ private:
+  static LRESULT CALLBACK Proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* self = reinterpret_cast<CadenceTarget*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (msg == WM_TIMER && self) {
+      if (gStillAfterMs > 0 && self->startTick_ == 0) self->startTick_ = GetTickCount64();
+      if (gStillAfterMs > 0 && GetTickCount64() - self->startTick_ > static_cast<uint64_t>(gStillAfterMs)) {
+        return 0;  // frozen: nothing changes, nothing repaints
+      }
+      ++self->frame_;
+      InvalidateRect(hwnd, nullptr, FALSE);
+      return 0;
+    }
+    if (msg == WM_PAINT && self && gPattern != Pattern::Default) {
+      PAINTSTRUCT ps{};
+      HDC dc = BeginPaint(hwnd, &ps);
+      self->PaintMotion(dc);
+      EndPaint(hwnd, &ps);
+      return 0;
+    }
+    if (msg == WM_PAINT && self) {
+      PAINTSTRUCT ps{};
+      HDC dc = BeginPaint(hwnd, &ps);
+      RECT client{};
+      GetClientRect(hwnd, &client);
+      const int phase = static_cast<int>(self->frame_ % 32);
+      HBRUSH back = CreateSolidBrush((self->frame_ & 1) ? RGB(20, 20, 30) : RGB(40, 25, 25));
+      FillRect(dc, &client, back);
+      DeleteObject(back);
+      RECT block{phase * 12, 30 + (phase % 7) * 10, phase * 12 + 140, 200};
+      HBRUSH fore = CreateSolidBrush(RGB(200, 60 + phase * 5, 40 + phase * 3));
+      FillRect(dc, &block, fore);
+      DeleteObject(fore);
+      EndPaint(hwnd, &ps);
+      return 0;
+    }
+    if (msg == WM_CLOSE) {
+      DestroyWindow(hwnd);
+      return 0;
+    }
+    if (msg == WM_DESTROY) {
+      PostQuitMessage(0);
+      return 0;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+  }
+  void Run() {
+    WNDCLASSEXW wc{};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = Proc;
+    wc.hInstance = GetModuleHandleW(nullptr);
+    wc.lpszClassName = L"Remote60AbrEvidenceTarget";
+    RegisterClassExW(&wc);
+    hwnd_ = CreateWindowExW((selectable ? 0 : WS_EX_TOOLWINDOW) | WS_EX_NOACTIVATE | WS_EX_LAYERED | WS_EX_TRANSPARENT,
+                            wc.lpszClassName, kTargetTitle.c_str(), WS_POPUP, 0, 0, gWinW, gWinH, nullptr,
+                            nullptr, wc.hInstance, nullptr);
+    if (hwnd_) {
+      SetWindowLongPtrW(hwnd_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+      SetLayeredWindowAttributes(hwnd_, 0, 1, LWA_ALPHA);
+      ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
+      // r5: a high-motion source must change at least as often as the host samples it.
+      if (gPattern != Pattern::Default) timeBeginPeriod(1);
+      SetTimer(hwnd_, 1, gPattern != Pattern::Default ? 8 : 16, nullptr);
+    }
+    ready_.store(true);
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) DispatchMessageW(&msg);
+    hwnd_ = nullptr;
+  }
+  // r5: pan -- a texture larger than the window by kPanMargin, blitted at an offset that moves
+  // 7 px right and 3 px down a frame; busy at every scale (4 px blocks of random colour over
+  // gradients and stripes), so it is hard to code but motion-predictable, like camera video.
+  // noise -- every pixel fresh every frame.
+  static constexpr int kPanMargin = 512;
+  void EnsureSurface(HDC dc) {
+    if (memDc_) return;
+    const int w = gWinW + (gPattern == Pattern::Pan ? kPanMargin : 0);
+    const int h = gWinH + (gPattern == Pattern::Pan ? kPanMargin : 0);
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(bi.bmiHeader);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    memDc_ = CreateCompatibleDC(dc);
+    bitmap_ = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, reinterpret_cast<void**>(&pixels_), nullptr, 0);
+    SelectObject(memDc_, bitmap_);
+    surfW_ = w;
+    surfH_ = h;
+    if (gPattern == Pattern::Pan) {
+      for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+          const uint32_t block = Rand(static_cast<uint32_t>((x / gBlock) * 7919 + (y / gBlock) * 104729));
+          const uint32_t r = ((block & 0xFF) + (x * 255 / w)) / 2;
+          const uint32_t g = (((block >> 8) & 0xFF) + (y * 255 / h)) / 2;
+          const uint32_t b = ((((x + y) / 9) & 1) ? 200u : 40u) ^ ((block >> 16) & 0x3F);
+          pixels_[static_cast<size_t>(y) * w + x] = (r << 16) | (g << 8) | b;
+        }
+      }
+    }
+  }
+  static uint32_t Rand(uint32_t v) {
+    v ^= v << 13;
+    v ^= v >> 17;
+    v ^= v << 5;
+    return v * 2654435761u;
+  }
+  void PaintMotion(HDC dc) {
+    EnsureSurface(dc);
+    if (!pixels_) return;
+    int sx = 0, sy = 0;
+    if (gPattern == Pattern::Pan) {
+      sx = static_cast<int>((frame_ * 7) % kPanMargin);
+      sy = static_cast<int>((frame_ * 3) % kPanMargin);
+    } else {
+      uint32_t state = static_cast<uint32_t>(frame_ * 2654435761u + 1u);
+      const size_t n = static_cast<size_t>(surfW_) * surfH_;
+      for (size_t i = 0; i < n; ++i) {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        pixels_[i] = state & 0x00FFFFFFu;
+      }
+    }
+    BitBlt(dc, 0, 0, gWinW, gWinH, memDc_, sx, sy, SRCCOPY);
+  }
+  std::thread thread_;
+  std::atomic<bool> ready_{false};
+  uint64_t frame_ = 0;
+  uint64_t startTick_ = 0;
+  HWND hwnd_ = nullptr;
+  HDC memDc_ = nullptr;
+  HBITMAP bitmap_ = nullptr;
+  uint32_t* pixels_ = nullptr;
+  int surfW_ = 0;
+  int surfH_ = 0;
+};
+
+// r5: "HH:MM:SS.mmm" at the start of a host log line, in seconds since midnight; -1 if absent.
+double log_time_sec(const std::string& line) {
+  if (line.size() < 18 || line[8] != ':' || line[11] != ':' || line[14] != '.') return -1.0;
+  return std::stoi(line.substr(6, 2)) * 3600.0 + std::stoi(line.substr(9, 2)) * 60.0 +
+         std::stoi(line.substr(12, 2)) + std::stoi(line.substr(15, 3)) / 1000.0;
+}
+
+std::string value_of(const std::string& line, const std::string& key) {
+  const std::string needle = " " + key + "=";
+  const size_t at = line.find(needle);
+  if (at == std::string::npos) return {};
+  const size_t start = at + needle.size();
+  const size_t end = line.find(' ', start);
+  return line.substr(start, end == std::string::npos ? std::string::npos : end - start);
+}
+
+}  // namespace
+
+int wmain(int argc, wchar_t** argv) {
+  std::setvbuf(stdout, nullptr, _IONBF, 0);
+  std::cout.setf(std::ios::unitbuf);
+  if (!host_e2e_allowed()) {
+    std::printf("SKIP  abr_client_evidence_e2e_test (starts a listening host)\n");
+    std::printf("      Set REMOTE60_ALLOW_HOST_E2E=1 to run it.\n\nRESULT: SKIPPED\n");
+    return kE2eSkippedExit;
+  }
+  std::string mode;
+  remote60::native_poc::e2e::StationLock stationLock;  // TEST ONLY: queue behind any other clipboard e2e (e2e_station_lock.hpp)
+  if (!stationLock.Acquire("abr_client_evidence_e2e_test")) return remote60::native_poc::e2e::StationLock::Busy("abr_client_evidence_e2e_test");
+  std::wstring hostExe;
+  bool desktop = false;
+  bool textOff = false;
+  uint32_t bitrate = kDefaultBitrate;
+  std::string expectSize;
+  int monitor = -1;
+  std::wstring keepLog;
+  bool cadenceWindow = false;
+  std::map<int, std::string> selectAt;  // second -> "window" | "desktop"
+  std::string expectFinal;
+  std::map<int, uint32_t> tuneAt;  // second -> bitrate
+  std::set<int> requestKeyAt;
+  int runSec = 0;
+  uint32_t keyint = 0;     // r5: 0 = the host's default
+  std::wstring maxQpArg;   // r5: empty = the host's default
+  std::string patternName = "default";
+  bool clipBench = false;  // clip-image r2 perf: the ClipSink host build + the bulk channel
+  bool fileBench = false;  // file copy R->P gate: the ClipSink host build's folder source + the bulk channel
+  uint32_t fileMib = 0;
+  int fileAtSec = 10;
+  bool clipPng = false;    // offer a PNG encoded before the run (no viewer-side encode in the span)
+  uint32_t clipMib = 0;
+  int clipAtSec = 10;
+  std::wstring proxySpec;
+  std::wstring runDir;
+  bool gdi = false;  // r3: force the GDI desktop backend, staging the real GNLinkCapture.exe worker  // with --desktop: keep the invisible animated window up anyway
+  for (int i = 1; i < argc; ++i) {
+    const std::wstring a = argv[i];
+    if (a == L"--thumbnail") {  // staged as GNLinkCapture.exe
+      Sleep(300000);
+      return 0;
+    }
+    if (a == L"--mode" && i + 1 < argc) {
+      const std::wstring m = argv[++i];
+      mode.assign(m.begin(), m.end());
+    } else if (a == L"--host" && i + 1 < argc) {
+      hostExe = argv[++i];
+    } else if (a == L"--desktop") {
+      desktop = true;
+    } else if (a == L"--text-off") {
+      textOff = true;
+    } else if (a == L"--bitrate" && i + 1 < argc) {
+      bitrate = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
+    } else if (a == L"--select-at" && i + 1 < argc) {
+      const std::wstring v = argv[++i];
+      const size_t colon = v.find(L':');
+      if (colon != std::wstring::npos) {
+        const std::wstring what = v.substr(colon + 1);
+        selectAt[static_cast<int>(std::wcstol(v.substr(0, colon).c_str(), nullptr, 10))] =
+            std::string(what.begin(), what.end());
+      }
+    } else if (a == L"--request-key-at" && i + 1 < argc) {
+      requestKeyAt.insert(static_cast<int>(std::wcstol(argv[++i], nullptr, 10)));
+    } else if (a == L"--run-sec" && i + 1 < argc) {
+      runSec = static_cast<int>(std::wcstol(argv[++i], nullptr, 10));
+    } else if (a == L"--fps" && i + 1 < argc) {
+      kFps = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
+    } else if (a == L"--keyint" && i + 1 < argc) {
+      keyint = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
+    } else if (a == L"--max-qp" && i + 1 < argc) {
+      maxQpArg = argv[++i];
+    } else if (a == L"--pattern" && i + 1 < argc) {
+      const std::wstring v = argv[++i];
+      patternName.assign(v.begin(), v.end());
+      gPattern = v == L"pan" ? Pattern::Pan : (v == L"noise" ? Pattern::Noise : Pattern::Default);
+    } else if (a == L"--measure-from" && i + 1 < argc) {
+      gMeasureFromSec = std::wcstod(argv[++i], nullptr);
+    } else if (a == L"--still-after" && i + 1 < argc) {
+      gStillAfterMs = static_cast<int>(std::wcstol(argv[++i], nullptr, 10)) * 1000;
+    } else if (a == L"--block" && i + 1 < argc) {
+      gBlock = std::max(1, static_cast<int>(std::wcstol(argv[++i], nullptr, 10)));
+    } else if (a == L"--window" && i + 1 < argc) {
+      const std::wstring v = argv[++i];
+      const size_t x = v.find(L'x');
+      if (x != std::wstring::npos) {
+        gWinW = static_cast<int>(std::wcstol(v.substr(0, x).c_str(), nullptr, 10));
+        gWinH = static_cast<int>(std::wcstol(v.substr(x + 1).c_str(), nullptr, 10));
+      }
+    } else if (a == L"--gdi") {
+      gdi = true;
+    } else if (a == L"--file-bench") {
+      fileBench = true;
+    } else if (a == L"--file-mib" && i + 1 < argc) {
+      fileMib = static_cast<uint32_t>(_wtoi(argv[++i]));
+    } else if (a == L"--file-at" && i + 1 < argc) {
+      fileAtSec = _wtoi(argv[++i]);
+    } else if (a == L"--clip-bench") {
+      clipBench = true;
+    } else if (a == L"--clip-png") {
+      clipPng = true;
+    } else if (a == L"--clip-mib" && i + 1 < argc) {
+      clipMib = static_cast<uint32_t>(std::wcstoul(argv[++i], nullptr, 10));
+    } else if (a == L"--clip-at" && i + 1 < argc) {
+      clipAtSec = static_cast<int>(std::wcstol(argv[++i], nullptr, 10));
+    } else if (a == L"--proxy" && i + 1 < argc) {
+      proxySpec = argv[++i];
+    } else if (a == L"--run-dir" && i + 1 < argc) {
+      runDir = argv[++i];
+    } else if (a == L"--tune-at" && i + 1 < argc) {
+      const std::wstring v = argv[++i];
+      const size_t colon = v.find(L':');
+      if (colon != std::wstring::npos) {
+        tuneAt[static_cast<int>(std::wcstol(v.substr(0, colon).c_str(), nullptr, 10))] =
+            static_cast<uint32_t>(std::wcstoul(v.substr(colon + 1).c_str(), nullptr, 10));
+      }
+    } else if (a == L"--expect-final" && i + 1 < argc) {
+      const std::wstring e = argv[++i];
+      expectFinal.assign(e.begin(), e.end());
+    } else if (a == L"--cadence-window") {
+      cadenceWindow = true;
+    } else if (a == L"--keep-log" && i + 1 < argc) {
+      keepLog = argv[++i];
+    } else if (a == L"--monitor" && i + 1 < argc) {
+      monitor = static_cast<int>(std::wcstol(argv[++i], nullptr, 10));
+    } else if (a == L"--expect-size" && i + 1 < argc) {
+      const std::wstring e = argv[++i];
+      expectSize.assign(e.begin(), e.end());
+    }
+  }
+  if (mode != "none" && mode != "present" && mode != "stop" && mode != "recover" && mode != "measured") {
+    std::printf("usage: --mode none|present|stop|recover|measured [--host <GNLinkStream.exe>]\n");
+    return 2;
+  }
+  std::cout << "mode: " << mode << " capture=" << (desktop ? "desktop" : "test-window")
+            << " bitrate=" << bitrate << " textPriority=" << (textOff ? "off" : "on") << "\n";
+
+  WSADATA wsa{};
+  if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return 1;
+  kHostPort = remote60::native_poc::e2e::e2e_pick_free_udp_port();
+  if (kHostPort == 0) {
+    std::printf("FAIL  no free UDP port for the host\n");
+    return 1;
+  }
+  std::printf("host port %u (picked at run time)\n", kHostPort);
+  kTargetTitle = remote60::native_poc::e2e::e2e_unique_window_title(L"remote60 abr evidence target");
+  // Staged inside the repository's test scratch root, never %TEMP%; removed when main returns,
+  // whichever way it returns (RV-20 r2). Only the directory this process created is ever removed.
+  // --run-dir names the CALLER's directory instead (the A/B scripts keep each run's evidence there,
+  // inside the repository): it is used as given and left for the caller.
+  remote60::native_poc::e2e::StagingDir staging;
+  std::wstring dir;
+  if (!runDir.empty()) {
+    // Absolute: the host runs in this directory, so a relative name handed to it (the file bench's
+    // source folder) would point somewhere else.
+    wchar_t full[MAX_PATH] = L"";
+    const DWORD fl = GetFullPathNameW(runDir.c_str(), MAX_PATH, full, nullptr);
+    if (fl > 0 && fl < MAX_PATH) runDir = full;
+    CreateDirectoryW(runDir.c_str(), nullptr);
+    dir = runDir + L"\\";
+  } else {
+    if (!staging.Create(L"abr_ev")) {
+      std::printf("FAIL  %s\n", staging.why().c_str());
+      return 1;
+    }
+    dir = staging.path();
+  }
+  const std::wstring me = self_path();
+  if (hostExe.empty()) hostExe = directory_of(me) + L"GNLinkStream.exe";
+  const bool staged = CopyFileW(hostExe.c_str(), (dir + L"GNLinkStream.exe").c_str(), FALSE) &&
+                      CopyFileW(gdi ? (directory_of(me) + L"GNLinkCapture.exe").c_str() : me.c_str(),
+                                (dir + L"GNLinkCapture.exe").c_str(), FALSE);
+  check("a host and a never-answering helper could be staged", staged,
+        std::string(hostExe.begin(), hostExe.end()));
+  // file bench: the clipboard helper beside the staged host (the test build's source starts it there),
+  // and the "copied" file in the source folder.
+  const std::wstring fileSrc = dir + L"fsrc";
+  const std::wstring fileDest = dir + L"fdest";
+  std::vector<uint8_t> fileContent;
+  if (fileBench) {
+    const bool helperStaged =
+        CopyFileW((directory_of(me) + L"GNLinkClipHelper.exe").c_str(), (dir + L"GNLinkClipHelper.exe").c_str(), FALSE);
+    CreateDirectoryW(fileSrc.c_str(), nullptr);
+    CreateDirectoryW((fileSrc + L"\\files").c_str(), nullptr);
+    CreateDirectoryW(fileDest.c_str(), nullptr);
+    DeleteFileW((fileSrc + L"\\go").c_str());
+    bool written = true;
+    if (fileMib > 0) {
+      fileContent.resize(static_cast<size_t>(fileMib) << 20);
+      uint32_t x = 0x9E3779B9u;
+      for (auto& b : fileContent) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        b = static_cast<uint8_t>(x);
+      }
+      std::ofstream o(fileSrc + L"\\files\\bench.bin", std::ios::binary);
+      o.write(reinterpret_cast<const char*>(fileContent.data()), static_cast<std::streamsize>(fileContent.size()));
+      written = o.good();
+    }
+    check("file bench: the helper and the source file are staged", helperStaged && written);
+  }
+
+  CadenceTarget target;
+  target.selectable = !selectAt.empty();
+  if (!desktop || cadenceWindow) {
+    check("an on-screen, invisible, click-through window is up for the host to capture", target.Start());
+  }
+  const HWND targetHwnd = target.hwnd();
+
+  HANDLE job = CreateJobObjectW(nullptr, nullptr);
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits{};
+  limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits));
+
+  const std::wstring hostLogPath = dir + L"host.log";
+  HANDLE hostLog = INVALID_HANDLE_VALUE;
+  PROCESS_INFORMATION hostPi{};
+  bool launched = false;
+  if (staged) {
+    SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
+    if (textOff) SetEnvironmentVariableW(L"REMOTE60_NATIVE_TEXT_PRIORITY_DISABLE", L"1");
+    if (gdi) SetEnvironmentVariableW(L"REMOTE60_DESKTOP_CAPTURE_BACKEND", L"gdi");
+    if (!maxQpArg.empty()) SetEnvironmentVariableW(L"REMOTE60_NATIVE_MAX_QP", maxQpArg.c_str());
+    // r5: a stats line every second, so the measured span has one reading per second.
+    if (gPattern != Pattern::Default) SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", L"1");
+    if (fileBench) {
+      // The same test build; its folder source stands in for the user's clipboard (which stays
+      // untouched: clipboard sync off). The file sender's rate evaluations go to the host log.
+      SetEnvironmentVariableW(L"REMOTE60_CLIPBOARD_SYNC", L"0");
+      SetEnvironmentVariableW(L"REMOTE60_FILE_COPY_TEST_SOURCE_DIR", fileSrc.c_str());
+      SetEnvironmentVariableW(L"REMOTE60_CLIP_BULK_TRACE", L"1");
+      // One stats line a second: the host log's clock for "when" (ABR steps, the send's end).
+      SetEnvironmentVariableW(L"REMOTE60_NATIVE_STATS_PRINT_EVERY_SEC", L"1");
+    }
+    if (clipBench) {
+      // The host under test sits next to the user's session: its clipboard monitor stays off, and
+      // received images land in a folder (the ClipSink test build), never on a clipboard.
+      SetEnvironmentVariableW(L"REMOTE60_CLIPBOARD_SYNC", L"0");
+      CreateDirectoryW((dir + L"sink").c_str(), nullptr);
+      SetEnvironmentVariableW(L"REMOTE60_CLIP_IMAGE_TEST_SINK_DIR", (dir + L"sink").c_str());
+    }
+    std::wstring cmd = L"\"" + dir + L"GNLinkStream.exe\" --transport udp --codec h264" +
+                       L" --bind-address 127.0.0.1 --bind-port " + std::to_wstring(kHostPort) +
+                       L" --fps " + std::to_wstring(kFps) + L" --bitrate " + std::to_wstring(bitrate) +
+                       (keyint > 0 ? L" --keyint " + std::to_wstring(keyint) : std::wstring()) +
+                       L" --seconds " + std::to_wstring(std::max(120, runSec + 30)) +
+                       L" --input-injection-mode none" +
+                       (desktop ? std::wstring() : remote60::native_poc::e2e::e2e_capture_window_args(kTargetTitle));
+    const bool noInjection = cmd.find(L"--input-injection-mode none") != std::wstring::npos;
+    check("the host is started with input injection off", noInjection);
+    std::vector<wchar_t> mutableCmd(cmd.begin(), cmd.end());
+    mutableCmd.push_back(L'\0');
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.bInheritHandle = TRUE;
+    hostLog = CreateFileW(hostLogPath.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                          &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    if (hostLog != INVALID_HANDLE_VALUE) {
+      si.dwFlags = STARTF_USESTDHANDLES;
+      si.hStdOutput = hostLog;
+      si.hStdError = hostLog;
+    }
+    const std::wstring isoAppData = dir + L"localappdata";
+    CreateDirectoryW(isoAppData.c_str(), nullptr);
+    std::vector<wchar_t> isoEnv = e2e_isolated_environment(isoAppData);
+    std::string isoWhy;
+    const bool isoOk = e2e_command_is_isolated(cmd, dir, &isoWhy) &&
+                       e2e_path_is_under(e2e_block_localappdata(isoEnv), dir);
+    check("the launched process is isolated from the user's files", isoOk, isoWhy);
+    launched = noInjection && isoOk &&
+               CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr,
+                              hostLog != INVALID_HANDLE_VALUE,
+                              CREATE_NO_WINDOW | CREATE_SUSPENDED | CREATE_UNICODE_ENVIRONMENT,
+                              isoEnv.data(), dir.c_str(), &si, &hostPi) != 0;
+    if (launched) {
+      AssignProcessToJobObject(job, hostPi.hProcess);
+      ResumeThread(hostPi.hThread);
+    }
+  }
+  check("the host started", launched);
+
+  // Per second of the run: real (non-synthetic) frames completed at this end.
+  std::vector<uint32_t> realFramesPerSec;
+  std::vector<std::string> selectionLog;
+  uint64_t metricsStoppedAtSec = 0;
+  if (launched) {
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in hostAddr{};
+    hostAddr.sin_family = AF_INET;
+    hostAddr.sin_port = htons(kHostPort);
+    InetPtonW(AF_INET, L"127.0.0.1", &hostAddr.sin_addr);
+    remote60::native_poc::test::Proxy proxy;
+    bool proxyOn = false;
+    if (!proxySpec.empty()) {
+      remote60::native_poc::test::Impair im;
+      unsigned d = 0, l = 0, r = 0;
+      std::swscanf(proxySpec.c_str(), L"%u:%u:%u", &d, &l, &r);
+      im.oneWayDelayUs = static_cast<uint64_t>(d) * 1000 / 2;
+      im.lossPerMille = l;
+      im.rateBps = static_cast<uint64_t>(r) * 1000;
+      proxyOn = proxy.Start(hostAddr, im);
+      check("the impairment proxy is up (RTT " + std::to_string(d) + " ms, loss " + std::to_string(l) +
+                "/1000, " + std::to_string(r) + " kbps)",
+            proxyOn);
+    }
+    if (proxyOn) {
+      connect(sock, reinterpret_cast<const sockaddr*>(&proxy.frontAddr), sizeof(proxy.frontAddr));
+    } else {
+      connect(sock, reinterpret_cast<const sockaddr*>(&hostAddr), sizeof(hostAddr));
+    }
+    DWORD rcvTimeout = 20;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&rcvTimeout), sizeof(rcvTimeout));
+    int rcvBuf = 4 << 20;
+    setsockopt(sock, SOL_SOCKET, SO_RCVBUF, reinterpret_cast<const char*>(&rcvBuf), sizeof(rcvBuf));
+
+    UdpHelloOptions hello;
+    hello.budgetMs = 20000;
+    hello.sliceMaxMs = 250;
+    hello.retrySleepMs = 50;
+    hello.requestBulkChannel = clipBench || fileBench;
+    std::string helloError;
+    uint32_t ackFeatures = 0;
+    const bool handshake = udp_hello_handshake(sock, hello, nullptr, &helloError, &ackFeatures, nullptr);
+    check("the viewer's Hello is answered", handshake, helloError);
+
+    UdpControlChannel control;
+    control.Configure(
+        [&sock](const void* data, size_t len) {
+          return send(sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
+        },
+        kUdpControlStreamClientToHost, kUdpControlStreamHostToClient, 1200);
+    UdpControlLink link(&control, 12000);
+
+    // clip-image r2: the product client, on this socket, as the viewer runs it.
+    ClipImageClient clip;
+    std::atomic<uint64_t> lastPingRttUs{0};
+    std::mutex pingMu;
+    std::vector<uint64_t> pingRttUs;  // measured span only
+    std::vector<uint64_t> frameArrivalUs;  // measured span only: last chunk of each real frame
+    const bool bulkAcked = (ackFeatures & kUdpFeatureBulkChannel) != 0;
+    // file bench: the product client, on this socket, with its helper on a private window station.
+    FileCopyClient files;
+    BulkArbiter viewArbiter;
+    std::wstring fileDesktop;
+    if (fileBench) {
+      check("the host acknowledged the bulk channel (kUdpFeatureBulkChannel)", bulkAcked);
+      HWINSTA ws = CreateWindowStationW(nullptr, 0, WINSTA_ALL_ACCESS, nullptr);
+      if (ws) {
+        wchar_t name[256] = L"";
+        DWORD len = 0;
+        GetUserObjectInformationW(ws, UOI_NAME, name, sizeof(name), &len);
+        HWINSTA orig = GetProcessWindowStation();
+        SetProcessWindowStation(ws);
+        if (CreateDesktopW(L"Default", nullptr, nullptr, 0, GENERIC_ALL, nullptr)) fileDesktop = std::wstring(name) + L"\\Default";
+        SetProcessWindowStation(orig);
+      }
+      check("file bench: a private window station for this side's helper and consumer", !fileDesktop.empty());
+      const std::wstring helperExe = directory_of(me) + L"GNLinkClipHelper.exe";
+      const std::wstring viewerHelperLog = dir + L"viewer_helper.log";
+      files.SetHelperLauncher([helperExe, fileDesktop, viewerHelperLog](file_copy::HelperLink* hl, std::string* why) {
+        return file_copy::launch_file_copy_helper_as_self(helperExe, fileDesktop.c_str(),
+                                                          L"--log \"" + viewerHelperLog + L"\"", hl, why);
+      });
+      files.Start([&sock](const void* data, size_t len) {
+                    return send(sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
+                  },
+                  [&] { return lastPingRttUs.load(); }, [&] { return control.TxPending(); }, 1200,
+                  clip_bulk_rate_config_from_env(), &viewArbiter);
+      files.SetBulkNegotiated(bulkAcked);
+    }
+    if (clipBench) {
+      check("the host acknowledged the bulk channel (kUdpFeatureBulkChannel)", bulkAcked);
+      clip.Start([&sock](const void* data, size_t len) {
+                   return send(sock, static_cast<const char*>(data), static_cast<int>(len), 0) > 0;
+                 },
+                 [&] { return lastPingRttUs.load(); }, [&] { return control.TxPending(); }, 1200,
+                 clip_bulk_rate_config_from_env());
+      clip.SetBulkNegotiated(bulkAcked);
+    }
+
+    std::atomic<bool> stop{false};
+    std::mutex fmu;
+    std::set<uint32_t> realSeqThisSec;
+    uint64_t secLatSumUs = 0, secLatMaxUs = 0;  // --mode measured: this second's capture -> receive
+    uint32_t secLatN = 0;
+    ClientControlMetricsSnapshot measuredLastSec{};
+    // r6: frame age per real frame (same machine, same QPC clock): capture -> encode done, and
+    // capture -> received here, for the frames of the measured span.
+    std::atomic<bool> latencyOn{false};
+    std::vector<uint64_t> capToEncUs, capToRecvUs;
+    // clip-image A/B: every real frame of the measured span with its own times, so the span can be cut
+    // into "during / just after the transfer" and "the rest" afterwards.
+    struct FrameRec {
+      uint64_t arrUs;
+      uint64_t encUs;   // capture -> encode done (host-internal)
+      uint64_t recvUs;  // capture -> received here
+    };
+    std::vector<FrameRec> frameRecs;
+    uint64_t clipWinStartUs = 0;
+    std::thread ingress([&] {
+      std::vector<uint8_t> buf(2048);
+      while (!stop.load()) {
+        control.Tick();
+        const int n = recv(sock, reinterpret_cast<char*>(buf.data()), static_cast<int>(buf.size()), 0);
+        if (n > 0 && clipBench && clip.OnDatagram(buf.data(), static_cast<size_t>(n))) continue;
+        if (n > 0 && fileBench && files.OnDatagram(buf.data(), static_cast<size_t>(n))) continue;
+        if (n > 0 && !control.OnPacket(buf.data(), static_cast<size_t>(n)) &&
+            n >= static_cast<int>(sizeof(UdpVideoChunkHeader))) {
+          UdpVideoChunkHeader h{};
+          std::memcpy(&h, buf.data(), sizeof(h));
+          if (h.magic == kMagic && h.kind == static_cast<uint16_t>(UdpPacketKind::VideoChunk) &&
+              h.size == sizeof(UdpVideoChunkHeader) && (h.flags & 0x10u) == 0 &&
+              (h.flags & 0x40u) == 0 && (h.flags & 0x4u) != 0) {  // last chunk of a real frame
+            std::lock_guard<std::mutex> lk(fmu);
+            realSeqThisSec.insert(h.seq);
+            if (h.captureQpcUs > 0) {
+              const uint64_t nowUs = qpc_now_us();
+              if (nowUs >= h.captureQpcUs) {
+                secLatSumUs += nowUs - h.captureQpcUs;
+                secLatMaxUs = std::max<uint64_t>(secLatMaxUs, nowUs - h.captureQpcUs);
+                ++secLatN;
+              }
+            }
+            if (latencyOn.load()) frameArrivalUs.push_back(qpc_now_us());
+            if (latencyOn.load() && h.captureQpcUs > 0) {
+              const uint64_t now = qpc_now_us();
+              if (h.encodeEndQpcUs >= h.captureQpcUs) capToEncUs.push_back(h.encodeEndQpcUs - h.captureQpcUs);
+              if (now >= h.captureQpcUs) capToRecvUs.push_back(now - h.captureQpcUs);
+              if (h.encodeEndQpcUs >= h.captureQpcUs && now >= h.encodeEndQpcUs) {
+                frameRecs.push_back({now, h.encodeEndQpcUs - h.captureQpcUs, now - h.captureQpcUs});
+              }
+            }
+          }
+        }
+      }
+    });
+
+    if (desktop && monitor >= 0) {
+      // The product message, sent once before the control thread starts, answered with the list.
+      ControlOutboundAction select{};
+      select.kind = ControlOutboundActionKind::MonitorSelect;
+      select.expectedResponseType = MessageType::ControlMonitorList;
+      select.expectedResponseSize = static_cast<uint16_t>(sizeof(ControlMonitorListMessage));
+      select.monitorSelect.header.magic = kMagic;
+      select.monitorSelect.header.type = static_cast<uint16_t>(MessageType::ControlMonitorSelect);
+      select.monitorSelect.header.size = static_cast<uint16_t>(sizeof(select.monitorSelect));
+      select.monitorSelect.seq = 1;
+      select.monitorSelect.monitorId = static_cast<uint32_t>(monitor);
+      select.monitorSelect.clientSendQpcUs = qpc_now_us();
+      TcpControlResponse response;
+      const bool selected = execute_control_action(link, select, &response);
+      check("monitor " + std::to_string(monitor) + " was selected", selected);
+      std::this_thread::sleep_for(std::chrono::seconds(2));  // the reattach and its keyframe
+    }
+
+    // What this viewer reports, per mode, set once a second by the loop below.
+    std::mutex mmu;
+    ClientControlMetricsSnapshot pendingMetrics{};
+    bool pendingSelectSet = false;
+    uint32_t pendingTune = 0;
+    bool pendingKeyRequest = false;
+    uint64_t pendingSelect = 0;
+    std::string pendingSelectKind;  // what the run asked for, not what the id happens to mean
+    std::mutex selMu;
+    std::vector<std::string> selections;  // what the host answered, in order
+    std::atomic<bool> controlStop{false};
+    std::thread controlThread([&] {
+      ClientControlScheduler scheduler;
+      WindowPanelStateModel windowPanel;
+      StreamStateControl streamState;
+      CaptureModeRequestState captureMode;
+      KeyframeRequestState keyframe(120000, 300000, 3);
+      RuntimeTuneState runtimeTune(300000, 30000000, 250000, 1, 240);
+      ClientInputQueue inputQueue;
+      scheduler.Reset(kClientControlIntervalMsDefault, qpc_now_us());
+      while (!controlStop.load()) {
+        if (clipBench) (void)clip.Pump(link);
+        if (fileBench) (void)files.Pump(link);
+        ClientControlMetricsSnapshot metrics;
+        bool selectNow = false;
+        uint64_t selectId = 0;
+        std::string selectKind;
+        uint32_t tuneNow = 0;
+        bool keyNow = false;
+        {
+          std::lock_guard<std::mutex> lk(mmu);
+          metrics = pendingMetrics;
+          tuneNow = pendingTune;
+          pendingTune = 0;
+          keyNow = pendingKeyRequest;
+          pendingKeyRequest = false;
+          selectNow = pendingSelectSet;
+          selectId = pendingSelect;
+          selectKind = pendingSelectKind;
+          pendingSelectSet = false;
+        }
+        if (keyNow) (void)keyframe.Request(2, qpc_now_us());
+        if (tuneNow != 0) {
+          runtimeTune.SetEnabled(true);
+          runtimeTune.SetTargets(tuneNow, 0, kFps);
+        }
+        if (selectNow) {
+          // The product message a viewer sends when the user picks a window (its id) or the
+          // desktop (windowId 0).
+          ControlOutboundAction select{};
+          select.kind = ControlOutboundActionKind::WindowSelect;
+          select.expectedResponseType = MessageType::ControlWindowSelected;
+          select.expectedResponseSize = static_cast<uint16_t>(sizeof(ControlWindowSelectedMessage));
+          select.windowSelect.header.magic = kMagic;
+          select.windowSelect.header.type = static_cast<uint16_t>(MessageType::ControlWindowSelect);
+          select.windowSelect.header.size = static_cast<uint16_t>(sizeof(select.windowSelect));
+          select.windowSelect.seq = 9001;
+          select.windowSelect.windowId = selectId;
+          select.windowSelect.clientSendQpcUs = qpc_now_us();
+          TcpControlResponse response;
+          const bool ok = execute_control_action(link, select, &response);
+          const auto& w = response.windowSelected;
+          std::lock_guard<std::mutex> lk(selMu);
+          selections.push_back(selectKind + " sent=" +
+                               (ok ? "1" : "0") + " flags=" + std::to_string(w.flags) +
+                               " asked=" + std::to_string(selectId) + " answered=" +
+                               std::to_string(w.windowId) + " reason=" +
+                               std::string(w.reason, strnlen(w.reason, sizeof(w.reason))));
+        }
+        ControlOutboundAction action{};
+        const uint64_t now = qpc_now_us();
+        if (scheduler.NextAction(now, metrics, &windowPanel, &streamState, &captureMode, &keyframe,
+                                 &runtimeTune, &inputQueue, &action, nullptr, nullptr)) {
+          TcpControlResponse response;
+          if (execute_control_action(link, action, &response) &&
+              action.kind == ControlOutboundActionKind::Ping) {
+            const uint64_t done = qpc_now_us();
+            scheduler.OnPingCompleted(done);
+            const uint64_t rtt = done >= action.ping.clientSendQpcUs ? done - action.ping.clientSendQpcUs : 0;
+            lastPingRttUs.store(rtt);
+            if (latencyOn.load()) {
+              std::lock_guard<std::mutex> lk(pingMu);
+              pingRttUs.push_back(rtt);
+            }
+            if (clipBench) {
+              clip.SetHostSupports(bulkAcked &&
+                                   (response.pong.captureTargetFlags & kCaptureFlagClipboardImageV1) != 0);
+            }
+            if (fileBench) {
+              files.SetHostSupports(bulkAcked && (response.pong.captureTargetFlags & kCaptureFlagFileCopyV1) != 0);
+            }
+          }
+        } else {
+          std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+      }
+    });
+
+    // The image to offer, built before the measured run. --clip-png encodes it to PNG here too, so the
+    // viewer-side WIC encode (CPU on this same PC) is out of the measured span: the A/B that tells
+    // the transfer's own effect on frame age from this machine's CPU contention.
+    ClipSnapshot clipSnapshot;
+    if (clipBench && clipMib > 0) {
+      const uint32_t w = 512, h = 512 * clipMib;
+      clipSnapshot.kind = ClipSnapshotKind::Dib;
+      clipSnapshot.sequence = 1000 + static_cast<uint64_t>(clipAtSec);
+      clipSnapshot.bytes.resize(sizeof(BITMAPV5HEADER) + static_cast<size_t>(w) * h * 4);
+      BITMAPV5HEADER bh{};
+      bh.bV5Size = sizeof(bh);
+      bh.bV5Width = static_cast<LONG>(w);
+      bh.bV5Height = static_cast<LONG>(h);
+      bh.bV5Planes = 1;
+      bh.bV5BitCount = 32;
+      bh.bV5Compression = BI_BITFIELDS;
+      bh.bV5RedMask = 0x00FF0000;
+      bh.bV5GreenMask = 0x0000FF00;
+      bh.bV5BlueMask = 0x000000FF;
+      bh.bV5AlphaMask = 0xFF000000;
+      bh.bV5CSType = LCS_sRGB;
+      std::memcpy(clipSnapshot.bytes.data(), &bh, sizeof(bh));
+      uint32_t x = 0x12345678u;
+      for (size_t o = sizeof(bh); o + 4 <= clipSnapshot.bytes.size(); o += 4) {
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        std::memcpy(clipSnapshot.bytes.data() + o, &x, 4);
+      }
+      if (clipPng) {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        std::vector<uint8_t> png;
+        uint32_t pw = 0, ph = 0;
+        const bool enc = clip_dib_to_png(clipSnapshot.bytes.data(), clipSnapshot.bytes.size(), &png, &pw, &ph) ==
+                         ClipWicResult::Ok;
+        check("--clip-png: the image was encoded to PNG before the run", enc);
+        clipSnapshot.kind = ClipSnapshotKind::Png;
+        clipSnapshot.bytes = std::move(png);
+      }
+    }
+    struct MemSample {
+      int sec;
+      SIZE_T viewerPrivate;
+      SIZE_T hostPrivate;
+    };
+    std::vector<MemSample> memSamples;
+    uint64_t clipOfferUs = 0, clipDoneUs = 0;
+    uint64_t fileWinStartUs = 0, filePublishedUs = 0, fileDoneUs = 0;
+    bool fileConsumerStarted = false;
+    PROCESS_INFORMATION fileConsumerPi{};
+    int clipDoneSec = -1;
+    // The run: 36 seconds. 'stop' reports fully for the first 14 and is silent after.
+    const int kRunSec = runSec > 0 ? runSec : (mode == "recover" ? 72 : 36);
+    constexpr int kStopAfterSec = 14;
+    constexpr int kResumeAtSec = 26;  // recover: silent from 14 to 26
+    for (int s = 0; s < kRunSec; ++s) {
+      const uint64_t now = qpc_now_us();
+      ClientControlMetricsSnapshot m{};
+      if (mode == "measured") {
+        // What this side measured over the last second (the ingress thread): real frames and
+        // capture -> receive latency. Decode tail: nothing decodes here, so a fixed, healthy value.
+        std::lock_guard<std::mutex> lk(fmu);
+        m = measuredLastSec;
+        m.updatedQpcUs = now;
+      } else if (mode == "present") {
+        // Exactly what the APK's session fills: the present* block and nothing else.
+        m.message.presentTargetIntervalUs = 1000000 / kFps;
+        m.message.presentFpsX100 = kFps * 100;
+        m.message.presentGapP50Us = 1000000 / kFps;
+        m.message.presentGapP95Us = 1000000 / kFps + 4000;
+        m.message.presentGapMaxUs = 1000000 / kFps + 9000;
+        m.message.presentSampleCount = kFps;
+        m.message.presentDisplayedCount = kFps;
+        m.updatedQpcUs = now;
+      } else if ((mode == "stop" && s < kStopAfterSec) ||
+                 (mode == "recover" && (s < kStopAfterSec || s >= kResumeAtSec))) {
+        // A healthy Windows-style report: decode fields present and fine.
+        m.message.width = 480;
+        m.message.height = 270;
+        m.message.recvFpsX100 = kFps * 100;
+        m.message.decodedFpsX100 = kFps * 100;
+        m.message.recvMbpsX1000 = 3000;
+        m.message.avgLatencyUs = 30000;
+        m.message.maxLatencyUs = 45000;
+        m.message.avgDecodeTailUs = 8000;
+        m.message.maxDecodeTailUs = 15000;
+        m.updatedQpcUs = now;
+      }
+      if (mode == "stop" && s == kStopAfterSec) metricsStoppedAtSec = static_cast<uint64_t>(s);
+      if (requestKeyAt.count(s) != 0) {
+        std::lock_guard<std::mutex> lk(mmu);
+        pendingKeyRequest = true;
+      }
+      if (tuneAt.count(s) != 0) {
+        std::lock_guard<std::mutex> lk(mmu);
+        pendingTune = tuneAt[s];
+      }
+      if (selectAt.count(s) != 0) {
+        std::lock_guard<std::mutex> lk(mmu);
+        pendingSelect = selectAt[s] == "window" ? static_cast<uint64_t>(reinterpret_cast<uintptr_t>(target.hwnd()))
+                                                : 0ull;
+        pendingSelectKind = selectAt[s];
+        pendingSelectSet = true;
+      }
+      {
+        std::lock_guard<std::mutex> lk(mmu);
+        pendingMetrics = m;
+      }
+      if (s + 1 >= static_cast<int>(gMeasureFromSec)) latencyOn.store(true);
+      if (clipBench && s == clipAtSec) clipWinStartUs = qpc_now_us();  // same instant with or without a transfer
+      if (clipBench && clipMib > 0 && s == clipAtSec) {
+        // Prepared before the run (below), so nothing but the transfer happens at this second.
+        clipOfferUs = qpc_now_us();
+        clip.SubmitSnapshot(std::move(clipSnapshot));
+        std::cout << "clip: offered " << clipMib << " MiB (" << (clipPng ? "pre-encoded PNG" : "DIB, encoded now")
+                  << ") at second " << s << "\n";
+      }
+      if (clipBench) {
+        PROCESS_MEMORY_COUNTERS_EX self{}, host{};
+        GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&self), sizeof(self));
+        GetProcessMemoryInfo(hostPi.hProcess, reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&host), sizeof(host));
+        memSamples.push_back({s, self.PrivateUsage, host.PrivateUsage});
+        const auto c = clip.GetCounters();
+        if (clipDoneUs == 0 && c.published + c.failed + c.cancelled + c.superseded > 0) {
+          clipDoneUs = qpc_now_us();
+          clipDoneSec = s;
+        }
+      }
+      if (fileBench && s == fileAtSec) {
+        fileWinStartUs = qpc_now_us();  // same instant with or without a copy
+        if (fileMib > 0) {
+          std::ofstream((fileSrc + L"\\go").c_str()) << "go";
+          std::cout << "file: copy of " << fileMib << " MiB triggered on the host at second " << s << "\n";
+        }
+      }
+      if (fileBench && fileMib > 0 && !fileConsumerStarted && files.GetCounters().remotePublished > 0) {
+        fileConsumerStarted = true;
+        filePublishedUs = qpc_now_us();
+        const std::wstring consumerExe = directory_of(me) + L"remote60_file_copy_helper_e2e_test.exe";
+        const std::wstring cmd = L"\"" + consumerExe + L"\" --consumer --mode drop --dest \"" + fileDest +
+                                 L"\" --result \"" + dir + L"fdest.result.txt\" --expect-bytes " +
+                                 std::to_wstring(fileContent.size()) + L" --wait-sec " + std::to_wstring(kRunSec + 30);
+        std::vector<wchar_t> c(cmd.begin(), cmd.end());
+        c.push_back(0);
+        STARTUPINFOW csi{};
+        csi.cb = sizeof(csi);
+        std::wstring d = fileDesktop;
+        csi.lpDesktop = d.data();
+        const bool started = CreateProcessW(nullptr, c.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr,
+                                            &csi, &fileConsumerPi) != 0;
+        if (started) AssignProcessToJobObject(job, fileConsumerPi.hProcess);
+        std::cout << "file: published here at second " << s << ", paste consumer " << (started ? "started" : "FAILED") << "\n";
+      }
+      if (fileBench && fileDoneUs == 0) {
+        const auto fcnt = files.GetCounters();
+        if (fcnt.recvEnded + fcnt.recvFailed > 0) {
+          fileDoneUs = qpc_now_us();
+          std::cout << "file: paste ended at second " << s << " (ended=" << fcnt.recvEnded << " failed=" << fcnt.recvFailed
+                    << ")\n";
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::seconds(1));
+      std::lock_guard<std::mutex> lk(fmu);
+      realFramesPerSec.push_back(static_cast<uint32_t>(realSeqThisSec.size()));
+      {
+        ClientControlMetricsSnapshot ms{};
+        const uint32_t frames = static_cast<uint32_t>(realSeqThisSec.size());
+        ms.message.width = 480;
+        ms.message.height = 270;
+        ms.message.recvFpsX100 = frames * 100;
+        ms.message.decodedFpsX100 = frames * 100;
+        ms.message.recvMbpsX1000 = 3000;
+        ms.message.avgLatencyUs = secLatN ? static_cast<uint32_t>(secLatSumUs / secLatN) : 0;
+        ms.message.maxLatencyUs = static_cast<uint32_t>(secLatMaxUs);
+        ms.message.avgDecodeTailUs = 8000;
+        ms.message.maxDecodeTailUs = 15000;
+        measuredLastSec = ms;
+        secLatSumUs = secLatMaxUs = 0;
+        secLatN = 0;
+      }
+      realSeqThisSec.clear();
+    }
+
+    controlStop.store(true);
+    if (controlThread.joinable()) controlThread.join();
+    if (fileBench) {
+      // R9FILE: the measured span (from --measure-from) and the file's outcome, for the A/B of
+      // docs/file_copy_r2p_gates.md. The host log (--run-dir) keeps [abr] and RATETRACE in order.
+      if (fileConsumerPi.hProcess) {
+        WaitForSingleObject(fileConsumerPi.hProcess, fileDoneUs ? 15000 : 0);
+        TerminateProcess(fileConsumerPi.hProcess, 125);
+        CloseHandle(fileConsumerPi.hProcess);
+        CloseHandle(fileConsumerPi.hThread);
+      }
+      std::vector<uint8_t> landed;
+      {
+        std::ifstream in(fileDest + L"\\bench.bin", std::ios::binary);
+        if (in) landed.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+      }
+      const bool same = fileMib > 0 && landed == fileContent;
+      const auto fcnt = files.GetCounters();
+      std::vector<uint64_t> pings;
+      {
+        std::lock_guard<std::mutex> lk(pingMu);
+        pings = pingRttUs;
+      }
+      std::sort(pings.begin(), pings.end());
+      auto pct = [](const std::vector<uint64_t>& v, int p) { return v.empty() ? 0.0 : v[v.size() * p / 100] / 1000.0; };
+      std::vector<uint64_t> recv;
+      uint32_t gaps250 = 0, gaps100 = 0;
+      uint64_t maxGap = 0, prev = 0;
+      {
+        std::lock_guard<std::mutex> lk(fmu);
+        for (const auto& r : frameRecs) {
+          recv.push_back(r.recvUs);
+          if (prev) {
+            const uint64_t g = r.arrUs - prev;
+            gaps250 += g > 250000;
+            gaps100 += g > 100000;
+            maxGap = std::max(maxGap, g);
+          }
+          prev = r.arrUs;
+        }
+      }
+      std::sort(recv.begin(), recv.end());
+      const double transferS = (fileWinStartUs && fileDoneUs) ? (fileDoneUs - fileWinStartUs) / 1e6 : 0.0;
+      std::printf("R9FILE mib=%u published=%llu prepared=%llu ended=%llu failed=%llu same=%d transferS=%.1f "
+                  "bytes=%llu rejected=%llu pingN=%zu pingP50Ms=%.1f pingP95Ms=%.1f frames=%zu capToRecvP50Ms=%.1f "
+                  "capToRecvP95Ms=%.1f gaps100=%u gaps250=%u maxGapMs=%.1f queries=%llu seen=%llu helperLaunches=%llu "
+                  "helperFailures=%llu\n",
+                  fileMib, static_cast<unsigned long long>(fcnt.remotePublished),
+                  static_cast<unsigned long long>(fcnt.recvPrepared), static_cast<unsigned long long>(fcnt.recvEnded),
+                  static_cast<unsigned long long>(fcnt.recvFailed), same ? 1 : 0, transferS,
+                  static_cast<unsigned long long>(fcnt.bytesReceived), static_cast<unsigned long long>(fcnt.chunksRejected),
+                  pings.size(), pct(pings, 50), pct(pings, 95), recv.size(), pct(recv, 50), pct(recv, 95), gaps100,
+                  gaps250, maxGap / 1000.0, static_cast<unsigned long long>(fcnt.offerQueries),
+                  static_cast<unsigned long long>(fcnt.remoteOffersSeen), static_cast<unsigned long long>(fcnt.helperLaunches),
+                  static_cast<unsigned long long>(fcnt.helperLaunchFailures));
+      files.Stop();
+    }
+    if (clipBench) {
+      const auto c = clip.GetCounters();
+      std::vector<uint64_t> pings;
+      {
+        std::lock_guard<std::mutex> lk(pingMu);
+        pings = pingRttUs;
+      }
+      std::sort(pings.begin(), pings.end());
+      auto pct = [](const std::vector<uint64_t>& v, int p) { return v.empty() ? 0.0 : v[v.size() * p / 100] / 1000.0; };
+      std::vector<uint64_t> arrivals;
+      {
+        std::lock_guard<std::mutex> lk(fmu);
+        arrivals = frameArrivalUs;
+      }
+      uint32_t gaps100 = 0, gaps250 = 0;
+      uint64_t maxGap = 0;
+      for (size_t i = 1; i < arrivals.size(); ++i) {
+        const uint64_t g = arrivals[i] - arrivals[i - 1];
+        gaps100 += g > 100000;
+        gaps250 += g > 250000;
+        maxGap = std::max(maxGap, g);
+      }
+      SIZE_T vBase = 0, vPeak = 0, vAfter = 0, hBase = 0, hPeak = 0, hAfter = 0;
+      for (const auto& m : memSamples) {
+        if (m.sec == clipAtSec - 1 || (clipMib == 0 && m.sec == clipAtSec)) {
+          vBase = m.viewerPrivate;
+          hBase = m.hostPrivate;
+        }
+        if (m.sec >= clipAtSec) {
+          vPeak = std::max(vPeak, m.viewerPrivate);
+          hPeak = std::max(hPeak, m.hostPrivate);
+        }
+        if (clipDoneSec >= 0 && m.sec == clipDoneSec + 5) {
+          vAfter = m.viewerPrivate;
+          hAfter = m.hostPrivate;
+        }
+      }
+      const double transferS = (clipOfferUs && clipDoneUs) ? (clipDoneUs - clipOfferUs) / 1e6 : 0.0;
+      const auto ps = clip.PacerStats();
+      std::printf("R7CLIP mib=%u published=%llu failed=%llu transferS=%.1f lastRateBps=%u pacerDatagrams=%llu "
+                  "resends=%llu pingN=%zu pingP50Ms=%.1f pingP95Ms=%.1f frames=%zu gaps100=%u gaps250=%u maxGapMs=%.1f "
+                  "viewerPrivMiB base=%.1f peak=%.1f after5s=%.1f hostPrivMiB base=%.1f peak=%.1f after5s=%.1f\n",
+                  clipMib, static_cast<unsigned long long>(c.published), static_cast<unsigned long long>(c.failed),
+                  transferS, c.lastRateBps, static_cast<unsigned long long>(ps.datagramsSent),
+                  static_cast<unsigned long long>(ps.resendsAfterTransmit), pings.size(), pct(pings, 50),
+                  pct(pings, 95), arrivals.size(), gaps100, gaps250, maxGap / 1000.0, vBase / 1048576.0,
+                  vPeak / 1048576.0, vAfter / 1048576.0, hBase / 1048576.0, hPeak / 1048576.0, hAfter / 1048576.0);
+      // R8WIN: the span cut at clip-at + 8 s. W1 = during / just after the transfer (it takes ~6 s here,
+      // then the host verifies and decodes), W2 = the rest. Baseline runs are cut at the same instant.
+      {
+        std::vector<FrameRec> recs;
+        {
+          std::lock_guard<std::mutex> lk(fmu);
+          recs = frameRecs;
+        }
+        auto window = [&](uint64_t from, uint64_t to, const char* name) {
+          std::vector<uint64_t> enc, recv, net;
+          uint32_t g250 = 0, g100 = 0;
+          uint64_t prev = 0;
+          for (const auto& r : recs) {
+            if (r.arrUs < from || r.arrUs >= to) continue;
+            enc.push_back(r.encUs);
+            recv.push_back(r.recvUs);
+            net.push_back(r.recvUs - r.encUs);
+            if (prev) {
+              g250 += r.arrUs - prev > 250000;
+              g100 += r.arrUs - prev > 100000;
+            }
+            prev = r.arrUs;
+          }
+          auto p95 = [](std::vector<uint64_t> v) {
+            if (v.empty()) return 0.0;
+            std::sort(v.begin(), v.end());
+            return v[v.size() * 95 / 100] / 1000.0;
+          };
+          std::printf("R8WIN %s frames=%zu capToEncP95Ms=%.1f capToRecvP95Ms=%.1f netP95Ms=%.1f gaps100=%u gaps250=%u\n",
+                      name, enc.size(), p95(enc), p95(recv), p95(net), g100, g250);
+        };
+        if (clipWinStartUs) {
+          window(clipWinStartUs, clipWinStartUs + 8000000, "w1");
+          window(clipWinStartUs + 8000000, UINT64_MAX, "w2");
+        }
+      }
+      clip.Stop();
+    }
+    if (proxyOn) proxy.Stop();
+    if (gPattern != Pattern::Default) {
+      std::lock_guard<std::mutex> lk(fmu);
+      auto stat = [](std::vector<uint64_t> v, const char* name) {
+        if (v.empty()) return std::string(name) + "=none";
+        std::sort(v.begin(), v.end());
+        uint64_t sum = 0;
+        for (uint64_t x : v) sum += x;
+        char b[160];
+        std::snprintf(b, sizeof(b), "%sAvgMs=%.1f %sP95Ms=%.1f", name, sum / 1000.0 / v.size(), name,
+                      v[v.size() * 95 / 100] / 1000.0);
+        return std::string(b);
+      };
+      std::cout << "R6LAT frames=" << capToRecvUs.size() << " " << stat(capToEncUs, "capToEnc") << " "
+                << stat(capToRecvUs, "capToRecv") << "\n";
+    }
+    {
+      std::lock_guard<std::mutex> lk(selMu);
+      selectionLog = selections;
+    }
+    stop.store(true);
+    if (ingress.joinable()) ingress.join();
+    closesocket(sock);
+  }
+
+  if (!desktop || cadenceWindow) target.Stop();
+  if (hostPi.hProcess) {
+    TerminateProcess(hostPi.hProcess, 0);
+    WaitForSingleObject(hostPi.hProcess, 5000);
+    CloseHandle(hostPi.hProcess);
+  }
+  if (hostPi.hThread) CloseHandle(hostPi.hThread);
+  if (hostLog != INVALID_HANDLE_VALUE) CloseHandle(hostLog);
+  CloseHandle(job);
+
+  if (launched && !desktop) {
+    std::string captureLine;
+    const bool own = remote60::native_poc::e2e::e2e_host_captured_window(hostLogPath, targetHwnd, &captureLine);
+    std::printf("capture: %s (this pid %lu)\n", captureLine.c_str(), static_cast<unsigned long>(GetCurrentProcessId()));
+    check("the host captured the window this test paints (its hwnd, this pid), not another test's", own, captureLine);
+  }
+
+  // ------------------------------------------------------------------ the host's own account
+  std::vector<std::string> abrLines, keyLines;
+  std::string lastStats;
+  {
+    std::ifstream in(hostLogPath);
+    std::string line;
+    while (std::getline(in, line)) {
+      if (line.find("[abr] profile=") != std::string::npos) abrLines.push_back(line);
+      if (line.find("[keyframe] seq=") != std::string::npos) keyLines.push_back(line);
+      if (line.find(" udpTxWireEstBytes=") != std::string::npos) lastStats = line;
+    }
+  }
+
+  std::string perSec;
+  uint32_t cadenceSeconds = 0;
+  for (size_t i = 0; i < realFramesPerSec.size(); ++i) {
+    perSec += std::to_string(realFramesPerSec[i]) + " ";
+    if (i >= 4 && realFramesPerSec[i] >= kFps / 2) ++cadenceSeconds;
+  }
+  std::cout << "real frames per second at this end: " << perSec << "\n";
+  const size_t judged = realFramesPerSec.size() > 4 ? realFramesPerSec.size() - 4 : 0;
+  const bool cadenceOk = launched && judged > 0 && cadenceSeconds * 10 >= judged * 8;
+  std::cout << "seconds after warmup with a real cadence (>= " << kFps / 2 << "): " << cadenceSeconds
+            << " of " << judged << "\n";
+
+  std::cout << "\n--- host [abr] lines (" << abrLines.size() << ") ---\n";
+  for (const auto& l : abrLines) std::cout << "  " << l << "\n";
+  std::cout << "\n--- host [keyframe] lines (" << keyLines.size() << ") ---\n";
+  for (const auto& l : keyLines) std::cout << "  " << l << "\n";
+  if (!lastStats.empty()) {
+    std::cout << "\n--- per-flow bytes, last stats line ---\n";
+    for (const char* k : {"udpTxBytes", "udpTxParityBytes", "udpTxChunkHdrBytes", "udpTxVideoDatagrams",
+                          "udpTxNackBytes", "udpTxNackDatagrams", "ctlTxBytes", "ctlTxDatagrams",
+                          "udpTxIpUdpHdrEstBytes", "udpTxWireEstBytes"}) {
+      std::cout << "  " << k << "=" << value_of(lastStats, k) << "\n";
+    }
+  }
+
+  // quality r2: what the host actually encoded -- its stats line (size=) and every [keyframe] line.
+  std::string encodedSize = value_of(lastStats, "size");
+  std::set<std::string> keySizes;
+  for (const auto& l : keyLines) keySizes.insert(value_of(l, "size"));
+  std::string keySizeList;
+  for (const auto& k : keySizes) keySizeList += k + " ";
+  std::cout << "\nencoded size (last stats line): " << encodedSize << "  keyframe sizes: " << keySizeList << "\n";
+  if (launched && !expectSize.empty()) {
+    check("the host encoded " + expectSize + " (stats line and every keyframe)",
+          encodedSize == expectSize && keySizes.size() == 1 && *keySizes.begin() == expectSize,
+          "stats=" + encodedSize + " keys=" + keySizeList);
+  }
+
+  if (launched && !selectAt.empty()) {
+    bool allOk = selectionLog.size() == selectAt.size();
+    for (const auto& l : selectionLog) {
+      std::cout << "selection: " << l << "\n";
+      allOk = allOk && l.find("sent=1 flags=1 ") != std::string::npos;
+      // r4 (r3 review): a "window" selection must really name this test's window -- without
+      // --cadence-window it would be sent as id 0, the desktop, and pass.
+      if (l.rfind("window ", 0) == 0) {
+        const std::string asked = value_of(" " + l, "asked");
+        allOk = allOk && asked != "0" && !asked.empty() && value_of(" " + l, "answered") == asked;
+      }
+    }
+    check("every selection was accepted by the host (flags bit0)", allOk,
+          std::to_string(selectionLog.size()) + " of " + std::to_string(selectAt.size()));
+  }
+  // r4: keyframes by reason (a key with several reasons counts under each).
+  {
+    std::map<std::string, int> byReason;
+    uint64_t keyBytes = 0;
+    for (const auto& l : keyLines) {
+      std::string r = value_of(l, "reasons");
+      const std::string b = value_of(l, "bytes");
+      if (!b.empty()) keyBytes += std::stoull(b);
+      size_t start = 0;
+      while (start <= r.size()) {
+        const size_t bar = r.find('|', start);
+        byReason[r.substr(start, bar == std::string::npos ? std::string::npos : bar - start)] += 1;
+        if (bar == std::string::npos) break;
+        start = bar + 1;
+      }
+    }
+    std::cout << "keyframes: " << keyLines.size() << " total, " << keyBytes << " bytes;";
+    for (const auto& [reason, n] : byReason) std::cout << " " << reason << "=" << n;
+    std::cout << "\n";
+    if (launched && !requestKeyAt.empty()) {
+      const int viewerKeys = byReason.count("viewer") ? byReason["viewer"] : 0;
+      check("every viewer keyframe request was answered with an IDR (" +
+                std::to_string(requestKeyAt.size()) + " asked)",
+            viewerKeys >= static_cast<int>(requestKeyAt.size()),
+            "viewer-reason keys=" + std::to_string(viewerKeys));
+    }
+  }
+  // r5: the rate the encoder actually produced, from the host's own cumulative counters, over the
+  // stats lines after an 8 s warmup (encoder start, first IDR, ramp).
+  if (launched) {
+    std::vector<std::string> statsLines;
+    std::string rcLine, gopLine;
+    {
+      std::ifstream in(hostLogPath);
+      std::string line;
+      while (std::getline(in, line)) {
+        if (line.find(" udpTxWireEstBytes=") != std::string::npos) statsLines.push_back(line);
+        if (line.find("h264 rate-control") != std::string::npos) rcLine = line;
+        if (line.find("h264 gop-config") != std::string::npos) gopLine = line;
+      }
+    }
+    const double t0 = statsLines.empty() ? -1.0 : log_time_sec(statsLines.front());
+    size_t a = 0;
+    while (a < statsLines.size() && log_time_sec(statsLines[a]) < t0 + gMeasureFromSec) ++a;
+    if (a + 1 < statsLines.size()) {
+      const std::string& A = statsLines[a];
+      const std::string& B = statsLines.back();
+      const double span = log_time_sec(B) - log_time_sec(A);
+      auto mbps = [&](const char* key) {
+        const std::string x = value_of(A, key), y = value_of(B, key);
+        if (x.empty() || y.empty() || span <= 0) return -1.0;
+        return (std::stod(y) - std::stod(x)) * 8.0 / span / 1e6;
+      };
+      int keysInSpan = 0;
+      std::map<std::string, int> spanReasons;
+      for (const auto& l : keyLines) {
+        const double t = log_time_sec(l);
+        if (t > log_time_sec(A) && t <= log_time_sec(B)) {
+          ++keysInSpan;
+          spanReasons[value_of(l, "reasons")] += 1;
+        }
+      }
+      std::string reasons;
+      for (const auto& [r, n] : spanReasons) reasons += r + ":" + std::to_string(n) + ",";
+      const double payload = mbps("udpTxBytes");
+      std::cout << std::fixed;
+      std::cout.precision(2);
+      std::cout << "R5MEASURE pattern=" << patternName << " block=" << gBlock << " fps=" << kFps << " keyint=" << keyint
+                << " maxQpArg=" << std::string(maxQpArg.begin(), maxQpArg.end())
+                << " encode=" << value_of(B, "size") << " span=" << span
+                << " targetMbps=" << bitrate / 1e6 << " payloadMbps=" << payload
+                << " ratio=" << (payload / (bitrate / 1e6))
+                << " parityMbps=" << mbps("udpTxParityBytes")
+                << " chunkHdrMbps=" << mbps("udpTxChunkHdrBytes")
+                << " ipUdpHdrMbps=" << mbps("udpTxIpUdpHdrEstBytes")
+                << " nackMbps=" << mbps("udpTxNackBytes")
+                << " wireMbps=" << mbps("udpTxWireEstBytes")
+                << " keys=" << keysInSpan << " keysPerSec=" << (span > 0 ? keysInSpan / span : 0.0)
+                << " keyReasons=" << reasons << "\n";
+      auto tail = [](const std::string& l) {
+        const size_t at = l.find("h264");
+        return at == std::string::npos ? std::string("(missing)") : l.substr(at);
+      };
+      std::cout << "R5RC " << tail(rcLine) << "\n";
+      std::cout << "R5GOP " << tail(gopLine) << "\n";
+    } else {
+      std::cout << "R5MEASURE none: not enough stats lines after warmup\n";
+    }
+  }
+
+  if (launched && !expectFinal.empty()) {
+    check("after the last selection the host encodes " + expectFinal + " (last stats line)",
+          encodedSize == expectFinal, "stats=" + encodedSize);
+  }
+
+  if (launched) {
+    // Instrumentation (A), independent of the cadence.
+    bool keyReasoned = !keyLines.empty();
+    for (const auto& l : keyLines) keyReasoned = keyReasoned && !value_of(l, "reasons").empty();
+    check("every [keyframe] line names its reasons", keyReasoned, std::to_string(keyLines.size()) + " lines");
+    const std::string parity = value_of(lastStats, "udpTxParityBytes");
+    const std::string wire = value_of(lastStats, "udpTxWireEstBytes");
+    const std::string payload = value_of(lastStats, "udpTxBytes");
+    const bool flows = !parity.empty() && !wire.empty() && !payload.empty() &&
+                       std::stoull(parity) > 0 && std::stoull(wire) > std::stoull(payload);
+    check("the stats line carries the per-flow bytes, and the wire estimate exceeds the payload", flows,
+          "payload=" + payload + " parity=" + parity + " wire=" + wire);
+
+    if (!cadenceOk) {
+      skip("ABR verdict for mode " + mode, "the host did not send a real cadence -- NOT JUDGED");
+    } else if (mode == "none" || mode == "present") {
+      check("ABR did not demote a client whose decode evidence " +
+                std::string(mode == "none" ? "never arrived" : "was never reported"),
+            abrLines.empty(), abrLines.empty() ? "" : abrLines.front());
+    } else if (mode == "recover") {
+      bool demoted = false;
+      bool recoveredHigh = false;
+      std::string last;
+      for (const auto& l : abrLines) {
+        if (value_of(l, "reason").find("severe") != std::string::npos) demoted = true;
+        if (demoted && value_of(l, "profile") == "high") recoveredHigh = true;
+        last = l;
+      }
+      check("ABR demoted during the silence and climbed back to high after it", demoted && recoveredHigh,
+            std::to_string(abrLines.size()) + " [abr] lines");
+      if (!expectSize.empty()) {
+        check("...and the high profile it returned to is " + expectSize + " at " + std::to_string(kFps) + " fps",
+              value_of(last, "encode") == expectSize && value_of(last, "fps") == std::to_string(kFps),
+              last);
+      }
+    } else if (mode == "measured") {
+      // The file bench's A/B is judged outside this run (docs/file_copy_r2p_gates.md) from R9FILE
+      // and the host log; nothing here is expected of ABR on its own.
+      std::printf("NOTE  mode measured: ABR is judged by the A/B, not by this run (%zu [abr] lines)\n",
+                  abrLines.size());
+    } else {
+      bool staleDemote = false;
+      for (const auto& l : abrLines) {
+        if (value_of(l, "evidence").find("stale_active") != std::string::npos &&
+            value_of(l, "reason").find("severe") != std::string::npos) {
+          staleDemote = true;
+        }
+      }
+      check("ABR demoted a client that reported and then went silent (stale_active, P7 kept)",
+            staleDemote, std::to_string(abrLines.size()) + " [abr] lines");
+    }
+  }
+  (void)metricsStoppedAtSec;
+
+  if (!keepLog.empty()) CopyFileW(hostLogPath.c_str(), keepLog.c_str(), FALSE);
+  if (runDir.empty()) {
+    check("the scratch directory is cleaned up", staging.Remove(), staging.why());
+  } else {
+    std::printf("NOTE  --run-dir: the caller's directory is kept (not a scratch directory)\n");
+  }
+  WSACleanup();
+  std::cout << "\n" << (gFailures == 0 ? "RESULT: ALL PASS" : "RESULT: FAILED") << "  (" << gChecks
+            << " checks, " << gFailures << " failed)\n";
+  return gFailures == 0 ? 0 : 1;
+}

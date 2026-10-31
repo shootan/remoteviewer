@@ -1,0 +1,11 @@
+PASS  early, undisturbed: three replies at 0/120/240  0,120,240
+PASS  A replaced at 50 ms by B on the same tuple: nothing more of A is sent  before=1 after=1
+PASS  B's replies are its own, after its grace  B sends at +2500,+2620,+2740
+PASS  expired after the first reply: one sent, then none  sends=1
+PASS  replaced by another tuple on the same IP: the old record sends nothing more  sends=1
+PASS  A's next punch is answered under the new record, after the grace  +2500,+2620,+2740
+PASS  legacy, undisturbed: three replies at the grace  2500,2620,2740
+PASS  legacy replaced at 2000 ms: none of its grace replies is sent  sends=0
+PASS  record swept away after the first reply: nothing more  sends=1
+
+relay_reply_fence_test: ALL PASS

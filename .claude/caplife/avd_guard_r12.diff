@@ -1,0 +1,74 @@
+--- avd_guard_r11_snapshot/ke_avd.py	2026-10-30 00:59:03.838368400 +0900
++++ avd_guard_r12_snapshot/ke_avd.py	2026-10-30 01:25:19.231517300 +0900
+@@ -369,19 +369,32 @@
+ _QEMU = {'pid': None, 'start': None, 'why': 'not looked up'}
+ 
+ 
++_RUN_SEQ = [0]
++
++
+ def _run(args, timeout):
+-    """AVD r11: one bounded call for a sample -- (rc, stdout, ms); a timeout / error is rc None, never an exception."""
++    """AVD r11: one bounded call for a sample -- (rc, stdout, ms); a timeout / error is rc None, never an exception.
++    stdout goes into a file, not a pipe: on the deadline the child is ended and this returns -- a grandchild (a
++    wrapper's interpreter, an adb server it starts) holding a pipe open cannot keep the sample waiting.
++    AVD r12 (Codex codex_apk_inbox_plan_src_r2.md N1): that file is THIS run's own -- <OUT>/sample_io/<pid>-<n>.out,
++    created new (an existing name is refused, never reused) and KEPT (no delete, no overwrite, no %TEMP% fallback)."""
+     t0 = time.monotonic()
+-    import tempfile
+-    # stdout into a file, not a pipe: on the deadline the child is ended and this returns -- a grandchild (a wrapper's
+-    # interpreter, an adb server it starts) holding a pipe open cannot keep the sample waiting
+-    with tempfile.TemporaryFile() as out:
++    io_dir = os.path.join(OUT, 'sample_io')
++    os.makedirs(io_dir, exist_ok=True)
++    _RUN_SEQ[0] += 1
++    path = os.path.join(io_dir, f'{os.getpid()}-{_RUN_SEQ[0]:06d}.out')
++    try:
++        out = open(path, 'xb')  # CreateNew
++    except Exception as e:  # noqa: BLE001 -- recorded as a miss; nothing else is tried
++        return None, f'stdout file not new: {type(e).__name__}', int((time.monotonic() - t0) * 1000)
++    with out:
+         try:
+             r = subprocess.run(args, stdout=out, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL, timeout=timeout)
+-            out.seek(0)
+-            return r.returncode, out.read().decode('utf-8', errors='replace'), int((time.monotonic() - t0) * 1000)
++            rc = r.returncode
+         except Exception as e:  # noqa: BLE001 -- recorded as a miss
+             return None, f'{type(e).__name__}', int((time.monotonic() - t0) * 1000)
++    with open(path, 'rb') as f:
++        return rc, f.read().decode('utf-8', errors='replace'), int((time.monotonic() - t0) * 1000)
+ 
+ 
+ def _ps(cmd, timeout=8):
+--- avd_guard_r11_snapshot/ke_sample_test.py	2026-10-30 00:58:34.257991500 +0900
++++ avd_guard_r12_snapshot/ke_sample_test.py	2026-10-30 01:25:19.232049000 +0900
+@@ -8,7 +8,6 @@
+ import os
+ import re
+ import sys
+-import tempfile
+ import time
+ import types
+ 
+@@ -23,7 +22,9 @@
+     print(f'{"PASS" if ok else "FAIL"}  {what}' + (f'  {detail}' if detail else ''), flush=True)
+ 
+ 
+-tmp = tempfile.mkdtemp(prefix='ke_sample_test_', dir=os.path.join(E, 'runs'))
++# r12: this run's own new folder under runs\ (no tempfile, no %TEMP%; kept)
++tmp = os.path.join(E, 'runs', f'ke_sample_test-{time.strftime("%Y%m%d%H%M%S")}-{os.getpid()}')
++os.makedirs(tmp)  # refused if it exists
+ open(os.path.join(tmp, 'fixture_account.txt'), 'w').write('ketest notarealpassword\n')
+ stub = types.ModuleType('ka_avd')
+ stub.ADB = os.path.join(E, 'stubs', 'fake_adb_sample.cmd')
+@@ -93,6 +94,10 @@
+       field(l, 'app_pss_kb') == '?' and 'dumpsys:None' in (field(l, 'miss') or '') and took < 9,
+       f'took={took:.1f}s ' + l[9:])
+ 
++io = os.path.join(tmp, 'avd', 'sample_io')
++kept = sorted(os.listdir(io)) if os.path.isdir(io) else []
++check("r12: every call's stdout file is this run's own (<OUT>/sample_io), created new and kept",
++      len(kept) >= 6 and all(re.match(r'^\d+-\d{6}\.out$', k) for k in kept), f'{len(kept)} files in {io}')
+ ns['_ps'] = real_ps
+ print(f'\n{checks} checks, {fails} failed\nRESULT: {"PASS" if fails == 0 else "FAIL"}')
+ sys.exit(0 if fails == 0 else 1)

@@ -1,0 +1,22 @@
+{
+  "python": "3.14.3 (tags/v3.14.3:323c59a, Feb  3 2026, 16:04:56) [MSC v.1944 64 bit (AMD64)]",
+  "junction_is_link": true,
+  "would_remove": [
+    {
+      "lexical": "D:\\remote\\remote\\.claude\\codex_ka_e_review\\gate_T_8a84198\\junction-probe-1793165314310100200\\run\\link\\sentinel.txt",
+      "resolved": "D:\\remote\\remote\\.claude\\codex_ka_e_review\\gate_T_8a84198\\junction-probe-1793165314310100200\\sibling\\sentinel.txt"
+    }
+  ],
+  "would_rmdir": [
+    "D:\\remote\\remote\\.claude\\codex_ka_e_review\\gate_T_8a84198\\junction-probe-1793165314310100200\\run"
+  ],
+  "cleanup_result": [
+    1,
+    1,
+    [
+      "D:\\remote\\remote\\.claude\\codex_ka_e_review\\gate_T_8a84198\\junction-probe-1793165314310100200\\run\\link"
+    ]
+  ],
+  "sentinel_preserved": true,
+  "actual_deletions": 0
+}

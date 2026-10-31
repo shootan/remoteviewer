@@ -1,0 +1,4 @@
+{
+ "repo_path": "D:/remote/remote",
+ "message": "docs(release): the empty key blocks the update path, not the installer\n\nThe note read as though the candidate could not be installed at all. Only\nthe in-app update path is blocked: the trusted key is what verifies an\nupdate manifest, and it has nothing to do with running the installer.\nGNLinkSetup-0.2.105.exe installs by hand exactly as it should, and the APK\ncarries the deployed signer with versionCode 12 over 11, so it upgrades an\nexisting install in place.\n\nThe distinction is the one that decides whether anybody can field-test this\nat all, so it should not have been left to be inferred.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+}

@@ -1,0 +1,13 @@
+PASS  V5 32 bpp DIB with alpha encodes to PNG
+PASS  PNG dimensions come from its header
+PASS  PNG decodes into a CF_DIBV5 HGLOBAL
+PASS  the published DIBV5 passes our own header check (top-down, alpha mask, sRGB)
+PASS  every pixel and alpha survives DIB -> PNG -> DIBV5 (851 px)
+PASS  the pattern really exercised alpha 0 and 255
+PASS  a PNG whose size differs from the offer is refused before decode
+PASS  24 bpp padded DIB encodes
+PASS  24 bpp colours survive and come out opaque
+PASS  an embedded colour profile is refused, not recoloured
+PASS  bytes that are not a PNG are refused
+
+RESULT: PASSED  (11 checks, 0 failed)

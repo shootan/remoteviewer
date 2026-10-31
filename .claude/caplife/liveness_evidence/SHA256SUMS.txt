@@ -1,0 +1,59 @@
+# apk-decoder-liveness r1 evidence -- commit 27d59665bb41cb78ebbfc6abc2bcea5c3595c211 on fix/apk-decoder-liveness (base 9f9a91c), tracked clean: 0 changes
+## product sink
+f9e1a90b1fca4cdcb6dec0977388987e5043a1b83345ccbd59edb37bfdb3fd76 */c/work/gnlink-wt/apk-decoder-liveness/apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp
+8ce7de00502ef92a49242700bcfca73b5fa981039eb078f1e8ea53267cbcb334 */c/work/gnlink-wt/apk-decoder-liveness/apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp
+## release .so (stripped) -- WaitIdleForTest count / 'decoder inbox full' count
+93f4855dba42675835dc872732ce8a455db91a47f9fc7a1707b0a4b4137b12f0 0 1 apps/android_direct_client/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/arm64-v8a/libremote60_android_direct.so
+217f7f5434d291637c9255e14e37979ef3317c683e07f62fb1c7a4de97fadf21 0 1 apps/android_direct_client/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/armeabi-v7a/libremote60_android_direct.so
+bbbc133b7d4c74e504d13ed20ebc9d3d60d335e5a5d185b25872e2c302ae6e21 0 1 apps/android_direct_client/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/x86/libremote60_android_direct.so
+f9faae3d1a802e77cd63f1e64a11621709231ec3adcc16c3df34c4d6839c93b3 0 1 apps/android_direct_client/app/build/intermediates/stripped_native_libs/release/stripReleaseDebugSymbols/out/lib/x86_64/libremote60_android_direct.so
+## APKs
+f702981d59f504d1ca91c5fe8c640b2fc307946e4d6e23ed141a88b7d36f31ea */c/work/gnlink-wt/apk-decoder-liveness/apps/android_direct_client/app/build/outputs/apk/debug/app-debug.apk
+cf1ac672e4830871f8ae1acc091893a742ac4a89ed472c373dbf0f6a06f3654d */c/work/gnlink-wt/apk-decoder-liveness/apps/android_direct_client/app/build/outputs/apk/release/app-release-unsigned.apk
+## negative inputs
+730583c150d463b4f5729df667d0c837cdcec5a7017ab1ae42a914e64a0faa5e */d/remote/remote/.claude/caplife/liveness_neg/old/android_video_decoder.cpp
+72c914a1163918b99726a0484230ba03871f333924a4797c9c5bd3569bab72c4 */d/remote/remote/.claude/caplife/liveness_neg/old/android_video_decoder.hpp
+40a6c2936e8f531e5e6b9bc8f9bbe82d60b5b9eea478ccc2719c4678f202e84e */d/remote/remote/.claude/caplife/liveness_neg/old/android_video_decoder_sh_seam.hpp
+1ebb98cd02374037feb373f2d5ad4d292ed2a56f666c61cffb04df795f89d666 */d/remote/remote/.claude/caplife/liveness_neg/m1/android_video_decoder.cpp
+dd63594fd1c5d8de9e6787e454ac285d7c5edf050c9d43d7dc8a8852ceb872e1 */d/remote/remote/.claude/caplife/liveness_neg/m2/android_video_decoder.cpp
+e5caea1d05363ab34312dd5fa183629221e872fb3b1afd9750ac7cb3f8f1fc48 */d/remote/remote/.claude/caplife/liveness_neg/make_mutants.py
+## run outputs
+6da3308a2764883773ca848ddfd61f9e7a714c1ae622a4b4efef57624d9a3649 */d/remote/remote/.claude/caplife/liveness_evidence/remote60_android_decoder_liveness_test__m1.txt
+236c843196a2ba675d55e7c4d36fc7e80ff0366bd08831bf6e77d8ab229198ba */d/remote/remote/.claude/caplife/liveness_evidence/remote60_android_decoder_liveness_test__m2.txt
+292070e39915917811529ef539b52ac5fdce6441f79cc10a9e43aaf5fab69422 */d/remote/remote/.claude/caplife/liveness_evidence/remote60_android_decoder_liveness_test__new.txt
+bd2cfadde82036cbc2d508732ea66e6d0aae9465cbf061355fb5b44cca58d711 */d/remote/remote/.claude/caplife/liveness_evidence/remote60_android_decoder_liveness_test__old9f9a91c.txt
+4c413817fb33ae33bcecb51414e9718b89e23128279fa270b7427751676b815f */d/remote/remote/.claude/caplife/liveness_evidence/remote60_android_decoder_session_liveness_test__new.txt
+3f4628855939861b87d9cafcdcb82cb84f1a9e883200e4829dbf1fa3ccee1fd0 */d/remote/remote/.claude/caplife/liveness_evidence/remote60_android_decoder_session_liveness_test__old9f9a91c.txt
+
+# r2 -- commit ec016f0bb603d869e192e12c77cd320f5ddaabb5 (clean tracked: 0)
+## axis 2 runs (the __r1.txt file is the superseded harness version, TCP control, not a result)
+4aa5663c36f855c31381703dc39abbdd30b0e36e50f4b1400e87927bac1e75bc */d/remote/remote/.claude/caplife/liveness_evidence/remote60_android_decoder_idr_recovery_test__new.txt
+3c1d825b800c3d7f417abeefe9641ccb965ec9c8d5d3d77a3d86b1e97d7d2fe6 */d/remote/remote/.claude/caplife/liveness_evidence/remote60_android_decoder_idr_recovery_test__old9f9a91c.txt
+848b5e6ebf9d808b9f9c9464cb90dc84d5d497ffaed95e0a0941ab0e3557b3e5 */d/remote/remote/.claude/caplife/liveness_evidence/remote60_android_decoder_idr_recovery_test__m3.txt
+## m3 input
+aa0a3b870f08988a6782dfc95bf303b4591c19768899726bde6b1d0b9e2ff7d0 */d/remote/remote/.claude/caplife/liveness_neg/m3/android_video_decoder.cpp
+## APKs (apk_out, untracked): marker liveness-trace in .so -- plain 0/4, trace 4/4, release 0/4
+1b76b9ed68c09752508981616f9d776baeeb98d306ed63d44ea07657373030ee */c/work/gnlink-wt/apk-decoder-liveness/apk_out/plain-debug.apk
+f4da936f417e0f7a5cd4234bbedbd75fba46cf598df8fd5e3454af0a76c80095 */c/work/gnlink-wt/apk-decoder-liveness/apk_out/release-unsigned.apk
+2915827b4c8b99ccd36a35c8b8bbb2d28c7302c3a44b759f320a77fb9c74329b */c/work/gnlink-wt/apk-decoder-liveness/apk_out/trace-debug.apk
+
+# r3 -- commit 7a79b09df02017831515d342733452809b022fd2 (clean tracked: 0)
+752e15201fb08a6acfb4604f17f4fef728891015189fc4600506c862cf99e463 */d/remote/remote/.claude/caplife/liveness_evidence/remote60_android_decoder_liveness_test__new_r3.txt
+018b3fc2510e3e9fc57cef04f88cce544fa17b8ffa2a80787ec8c0a682d3d76f */d/remote/remote/.claude/caplife/liveness_evidence/remote60_android_decoder_liveness_test__old9f9a91c_r3.txt
+784de47ac34c4fb4d28e0f9363ca1be64845fb5be165b6948ae77c283607cf1c */d/remote/remote/.claude/caplife/liveness_evidence/remote60_android_decoder_liveness_test__m4.txt
+bf9c5e5a9e5740c4223d98880c7567d5f5f9ec0d1b80c816a76a49e22cd696f7 */d/remote/remote/.claude/caplife/liveness_evidence/relay_trace_test__run0.log
+ecf426f6c8f23cbba3702694edc949ba92ce9da85ca46cfdbb5aa5c75fbd6ede */d/remote/remote/.claude/caplife/liveness_evidence/relay_trace_test__run1.log
+999e47175ea83f85f75bcd44228d1a7388141c9a0c77d0de754f5deddf7aec5b */d/remote/remote/.claude/caplife/liveness_evidence/relay_trace_test__run2.log
+75cf0d3ea1749bb42b544bb46a555e907acaee563408e7648f75f87aec7ecf57 */d/remote/remote/.claude/caplife/liveness_evidence/relay_trace_test__run3.log
+0113ebe122b9e5204aef69637080c617935d6efe890201605a75b22ced632ee7 */d/remote/remote/.claude/caplife/liveness_evidence/ke_orchestration_test__r8.log
+## m4 input
+87c89df895a40e0c468ff39686ef01c07fef4eff89203a25e1b663846b4f7763 */d/remote/remote/.claude/caplife/liveness_neg/m4/android_video_decoder.cpp
+e1bdae523dbf8873fc4dc7fc0413c1ceeb8b24a9d7e3f876e15fbbed1ab9f3d5 */d/remote/remote/.claude/caplife/liveness_neg/make_m4.py
+## APKs r3 (apk_out): liveness-trace marker -- release 0/4, ke-off-lt 4/4, ke-on-lt 4/4
+25fb6d981994637c1ade12d4e08f74ce22ca0517b008e9aafb17e3fe74379503 */c/work/gnlink-wt/apk-decoder-liveness/apk_out/r3-release-unsigned.apk
+a7816b3cbbc04134fca1671a12e18866ff5e4b3fc9b5cbda3f76541bc551b7e7 */c/work/gnlink-wt/apk-decoder-liveness/apk_out/ke-off-lt.apk
+aa15aad48e9b75f0377cdc31bc13e65247357760250972b7b630c02be80b46c7 */c/work/gnlink-wt/apk-decoder-liveness/apk_out/ke-on-lt.apk
+## harness r8 snapshot (.claude/caplife/avd_guard_r8_snapshot/SHA256SUMS.txt)
+d6092772658731c6929736595f369498565bf5530e4f4661d98ca7b6997775a2 */d/remote/remote/.claude/caplife/avd_guard_r8_snapshot/SHA256SUMS.txt
+## adb client pinned
+7035cf5ec7f99f7b5662a9f5395f9dccfc3b6fe42583d0b9550124a0c3496606 */c/Users/shota/AppData/Local/Android/Sdk/platform-tools/adb.exe

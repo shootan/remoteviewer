@@ -1,0 +1,6 @@
+FAIL  a non-number bound falls back and says so (MAX_PER_ACCOUNT=abc -> 24)
+FAIL  a fraction falls back (MAX_PER_WIRE_IP=2.5 -> 24)
+FAIL  a negative falls back (MAX_SOCKETS=-3 -> 256)
+PASS  ...and the server still starts
+
+RESULT: FAILED  (3 failed)

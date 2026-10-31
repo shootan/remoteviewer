@@ -1,0 +1,110 @@
+  std::printf("\n[lk-ux-retry r2 (Codex N1): one deadline for the whole retry; nothing after its caller answered]\n");
+  {
+    wait_until([&] { return !svc.connected.load(); }, 3000);
+    svc.offerRetry = true;
+    svc.stall = false;
+    svc.stallSupersede = false;
+    svc.finishJobs = false;
+    svc.sealedStage = static_cast<uint16_t>(UnlockStage::Injected);
+    svc.sealedTerminal = false;
+    svc.supersedeStage = static_cast<uint16_t>(UnlockStage::Superseded);
+    svc.supersedeTerminal = true;
+    HostUnlockRelay h;
+    point(h, svc);
+    h.ProbeLockCredAsync();
+    wait_until([&] { return h.LockCredSupportNow() == HostUnlockRelay::LockCredSupport::Supported; }, 5000);
+    const auto typed_wait = [&](uint64_t cookie, uint32_t id) {
+      ControlUnlockChallengeMessage c{};
+      h.LockCredChallengeSync(challenge_req(id), cookie, &c, 5000);
+      h.SealedAsync(sealed_req(id), cookie);
+      ControlUnlockStatusResultMessage r{};
+      wait_until([&] { return h.PollResult(cookie, id, &r); }, 5000);
+      return r.stage == static_cast<uint16_t>(UnlockStage::Injected) && r.terminal == 0;
+    };
+
+    // (1) The worker is busy (a status answer 1.5 s late) when the retry is queued; its caller gives up after
+    // 300 ms (18). The retry is withdrawn from the queue: it never runs.
+    check("N1 (1) setup: A typed and waiting", typed_wait(0x81, 81));
+    svc.statusDelayMs = 1500;
+    std::thread busy([&] { h.RefreshLockCredStatus(0x81, 81, 3000); });
+    Sleep(100);
+    const int sup1 = svc.supersedeSeen.load(), ch1 = svc.challengeSeen.load();
+    ControlUnlockChallengeMessage r1{};
+    const auto t1 = std::chrono::steady_clock::now();
+    const bool got1 = h.LockCredRetryChallengeSync(challenge_req(82), 81, 0x81, &r1, 300);
+    const auto ms1 = ms_since(t1);
+    busy.join();
+    svc.statusDelayMs = 0;
+    Sleep(800);
+    ControlUnlockStatusResultMessage a1{};
+    check("N1 (1): the caller gives up at its deadline (no answer -> the host says 18)", !got1 && ms1 < 1000,
+          std::to_string(ms1) + " ms");
+    check("N1 (1): ...and the withdrawn retry never ran: 0 supersede, 0 challenge",
+          svc.supersedeSeen.load() == sup1 && svc.challengeSeen.load() == ch1,
+          std::to_string(svc.supersedeSeen.load() - sup1) + " supersede, " + std::to_string(svc.challengeSeen.load() - ch1) + " challenge");
+    check("N1 (1): ...A still waits (its hold and result as they were); nothing kept for the retry",
+          h.PollResult(0x81, 81, &a1) && a1.stage == static_cast<uint16_t>(UnlockStage::Injected) && a1.terminal == 0 &&
+              !h.PollResult(0x81, 82, &a1) && svc.connected.load());
+    h.EndSession(0x81);
+    wait_until([&] { return !svc.connected.load(); }, 3000);
+
+    // (2) The supersede is answered only after the caller's deadline (the service is slow): the retry's own
+    // exchange ends with that deadline -- no fresh challenge, no hold for it, the caller said 18.
+    check("N1 (2) setup: A typed and waiting", typed_wait(0x83, 83));
+    svc.supersedeDelayMs = 900;
+    const int ch2 = svc.challengeSeen.load();
+    ControlUnlockChallengeMessage r2{};
+    const bool got2 = h.LockCredRetryChallengeSync(challenge_req(84), 83, 0x83, &r2, 300);
+    Sleep(1500);
+    svc.supersedeDelayMs = 0;
+    check("N1 (2): a supersede slower than the retry's deadline -> the caller said 18 (no answer), and NO fresh challenge",
+          !got2 && svc.challengeSeen.load() == ch2,
+          std::to_string(svc.challengeSeen.load() - ch2) + " challenges");
+    ControlUnlockStatusResultMessage none{};
+    check("N1 (2): ...nothing kept for the retry, and the pipe is not held for it",
+          !h.PollResult(0x83, 84, &none) && wait_until([&] { return !svc.connected.load(); }, 3000));
+    h.EndSession(0x83);
+    wait_until([&] { return !svc.connected.load(); }, 3000);
+    h.ProbeLockCredAsync();  // the failed exchange made "supported" unknown: asked again
+    wait_until([&] { return h.LockCredSupportNow() == HostUnlockRelay::LockCredSupport::Supported; }, 5000);
+
+    // (2b) The supersede succeeds in time, then the fresh challenge is answered after the retry's deadline:
+    // the earlier request keeps its real end (17) -- and no challenge of the retry is held.
+    check("N1 (2b) setup: A typed and waiting", typed_wait(0x85, 85));
+    svc.supersedeDelayMs = 100;
+    svc.challengeDelayMs = 600;
+    ControlUnlockChallengeMessage r2b{};
+    const bool got2b = h.LockCredRetryChallengeSync(challenge_req(86), 85, 0x85, &r2b, 300);
+    Sleep(1200);
+    svc.supersedeDelayMs = 0;
+    svc.challengeDelayMs = 0;
+    ControlUnlockStatusResultMessage a2b{};
+    check("N1 (2b): the earlier wait ended (its own Superseded, final), while the retry's caller said 18",
+          !got2b && h.PollResult(0x85, 85, &a2b) && a2b.stage == static_cast<uint16_t>(UnlockStage::Superseded) &&
+              a2b.terminal == 1,
+          "A stage=" + std::to_string(a2b.stage));
+    check("N1 (2b): ...and the late challenge of the retry is not held (the pipe goes; nothing kept for it)",
+          !h.PollResult(0x85, 86, &none) && wait_until([&] { return !svc.connected.load(); }, 3000));
+    h.EndSession(0x85);
+    wait_until([&] { return !svc.connected.load(); }, 3000);
+    h.ProbeLockCredAsync();
+    wait_until([&] { return h.LockCredSupportNow() == HostUnlockRelay::LockCredSupport::Supported; }, 5000);
+
+    // (3) The session ends while the supersede is on the pipe: no fresh challenge, nothing of it kept.
+    check("N1 (3) setup: A typed and waiting", typed_wait(0x87, 87));
+    svc.supersedeDelayMs = 500;
+    const int ch3 = svc.challengeSeen.load();
+    ControlUnlockChallengeMessage r3{};
+    std::thread retry3([&] { (void)h.LockCredRetryChallengeSync(challenge_req(88), 87, 0x87, &r3, 3000); });
+    Sleep(150);
+    h.EndSession(0x87);
+    retry3.join();
+    Sleep(800);
+    svc.supersedeDelayMs = 0;
+    check("N1 (3): the session ended during the supersede -> no fresh challenge, nothing of the session kept",
+          svc.challengeSeen.load() == ch3 && h.KeptEntriesForTest(0x87) == 0,
+          std::to_string(svc.challengeSeen.load() - ch3) + " challenges, " + std::to_string(h.KeptEntriesForTest(0x87)) + " kept");
+    check("N1 (3): ...and the pipe is not held", wait_until([&] { return !svc.connected.load(); }, 3000));
+    h.Stop();
+  }
+

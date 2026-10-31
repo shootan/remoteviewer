@@ -1,0 +1,34 @@
+﻿PASS  not connected: a reboot request is not taken (no id)
+PASS  a host and a never-answering helper are staged
+PASS  a token without SeShutdownPrivilege is made for the host
+PASS  the launched process is isolated from the user's files
+PASS  the host started (restricted token)
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all (it cannot restart this PC)  0
+PASS  the phone's session connects
+remote60_android_session_reboot_e2e_test.exe : [native-video-client-session] video receive nack=1 holdUs=120000 nonbloc
+king=1
+At D:\remote\remote\.claude\caplife\apk_runs.ps1:34 char:70
++ ...  @a > "$out\$name.txt" 2>&1 } else { & $exe > "$out\$name.txt" 2>&1 }
++                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([native-video-c...0 nonblocking=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+PASS  ...and reaches Connected  connected window_list_received count=10 selected=desktop
+PASS  the host advertises remote reboot (Pong 0x4000), read by the phone's session  1138552
+PASS  one confirm: a request id (never 0)  3086135359
+PASS  a second confirm while it is out: not taken
+[native-video-client-session] udp recv drop sock=340 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=24 stop=0
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] udp recv drop sock=340 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=26 sinceDatagramMs=20 stop=0
+PASS  the host's answer (85) comes back for that request  3086135359 outcome 2
+PASS  ...NotAuthorized: a loopback session without the directory is not allowed to restart  2
+[native-video-client-session] udp recv drop sock=340 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=42 sinceDatagramMs=22 stop=0
+PASS  nothing more comes (one answer per request, none re-sent)
+PASS  the session is still up after a refused request  connected window_list_received count=10 selected=desktop
+PASS  the host saw exactly one reboot request  1
+PASS  ...and answered it not authorized (auth=0 result=2)
+
+RESULT: ALL PASS  (17 checks, 0 failed)

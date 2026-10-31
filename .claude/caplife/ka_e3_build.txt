@@ -1,0 +1,4 @@
+﻿msbuild 버전 17.14.40+3e7442088(.NET Framework용)
+
+  standby_lease_test.cpp
+  remote60_standby_lease_test.vcxproj -> C:\work\gnlink-wt\ka-r3\build\apps\native_poc\Release\remote60_standby_lease_test.exe

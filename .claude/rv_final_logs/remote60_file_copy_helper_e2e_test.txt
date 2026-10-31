@@ -1,0 +1,132 @@
+file_copy_helper_e2e_test -- the real helper, this user, a private window station
+PASS  GNLinkClipHelper.exe is beside this test  D:\remote\remote\.claude\worktrees\verify-c2-ef533f2\build-verify\apps\native_poc\Release\GNLinkClipHelper.exe
+PASS  a scratch directory inside the repository
+
+--- the token rule ---
+PASS  the interactive user of this session is known (WTS)  err=0
+PASS  ...and it is this process's user   vs S-1-5-21-3755351295-1954912156-110340796-1001
+PASS  A NON-ELEVATED CALLER IS REFUSED (its linked token would be the FULL admin one)  caller-not-elevated
+PASS  ...a wrong interactive user is refused on an elevated caller only (here: refused earlier)
+PASS  an impossible session has no interactive user
+
+--- the handshake rule ---
+PASS  right pid + right nonce accepted
+PASS  a client that is not the launched pid is refused
+PASS  a launched pid of 0 (nothing launched) is refused
+PASS  a Hello claiming another pid than the pipe client is refused
+PASS  ONE BIT OFF IN THE NONCE IS REFUSED
+PASS  a wrong version is refused
+
+--- who may start the helper as itself ---
+PASS  a limited (UAC-split) Medium process may
+PASS  a plain (no UAC split) Medium process may
+PASS  AN ELEVATED (FULL) PROCESS MAY NOT
+PASS  ...nor a full one that somehow reads Medium
+PASS  ...nor a High-integrity process without a split (UAC off, administrator)
+PASS  ...nor SYSTEM
+PASS  a Low process may (it is not elevated; the pipe DACL decides the rest)
+PASS  a private window station with a Default desktop (its own clipboard)
+
+--- live handshake refusals ---
+PASS  a second server pipe
+PASS  ...launch a helper that cannot connect
+PASS  ...this process can open the pipe (same user)  err=0
+PASS  A CLIENT THAT IS NOT THE LAUNCHED PROCESS IS REFUSED, RIGHT NONCE OR NOT  client-pid-is-not-the-launched-helper
+PASS  ...and the pipe is closed on refusal
+PASS  ...launch a helper that exits at once (bad pipe, no client)
+PASS  A HELPER THAT EXITED BEFORE CONNECTING IS REFUSED AS SUCH, WITHOUT WAITING OUT THE TIMEOUT  helper-exited-before-connecting in 16 ms
+PASS  ...launch the helper with a wrong nonce
+PASS  A WRONG NONCE FROM THE REAL HELPER IS REFUSED  nonce-mismatch
+PASS  ...and the helper exits (no HelloAck) with 4  exit=4
+
+--- the helper starts, proves itself, and is under the Job ---
+PASS  server pipe for this user
+PASS  ...launched on the private station (Medium test launch)
+PASS  THE HELPER CONNECTS AND ITS HELLO CARRIES THE NONCE FROM ITS COMMAND LINE
+PASS  ...pid matches the launched process
+PASS  ...the helper is in a Job
+
+--- R->P: StatFiles / Pin / ReadLocal / Unpin over the pipe ---
+PASS  fixtures
+PASS  Stats: 7 entries back
+PASS  f1/f2/f3 Ok with ids, names, sizes
+PASS  directory NotAFile / .lnk Excluded / missing NotFound / device BadPath
+PASS  Pin f1 + f2 with the ids Stat gave
+PASS  f1 READS BACK EXACTLY THROUGH THE PIPE IN 256 KiB CHUNKS
+PASS  a read at EOF is an empty Ok
+PASS  a read past EOF is BadRequest
+PASS  A WRITER IS REFUSED WHILE THE HELPER HOLDS THE PIN  err=32
+PASS  Unpin releases 2
+PASS  ...and the writer may open now
+PASS  delete + recreate f2
+PASS  Pin with the old id is Replaced
+PASS  Pin while a writer holds f1 is SharingViolation
+PASS  Pin f1 with a 1500 ms lease
+PASS  A READ AFTER THE LEASE RAN OUT IS REFUSED (LeaseExpired or already swept)  unknown-id
+PASS  ...AND THE FILE IS FREE AGAIN  err=0
+
+--- P->R: publish, paste through the shell, read from the host ---
+PASS  PublishRemoteFiles offer 7 (2 files)  status=ok count=2
+PASS  the paste consumer starts on the station
+PASS  THE PASTE BEGAN (PasteBegin) AND WAS ANSWERED WITH THE CONFIRMED DESCRIPTOR
+PASS  THE SHELL READ EVERY BYTE FROM THE HOST THROUGH THE PIPE  6 ReadRequests
+PASS  BOTH FILES LANDED IN THE DESTINATION, IDENTICAL TO WHAT THE HOST SERVED   | 
+PASS  ...the drop returned quickly (async; the copy ran after it)  hr=0x00000000 effect=0x1 seconds=0.040
+PASS  PasteEnd(ended) arrived  ended
+PASS  consumer exit 0  exit=0
+PASS  nothing unexpected on the pipe  0
+
+--- the host refuses a read half way: the shell discards the partial file ---
+PASS  PublishRemoteFiles offer 8  status=ok count=2
+PASS  consumer starts
+PASS  the refused read was answered ReadError  1
+PASS  THE PASTE ENDED BY IDLE OR ERROR, NOT AS A SUCCESS  idle
+PASS  no partial remote_0.bin is left in the destination (observed, as in probe T3a)
+PASS  consumer exited  exit=0
+
+--- the same file twice in one operation; a synchronous consumer refused ---
+PASS  PublishRemoteFiles offer 9  status=ok count=2
+PASS  dup consumer starts
+PASS  TWO STREAMS OF THE SAME FILE IN ONE OPERATION READ THE SAME, CORRECT BYTES  dup streams hr1=0x00000000 hr2=0x00000000 r1=0x00000000 r2=0x00000000 len1=1048583 len2=1048583 same=1 synthetic=1
+PASS  ...and the operation ended (EndOperation -> PasteEnd ended)  ended
+PASS  sync consumer starts
+PASS  A CONSUMER WITHOUT StartOperation IS REFUSED THE DESCRIPTOR AND THE CONTENTS  sync descriptor hr=0x800401d3 refused=1 | sync contents hr=0x80040064 refused=1
+PASS  ...and nothing was asked of the host for it
+
+--- the consumer dies mid-copy: the helper is not wedged ---
+PASS  PublishRemoteFiles offer 10  status=ok count=2
+PASS  consumer starts
+PASS  THE PASTE ENDS (idle) AFTER THE CONSUMER IS GONE, WITHOUT ANYONE ENDING IT  idle
+      (observed, not asserted: 1 file(s), 1048588 bytes left in the destination by the dead consumer)
+PASS  the helper is still alive
+PASS  PublishRemoteFiles offer 11  status=ok count=2
+PASS  consumer starts
+PASS  A NEW PASTE AFTER THE DEAD ONE COMPLETES  file remote_0.bin size=1048583 attrs=0x20 mismatch=-1
+
+--- Clear takes the offer off the clipboard ---
+PASS  PublishRemoteFiles offer 12  status=ok count=2
+PASS  consumer (empty check) starts
+PASS  AFTER Clear THE CLIPBOARD OFFERS NO FileGroupDescriptorW  desc=0 contents=0
+
+--- a bad offer is refused before it reaches the clipboard ---
+PASS  a name with a separator is Refused  ok
+PASS  101 items: no PublishResult (refused by the codec), helper alive
+
+--- Shutdown: the helper clears the clipboard and exits 0 ---
+PASS  PublishRemoteFiles offer 14  status=ok count=2
+PASS  THE HELPER EXITS 0 ON Shutdown  exit=0
+PASS  consumer (empty check) starts
+PASS  ...AND THE CLIPBOARD OFFERS NO FILES AFTERWARDS  desc=0 contents=0
+
+--- the pipe dropped: the helper clears the clipboard and exits 0 on its own ---
+PASS  second helper: pipe
+PASS  ...launched
+PASS  ...hello
+PASS  PublishRemoteFiles offer 15  status=ok count=2
+PASS  THE HELPER NOTICES THE BROKEN PIPE AND EXITS 0  exit=0
+PASS  consumer (empty check) starts
+PASS  ...and no files are offered afterwards  desc=0 contents=0
+PASS  the host side orphaned no pending I/O in this whole run  0
+PASS  the scratch run directory is removed
+
+RESULT: ALL PASS  (100 checks, 0 failed)

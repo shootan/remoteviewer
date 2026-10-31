@@ -1,0 +1,46 @@
+[product client: StandbyLease + ClientSessionController at a real host]
+PASS  the fake directory starts
+FAIL  no scratch directory inside the repository: the build directory (C:\work\gnlink-wt\ka-verify-build\test-scratch) is not inside the repository (C:\work\gnlink-wt\ka-r3); no scratch root will be created anywhere else
+FAIL  a real GNLinkStream starts
+FAIL  the host registers
+PASS  A's and B's leases open (one socket each)
+FAIL  A parks (its StandbyHello admitted)  unsupported: no answer to StandbyHello; 
+FAIL  B parks, its own entry  unsupported: no answer to StandbyHello; 
+PASS  ...and NEITHER started a session
+FAIL  A's activation arguments: its lease's socket and the activation handshake
+FAIL  A's ClientSessionController connects THROUGH the activation (no Hello)  host is required | unsupported: no answer to StandbyHello; 
+FAIL  ...the host admitted it as the first session by activation
+FAIL  ...video reaches A's sink
+FAIL  ...and A's control works (its window list arrives)
+  -- B, parked, pings for 12 s; A must not notice --
+FAIL  B stays parked (its Pings answered), no entry lost  unsupported: no answer to StandbyHello; 
+PASS  NO new session, NO control-session end while B pinged
+FAIL  A is still connected
+  -- B takes over explicitly; A's session ends; A parks again; A takes it back --
+FAIL  B's activation arguments
+FAIL  B connects through ITS activation  host is required | unsupported: no answer to StandbyHello; 
+FAIL  ...a takeover: a new epoch for B
+FAIL  ...video reaches B
+PASS  A's session ends (the host moved on)  error
+FAIL  A's session over (its own operation)
+FAIL  A parks again on its lease's own socket: its entry answers its Pings  unsupported: no answer to StandbyHello; 
+FAIL  A takes it back (a larger generation)   | unsupported: no answer to StandbyHello; 
+FAIL  ...video reaches A again
+FAIL  no ordinary Hello made a session: the first by activation, every rollover by activation  first=0 epochs=0 byActivation=0
+  -- the app's StandbyRunner (a pump thread per PC): start, activate, session over, release --
+PASS  the runner starts a lease for the PC (its own thread)
+PASS  ...it waits for a capability (none of its own), nothing sent
+PASS  the app hands one in (Provide)
+FAIL  ...it parks without anyone pumping it here
+FAIL  TakeActivation + Connect: the runner's PC takes the session by activation (video)
+FAIL  ...while handed off the runner reports it so (the pump leaves the socket alone)
+FAIL  ...the runner takes the session-over of its operation
+FAIL  the host sees the session end (the grant ends with it)
+FAIL  session over: parked again by the runner's own pings
+  -- the product's activation of a session entry (standby_session_link.hpp: its gate + the link) --
+FAIL  an operation stale before its connect: not adopted, the arguments abandoned, the lease keeps its socket  standby_not_ready
+FAIL  Connect refused before its worker: abandoned (the handle closed by the lease), parked again  standby_not_ready
+FAIL  the entry's own operation: adopted, connected by activation, video  standby_not_ready | 
+FAIL  ...while it runs the lease is handed off (the pump leaves the socket to the session)
+FAIL  closed as the bridge closes it: the lease is parked again on its own socket (SessionOver after Disconnect)
+PASS  ...a second Over says nothing

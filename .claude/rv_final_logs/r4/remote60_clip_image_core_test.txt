@@ -1,0 +1,118 @@
+PASS  8192x2048 (64 MiB decoded) with a 16 MiB PNG and 1 MiB text passes: the stated boundary
+PASS  8192x2049 is refused (decoded over 64 MiB)
+PASS  8193 x 1 is refused (side over 8192)
+PASS  8192x4096 (128 MiB) is refused, not a boundary
+PASS  a tiny PNG of 8192x2048 is judged by its decoded size, and passes
+PASS  a tiny PNG of 8192x4096 is refused on its dimensions alone
+PASS  PNG over 16 MiB is refused
+PASS  PNG of exactly 16 MiB passes
+PASS  text over 1 MiB is refused
+PASS  zero size is refused
+PASS  a 32-bit product would overflow: computed in 64 bits
+PASS  24 bpp BI_RGB 4x3: stride rounds to 4 bytes (12), rows after the header
+PASS  negative height is top-down
+PASS  BI_BITFIELDS with a 40-byte header: masks after it, rows after the masks
+PASS  8 bpp without clrUsed has 256 palette entries
+PASS  more palette entries than 8 bpp can index is refused
+PASS  V5 sRGB with its masks inside the header
+PASS  V5 with an embedded profile is refused (never recoloured)
+PASS  V5 calibrated RGB is refused
+PASS  rows missing: truncated
+PASS  BI_JPEG is refused
+PASS  BI_BITFIELDS at 24 bpp is refused
+PASS  an unknown header size is refused
+PASS  a wrap-sized header is refused before any multiplication matters
+PASS  12 bpp is refused
+PASS  planes != 1 is refused
+PASS  height INT32_MIN is refused (cannot be negated)
+PASS  a ControlData datagram on a bulk stream id is bulk's
+PASS  the control stream (1) is not
+PASS  a control-resume stream id (bit31) is not
+PASS  a control-resume id with bit30 also set (0xC0000001) is not bulk's
+PASS  a NACK for a bulk stream is bulk's (stream id at the same offset)
+PASS  a video chunk is not
+PASS  wrong magic is not
+PASS  a truncated datagram is not
+PASS  bulk ids keep the direction in the low bits and never collide with control ids
+PASS  generations start above zero
+PASS  at the wrap, a value whose low 28 bits are 0 is skipped
+PASS  after a wrap, none of the last 64 low values is reused
+PASS  defaults: 256 kbps start, per-ACK rounds, 16 Mbps cap
+PASS  nothing is due before a round completes
+PASS  a round completed 50 ms ago is not due yet (min 100 ms)
+PASS  ...and is due at 100 ms
+PASS  with SRTT 300 ms the interval is the SRTT, not 100 ms
+PASS  initial probe: x2 per round (256k -> 512k)
+PASS  ③ the round after a raise settles (its goodput still carries the old rate): hold
+PASS  x2 per raise, a raise every other round: 4096k after seven rounds
+PASS  ① an isolated loss holds the round (no halving, probe continues)
+PASS  ① loss with a weak delay rise halves and ends the probe
+PASS  ...its trailing round is the same event (no second halving)
+PASS  after recovery: +25 % of the post-decrease rate per second (x1.250 in ~1 s)
+PASS  linear, not exponential: x1.500 after ~2 s (1.5, not 1.5625)
+PASS  a long quiet spell banks at most one second of growth
+PASS  ③ no pending work: hold
+PASS  ③ no fresh round trip measured: hold
+PASS  ③ a window that yielded to control/video: hold
+PASS  ③ control RTT not stable (+30 ms): hold
+PASS  ③ a raise
+PASS  ③ the next round shows no gain (250k again): hold, and stay there
+PASS  ③ ...no repeated raise while nothing new is seen
+PASS  ③ goodput up by less than the raise is not new headroom
+PASS  ③ goodput up by the raise's full size is new headroom: raising resumes
+PASS  ③ ...or a bounded retry after 5 s
+PASS  ② 200 fragments is too few: Unknown (never taken as low)
+PASS  ② 300 fragments, none lost: Low
+PASS  ② 1 % loss over the horizon is an isolated loss: hold
+PASS  ② sustained loss over 5 %% of the horizon is congestion
+PASS  ② ...and a horizon older than 10 s is forgotten (Unknown again)
+PASS  ① a delay rise alone (a shallow queue, competing traffic) still halves
+PASS  ① a retransmission timeout (progress lost) halves
+PASS  competing traffic halves
+PASS  ...its next round is the same event
+PASS  a later round still congested is a new event
+PASS  three decreases in a row pause
+PASS  after the pause comes a small probe, not the old rate
+PASS  a clean window inside the probe does not raise yet
+PASS  never below the floor (64 kbps) by its own decreases
+PASS  the rate stops at the cap (1 Mbps) and the probe ends there
+PASS  ④ a budget of 0 sends nothing (not the 64 kbps floor)
+PASS  ④ a budget under the floor is honoured as it is (10 kbps)
+PASS  ④ lifting the budget does not raise the rate by itself
+PASS  ④ video starts: the budget drops, the rate follows at once
+PASS  ④ ...and the probe after a pause respects a budget of 0
+PASS  LAN jitter (1 ms -> 3 ms) is neither congestion nor a reason to stop raising
+PASS  wall-clock mode (a parameter): due every 2 s, rounds do not matter
+PASS  the first sample is used
+PASS  a resent chunk's sample is not (Karn), even an ordinary-looking one
+PASS  a duplicate pull is not
+PASS  a pull bunched right behind the previous one is not (ACK compression)
+PASS  an ordinary sample moves SRTT by 1/8
+PASS  the bunching floor is 1 ms at high rates
+PASS  a lone 250 ms spike on a 40 ms path is held back (a resent pull, not a queue)
+PASS  ...and dropped when the next sample is normal
+PASS  two high samples in a row are a queue: both count
+PASS  a lost pull's resend is held
+PASS  ...its follower one round trip later, less late, is not a queue: both dropped
+PASS  ...and the next normal sample counts as usual
+PASS  a later-arriving, higher second spike close behind is still a queue
+PASS  no current delay before any sample
+PASS  a pull lost twice (296 then 543 ms, measured) leaves the current delay at the path's 42 ms
+PASS  resent and bunched samples do not enter it
+PASS  a queue lifts every sample: once the last 4 are all high, it is high
+PASS  a first resend of a fragment is a new loss
+PASS  the same fragment NACKed and resent again is a repeat
+PASS  a resend of a chunk the host already confirmed is a lost ACK
+PASS  the numerator does not grow with repeats or lost ACKs (30 sent, 1 lost)
+PASS  repeats and lost ACKs are counted apart
+PASS  Take starts a fresh window
+PASS  a message resent whole (every fragment) is one RTO
+PASS  ...and resending it again is neither loss nor another RTO
+PASS  a new session starts from nothing: the same fragment is a new loss again
+PASS  200 fragments (under the 300 minimum) at 15 % loss is Unknown, not High
+PASS  400 fragments at 15 % is High
+PASS  after a pause longer than the 10 s horizon the old losses are gone: Unknown again
+PASS  an isolated loss with an SRTT still high from old spikes but a normal current delay holds
+PASS  a current delay over max(2x, +50 ms) is congestion
+
+RESULT: PASSED  (116 checks, 0 failed)

@@ -1,0 +1,1385 @@
+// See viewer_control_client.hpp. Bodies are the controlThread lambda of native_video_client_main.cpp,
+// verbatim (viewer split refactor Phase 2-4).
+
+#include "prelogin_control_allowlist.hpp"
+#include "prelogin_input_gate.hpp"
+#include "viewer_control_client.hpp"
+#include "viewer_owner_fence.hpp"
+
+#include <iostream>
+#include <memory>
+#include <sstream>
+
+#include "viewer_constants.hpp"
+#include "viewer_env_util.hpp"
+#include "viewer_input_forward.hpp"
+#include "viewer_log.hpp"
+#include "viewer_picker.hpp"
+#include "viewer_recv_liveness.hpp"
+
+#include "viewer_unlock.hpp"
+#include "reboot_menu_policy.hpp"
+#include "peer_version.hpp"
+#include "paste_apply_wire.hpp"
+#include "viewer_paste_gate.hpp"
+#include "viewer_restore.hpp"
+
+namespace remote60::native_poc::viewer {
+
+int ControlClient::fetch_one_thumbnail(remote60::native_poc::ControlLink& link) {
+  // Routed through the ControlLink, not the raw socket, so a directory session (control
+  // tunnelled over the punched UDP socket) fetches previews too. The exchange itself is the
+  // shared fetch_window_thumbnail, the same code the Android ClientSessionController runs
+  // (F-09); this side only picks the card and stores the pixels -- GDI wants BGRA, which is the
+  // wire order. One card per idle action keeps the strict request/response loop from being
+  // starved. Only invoked when the host advertised the capability, because an older host would
+  // drain the request and never reply. Returns: 1 fetched, 0 nothing to do, -1 link failure
+  // (stream desynced).
+  if (!ctx.picker.hostSupportsThumbnails.load(std::memory_order_relaxed)) return 0;
+  uint64_t id = 0;
+  {
+    std::lock_guard<std::mutex> lk(ctx.picker.thumbMu);
+    if (ctx.picker.thumbFetchQueue.empty()) return 0;
+    id = ctx.picker.thumbFetchQueue.front();
+    ctx.picker.thumbFetchQueue.pop_front();
+  }
+  remote60::native_poc::WindowThumbnailReply reply;
+  if (!remote60::native_poc::fetch_window_thumbnail(link, id, 256, 160, qpc_now_us(), &reply)) {
+    return -1;
+  }
+  // Recorded whether or not pixels came back. flags bit0 clear is the host saying "not this
+  // window" -- a complete, successful exchange that yielded no preview -- and without noting it
+  // the queue cannot tell that window from one it has never asked about.
+  const uint64_t attemptUs = qpc_now_us();
+  if (reply.present) {
+    auto thumb = std::make_shared<WindowThumb>();
+    thumb->width = reply.width;
+    thumb->height = reply.height;
+    thumb->bgra = std::move(reply.bgra);
+    thumb->fetchedUs = attemptUs;
+    {
+      std::lock_guard<std::mutex> lk(ctx.picker.thumbMu);
+      ctx.picker.thumbs[id] = std::move(thumb);
+      auto& attempt = ctx.picker.thumbAttempts[id];
+      attempt.lastAttemptUs = attemptUs;
+      attempt.failed = false;
+    }
+    // Outside the lock: the paint handler takes ctx.picker.thumbMu, and invalidating while
+    // holding it invited a stall on every received preview.
+    InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+  } else {
+    {
+      std::lock_guard<std::mutex> lk(ctx.picker.thumbMu);
+      auto& attempt = ctx.picker.thumbAttempts[id];
+      attempt.lastAttemptUs = attemptUs;
+      attempt.failed = true;
+    }
+    // Repaint for this one too: the card has to stop saying the preview is on its way.
+    InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+  }
+  return 1;
+}
+
+namespace {
+
+// Paste on demand: hands one paste's answer to the UI thread, which owns the key it releases.
+void post_paste_answer(ViewerState& ctx, const PasteAnswer& a) {
+  if (!ctx.session.hwnd) return;
+  auto* copy = new PasteAnswer(a);
+  if (!PostMessageW(ctx.session.hwnd, kMsgPasteResult, 0, reinterpret_cast<LPARAM>(copy))) delete copy;
+}
+
+PasteFailure paste_failure_for_text(remote60::native_poc::PasteApplyResult r) {
+  switch (r) {
+    case remote60::native_poc::PasteApplyResult::Failed:
+      return PasteFailure::HostWrite;
+    case remote60::native_poc::PasteApplyResult::TooLarge:
+      return PasteFailure::TooLarge;
+    default:
+      return PasteFailure::Refused;
+  }
+}
+
+PasteFailure paste_failure_for_image(const remote60::native_poc::ClipImageClient::PasteOutcome& o) {
+  using remote60::native_poc::ClipImageReason;
+  using remote60::native_poc::ClipOutcome;
+  if (o.outcome == ClipOutcome::NotSent) {
+    return static_cast<remote60::native_poc::ClipPackageResult>(o.detail) ==
+                   remote60::native_poc::ClipPackageResult::TooLarge
+               ? PasteFailure::TooLarge
+               : PasteFailure::ReadFailed;
+  }
+  if (o.outcome == ClipOutcome::Cancelled) {
+    const auto why = static_cast<ClipImageReason>(o.detail);
+    if (why == ClipImageReason::User) return PasteFailure::Cancelled;
+    if (why == ClipImageReason::Session) return PasteFailure::Link;
+  }
+  return PasteFailure::Refused;
+}
+
+PasteFailure paste_failure_for_files(uint8_t verdict) {
+  namespace fn = remote60::native_poc::file_copy::net;
+  switch (static_cast<fn::Verdict>(verdict)) {
+    case fn::Verdict::HelperUnavailable:
+      return PasteFailure::HelperUnavailable;
+    case fn::Verdict::StaleEpoch:
+      return PasteFailure::Link;
+    case fn::Verdict::TooLarge:
+    case fn::Verdict::TooMany:
+      return PasteFailure::TooLarge;
+    default:
+      return PasteFailure::Refused;
+  }
+}
+
+}  // namespace
+
+int ControlClient::pump_paste(remote60::native_poc::ControlLink& link) {
+  auto& clip = ctx.control.clipboard;
+  // r4: a paste waits for one fresh poll before it sends -- a copy made on the host a moment ago,
+  // inside the 700 ms poll interval, must still win over this PC's older copy.
+  {
+    uint64_t probeId = 0;
+    {
+      std::lock_guard<std::mutex> lock(clip.mu);
+      if (clip.probeRequested) {
+        clip.probeRequested = false;
+        probeId = clip.probeId;
+      }
+    }
+    // r5 (F1): the baseline a copy here asked for, before anything else: a paste's check compares with it.
+    uint64_t baselineToken = 0;
+    {
+      std::lock_guard<std::mutex> lock(clip.mu);
+      if (clip.baselineRequested) {
+        clip.baselineRequested = false;
+        baselineToken = clip.baselineToken;
+      }
+    }
+    if (baselineToken != 0) {
+      const int r = poll_host_clipboard(link, /*forced=*/true);
+      if (r < 0) return -1;
+      PasteAnswer b;
+      b.id = baselineToken;
+      b.probe = true;
+      b.baseline = true;
+      b.genKnown = clip.hostCopyGenKnown.load(std::memory_order_acquire);
+      b.hostCopyGen = clip.hostCopyGen.load(std::memory_order_acquire);
+      b.connGen = clip.connGen.load(std::memory_order_acquire);
+      post_paste_answer(ctx, b);
+      if (probeId == 0) return 1;
+    }
+    if (probeId != 0) {
+      const int r = poll_host_clipboard(link, /*forced=*/true);
+      PasteAnswer a;
+      a.id = probeId;
+      a.probe = true;
+      if (r < 0) {
+        a.failure = PasteFailure::Link;
+        post_paste_answer(ctx, a);
+        return -1;
+      }
+      a.genKnown = clip.hostCopyGenKnown.load(std::memory_order_acquire);
+      a.hostCopyGen = clip.hostCopyGen.load(std::memory_order_acquire);
+      a.connGen = clip.connGen.load(std::memory_order_acquire);
+      post_paste_answer(ctx, a);
+      return 1;
+    }
+  }
+  // Images and files settle inside their clients; their outcome is passed on as soon as it exists.
+  {
+    remote60::native_poc::ClipImageClient::PasteOutcome io;
+    if (ctx.control.clipImage.TakePasteOutcome(&io)) {
+      PasteAnswer a;
+      a.id = io.id;
+      a.format = PasteFormat::Image;
+      a.applied = io.applied;
+      a.failure = io.applied ? PasteFailure::None : paste_failure_for_image(io);
+      a.detail = static_cast<uint32_t>(io.outcome) << 8 | io.detail;
+      post_paste_answer(ctx, a);
+    }
+    remote60::native_poc::FileCopyClient::PasteOutcome fo;
+    if (ctx.control.fileCopy.TakePasteOutcome(&fo)) {
+      PasteAnswer a;
+      a.id = fo.id;
+      a.format = PasteFormat::Files;
+      a.applied = fo.applied;
+      a.failure = fo.applied ? PasteFailure::None : paste_failure_for_files(fo.verdict);
+      a.detail = fo.verdict;
+      post_paste_answer(ctx, a);
+    }
+  }
+  std::u16string text;
+  uint64_t id = 0, hash = 0;
+  uint32_t revision = 0, seq = 0;
+  {
+    std::lock_guard<std::mutex> lock(clip.mu);
+    if (!clip.havePasteText) return 0;
+    clip.havePasteText = false;
+    text = std::move(clip.pasteText);
+    clip.pasteText.clear();
+    id = clip.pasteTextId;
+    hash = clip.pasteTextHash;
+    revision = clip.pasteTextRevision;
+    seq = ++clip.nextSeq;
+  }
+  PasteAnswer a;
+  a.id = id;
+  a.format = PasteFormat::Text;
+  if (!clip.hostPasteOnDemand.load(std::memory_order_acquire)) {
+    // The UI asked for a host that has since gone (a reconnect to an older one): nothing is sent.
+    a.failure = PasteFailure::UpdateNeeded;
+    post_paste_answer(ctx, a);
+    return 0;
+  }
+  const uint64_t startUs = qpc_now_us();
+  const std::vector<uint8_t> req =
+      remote60::native_poc::build_paste_text_apply(seq, id, revision, text, hash, startUs);
+  remote60::native_poc::ControlPasteAppliedMessage reply{};
+  const bool exchanged = link.Write(req.data(), req.size()) && link.EndMessage() && link.Read(&reply, sizeof(reply)) &&
+                         remote60::native_poc::paste_applied_valid(reply, seq, id);
+  if (!exchanged) {
+    a.failure = PasteFailure::Link;
+    post_paste_answer(ctx, a);
+    std::cout << "[native-video-client][paste] text exchange failed (link)\n";
+    return -1;
+  }
+  const auto result = static_cast<remote60::native_poc::PasteApplyResult>(reply.result);
+  a.applied = result == remote60::native_poc::PasteApplyResult::Applied;
+  a.failure = a.applied ? PasteFailure::None : paste_failure_for_text(result);
+  a.detail = static_cast<uint32_t>(reply.result) << 24 | static_cast<uint32_t>(reply.stage) << 16 | (reply.win32 & 0xffff);
+  std::cout << "[native-video-client][paste] text answer result=" << static_cast<int>(reply.result)
+            << " stage=" << static_cast<int>(reply.stage) << " win32=" << reply.win32
+            << " utf16Count=" << text.size() << " ms=" << (qpc_now_us() - startUs) / 1000
+            << " hostUserCopyGen=" << reply.hostUserCopyGen << "\n";
+  post_paste_answer(ctx, a);
+  return 1;
+}
+
+int ControlClient::pump_clipboard_sync(remote60::native_poc::ControlLink& link) {
+  auto& clip = ctx.control.clipboard;
+  if (!clip.enabled.load(std::memory_order_relaxed) ||
+      !clip.hostSupports.load(std::memory_order_relaxed)) {
+    return 0;
+  }
+  // Paste on demand first: a key is being held for its answer.
+  {
+    const int p = pump_paste(link);
+    if (p != 0) return p;
+  }
+  // Once per session, ask the UI thread for whatever is on the clipboard now and send it. This is
+  // what makes the machine the user just connected from the source of truth: the host's clipboard
+  // may be older, and silently pulling it over the top of a fresh copy is the bug this prevents.
+  if (clip.policy.TakeInitialPush() && ctx.session.hwnd) {
+    PostMessageW(ctx.session.hwnd, kMsgPushClipboardNow, 0, 0);
+  }
+  // Clipboard image v1: an image copy's offer / cancel / status exchange, one per idle turn.
+  {
+    const int r = ctx.control.clipImage.Pump(link);
+    if (r != 0) return r;
+    // File copy (t-zdmsd4gb): offer / 700 ms paste query / prepare, one per idle turn.
+    const int f = ctx.control.fileCopy.Pump(link);
+    if (f != 0) return f;
+    // Paste on demand: an image the host refused is a failed paste, not a cue to send its text
+    // instead -- the user pasted the image, and something else must not arrive in its place (Q3).
+    std::u16string fallback;
+    (void)ctx.control.clipImage.TakeFallbackText(&fallback);
+  }
+  // (a) A local clipboard change the UI thread left pending goes first -- the user copying on the
+  // viewer expecting to paste on the host is the interactive case, so it should not wait behind the
+  // poll.
+  std::u16string outText;
+  uint64_t outHash = 0;
+  uint32_t seq = 0;
+  bool haveOutbound = false;
+  {
+    std::lock_guard<std::mutex> lock(clip.mu);
+    if (clip.hasPending) {
+      outText = std::move(clip.pendingText);
+      outHash = clip.pendingHash;
+      seq = ++clip.nextSeq;
+      clip.hasPending = false;
+      clip.pendingText.clear();
+      haveOutbound = true;
+    }
+  }
+  if (haveOutbound) {
+    const bool sent = remote60::native_poc::send_clipboard_update(link, seq, outText, outHash, qpc_now_us());
+    // r6 (Codex F2): taken off the shared pending already -- whether it went or the owner fence refused its write,
+    // this copy is zeroed now
+    if (!outText.empty()) SecureZeroMemory(&outText[0], outText.size() * sizeof(char16_t));
+    outText.clear();
+    if (!sent) return -1;
+    return 1;
+  }
+  // (b) Otherwise poll the host for a change, on an interval -- the host cannot push, so this is the
+  // only way host -> viewer text arrives.
+  return poll_host_clipboard(link, false);
+}
+
+int ControlClient::poll_host_clipboard(remote60::native_poc::ControlLink& link, bool forced) {
+  auto& clip = ctx.control.clipboard;
+  const uint64_t nowUs = qpc_now_us();
+  if (!forced && !clip.policy.ShouldPoll(nowUs)) return 0;
+  clip.policy.NotePolled(nowUs);
+  remote60::native_poc::ClipboardPollReply reply;
+  if (!remote60::native_poc::poll_clipboard(link, clip.policy.knownGeneration(), nowUs, &reply)) {
+    return -1;
+  }
+  // Paste on demand r4: a copy made on the host in any way (menu, at that PC, an image) shows here
+  // as a higher copy generation. The first value of a session is where it starts, not a copy.
+  if (reply.hasCopyGen) {
+    const bool known = clip.hostCopyGenKnown.exchange(true, std::memory_order_acq_rel);
+    const uint64_t before = clip.hostCopyGen.exchange(reply.copyGen, std::memory_order_acq_rel);
+    if (known && reply.copyGen > before) {
+      std::cout << "[native-video-client][paste] remote copy on the host (any format) copyGen=" << reply.copyGen
+                << (forced ? " (seen by a paste's check)" : "") << "\n";
+    }
+  }
+  // The first reply of a session only sets the generation: its contents are from before this
+  // session and must not land on top of what the user copied since (the stale-revival bug).
+  if (clip.policy.OnPollReply(reply.generation, reply.hasData)) {
+    // r7 (D1): whether the remote PC's text lands here is decided on the UI thread, which records this
+    // PC's copies -- here it is only handed over, with what that decision needs from this one reply:
+    // its copy generation and the connection it came on (this thread bumps connGen, so it is the
+    // poll's). The UI thread also writes it, as the owner of the clipboard listener window.
+    if (reply.hasData && !reply.text.empty() && ctx.session.hwnd) {
+      auto* item = new RemoteTextApply;
+      item->text = std::move(reply.text);
+      item->hash = reply.hash;
+      item->hasCopyGen = reply.hasCopyGen;
+      item->copyGen = reply.copyGen;
+      item->connGen = clip.connGen.load(std::memory_order_acquire);
+      if (!PostMessageW(ctx.session.hwnd, kMsgApplyClipboard, 0, reinterpret_cast<LPARAM>(item))) delete item;
+    }
+  }
+  return 1;
+}
+
+void ControlClient::handle_pong(const ControlOutboundAction& action, const ControlPongMessage& pong) {
+  const uint64_t doneUs = qpc_now_us();
+  ctx.control.scheduler.OnPingCompleted(doneUs);
+  {
+    // Say it once per transition rather than every ping. A frozen picture with no
+    // explanation is the worst version of this; a line saying a Windows security
+    // prompt is on screen turns it into something the operator can act on.
+    const bool secure =
+        (pong.captureTargetFlags &
+         remote60::native_poc::kCaptureFlagSecureDesktopActive) != 0;
+    ctx.session.hostImeSupported.store(
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagHostImeV1) != 0,
+        std::memory_order_relaxed);
+    ctx.session.hostFrameHeartbeat.store(
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagFrameHeartbeat) != 0);
+    const bool imeV2 =
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagHostImePulseStateV2) != 0;
+    ctx.session.hostImeV2Supported.store(imeV2, std::memory_order_relaxed);
+    // Enter host-IME negotiation once, when the user opted in and the host speaks v2. Disabled ->
+    // pending; the control loop's align pump then aligns the host to EN and posts activate. A
+    // v1-only host never enters, so it stays on the unchanged legacy client-IME path. (Codex Edge 4.)
+    if (host_ime_optin() && imeV2 &&
+        ctx.session.imeMode.load(std::memory_order_acquire) == 0 &&
+        !ctx.session.imeEnterPending.exchange(true, std::memory_order_acq_rel)) {
+      const uint32_t gen = ctx.session.imeGeneration.fetch_add(1, std::memory_order_acq_rel) + 1;
+      std::cout << "[native-video-client][ime] enter negotiation gen=" << gen << "\n";
+    }
+    ctx.session.unlockSupported.store(
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagUnlockSealedV1) != 0,
+        std::memory_order_relaxed);
+    // Raw capability bits for the reboot/prelogin menu affordances (prelogin-service r3). Refreshed
+    // every pong like the others so a reconnect never inherits a stale answer.
+    ctx.session.hostCaptureFlags.store(pong.captureTargetFlags, std::memory_order_relaxed);
+    const bool roleWasKnown = ctx.session.hostRoleKnown.exchange(true, std::memory_order_seq_cst);  // r7 H6
+    // rel-0163 r3/r4: a pick held until now runs once, on the UI thread (the R1 handshake's control half).
+    note_host_role_known(ctx, !roleWasKnown);
+    // lockscreen-cred r1: the held-back notice is said again on the next arrival at EITHER logon screen.
+    if (!remote60::native_poc::prelogin::HostAtLogonScreen(pong.captureTargetFlags)) {
+      ctx.session.preloginHeldBackNoticed.store(false, std::memory_order_release);  // say it again next time
+    }
+    // "Windows 로그인": typed is not logged in. The host leaving the pre-login screen after the password
+    // went in (within two minutes of it) is said as exactly that -- lockscreen-cred r1 (Codex contract 5):
+    // not as a login this viewer saw (kPreloginLeftLogon, "not confirmed").
+    if (const uint64_t typedAt = ctx.session.preloginInjectedAtUs.load(std::memory_order_acquire)) {
+      const bool stillAtLogon = (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagPreloginV1) != 0;
+      const bool recent = qpc_now_us() - typedAt < 120000000ull;
+      if (!stillAtLogon || !recent) {
+        ctx.session.preloginInjectedAtUs.store(0, std::memory_order_release);
+        if (!stillAtLogon && recent) {
+          std::cout << "[native-video-client][prelogin-login] host left the logon screen after the typed password\n";
+          PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(kLoginRolePrelogin, kPreloginLeftLogon, ctx.session.controlRunGen.load(std::memory_order_acquire)), 0);
+        }
+      }
+    }
+    // Mouse X buttons (back / forward): sent only to a host that says it maps them. Set every
+    // pong like the others, so a reconnect never inherits an answer. (mouse-xbutton r1)
+    ctx.session.hostMouseXButtons.store(
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagMouseXButtonsV1) != 0,
+        std::memory_order_release);
+    if (secure != ctx.control.reportedSecure) {
+      ctx.control.reportedSecure = secure;
+      std::cout << "[native-video-client] secure-desktop-active="
+                << (secure ? 1 : 0)
+                << (secure ? "  (a Windows security prompt is on screen; it "
+                             "cannot be captured, so the picture is paused)"
+                           : "  (picture resumes)")
+                << std::endl;
+    }
+    // Clipboard text sync (K1): whether this host understands the clipboard messages. Set every
+    // pong (cheap, and a reconnect to a different host must not carry the old answer forward).
+    const bool clipboardHost =
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagClipboardTextV1) != 0;
+    // The first pong that reports support opens a session as far as the clipboard is concerned:
+    // arm the baseline poll and the one-shot push. Done on the transition, so a reconnect re-arms
+    // and a host's previous-session clipboard is never inherited.
+    if (clipboardHost && !ctx.control.clipboard.hostSupports.load(std::memory_order_relaxed)) {
+      std::lock_guard<std::mutex> lock(ctx.control.clipboard.mu);
+      ctx.control.clipboard.core.Reset();
+      ctx.control.clipboard.policy.OnConnected();
+      ctx.control.clipboard.connGen.fetch_add(1, std::memory_order_acq_rel);
+      ctx.control.clipboard.havePasteText = false;  // asked on the previous connection
+      ctx.control.clipboard.probeRequested = false;
+      ctx.control.clipboard.baselineRequested = false;
+      ctx.control.clipboard.hostCopyGenKnown.store(false, std::memory_order_release);  // a new session's baseline
+    }
+    // Paste on demand: whether this host confirms a paste. Set every pong, like the bits around it.
+    ctx.control.clipboard.hostPasteOnDemand.store(
+        clipboardHost && (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagPasteOnDemandV1) != 0,
+        std::memory_order_release);
+    ctx.control.clipboard.hostSupports.store(clipboardHost, std::memory_order_relaxed);
+    // Clipboard image v1: only together with the text sync (images ride its on/off and its session
+    // rules) and the bulk channel the HelloAck agreed to.
+    ctx.control.clipImage.SetHostSupports(
+        clipboardHost && ctx.session.bulkChannelNegotiated &&
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagClipboardImageV1) != 0);
+    // File copy: the same conditions and its own bit (0x800).
+    ctx.control.fileCopy.SetHostSupports(
+        clipboardHost && ctx.session.bulkChannelNegotiated &&
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagFileCopyV1) != 0);
+    ctx.control.fileCopy.SetHostOrdersOffers(
+        (pong.captureTargetFlags & remote60::native_poc::kCaptureFlagFileOfferCopyGenV1) != 0);
+  }
+  const uint64_t rttUs =
+      (doneUs >= action.ping.clientSendQpcUs) ? (doneUs - action.ping.clientSendQpcUs) : 0;
+  ctx.control.lastRttUs.store(rttUs, std::memory_order_relaxed);
+  ctx.control.lastRttAtUs.store(doneUs, std::memory_order_relaxed);
+  std::cout << "[native-video-client][control] seq=" << pong.seq
+            << " rttUs=" << rttUs
+            << " hostQueueUs=" << ((pong.hostSendQpcUs >= pong.hostRecvQpcUs)
+                                        ? (pong.hostSendQpcUs - pong.hostRecvQpcUs)
+                                        : 0)
+            << " hostCapPid=" << pong.captureTargetPid
+            << " hostCapProc=" << fixed_cstr_to_string(
+                   pong.captureTargetProcess, sizeof(pong.captureTargetProcess))
+            << " hostCapRebind=" << pong.captureRebindCount
+            << "\n";
+  // GNLink stream telemetry (diagnostics only): a periodic NTP-style clock offset
+  // (host QPC minus client QPC) plus RTT, so the seq-joined host/client logs can
+  // also be roughly aligned on an absolute timeline. Runs once per pong (~control
+  // interval); no new control traffic is introduced.
+  {
+    const int64_t t1 = static_cast<int64_t>(action.ping.clientSendQpcUs);
+    const int64_t t2 = static_cast<int64_t>(pong.hostRecvQpcUs);
+    const int64_t t3 = static_cast<int64_t>(pong.hostSendQpcUs);
+    const int64_t t4 = static_cast<int64_t>(doneUs);
+    const int64_t clockOffsetUs = ((t2 - t1) + (t3 - t4)) / 2;
+    std::ostringstream telem;
+    telem << "[native-video-client][telemetry] stage=clock"
+          << " pingSeq=" << pong.seq
+          << " rttUs=" << rttUs
+          << " clockOffsetUs=" << clockOffsetUs
+          << " clientSendUs=" << action.ping.clientSendQpcUs
+          << " hostRecvUs=" << pong.hostRecvQpcUs
+          << " hostSendUs=" << pong.hostSendQpcUs
+          << " clientRecvUs=" << doneUs;
+    log_client_line(ctx, telem.str());
+  }
+}
+
+void ControlClient::handle_window_list(const ControlWindowListMessage& windowList) {
+  // Handed to the UI thread rather than applied here: ApplyWindowList sizes the visible grid from
+  // the window's client rect and DPI, and the thumbnail queue it fills is consumed against the
+  // same layout. A control thread computing UI layout was the thread-affinity smell F-07 names.
+  // Falls back to applying inline only when there is no window to post to (headless harness).
+  bool posted = false;
+  if (ctx.session.hwnd) {
+    auto* copy = new ControlWindowListMessage(windowList);
+    posted = PostMessageW(ctx.session.hwnd, kMsgApplyWindowList, 0, reinterpret_cast<LPARAM>(copy)) != FALSE;
+    if (!posted) delete copy;
+  }
+  if (!posted) apply_window_list_snapshot(ctx, windowList);
+  // The window list is where the host says whether it knows the monitor
+  // messages; asking one that does not would stall this loop waiting for a
+  // reply that never comes.
+  const bool supportsMonitors =
+      (windowList.flags &
+       remote60::native_poc::kControlWindowListFlagMonitors) != 0;
+  const bool monitorsNewlySupported =
+      ctx.picker.windowPanel.SetHostSupportsMonitors(supportsMonitors);
+  // dxgi-wedge-fix r1: whether this host answers a screen pick through the window-select transaction
+  // (with the generation the picker's gate waits on) -- what a restored screen is selected through.
+  ctx.picker.windowPanel.SetHostSupportsMonitorSelect(
+      (windowList.flags & remote60::native_poc::kControlWindowListFlagMonitorSelectTransactionV1) != 0);
+  ctx.picker.restore.windowListSeen.store(true, std::memory_order_release);
+  if (ctx.session.hwnd) PostMessageW(ctx.session.hwnd, kMsgRestoreStep, 0, 0);
+  // The stored --monitor is auto-applied only when the session opens straight
+  // into the stream. In picker mode the user has not chosen a target yet, so
+  // selecting a monitor here would restart the host capture before any pick and
+  // fight the first-frame gate; a monitor pick is a follow-up (toolbar) action.
+  if (!startInPicker && monitorsNewlySupported && ctx.session.requestedMonitorId > 0) {
+    // Only when a screen other than the primary was asked for: selecting monitor
+    // zero would restart the capture for no change.
+    ctx.picker.windowPanel.RequestMonitorSelect(ctx.session.requestedMonitorId);
+  } else if (monitorsNewlySupported) {
+    // dxgi-wedge-fix r4 (Codex r3 ③): ask for the screen list once per connection, as soon as the host
+    // says it has the monitor messages -- picker or not. Without it the toolbar never had a screen switch
+    // (it needs two or more screens), so a user could not choose a screen at all. A query only: nothing is
+    // selected, the stream/generation are untouched, and the restore descriptor does not change.
+    ctx.picker.windowPanel.RequestMonitorList();
+    log_client_line(ctx, "[native-video-client][control] monitor-list requested (host has the monitor messages)");
+  }
+  InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+}
+
+void ControlClient::handle_window_selected(const ControlWindowSelectedMessage& windowSelected) {
+  apply_window_selected_result(ctx, windowSelected);
+  queue_window_list_request(ctx, "window_list_request pending");
+  InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+}
+
+void ControlClient::handle_input_ack(const ControlInputAckMessage& inputAck) {
+  const uint64_t ackCount = ctx.control.scheduler.RecordInputAck(args.inputLogEvery);
+  if (ackCount > 0) {
+    std::cout << "[native-video-client][input] ackSeq=" << inputAck.seq
+              << " sent=" << ackCount
+              << " dropped=" << ctx.control.inputQueue.dropped_count()
+              << "\n";
+  }
+}
+
+
+
+// ---------------------------------------------------------------- control resume (item 8, C3)
+
+bool ControlClient::video_alive(uint64_t nowUs) const {
+  // Deliberately the watchdog's own definition, called rather than restated. A resume is
+  // asked for exactly while the picture is the reason the session is still here; if this
+  // drifted from liveness_video_stopped the viewer would either keep asking after the session
+  // had been written off, or stop asking while it was still being kept alive.
+  SessionLivenessSample sample;
+  sample.nowUs = nowUs;
+  sample.stage = ctx.recvLive.current_stage();
+  sample.lastPublishUs = ctx.recvLive.lastPublishUs.load(std::memory_order_relaxed);
+  SessionLivenessConfig cfg;
+  cfg.deadSessionUs = static_cast<uint64_t>(ctx.session.deadSessionUs);
+  return !liveness_video_stopped(sample, cfg);
+}
+
+bool ControlClient::control_round_trip(remote60::native_poc::ControlLink& link) {
+  // A ping of this worker's own, not one taken from the scheduler: the scheduler's pings are
+  // paced and carry telemetry, and what is wanted here is one exchange, now, whose only
+  // meaning is that both ends agree about the stream ids they just changed.
+  remote60::native_poc::ControlOutboundAction action;
+  action.kind = remote60::native_poc::ControlOutboundActionKind::Ping;
+  action.ping.header.magic = remote60::native_poc::kMagic;
+  action.ping.header.type = static_cast<uint16_t>(remote60::native_poc::MessageType::ControlPing);
+  action.ping.header.size = static_cast<uint16_t>(sizeof(action.ping));
+  action.ping.clientSendQpcUs = remote60::native_poc::qpc_now_us();
+  action.expectedResponseType = remote60::native_poc::MessageType::ControlPong;
+  action.expectedResponseSize =
+      static_cast<uint16_t>(sizeof(remote60::native_poc::TcpControlResponse{}.pong));
+  remote60::native_poc::TcpControlResponse response;
+  return remote60::native_poc::execute_control_action(link, action, &response) &&
+         response.kind == remote60::native_poc::TcpControlResponseKind::Pong;
+}
+
+bool ControlClient::begin_control_resume(uint64_t nowUs) {
+  // ka-pc-impl r6 (Codex F2): after the owner fence nothing is resumed -- the session is ending; only releases go.
+  if (gate_is_fenced(ctx.control.fenceGate)) return false;
+  // Only the tunnelled path. A direct TCP control socket that dies is a different failure with
+  // a different repair, and this one would be re-keying a stream that is not there.
+  if (!ctx.control.overUdp.load(std::memory_order_acquire)) return false;
+  // The other three reasons to say no live with the recovery itself -- an old host, a
+  // cancelled session, and a session whose picture has stopped (which is one that is ending,
+  // not one that is broken) -- so a harness driving this end to end asks the same three
+  // questions rather than three that look like them.
+  if (!ctx.control.resume.BeginBreakIfPossible(nowUs, video_alive(nowUs),
+                                               !ctx.session.running.load())) {
+    return false;
+  }
+  // Control IS down, and saying otherwise would leave the toolbar claiming a link that answers
+  // nothing. It also starts the watchdog's own clock, which is what keeps the 30 s ceiling a
+  // single budget rather than two that can be spent one after the other.
+  ctx.control.connected.store(false, std::memory_order_relaxed);
+  set_window_panel_status(ctx, "control_resuming");
+  if (ctx.session.hwnd) InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+  return true;
+}
+
+bool ControlClient::pump_control_resume(
+    std::unique_ptr<remote60::native_poc::ControlLink>& link,
+    remote60::native_poc::ControlWorkerState& state) {
+  ctx.control.udpControl.Tick();
+
+  remote60::native_poc::ResumePumpHooks hooks;
+  hooks.cancelled = [this] { return !ctx.session.running.load() || gate_is_fenced(ctx.control.fenceGate); };
+  hooks.nowUs = [] { return qpc_now_us(); };
+  hooks.videoAlive = [this] { return video_alive(qpc_now_us()); };
+  hooks.proveChannel = [this, &link] {
+    // The link is holding a half-read message from the stream that just died. The ordinary
+    // loop builds it once precisely so that partial message is not lost -- here losing it is
+    // the point, because it belongs to a stream neither end is listening on any more.
+    link = std::make_unique<remote60::native_poc::UdpControlLink>(&ctx.control.udpControl,
+                                                                 kUdpControlReadTimeoutMs);
+    FenceGatedLink gatedProbe(link, ctx.control.fenceGate);  // r6: no probe write after the owner fence
+    return control_round_trip(gatedProbe);
+  };
+  hooks.onResumed = [this](uint64_t toFirstSendUs, uint64_t toRunningUs) {
+    std::ostringstream os;
+    os << "[native-video-client][control-resume] resumed resumeId="
+       << ctx.control.resume.resume_id()
+       << " attempts=" << ctx.control.resume.attempts()
+       << " breakToFirstSendUs=" << toFirstSendUs
+       << " breakToRunningUs=" << toRunningUs;
+    log_client_line(ctx, os.str());
+    // Actions queued while the channel was dead are dropped rather than delivered late. The
+    // user was clicking at a picture that could not answer; replaying thirty seconds of that
+    // into the host the moment it can hear again is worse than losing it. RELEASES are kept:
+    // a key-up or button-up the user made during the break is the one thing that lets go of
+    // what the host is still holding, and dropping it is how a Shift stayed down. (RV-01)
+    // Filtered in place rather than Reset() so the sequence numbers keep counting -- the host
+    // is the same session and has not forgotten where they were.
+    uint32_t dropped = 0;
+    uint32_t keptReleases = 0;
+    ctx.control.inputQueue.DropAllButReleases(&dropped, &keptReleases);
+    std::cout << "[native-video-client][control-resume] dropped " << dropped
+              << " input actions queued during the break, kept " << keptReleases
+              << " releases\n";
+    ctx.control.connected.store(true, std::memory_order_relaxed);
+    set_window_panel_status(ctx, std::string());
+    if (ctx.session.hwnd) {
+      // The existing release-all contract, on the thread that owns the key state. A key-up
+      // sent while the tunnel was dead is gone, and the host is still holding whatever was
+      // down when it broke.
+      PostMessageW(ctx.session.hwnd, kMsgControlResumed, 0, 0);
+      InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+    }
+  };
+  hooks.idle = [] {
+    // Idle can also mean the video stopped too, in which case this waits and asks nothing
+    // while the session watchdog decides -- it declares the session dead after deadSessionUs
+    // and closes the window, which ends this loop through the cancelled hook above.
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  };
+
+  switch (ctx.control.resume.Pump(hooks)) {
+    case remote60::native_poc::ResumePumpResult::Resumed:
+      state = remote60::native_poc::ControlWorkerState::Running;
+      return true;
+    case remote60::native_poc::ResumePumpResult::GaveUp:
+    case remote60::native_poc::ResumePumpResult::Cancelled:
+      state = remote60::native_poc::ControlWorkerState::Closed;
+      return false;
+    default:
+      return true;
+  }
+}
+void ControlClient::Run() {
+  const uint64_t runGen = ctx.session.controlRunGen.fetch_add(1, std::memory_order_acq_rel) + 1;  // r5 G11: a new connection's run
+  // dxgi-wedge-fix r4: the screen capability (and so the one screen-list request) belongs to THIS connection.
+  ctx.picker.windowPanel.SetHostSupportsMonitors(false);
+  ctx.session.hostRoleKnown.store(false, std::memory_order_release);   // r7 H6: not until its first pong
+  // lockscreen-cred r2 (Codex L5): a password still waiting from an earlier connection is that connection's --
+  // dropped (zeroed) now, not left for this one (the send would refuse it too; this makes it not linger).
+  if (ctx.session.preloginCredRequested.load(std::memory_order_acquire) &&
+      ctx.session.preloginCredRunGen.load(std::memory_order_acquire) != runGen) {
+    std::wstring stale;
+    {
+      std::lock_guard<std::mutex> lock(ctx.session.preloginCredMu);
+      stale.swap(ctx.session.preloginCredPassword);
+    }
+    if (!stale.empty()) SecureZeroMemory(&stale[0], stale.size() * sizeof(wchar_t));
+    ctx.session.preloginCredRequested.store(false, std::memory_order_release);
+  }
+  // Built once, not per action: the tunnelled link carries the partially-read inbound
+  // message between calls, and a fresh one each time would drop whatever it held.
+  std::unique_ptr<remote60::native_poc::ControlLink> controlLink;
+  if (ctx.control.overUdp.load(std::memory_order_acquire)) {
+    controlLink = std::make_unique<remote60::native_poc::UdpControlLink>(
+        &ctx.control.udpControl, kUdpControlReadTimeoutMs);
+  } else {
+    controlLink = std::make_unique<remote60::native_poc::TcpControlLink>(controlSock);
+  }
+  // ka-pc-impl r6 (Codex F2): every write of this loop asks the owner-fence gate first (viewer_owner_fence.hpp): after
+  // the fence only a counted release's exchange starts a write -- whichever branch of the loop it comes from.
+  FenceGatedLink gated(controlLink, ctx.control.fenceGate);
+
+  // P0 telemetry accumulators (input serialization diagnosis, #351): one line per second.
+  // Move-specific (BLOCKER 1) + coalesce delta (BLOCKER 2) + queue age (HIGH 3) + windowUs.
+  // lockscreen-cred r1: a typed lock-screen credential this connection is following to its unlock (0 = none).
+  // lockscreen-cred r1: key downs the last look held back on this connection (their ups are not sent).
+  bool heldDownAtSend[256] = {};
+  uint32_t lockCredPollRequestId = 0;
+  ctx.session.lockCredPending.store(false, std::memory_order_release);  // a new connection follows nothing yet
+  uint64_t lockCredPollNextUs = 0;
+  uint64_t lockCredPollDeadlineUs = 0;
+  uint64_t p0MoveSent = 0;       // move InputEvents actually sent (kind==1)
+  uint64_t p0MoveRttSumUs = 0;   // send->ack RTT for moves
+  uint64_t p0MoveRttMaxUs = 0;
+  uint64_t p0MoveQueueAgeSumUs = 0;  // generate->send age for moves
+  uint64_t p0MoveQueueAgeMaxUs = 0;
+  uint64_t p0LastEmitUs = 0;
+  uint64_t p0LastMoveGen = 0;
+  uint64_t p0LastCoalesced = 0;
+  bool versionReported = false;
+  bool versionExchangeFailed = false;
+  log_client_line(ctx, "[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=" +
+                      local_product_version() + " peerProcess=GNLinkStream peerVersion=unknown-awaiting-pong");
+
+  // The worker's state. Resuming is this same thread and this same loop with the request
+  // side switched off -- not a second worker, and not this one exiting and being started
+  // again, either of which would race the session teardown for nothing. (item 8, C3)
+  remote60::native_poc::ControlWorkerState workerState =
+      remote60::native_poc::ControlWorkerState::Running;
+
+  while (ctx.session.running.load()) {
+    if (workerState == remote60::native_poc::ControlWorkerState::Resuming) {
+      // r6 (Codex F2): a resume already under way stops at the owner fence (the session is ending)
+      if (gate_is_fenced(ctx.control.fenceGate)) {
+        std::cout << "[native-video-client][control] owner fence during a resume: not resumed\n";
+        break;
+      }
+      if (!pump_control_resume(controlLink, workerState)) break;
+      continue;
+    }
+    // Drives retransmission and gap recovery; cheap when there is nothing outstanding.
+    if (ctx.control.overUdp.load(std::memory_order_acquire)) ctx.control.udpControl.Tick();
+    bool didWork = false;
+    const uint64_t nowUs = qpc_now_us();
+    // ka-pc-impl r5/r6 (Codex R3-b, F1, F2): after the owner fence this thread sends RELEASES ONLY -- each taken off the
+    // queue and counted in one critical section of the gate (gate_take_release), through the same logon-screen gates
+    // as any input, written through the gated link (only a counted release may write now). No ping-scheduled work, no
+    // pick, no stream state, no clipboard, no credential, no IME align. A release whose exchange fails is not resumed.
+    if (gate_is_fenced(ctx.control.fenceGate)) {
+#if defined(REMOTE60_VIEWER_KA_TEST_SEAM)
+      // TEST BUILD ONLY (GNLinkViewerKaTest): REMOTE60_VIEWER_TEST_HOLD_SEND_AFTER_FENCE_MS=N holds this sender for N ms
+      // after the fence -- a sender slow at exactly the wrong moment. (A refused release write is
+      // REMOTE60_VIEWER_TEST_REFUSE_RELEASE_WRITE_AFTER_FENCE, in the gate itself.)
+      {
+        static const uint64_t holdMs = [] {
+          const char* v = std::getenv("REMOTE60_VIEWER_TEST_HOLD_SEND_AFTER_FENCE_MS");
+          return v ? std::strtoull(v, nullptr, 10) : 0ull;
+        }();
+        if (holdMs && GetTickCount64() - ctx.session.ownerFenceAtMs.load() < holdMs) {
+          Sleep(5);
+          continue;
+        }
+      }
+#endif
+      ControlOutboundAction release{};
+      if (!gate_take_release(ctx.control.fenceGate, ctx.control.inputQueue, nowUs, &release)) {
+        ctx.control.inputQueue.WaitForInput(5);
+        continue;
+      }
+      // the same last look as any input (r7 H6 / r9): a release the logon-screen gates would not send is not sent
+      const bool keyUpOfHeldBackDown = release.kind == ControlOutboundActionKind::InputEvent &&
+                                       release.inputEvent.kind == 6 && release.inputEvent.keyCode < 256 &&
+                                       heldDownAtSend[release.inputEvent.keyCode];
+      if (keyUpOfHeldBackDown) heldDownAtSend[release.inputEvent.keyCode] = false;
+      const bool mayGo =
+          !keyUpOfHeldBackDown &&
+          remote60::native_poc::prelogin::ViewerMaySendAction(
+              remote60::native_poc::prelogin::EffectiveHostFlags(ctx.session.hostRoleKnown.load(std::memory_order_acquire),
+                                                                 ctx.session.hostCaptureFlags.load(std::memory_order_relaxed)),
+              release) &&
+          !(ctx.session.hostRoleKnown.load(std::memory_order_acquire) &&
+            (ctx.session.hostCaptureFlags.load(std::memory_order_relaxed) & remote60::native_poc::kCaptureFlagPreloginV1) != 0 &&
+            !remote60::native_poc::prelogin::IsControlAllowedInPrelogin(remote60::native_poc::outbound_message_type(release)));
+      if (!mayGo) {
+        gate_end_input(ctx.control.fenceGate, InputOutcome::Skipped);
+        continue;
+      }
+      TcpControlResponse releaseResponse{};
+      const bool releaseOk = execute_control_action(gated, release, &releaseResponse);
+      if (releaseOk && releaseResponse.kind == TcpControlResponseKind::InputAck) {
+        gate_end_input(ctx.control.fenceGate, InputOutcome::Acked);
+      } else {
+        gate_end_input(ctx.control.fenceGate, InputOutcome::Failed);
+        std::cout << "[native-video-client][control] a release after the owner fence was not acknowledged; "
+                     "no resume (the session is ending)\n";
+        break;
+      }
+      continue;
+    }
+    // P0: once a second, print mouse-moves the UI generated vs coalesced vs actually sent, with the
+    // send->ack RTT and generate->send queue age. moveGen>>moveSent (and coalesced making up the
+    // gap) means the drag is serialized 1-per-RTT. windowUs is emitted because the control thread
+    // blocks in execute_control_action, so the window is only approximately 1s.
+    if (p0LastEmitUs == 0) p0LastEmitUs = nowUs;
+    if (nowUs - p0LastEmitUs >= 1000000ULL) {
+      const uint64_t windowUs = nowUs - p0LastEmitUs;
+      const uint64_t moveGenNow = ctx.input.moveGeneratedCount.load(std::memory_order_relaxed);
+      const uint64_t coalescedNow = ctx.control.inputQueue.coalesced_move_count();
+      const uint64_t moveGenDelta = moveGenNow - p0LastMoveGen;
+      const uint64_t coalescedDelta = coalescedNow - p0LastCoalesced;
+      const uint64_t rttAvg = p0MoveSent ? (p0MoveRttSumUs / p0MoveSent) : 0;
+      const uint64_t ageAvg = p0MoveSent ? (p0MoveQueueAgeSumUs / p0MoveSent) : 0;
+      std::cout << "[native-video-client][input-p0] windowUs=" << windowUs
+                << " moveGen=" << moveGenDelta
+                << " moveCoalesced=" << coalescedDelta
+                << " moveSent=" << p0MoveSent
+                << " droppedTotal=" << ctx.control.inputQueue.dropped_count()
+                << " moveRttAvgUs=" << rttAvg
+                << " moveRttMaxUs=" << p0MoveRttMaxUs
+                << " moveQueueAgeAvgUs=" << ageAvg
+                << " moveQueueAgeMaxUs=" << p0MoveQueueAgeMaxUs
+                << " transport=" << (ctx.control.overUdp.load(std::memory_order_acquire) ? "udp" : "tcp")
+                << "\n";
+      p0LastMoveGen = moveGenNow;
+      p0LastCoalesced = coalescedNow;
+      p0MoveSent = 0;
+      p0MoveRttSumUs = 0;
+      p0MoveRttMaxUs = 0;
+      p0MoveQueueAgeSumUs = 0;
+      p0MoveQueueAgeMaxUs = 0;
+      p0LastEmitUs = nowUs;
+    }
+    if (ctx.session.unlockRequested.exchange(false, std::memory_order_acq_rel)) {
+      // lockscreen-cred r1 (Codex contract 2): the disconnected-session unlock now says how it ended, in the
+      // result window -- not only here -- and a password refused as policy is not kept to be replayed.
+      uint16_t stage = 0;
+      uint32_t win32 = 0;
+      if (!ctx.session.unlockSupported.load(std::memory_order_relaxed)) {
+        std::cout << "[native-video-client][unlock] host does not support sealed unlock\n";
+        stage = kLoginUnsupported;
+      } else {
+        std::wstring pw;
+        if (load_unlock_password(0, &pw)) {
+          std::string status;
+          bool clearCred = false;
+          (void)run_unlock_exchange_result(gated, pw, &stage, &win32, &clearCred, &status);
+          if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
+          if (clearCred) {  // wrong/corrupt/refused: drop it so it is not auto-reused (lockout guard)
+            clear_unlock_password(0);
+            std::cout << "[native-video-client][unlock] " << status
+                      << " (stored password cleared; set it again to retry)\n";
+          } else {
+            std::cout << "[native-video-client][unlock] " << status << "\n";
+          }
+        } else {
+          clear_unlock_password(0);  // a present-but-unreadable file would block re-prompt forever
+          std::cout << "[native-video-client][unlock] no usable stored password (set it again)\n";
+          stage = static_cast<uint16_t>(remote60::native_poc::UnlockStage::DecryptFailed);
+        }
+      }
+      PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(kLoginRoleUnlock, stage, ctx.session.controlRunGen.load(std::memory_order_acquire)),
+                   static_cast<LPARAM>(win32));
+    }
+    // "Windows 로그인" (prelogin-ui r3, item 5; lockscreen-cred r1): the prompt left a password for the screen
+    // it was asked at. Sent only if the host is still at THAT screen on THIS connection -- sealed under that
+    // screen's purpose -- else dropped (zeroed) and said. The window is told what happened.
+    if (ctx.session.preloginCredRequested.load(std::memory_order_acquire)) {
+      std::wstring pw;
+      {
+        std::lock_guard<std::mutex> lock(ctx.session.preloginCredMu);
+        pw.swap(ctx.session.preloginCredPassword);
+      }
+      ctx.session.preloginCredRequested.store(false, std::memory_order_release);
+      const int askedRole = ctx.session.preloginCredRole.load(std::memory_order_acquire);
+      const bool sameConnection = ctx.session.preloginCredRunGen.load(std::memory_order_acquire) ==
+                                  ctx.session.controlRunGen.load(std::memory_order_acquire);
+      const auto nowRole = remote60::native_poc::DecideLogonScreenRole(ctx.session.hostCaptureFlags.load(std::memory_order_relaxed));
+      bool stillThere =
+          sameConnection && ctx.session.hostRoleKnown.load(std::memory_order_acquire) &&
+          ((askedRole == kLoginRolePrelogin && nowRole == remote60::native_poc::LogonScreenRole::Prelogin) ||
+           (askedRole == kLoginRoleLockScreen && nowRole == remote60::native_poc::LogonScreenRole::LockScreen));
+      uint16_t stage = kPreloginNotAtLogon;
+      uint32_t win32 = 0;
+      bool waiting = false;
+      uint32_t lockRequestId = 0;
+      std::string status = "not sent: the host is no longer at the screen it was asked for";
+      // lk-ux-retry r1: a press while this connection's typed password still waits is the explicit retry -- sent as
+      // 89 naming the waiting request, which the host ends first. Only where the host says it can (an older one:
+      // the earlier one is still waited for and nothing is sent, as before).
+      const bool retryAllowed = (ctx.session.hostCaptureFlags.load(std::memory_order_relaxed) &
+                                 remote60::native_poc::kCaptureFlagLockCredRetryV1) != 0;
+      const uint32_t supersedes = askedRole == kLoginRoleLockScreen ? lockCredPollRequestId : 0;
+      if (supersedes != 0 && !retryAllowed) {
+        stillThere = false;
+        stage = kLoginPending;
+        status = "not sent: the earlier password still waits and this host cannot end that wait";
+      }
+      if (!pw.empty() && stillThere) {
+        if (askedRole == kLoginRoleLockScreen) {
+          LockCredProgress progress;
+          const bool exchanged =
+              run_lock_cred_exchange(gated, pw, &stage, &win32, &waiting, &lockRequestId, &status, supersedes, &progress);
+          // lk-ux-retry r2 (Codex N2): the earlier wait is over exactly when the host issued THIS retry's challenge
+          // -- whatever then happened to the new password. 18, a refusal or no answer: it still waits (followed).
+          // (Superseded as the retry's own answer: the earlier wait ended, but no new challenge could be had.)
+          // (r3, Codex N2-b: both only from an answer that passed its checks -- request id and purpose.)
+          const bool priorEnded = progress.challengeIssued || progress.supersededAnswer;
+          if (supersedes != 0 && priorEnded) {
+            if (!exchanged) {
+              // The new password: never sealed (a local failure) / sent, but its answer never came.
+              stage = progress.sealSent ? kLockRetryUnknown : kLockRetryNotSent;
+              win32 = 0;
+            }
+            // The earlier wait ended (or had ended): it is followed no more -- its late answers cannot reach the
+            // new attempt (they carry its request id; the host also closed its transaction).
+            std::cout << "[native-video-client][lock-cred] requestId=" << supersedes << " superseded by requestId="
+                      << lockRequestId << "\n";
+            lockCredPollRequestId = 0;
+            ctx.session.lockCredPending.store(false, std::memory_order_release);
+          }
+          // lk-ux-retry r3 (Codex N2-a): a password the host may already be typing (its seal went out) but whose
+          // answer has not come is NOT forgotten: it is followed like a typed one -- so the next press is a retry
+          // that names it (the host ends its wait first), never an ordinary request refused as "pending".
+          if (!exchanged && progress.sealSent) {
+            if (supersedes == 0) stage = kLockCredSentUnknown;
+            waiting = true;
+          }
+        } else {
+          (void)run_prelogin_cred_exchange(gated, pw, &stage, &win32, &status);
+        }
+      }
+      if (!pw.empty()) SecureZeroMemory(&pw[0], pw.size() * sizeof(wchar_t));
+      std::cout << "[native-video-client][" << (askedRole == kLoginRoleLockScreen ? "lock-cred" : "prelogin-login")
+                << "] " << status << " stage=" << stage << " win32=" << win32 << " waiting=" << (waiting ? 1 : 0) << "\n";
+      if (askedRole == kLoginRolePrelogin && stage == static_cast<uint16_t>(remote60::native_poc::UnlockStage::Injected)) {
+        ctx.session.preloginInjectedAtUs.store(qpc_now_us(), std::memory_order_release);
+      }
+      if (waiting) {
+        // Typed; the unlock is followed between the other work of this loop (one 44 a second), so the user's
+        // Enter -- which goes through this same thread -- is never held up by the wait.
+        lockCredPollRequestId = lockRequestId;
+        ctx.session.lockCredPending.store(true, std::memory_order_release);
+        lockCredPollNextUs = qpc_now_us() + 1000000ull;
+        lockCredPollDeadlineUs = qpc_now_us() + 135000000ull;
+      }
+      PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(askedRole, stage, ctx.session.controlRunGen.load(std::memory_order_acquire)),
+                   static_cast<LPARAM>(win32));
+    }
+    // lockscreen-cred r1: a typed lock-screen credential waiting for its unlock -- one status poll when due.
+    if (lockCredPollRequestId != 0 && qpc_now_us() >= lockCredPollNextUs) {
+      uint16_t stage = 0;
+      bool terminal = false;
+      uint32_t win32 = 0;
+      const bool polled = poll_lock_cred_status(gated, lockCredPollRequestId, &stage, &terminal, &win32);
+      const bool expired = qpc_now_us() >= lockCredPollDeadlineUs;
+      if ((polled && terminal) || expired) {
+        if (!(polled && terminal)) stage = static_cast<uint16_t>(remote60::native_poc::UnlockStage::UnlockUnconfirmed);
+        // It WAS typed: a later refusal means the job's state is gone (the relay reconnected, or another press
+        // replaced it) -- not "not sent". Said as unconfirmed.
+        // lk-ux-retry r2 (Codex N2): an explicit end of it (Superseded) is said as that, never as "2 minutes".
+        // lk-ux-retry r3 (Codex N2-a): a password followed before it was typed may end as what the typing found
+        // (not ready, failed, stale, expired, not opened) -- said as that, never as "2 minutes".
+        using remote60::native_poc::UnlockStage;
+        const bool ownEnd = stage == static_cast<uint16_t>(UnlockStage::SessionUnlocked) ||
+                            stage == static_cast<uint16_t>(UnlockStage::Superseded) ||
+                            stage == static_cast<uint16_t>(UnlockStage::TargetNotReady) ||
+                            stage == static_cast<uint16_t>(UnlockStage::InjectFailed) ||
+                            stage == static_cast<uint16_t>(UnlockStage::RejectedStaleTopology) ||
+                            stage == static_cast<uint16_t>(UnlockStage::Timeout) ||
+                            stage == static_cast<uint16_t>(UnlockStage::DecryptFailed);
+        if (!ownEnd) stage = static_cast<uint16_t>(UnlockStage::UnlockUnconfirmed);
+        std::cout << "[native-video-client][lock-cred] requestId=" << lockCredPollRequestId << " final stage=" << stage
+                  << "\n";
+        PostMessageW(ctx.session.hwnd, kMsgPreloginCredResult, make_login_result_wparam(kLoginRoleLockScreen, stage, ctx.session.controlRunGen.load(std::memory_order_acquire)),
+                     static_cast<LPARAM>(win32));
+        lockCredPollRequestId = 0;
+        ctx.session.lockCredPending.store(false, std::memory_order_release);
+      } else {
+        lockCredPollNextUs = qpc_now_us() + 1000000ull;
+      }
+    }
+    // Remote reboot (prelogin-service r3): the confirm popup set rebootRequested on the UI thread. Send
+    // ControlRebootRequest exactly once -- a lost reply is NOT auto-retried (R3); the user re-confirms.
+    if (ctx.session.rebootRequested.exchange(false, std::memory_order_acq_rel)) {
+      const uint32_t flags = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
+      const uint64_t confirmedFor = ctx.session.rebootRequestedRunGen.load(std::memory_order_acquire);
+      if (confirmedFor != ctx.session.controlRunGen.load(std::memory_order_acquire)) {
+        std::cout << "[native-video-client][reboot] confirmed for an earlier connection; not sent\n";
+        PostMessageW(ctx.session.hwnd, kMsgRebootResult, kRebootNotSent, 0);
+      } else if ((flags & remote60::native_poc::kCaptureFlagRemoteRebootV1) == 0) {
+        std::cout << "[native-video-client][reboot] host does not advertise remote reboot\n";
+        PostMessageW(ctx.session.hwnd, kMsgRebootResult, kRebootNotSent, 0);
+      } else {
+        static std::atomic<uint32_t> rebootSeq{0};
+        const uint32_t rid = rebootSeq.fetch_add(1, std::memory_order_relaxed) * 2u + 1u;  // never 0
+        ControlOutboundAction action{};
+        action.kind = ControlOutboundActionKind::RebootRequest;
+        action.reboot.header.magic = remote60::native_poc::kMagic;
+        action.reboot.header.type = static_cast<uint16_t>(MessageType::ControlRebootRequest);
+        action.reboot.header.size = static_cast<uint16_t>(sizeof(action.reboot));
+        action.reboot.requestId = rid;
+        action.expectedResponseType = MessageType::ControlRebootReply;
+        action.expectedResponseSize = sizeof(remote60::native_poc::ControlRebootReplyMessage);
+        TcpControlResponse resp{};
+        if (execute_control_action(gated, action, &resp) &&
+            resp.kind == TcpControlResponseKind::RebootReply && resp.rebootReply.requestId == rid) {
+          std::cout << "[native-video-client][reboot] requestId=" << rid
+                    << " result=" << static_cast<unsigned>(resp.rebootReply.result)
+                    << " win32=" << resp.rebootReply.win32 << "\n";
+          PostMessageW(ctx.session.hwnd, kMsgRebootResult, resp.rebootReply.result,
+                       static_cast<LPARAM>(resp.rebootReply.win32));
+        } else {
+          std::cout << "[native-video-client][reboot] requestId=" << rid
+                    << " no valid reply (link closed/desynced); not auto-retrying\n";
+          PostMessageW(ctx.session.hwnd, kMsgRebootResult, kRebootNoAnswer, 0);
+        }
+      }
+    }
+    // r9 R5: "Ctrl+Alt+Del" at a pre-login host -- one ControlPreloginControl (83), its answer shown.
+    if (ctx.session.sasRequested.exchange(false, std::memory_order_acq_rel)) {
+      const uint32_t flags = ctx.session.hostCaptureFlags.load(std::memory_order_relaxed);
+      if (ctx.session.sasRequestedRunGen.load(std::memory_order_acquire) !=
+              ctx.session.controlRunGen.load(std::memory_order_acquire) ||
+          (flags & remote60::native_poc::kCaptureFlagPreloginSasV1) == 0) {
+        std::cout << "[native-video-client][sas] not sent (another connection / not offered)\n";
+        PostMessageW(ctx.session.hwnd, kMsgSasResult, kSasNotSent, 0);
+      } else {
+        static std::atomic<uint32_t> sasSeq{0};
+        const uint32_t rid = sasSeq.fetch_add(1, std::memory_order_relaxed) * 2u + 1u;  // never 0
+        ControlOutboundAction action{};
+        action.kind = ControlOutboundActionKind::PreloginControl;
+        action.preloginControl = remote60::native_poc::make_sas_request(rid);
+        action.expectedResponseType = MessageType::ControlPreloginStatus;
+        action.expectedResponseSize = sizeof(remote60::native_poc::ControlPreloginStatusMessage);
+        TcpControlResponse resp{};
+        if (execute_control_action(gated, action, &resp) && resp.kind == TcpControlResponseKind::PreloginStatus &&
+            resp.preloginStatus.requestId == rid) {
+          std::cout << "[native-video-client][sas] requestId=" << rid
+                    << " result=" << static_cast<unsigned>(resp.preloginStatus.result)
+                    << " win32=" << resp.preloginStatus.win32 << "\n";
+          PostMessageW(ctx.session.hwnd, kMsgSasResult,
+                       static_cast<WPARAM>(resp.preloginStatus.result) | (static_cast<WPARAM>(resp.preloginStatus.flags) << 8),
+                       static_cast<LPARAM>(resp.preloginStatus.win32));
+        } else {
+          std::cout << "[native-video-client][sas] requestId=" << rid << " no valid reply\n";
+          PostMessageW(ctx.session.hwnd, kMsgSasResult, kSasNoAnswer, 0);
+        }
+      }
+    }
+    // Host-IME entry: before draining input, align the host IME to English and confirm, so the
+    // switch to physical routing (posted below) never lets an English key compose as jamo. Runs at
+    // most one round-trip; keeps ordering because it precedes NextAction on the serial link.
+    if (ctx.session.imeEnterPending.load(std::memory_order_acquire)) {
+      const uint32_t gen = ctx.session.imeGeneration.load(std::memory_order_acquire);
+      ControlOutboundAction imeAction{};
+      imeAction.kind = ControlOutboundActionKind::ImeStateRequest;
+      imeAction.expectedResponseType = MessageType::ControlImeStateResponse;
+      imeAction.expectedResponseSize = sizeof(ControlImeStateResponseMessage);
+      imeAction.imeStateReq.header.magic = remote60::native_poc::kMagic;
+      imeAction.imeStateReq.header.type =
+          static_cast<uint16_t>(MessageType::ControlImeStateRequest);
+      imeAction.imeStateReq.header.size = sizeof(ControlImeStateRequestMessage);
+      imeAction.imeStateReq.seq = gen;
+      imeAction.imeStateReq.targetGeneration = gen;
+      imeAction.imeStateReq.action = 1;  // set to English, then query
+      imeAction.imeStateReq.clientSendQpcUs = qpc_now_us();
+      TcpControlResponse imeResp{};
+      if (!execute_control_action(gated, imeAction, &imeResp)) {
+        if (gate_is_fenced(ctx.control.fenceGate)) continue;  // r6: refused by the fence -- releases still go
+        std::cout << "[native-video-client][control] action failed kind=ime-align\n";
+        break;
+      }
+      if (imeResp.kind == TcpControlResponseKind::ImeStateResponse &&
+          imeResp.imeStateResponse.targetGeneration == gen) {
+        const uint16_t st = imeResp.imeStateResponse.status;
+        if (st == 2) {
+          // Host reported stale-target (focus moved mid-align); keep pending and retry next loop.
+          std::cout << "[native-video-client][ime] align stale-target; retrying\n";
+        } else {
+          const int open = (st == 0) ? static_cast<int>(imeResp.imeStateResponse.open) : 2;  // 2=?
+          ctx.session.imeEnterPending.store(false, std::memory_order_release);
+          if (ctx.session.hwnd)
+            PostMessageW(ctx.session.hwnd, kMsgHostImeActivate, static_cast<WPARAM>(open), 0);
+          std::cout << "[native-video-client][ime] align done status=" << st << " open=" << open
+                    << "\n";
+        }
+      } else {
+        // Generation mismatch or unexpected reply: drop pending so we do not spin; a later pong
+        // re-enters if still applicable.
+        ctx.session.imeEnterPending.store(false, std::memory_order_release);
+      }
+      didWork = true;
+      continue;
+    }
+    ControlOutboundAction action{};
+    // C0 stage 1: offered only for a host that acknowledged the feature (session flag).
+    ClientBandwidthSnapshot bandwidthSnapshot{};
+    const bool bandwidthObserve = ctx.session.bandwidthObserveNegotiated;
+    if (bandwidthObserve) {
+      std::lock_guard<std::mutex> lock(ctx.control.bandwidthMu);
+      bandwidthSnapshot = ctx.control.bandwidth;
+    }
+    // r6 (Codex F1/F2): the scheduler's pick -- which may take an input off the queue -- is made and admitted in ONE
+    // critical section of the owner-fence gate: an input taken is counted at once; after a fence anything but a
+    // release is refused there and dropped, never written.
+    const GateAdmit admit = gate_begin_action(ctx.control.fenceGate, &action, [&](ControlOutboundAction* out) {
+      return ctx.control.scheduler.NextAction(
+          nowUs, capture_client_control_metrics_snapshot(ctx), &ctx.picker.windowPanel,
+          &ctx.control.streamState, &ctx.control.captureModeRequests, &ctx.control.keyframeRequests, &ctx.control.runtimeTune,
+          &ctx.control.inputQueue, out, nullptr,
+          bandwidthObserve ? &bandwidthSnapshot : nullptr);
+    });
+    if (admit == GateAdmit::Refused) {
+      std::cout << "[native-video-client][control] owner fence: a picked action (kind=" << static_cast<int>(action.kind)
+                << ") dropped, not sent\n";
+      continue;
+    }
+    if (admit == GateAdmit::Admitted) {
+      // Every way out of this block settles the admitted exchange in the gate (an input: acked / failed / not sent).
+      struct AdmitEnd {
+        OwnerFenceGate& g;
+        bool input;
+        InputOutcome outcome = InputOutcome::Skipped;
+        ~AdmitEnd() {
+          if (input) gate_end_input(g, outcome);
+          else gate_end_other(g);
+        }
+      } admitEnd{ctx.control.fenceGate, action_is_input(action)};
+      // r7 H6: the last look before an input leaves -- it may have been queued before the host's role was
+      // known, or before it changed. Held back here exactly as at the keyboard.
+      if (!remote60::native_poc::prelogin::ViewerMaySendAction(
+              remote60::native_poc::prelogin::EffectiveHostFlags(ctx.session.hostRoleKnown.load(std::memory_order_acquire),
+                                                                 ctx.session.hostCaptureFlags.load(std::memory_order_relaxed)),
+              action)) {
+        // lockscreen-cred r1: a key down held back here is remembered, so its up -- which the gate lets through
+        // as a release -- is held back too: a release goes only for a down that went.
+        if (action.kind == ControlOutboundActionKind::InputEvent && action.inputEvent.kind == 5 &&
+            action.inputEvent.keyCode < 256) {
+          heldDownAtSend[action.inputEvent.keyCode] = true;
+        }
+        ctx.session.preloginHeldBackAtSend.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      if (action.kind == ControlOutboundActionKind::InputEvent && action.inputEvent.keyCode < 256 &&
+          (action.inputEvent.kind == 5 || action.inputEvent.kind == 6)) {
+        const bool heldDown = heldDownAtSend[action.inputEvent.keyCode];
+        heldDownAtSend[action.inputEvent.keyCode] = false;
+        if (action.inputEvent.kind == 6 && heldDown) {
+          ctx.session.preloginHeldBackAtSend.fetch_add(1, std::memory_order_relaxed);
+          continue;
+        }
+      }
+      // r9: a host KNOWN to be at the logon screen closes the link on anything outside its allowlist (the
+      // same definition, prelogin_control_allowlist.hpp): such a request is not sent at all.
+      if (ctx.session.hostRoleKnown.load(std::memory_order_acquire) &&
+          (ctx.session.hostCaptureFlags.load(std::memory_order_relaxed) & remote60::native_poc::kCaptureFlagPreloginV1) != 0 &&
+          !remote60::native_poc::prelogin::IsControlAllowedInPrelogin(remote60::native_poc::outbound_message_type(action))) {
+        // rel-0163 r3: a WindowSelect not sent is a pick still waiting for its ack -- resolve that op on the UI
+        // thread (continued as a local desktop selection, or refused), never left waiting.
+        if (action.kind == ControlOutboundActionKind::WindowSelect && ctx.session.hwnd) {
+          // rel-0163 r4 (Codex R2): the op tag the request was made with -- never the live epoch read now.
+          PostMessageW(ctx.session.hwnd, kMsgUnsendableSelect, static_cast<WPARAM>(action.windowSelect.windowId),
+                       static_cast<LPARAM>(action.selectionTag));
+        }
+        continue;
+      }
+      TcpControlResponse response{};
+      const uint64_t actionStartUs = qpc_now_us();
+      const bool actionOk = execute_control_action(gated, action, &response);
+      // r5/r6 (Codex R3-a): an input is acknowledged only by the host's InputAck
+      admitEnd.outcome = (actionOk && response.kind == TcpControlResponseKind::InputAck) ? InputOutcome::Acked
+                                                                                         : InputOutcome::Failed;
+      // One exchange that never gets its reply stalls every later one behind it,
+      // including input. Naming the slow action is the only way to see which.
+      const uint64_t actionDoneUs = qpc_now_us();
+      const uint64_t actionUs = actionDoneUs - actionStartUs;
+      // No key code, character, coordinates or text. All input kinds share the ACK counter,
+      // so record kind and timestamps separately rather than calling that counter keyboard RTT.
+      const bool inputEventAction = action.kind == ControlOutboundActionKind::InputEvent;
+      const bool inputTextAction = action.kind == ControlOutboundActionKind::InputText;
+      const bool physicalKeyAction = action.kind == ControlOutboundActionKind::PhysicalKey;
+      if ((inputEventAction || inputTextAction || physicalKeyAction) &&
+          (!inputEventAction || action.inputEvent.kind != 1 || actionUs >= 100000ULL || !actionOk)) {
+        std::ostringstream timing;
+        timing << "[native-video-client][input-timing] timingSchema=2"
+               << " seq=" << (inputEventAction ? action.inputEvent.seq :
+                                inputTextAction ? action.inputText.seq : action.physicalKey.seq)
+               << " actionKind=" << static_cast<int>(action.kind)
+               << " eventKind=" << (inputEventAction ? action.inputEvent.kind : 0)
+               << " clientGeneratedUs=" << action.inputGeneratedUs
+               << " clientSendUs=" << actionStartUs
+               << " clientDoneUs=" << actionDoneUs
+               << " queueAgeUs="
+               << ((action.inputGeneratedUs > 0 && actionStartUs >= action.inputGeneratedUs)
+                       ? static_cast<int64_t>(actionStartUs - action.inputGeneratedUs) : -1)
+               << " exchangeUs=" << actionUs
+               << " ok=" << (actionOk ? 1 : 0)
+               << " ack=" << ((actionOk && response.kind == TcpControlResponseKind::InputAck) ? 1 : 0)
+               << " osInjectionConfirmed=0";
+        log_client_line(ctx, timing.str());
+      }
+      if (actionUs > 1000000ULL) {
+        std::cout << "[native-video-client][control] slow action kind="
+                  << static_cast<int>(action.kind) << " tookUs=" << actionUs
+                  << " ok=" << (actionOk ? 1 : 0) << "\n";
+      }
+      if (!actionOk) {
+        // A failed exchange ends the session's control, so it has to say which one and
+        // on what transport. This used to break out silently, which made a control
+        // channel that died on one bad message look identical to one that never
+        // connected.
+        std::cout << "[native-video-client][control] action failed kind="
+                  << static_cast<int>(action.kind) << " transport="
+                  << (ctx.control.overUdp.load(std::memory_order_acquire) ? "udp-tunnel" : "tcp");
+        if (ctx.control.overUdp.load(std::memory_order_acquire)) {
+          // Closed means the channel gave up on the peer; open means the exchange came
+          // back as something other than the reply this action was waiting for.
+          const auto stats = ctx.control.udpControl.GetStats();
+          std::cout << " closed=" << (ctx.control.udpControl.IsClosed() ? 1 : 0)
+                    << " reason=" << to_string(ctx.control.udpControl.CloseReason())
+                    << " sent=" << stats.messagesSent
+                    << " received=" << stats.messagesReceived
+                    << " retx=" << stats.fragmentRetransmits
+                    << " nacks=" << stats.nacksSent;
+        }
+        std::cout << "\n";
+        // The request that just failed is NOT resent. It may not be idempotent -- a
+        // capture-mode change, a window selection -- and the host's mailbox keeping it is
+        // not the same as its reply being redelivered. It fails here; the UI asks again if
+        // it still wants the answer. A reply that turns up later is dropped by the re-key,
+        // which gives the resumed channel stream ids the old reply does not carry.
+        if (gate_is_fenced(ctx.control.fenceGate)) continue;  // r6: the fence refused it -- releases still go
+        if (begin_control_resume(qpc_now_us())) {
+          workerState = remote60::native_poc::ControlWorkerState::Resuming;
+          continue;
+        }
+        break;
+      }
+      if (action.kind == ControlOutboundActionKind::InputEvent) {
+        const uint64_t sent = ++ctx.session.inputEventsSent;
+        if (args.inputLogEvery > 0 && (sent % args.inputLogEvery) == 0) {
+          std::cout << "[native-video-client][input] sent=" << sent
+                    << " kind=" << action.inputEvent.kind
+                    << " seq=" << action.inputEvent.seq << "\n";
+        }
+        // P0 telemetry (#351): move-specific only (kind==1). actionUs = send + wait-for-ack, the
+        // serial round trip; queue age = send time - generation time (how long it waited behind the
+        // one-per-RTT gate). Buttons/keys are excluded so the drag comparison stays clean.
+        if (action.inputEvent.kind == 1) {
+          ++p0MoveSent;
+          if (actionUs > p0MoveRttMaxUs) p0MoveRttMaxUs = actionUs;
+          p0MoveRttSumUs += actionUs;
+          const uint64_t sendUs = actionStartUs;
+          const uint64_t ageUs =
+              (action.inputGeneratedUs > 0 && sendUs >= action.inputGeneratedUs)
+                  ? (sendUs - action.inputGeneratedUs)
+                  : 0;
+          p0MoveQueueAgeSumUs += ageUs;
+          if (ageUs > p0MoveQueueAgeMaxUs) p0MoveQueueAgeMaxUs = ageUs;
+        }
+      }
+      didWork = true;
+
+      if (action.kind == ControlOutboundActionKind::CaptureMode) {
+        std::cout << "[native-video-client][control] capture-mode-request seq=" << action.captureMode.seq
+                  << " mode=" << action.captureMode.mode
+                  << " xPermille=" << action.captureMode.xPermille
+                  << " yPermille=" << action.captureMode.yPermille
+                  << "\n";
+      } else if (action.kind == ControlOutboundActionKind::KeyframeRequest) {
+        std::cout << "[native-video-client][control] keyframe-request seq=" << action.keyframe.seq
+                  << " reason=" << action.keyframe.reason << "\n";
+      } else if (action.kind == ControlOutboundActionKind::StreamState) {
+        std::cout << "[native-video-client][control] stream-state seq="
+                  << action.streamState.seq
+                  << " active=" << ((action.streamState.flags & 0x1u) ? 1 : 0) << "\n";
+      } else if (action.kind == ControlOutboundActionKind::RuntimeTune) {
+        std::cout << "[native-video-client][control] runtime-config seq=" << action.runtimeTune.seq
+                  << " bitrate=" << action.runtimeTune.bitrate
+                  << " keyint=" << action.runtimeTune.keyint
+                  << " flags=" << action.runtimeTune.flags
+                  << "\n";
+      }
+
+      switch (response.kind) {
+        case TcpControlResponseKind::Pong: {
+          handle_pong(action, response.pong);
+          if (!versionReported) {
+            versionReported = true;
+            std::string peer;
+            const bool supported = (response.pong.captureTargetFlags & kCaptureFlagPeerVersion) != 0;
+            versionExchangeFailed = !exchange_peer_version(gated, supported, response.pong.seq, &peer);
+            log_client_line(ctx, "[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=" +
+                                local_product_version() + " peerProcess=GNLinkStream peerVersion=" + peer +
+                                " peerVersionSource=" + (supported ? "peer-report" : "unsupported"));
+          }
+          break;
+        }
+        case TcpControlResponseKind::WindowList: {
+          handle_window_list(response.windowList);
+          break;
+        }
+        case TcpControlResponseKind::MonitorList: {
+          ctx.picker.windowPanel.ApplyMonitorList(response.monitorList);
+          break;
+        }
+        case TcpControlResponseKind::WindowSelected:
+          handle_window_selected(response.windowSelected);
+          break;
+        case TcpControlResponseKind::InputAck: {
+          handle_input_ack(response.inputAck);
+          break;
+        }
+        case TcpControlResponseKind::None:
+        default:
+          break;
+      }
+      // A failed framed exchange cannot safely reuse the stream. Deliberately NOT a resume: the
+      // stream is desynced rather than gone, and re-keying it would carry that desync into the
+      // new stream ids with nothing having been resynchronised.
+      if (versionExchangeFailed) break;
+    }
+
+    // Clipboard sync runs whether or not the picker is up (unlike previews), so it comes first.
+    if (!didWork) {
+      const int synced = pump_clipboard_sync(gated);
+      if (synced < 0 && gate_is_fenced(ctx.control.fenceGate)) continue;  // r6: refused by the fence
+      if (synced < 0) {
+        // The same door as a failed action: on the tunnel a clipboard poll that cannot complete
+        // is the link having gone, not the clipboard having a problem.
+        if (begin_control_resume(qpc_now_us())) {
+          workerState = remote60::native_poc::ControlWorkerState::Resuming;
+          continue;
+        }
+        break;
+      }
+      didWork = (synced > 0);
+    }
+    if (!didWork && ctx.picker.visible.load(std::memory_order_relaxed)) {
+      const int fetched = fetch_one_thumbnail(gated);
+      if (fetched < 0 && gate_is_fenced(ctx.control.fenceGate)) continue;  // r6: refused by the fence
+      if (fetched < 0) {
+        if (begin_control_resume(qpc_now_us())) {
+          workerState = remote60::native_poc::ControlWorkerState::Resuming;
+          continue;
+        }
+        break;
+      }
+      didWork = (fetched > 0);
+    }
+    if (!didWork) ctx.control.inputQueue.WaitForInput(2);
+  }
+  ctx.control.connected.store(false, std::memory_order_relaxed);
+  // Host-IME: control is gone, so restore the local IME and stop physical routing on the UI thread.
+  // A reconnect renegotiates from scratch (generation bumps, pending re-arms on the next pong).
+  ctx.session.imeEnterPending.store(false, std::memory_order_release);
+  if (ctx.session.imeMode.load(std::memory_order_acquire) != 0 && ctx.session.hwnd) {
+    PostMessageW(ctx.session.hwnd, kMsgHostImeDeactivate, 0, 0);
+  }
+  ctx.control.runtimeTune.SetEnabled(false);
+  // A selection cannot complete once control is gone: drop the pending state so the picker
+  // re-enables instead of staying locked on "waiting for first frame". The viewer exits
+  // shortly after (the video socket dies too), which returns the shell to the host list.
+  clear_pc_target_selection(ctx);
+  // Drop the persistent generation filter too: a reconnect renegotiates generations from
+  // scratch, so an old value must not silently filter the new stream to nothing.
+  ctx.sel.activeStreamGeneration.store(0, std::memory_order_release);
+  set_window_panel_status(ctx, "control_disconnected");
+  InvalidateRect(ctx.session.hwnd, nullptr, FALSE);
+}
+
+}  // namespace remote60::native_poc::viewer

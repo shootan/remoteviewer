@@ -1,0 +1,36 @@
+{
+  "accounts": {
+    "tester": {
+      "id": "tester",
+      "salt": "4f083d3e6a3c00921e0db413d3f101cf",
+      "hash": "152d71c6e925cacc2f60dbcacd2138c3e9330445c1e3dbb4121796d20b05dd40",
+      "status": "active",
+      "createdAt": 1793137006214,
+      "updatedAt": 1793137006214,
+      "approvedAt": 1793137006214,
+      "memo": "",
+      "lastLoginAt": 1793137007812
+    }
+  },
+  "hosts": {
+    "ff78765c9b9f3cd1": {
+      "hostId": "ff78765c9b9f3cd1",
+      "accountId": "tester",
+      "machineId": "8ec6ecb1-11fb-4db3-8127-aea0c5311225",
+      "hostName": "KA-OLD",
+      "tokenHash": "6caf92c8e2d8698902ce242237ab1e392826e584d3a07b82377fb8946b801d44",
+      "lastSeen": 1793137088472,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 56856,
+      "wireIp": "127.0.0.1",
+      "wirePort": 56856,
+      "localIps": [
+        "192.168.0.76",
+        "172.22.224.1"
+      ],
+      "localUdpPort": 56856,
+      "alternateUdpPort": 0
+    }
+  },
+  "devices": {}
+}

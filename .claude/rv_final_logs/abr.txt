@@ -1,0 +1,39 @@
+mode: present capture=desktop bitrate=3000000 textPriority=on
+host port 55975 (picked at run time)
+PASS  a host and a never-answering helper could be staged  D:\remote\remote\.claude\worktrees\verify-c2-ef533f2\build-verify\apps\native_poc\Release\GNLinkStream.exe
+PASS  the host is started with input injection off
+PASS  the launched process is isolated from the user's files
+PASS  the host started
+PASS  the viewer's Hello is answered
+real frames per second at this end: 2 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 
+seconds after warmup with a real cadence (>= 15): 0 of 32
+
+--- host [abr] lines (0) ---
+
+--- host [keyframe] lines (3) ---
+  09-28 22:51:04.602 [native-video-host][keyframe] seq=1 bytes=100058 reasons=initial|first_frame sinceLastKeyMs=0 kick=1 size=1920x1080 bitrate=3000000
+  09-28 22:51:19.033 [native-video-host][keyframe] seq=31 bytes=109745 reasons=encoder_gop sinceLastKeyMs=14430 kick=0 size=1920x1080 bitrate=3000000
+  09-28 22:51:36.029 [native-video-host][keyframe] seq=61 bytes=113752 reasons=encoder_gop sinceLastKeyMs=16996 kick=0 size=1920x1080 bitrate=3000000
+
+--- per-flow bytes, last stats line ---
+  udpTxBytes=660778
+  udpTxParityBytes=113752
+  udpTxChunkHdrBytes=64768
+  udpTxVideoDatagrams=736
+  udpTxNackBytes=0
+  udpTxNackDatagrams=0
+  ctlTxBytes=25552
+  ctlTxDatagrams=146
+  udpTxIpUdpHdrEstBytes=24696
+  udpTxWireEstBytes=889546
+
+encoded size (last stats line): 1920x1080  keyframe sizes: 1920x1080 
+PASS  the host encoded 1920x1080 (stats line and every keyframe)  stats=1920x1080 keys=1920x1080 
+keyframes: 3 total, 323555 bytes; encoder_gop=2 first_frame=1 initial=1
+R5MEASURE none: not enough stats lines after warmup
+PASS  every [keyframe] line names its reasons  3 lines
+PASS  the stats line carries the per-flow bytes, and the wire estimate exceeds the payload  payload=660778 parity=113752 wire=889546
+SKIP  ABR verdict for mode present  NOT JUDGED: the host did not send a real cadence -- NOT JUDGED
+PASS  the scratch directory is cleaned up
+
+RESULT: ALL PASS  (9 checks, 0 failed)

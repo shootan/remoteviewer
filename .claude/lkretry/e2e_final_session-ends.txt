@@ -1,0 +1,69 @@
+﻿mode: host in --prelogin; the viewer goes away while its password waits
+PASS  the fake directory starts
+PASS  the test's own target and decoy windows are up
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r6 V1 counter-example: with the service's old environment the worker exits at once, rc 11 (h264 refused)  11
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r6 V7: a machine record naming another server is not used (the worker stays offline)
+PASS  r6 V5: a decoy directory starts
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r6 V5: a worker given a directory in its environment reaches its configuration and says it is ignored  10-26 12:04:56.850 [native-video-host] latency-priority processAboveNormal=1 mainThreadAboveNormal=1
+
+10-26 12:04:56.867 [native-video-host][clipboard] monitor started
+
+10-26 12:04:56.868 [native-video-host] waiting client bindPort=50602 transport=udp fps=30 bitrate=8000000 seconds=150
+
+10-26 12:04:56.868 [native-video-host] wireCap=on wireCapBps=8000000 wireCapMtu=1200
+
+10-26 12:04:56.868 [native-video-host] h264 pacing=on udpPacePeakPercent=500 udpPacePeakBps=40000000 udpPacePeakFloorBps=40000000 udpKeyframePacePeakBps=100000000 fecSingleChunkStride=tight stalePreEncodeGuard=0 capturePoolBuffers=2 encoderTuneMode=low_latency abr=on abrMode=default frameGating=on staticSceneFps=8 gatingStaticPm=6 m9=off m9Mode=dry-run keyReqMinUs=120000 keyReqBucketCap=3 captureInputMinPushPerSec=10 captu
+PASS  r6 V5: ...and never talks to that directory (0 register, 0 heartbeat)  0 registrations
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r9 W2: a worker whose input desktop is a user's (not the logon desktop) leaves at once, exit 14  14
+PASS  ...it never served it and never registered
+PASS  the host command is isolated from the user's files
+PASS  SAFETY: the host's token holds no SeShutdownPrivilege at all  0
+PASS  r6 V2: the worker started EXACTLY as the service starts it (--prelogin alone, the service's environment function)
+PASS  r6 V2: ...it loaded the machine record (no directory argument exists to stand in for it)
+PASS  the host registered and collected the viewer's capability from its heartbeat
+PASS  the product's window procedure owns a window
+PASS  the session toolbar is created
+PASS  the viewer's directory-authenticated Hello is answered
+PASS  video is arriving  1 media datagrams
+[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=0.2.162 peerProcess=GNLinkStream peerVersion=unknown-awaiting-pong eventQpcUs=329714194403
+[native-video-client][control] seq=1 rttUs=531 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=1 rttUs=531 clockOffsetUs=-47 clientSendUs=329714194421 hostRecvUs=329714194639 hostSendUs=329714194639 clientRecvUs=329714194952 eventQpcUs=329714195073
+[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=0.2.162 peerProcess=GNLinkStream peerVersion=0.2.162 peerVersionSource=peer-report eventQpcUs=329714195263
+PASS  the worker completes a round trip with the host
+PASS  the toolbar window exists
+
+--- r5 G7: the viewer goes away while its password waits ---
+PASS  the host is at the logon screen
+PASS  the "Windows 로그인" item is there
+    [step] clicked the item
+[native-video-client][control] seq=2 rttUs=281 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=2 rttUs=281 clockOffsetUs=-14 clientSendUs=329714699335 hostRecvUs=329714699461 hostSendUs=329714699461 clientRecvUs=329714699616 eventQpcUs=329714699688
+[native-video-client][input-timing] timingSchema=2 seq=1 actionKind=10 eventKind=6 clientGeneratedUs=329714766315 clientSendUs=329714766349 clientDoneUs=329714766796 queueAgeUs=34 exchangeUs=447 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=329714766830
+    [step] prompt done
+    [step] operator done
+PASS  the password was typed into the prompt and sent
+PASS  ...and is waiting at the host (no result yet)
+[native-video-client][prelogin-login] login timed out stage=0 win32=0 waiting=0
+[native-video-client][input-timing] timingSchema=2 seq=2 actionKind=10 eventKind=6 clientGeneratedUs=329714766328 clientSendUs=329725103130 clientDoneUs=329725103595 queueAgeUs=10336802 exchangeUs=465 ok=1 ack=1 osInjectionConfirmed=0 eventQpcUs=329725103614
+    [step] the viewer is gone
+PASS  the host's control session for that viewer ended (while the password still waited)
+PASS  G7: NOTHING was typed into the target that came afterwards
+PASS  ...nor into the window that had the focus
+PASS  ...the worker dropped it as stale (stage 2), never Injected
+
+--- nothing kept ---
+PASS  the password is in none of the viewer's output
+PASS  ...nor in the host's
+PASS  ...nor in any file of this run (the viewer's credential store included)
+PASS  no credential file was written by the viewer
+PASS  the scratch directory is cleaned up
+
+RESULT: ALL PASS  (41 checks, 0 failed)

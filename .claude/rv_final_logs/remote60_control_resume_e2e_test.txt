@@ -1,0 +1,225 @@
+ports host 58470 proxy 58471 (picked at run time)
+PASS  a host and a never-answering helper could be staged
+PASS  a window of this process is up for the host to inject into
+PASS  the control seam is listening between the viewer and the host
+PASS  the launched process is isolated from the user's files
+PASS  the host started
+PASS  the viewer's Hello is answered through the seam
+PASS  ...and the host offers control resume  features=122 resumeBit=32
+PASS  control answers before anything is broken
+PASS  ...and video is arriving  4 media datagrams
+PASS  an input sent before the break is acknowledged
+PASS  ...AND ARRIVES IN THIS PROCESS'S WINDOW  the host injected it; ackSent alone would not have shown that
+PASS  [C5] a Hello the host will refuse is sent before the break
+
+--- case 1: control is cut in both directions, video keeps flowing ---
+PASS  the viewer's control channel declares itself dead on its own  6589ms, reason=peer-lost
+PASS  ...while video kept arriving through the same socket  12 media datagrams during it
+    [control-resume] break resumeId=20737
+PASS  a recovery starts
+    ...attempts=0 media=16 proxyMedia=19 videoAgeMs=967 videoAlive=1 refused=0 ignored=0 rekeyed=0
+    [control-resume] send resumeId=20737 attempt=1 ok=1
+    [control-resume] send resumeId=20737 attempt=2 ok=1
+    [control-resume] send resumeId=20737 attempt=3 ok=1
+    [control-resume] send resumeId=20737 attempt=4 ok=1
+    [control-resume] ack served=1 resumeId=20737 rekeyed=1
+    [control-resume] resumed resumeId=20737 attempts=4
+PASS  THE CONTROL CHANNEL COMES BACK WITHOUT A RECONNECT  4 asks
+PASS  ...and the asks went out over the media socket  4 resume datagrams
+    timing: breakToFirstSend=0ms  breakToRunning=1739ms  attempts=4
+PASS  ...inside the thirty second budget, which did not move  1739ms of 30000ms
+PASS  ...and the first ask went out long before the repair finished  the ask is immediate; whatever follows is the host deciding
+PASS  THE PICTURE KEPT ARRIVING THROUGHOUT THE REPAIR  6 media datagrams during it, longest gap 967ms
+PASS  NOTHING THE HOST SENT DURING THE REPAIR WAS SWALLOWED  6 received; seam 4 before the viewer's reading, 6 after it
+PASS  THREE REAL ROUND TRIPS ON THE RESUMED CHANNEL  3/3
+PASS  input works again after the repair (host acknowledged)
+PASS  ...AND THE HOST ACTUALLY INJECTED IT  judged by this process's own message queue, not by ackSent
+PASS  a key-up sent after the repair reaches the host's injection  this is what stops a modifier stranding when the break swallowed the real one
+PASS  A REPLAY OF PRE-BREAK CONTROL DATAGRAMS DOES NOT DISTURB THE RESUMED CHANNEL  the re-key gave it stream ids those datagrams do not carry
+
+--- counter-examples: asks at a healthy channel ---
+PASS  the channel is healthy to begin with
+PASS  [counter-example 1] A HEALTHY CHANNEL SURVIVES EIGHT UNINVITED ASKS  3/3 round trips after them
+PASS  ...and the viewer's channel is on the same stream ids -- nothing re-keyed it  tx 2147566597->2147566597 rx 2147566598->2147566598
+PASS  ...and video never stopped  2 media datagrams
+PASS  [counter-example 2] A REPLAYED OLD ASK DOES NOT DISTURB THE CHANNEL  3/3 round trips after it
+
+--- case 5: alive on the first probe, then the link goes ---
+    [control-resume] break resumeId=20738
+PASS  a recovery begins while the channel is still fine
+    [control-resume] send resumeId=20738 attempt=1 ok=1
+    [control-resume] send resumeId=20738 attempt=2 ok=1
+    [control-resume] send resumeId=20738 attempt=3 ok=1
+    [control-resume] send resumeId=20738 attempt=4 ok=1
+    [control-resume] send resumeId=20738 attempt=5 ok=1
+    [control-resume] send resumeId=20738 attempt=6 ok=1
+PASS  THE HOST REFUSES WHILE ITS CHANNEL IS ANSWERING  6 refusals
+PASS  ...and nothing was re-keyed for it
+    ...attempts=6 media=34 proxyMedia=37 videoAgeMs=425 videoAlive=1 refused=9 ignored=9 rekeyed=0
+    [control-resume] send resumeId=20738 attempt=7 ok=1
+    [control-resume] send resumeId=20738 attempt=8 ok=1
+    [control-resume] send resumeId=20738 attempt=9 ok=1
+    [control-resume] send resumeId=20738 attempt=10 ok=1
+    [control-resume] ack served=1 resumeId=20738 rekeyed=1
+    [control-resume] resumed resumeId=20738 attempts=10
+PASS  AND THE SAME RECOVERY STILL GETS THROUGH  10 asks in total
+    timing: breakToRunning=5184ms  attempts=10  resumeId=20738
+PASS  ...and the channel round trips three times afterwards  3/3
+
+--- case 2: the host's answer is lost, then duplicated ---
+    [control-resume] break resumeId=20739
+PASS  a second recovery starts
+PASS  ...with a DIFFERENT id from the first  20738 then 20739
+    ...attempts=0 media=52 proxyMedia=55 videoAgeMs=258 videoAlive=1 refused=12 ignored=9 rekeyed=0
+    [control-resume] send resumeId=20739 attempt=1 ok=1
+    [control-resume] send resumeId=20739 attempt=2 ok=1
+    [control-resume] send resumeId=20739 attempt=3 ok=1
+    [control-resume] send resumeId=20739 attempt=4 ok=1
+    [control-resume] ack served=1 resumeId=20739 rekeyed=1
+    [control-resume] resumed resumeId=20739 attempts=4
+PASS  THE REPAIR SURVIVES ITS ANSWER BEING LOST TWICE  4 asks
+    timing: breakToFirstSend=0ms  breakToRunning=1737ms  attempts=4
+PASS  ...it took more than one ask to get there  4 asks
+PASS  ...and both of the lost answers really were dropped, not merely scheduled to be  0 drops left unused
+PASS  the host's answer can be delivered again, late
+PASS  A LATE DUPLICATE OF THE ANSWER IS REFUSED, NOT REAPPLIED  last reason=no-attempt
+PASS  ...and it did not start anything
+PASS  ...and the channel round trips three times afterwards, undisturbed  3/3
+
+--- case 3: only the viewer's uplink control is cut, then the session is called off mid-recovery ---
+PASS  a one-way control cut is noticed too  reason=peer-lost
+PASS  ...with video still arriving the whole time
+    [control-resume] break resumeId=20740
+PASS  a recovery starts
+    ...attempts=0 media=70 proxyMedia=73 videoAgeMs=785 videoAlive=1 refused=14 ignored=10 rekeyed=0
+    [control-resume] send resumeId=20740 attempt=1 ok=1
+    [control-resume] send resumeId=20740 attempt=2 ok=1
+    [control-resume] send resumeId=20740 attempt=3 ok=1
+    [control-resume] gave-up resumeId=20740 attempts=3
+PASS  CANCELLATION ENDS THE RECOVERY, not the ceiling  1855ms (the ceiling is 30000ms)
+PASS  ...promptly  1855ms
+
+--- case 4: the shell replaces this viewer while a recovery is running ---
+    [control-resume] break resumeId=20741
+PASS  a recovery starts
+    ...attempts=0 media=74 proxyMedia=77 videoAgeMs=640 videoAlive=1 refused=17 ignored=10 rekeyed=0
+    [control-resume] send resumeId=20741 attempt=1 ok=1
+    [control-resume] send resumeId=20741 attempt=2 ok=1
+    [control-resume] send resumeId=20741 attempt=3 ok=1
+    [control-resume] send resumeId=20741 attempt=4 ok=1
+    ...attempts=4 media=78 proxyMedia=81 videoAgeMs=682 videoAlive=1 refused=17 ignored=14 rekeyed=0
+    [control-resume] send resumeId=20741 attempt=5 ok=1
+    [control-resume] send resumeId=20741 attempt=6 ok=1
+    [control-resume] send resumeId=20741 attempt=7 ok=1
+    [control-resume] send resumeId=20741 attempt=8 ok=1
+    ...attempts=8 media=82 proxyMedia=85 videoAgeMs=657 videoAlive=1 refused=17 ignored=18 rekeyed=0
+    [control-resume] send resumeId=20741 attempt=9 ok=1
+    [control-resume] send resumeId=20741 attempt=10 ok=1
+    [control-resume] send resumeId=20741 attempt=11 ok=1
+    [control-resume] send resumeId=20741 attempt=12 ok=1
+    ...attempts=12 media=86 proxyMedia=89 videoAgeMs=710 videoAlive=1 refused=17 ignored=22 rekeyed=0
+    [control-resume] send resumeId=20741 attempt=13 ok=1
+    [control-resume] send resumeId=20741 attempt=14 ok=1
+    [control-resume] send resumeId=20741 attempt=15 ok=1
+    ...attempts=15 media=90 proxyMedia=93 videoAgeMs=747 videoAlive=1 refused=17 ignored=25 rekeyed=0
+    [control-resume] send resumeId=20741 attempt=16 ok=1
+    [control-resume] send resumeId=20741 attempt=17 ok=1
+    [control-resume] send resumeId=20741 attempt=18 ok=1
+    [control-resume] send resumeId=20741 attempt=19 ok=1
+    ...attempts=19 media=94 proxyMedia=97 videoAgeMs=781 videoAlive=1 refused=17 ignored=29 rekeyed=0
+    [control-resume] send resumeId=20741 attempt=20 ok=1
+    [control-resume] send resumeId=20741 attempt=21 ok=1
+    [control-resume] send resumeId=20741 attempt=22 ok=1
+    [control-resume] send resumeId=20741 attempt=23 ok=1
+    ...attempts=23 media=98 proxyMedia=101 videoAgeMs=806 videoAlive=1 refused=17 ignored=33 rekeyed=0
+    [control-resume] send resumeId=20741 attempt=24 ok=1
+    [control-resume] send resumeId=20741 attempt=25 ok=1
+    [control-resume] send resumeId=20741 attempt=26 ok=1
+    ...attempts=26 media=98 proxyMedia=101 videoAgeMs=2860 videoAlive=1 refused=17 ignored=36 rekeyed=0
+    [control-resume] send resumeId=20741 attempt=27 ok=1
+    [control-resume] send resumeId=20741 attempt=28 ok=1
+    [control-resume] send resumeId=20741 attempt=29 ok=1
+PASS  A SESSION THAT HAS BEEN SUPERSEDED IS NOT REPAIRED  the host answers; the viewer does not act on it
+PASS  ...nothing was re-keyed
+PASS  ...and the answers that did arrive were refused for the generation  29 answers ignored, last reason=generation
+PASS  the host is gone when the job closes
+    seam: media=101 controlDropped=78 resumeAsks=58 resumeAcks=57 fromOtherHostPorts=0
+
+--- what the host said about its control session ---
+    09-28 22:49:40.565 [native-video-host] capture-window target hwnd=0x1550cbc pid=20692 process=remote60_control_resume_e2e_test.exe title=remote60 c3 inject target pid 20692 b1928a6d clientOnly=0
+    09-28 22:49:40.819 [native-video-host] capture-switch first-callback streamGen=1 selectedId=22351036 targetHwnd=0x1550cbc pid=20692 process=remote60_control_resume_e2e_test.exe title=remote60 c3 inject target pid 20692 b1928a6d callbackUs=1906492137547 captureUs=1906492137547
+    09-28 22:49:43.061 [native-video-host] capture-switch first-frame path=h264-udp streamGen=1 selectedId=22351036 targetHwnd=0x1550cbc pid=20692 process=remote60_control_resume_e2e_test.exe title=remote60 c3 inject target pid 20692 b1928a6d sendQpcUs=1906494381221 captureQpcUs=1906494362869 size=306x232 auEpoch=3 curEpoch=3 holdUs=18352
+    09-28 22:49:50.046 [native-video-host][control] resume id=20737 accepted=0 verdict=probe evidence=idle probeAttempts=1 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:50.605 [native-video-host][control] resume id=20737 accepted=0 verdict=probe evidence=pending probeAttempts=3 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:51.164 [native-video-host][control] resume id=20737 accepted=0 verdict=probe evidence=pending probeAttempts=5 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:51.723 [native-video-host][control] udp control session ended epoch=1 resumed=0 reason=peer-lost
+    09-28 22:49:51.723 [native-video-host][control] resume id=20737 accepted=1 verdict=serve evidence=probe-failed probeAttempts=0 probes=1 wake=1 negotiated=1 peer=same serving=1
+    09-28 22:49:52.404 [native-video-host][control] resume id=12648430 accepted=0 verdict=probe evidence=idle probeAttempts=1 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:52.710 [native-video-host][control] resume id=12648430 accepted=0 verdict=refuse evidence=alive probeAttempts=1 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:53.018 [native-video-host][control] resume id=12648430 accepted=0 verdict=refuse evidence=alive probeAttempts=1 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:53.325 [native-video-host][control] resume id=12648430 accepted=0 verdict=probe evidence=idle probeAttempts=1 probes=2 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:53.635 [native-video-host][control] resume id=12648430 accepted=0 verdict=refuse evidence=alive probeAttempts=1 probes=2 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:53.946 [native-video-host][control] resume id=12648430 accepted=0 verdict=refuse evidence=alive probeAttempts=1 probes=2 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:54.254 [native-video-host][control] resume id=12648430 accepted=0 verdict=probe evidence=idle probeAttempts=1 probes=3 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:54.563 [native-video-host][control] resume id=12648430 accepted=0 verdict=refuse evidence=alive probeAttempts=1 probes=3 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:54.874 [native-video-host][control] resume id=12648430 accepted=0 verdict=refuse evidence=alive probeAttempts=1 probes=3 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:55.382 [native-video-host][control] resume id=20738 accepted=0 verdict=probe evidence=idle probeAttempts=1 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:55.906 [native-video-host][control] resume id=20738 accepted=0 verdict=refuse evidence=alive probeAttempts=1 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:56.435 [native-video-host][control] resume id=20738 accepted=0 verdict=probe evidence=idle probeAttempts=1 probes=2 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:56.965 [native-video-host][control] resume id=20738 accepted=0 verdict=refuse evidence=alive probeAttempts=1 probes=2 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:57.493 [native-video-host][control] resume id=20738 accepted=0 verdict=probe evidence=idle probeAttempts=1 probes=3 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:58.023 [native-video-host][control] resume id=20738 accepted=0 verdict=refuse evidence=alive probeAttempts=1 probes=3 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:58.548 [native-video-host][control] resume id=20738 accepted=0 verdict=probe evidence=idle probeAttempts=1 probes=4 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:59.108 [native-video-host][control] resume id=20738 accepted=0 verdict=probe evidence=pending probeAttempts=3 probes=4 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:49:59.665 [native-video-host][control] resume id=20738 accepted=0 verdict=probe evidence=pending probeAttempts=5 probes=4 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:50:00.226 [native-video-host][control] udp control session ended epoch=1 resumed=1 reason=peer-lost
+    09-28 22:50:00.226 [native-video-host][control] resume id=20738 accepted=1 verdict=serve evidence=probe-failed probeAttempts=0 probes=4 wake=1 negotiated=1 peer=same serving=1
+    09-28 22:50:07.424 [native-video-host][control] resume id=20739 accepted=0 verdict=probe evidence=idle probeAttempts=1 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:50:07.984 [native-video-host][control] resume id=20739 accepted=0 verdict=probe evidence=pending probeAttempts=3 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:50:08.543 [native-video-host][control] resume id=20739 accepted=0 verdict=probe evidence=pending probeAttempts=5 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:50:09.100 [native-video-host][control] udp control session ended epoch=1 resumed=1 reason=peer-lost
+    09-28 22:50:09.100 [native-video-host][control] resume id=20739 accepted=1 verdict=serve evidence=probe-failed probeAttempts=0 probes=1 wake=1 negotiated=1 peer=same serving=1
+    09-28 22:50:10.811 [native-video-host] encodedFrames=0 sentFrames=0 queuePushCount=1 queuePopCount=57 queuePushPerSec=0 idleHoldPerSec=1 idleHoldTotal=29 captureInputLowPushStreakSec=0 captureDeadRestartCount=0 queueDepthMax=1 queueDepthWindowMax=0 queueWaitTimeoutCount=3172 queueWaitNoWorkCount=0 captureRestarts=0 wgcContentSizeMismatchDrops=0 wgcPoolRecreates=0 captureWindowRebindCount=0 captureTargetPid=20692 captureTargetProc=remote60_control_resume_e2e_test.exe captureTargetHwnd=0x1550cbc callbackFrames=0 skippedByOverwrite=0 stalePreEncodeDrops=0 staleEncodedDrops=0 encoderResets=0 keyReqTotal=0 keyReqDropTotal=0 inputEvents=3 secureInputAttempts=0 secureInputDelivered=0 secureInputBrokerFailed=0 secureInputSkipWindowMode=0 secureInputSkipUnauth=0 desktopPromo=0/0/0 desktopPromoDeferSecure=0 desktopSecureProbeFalse=0 lastPromoWaitUs=0 inputIgnoredMove=0 inputNoTarget=0 inputUnsupported=0 inputInjectFail=0 inputFreshProbeSecure=0 inputFreshProbeReroute=0 inputInjectFailDefault=0 inputFailSetCursorPos=0     09-28 22:50:15.996 [native-video-host][control] resume id=20740 accepted=0 verdict=probe evidence=idle probeAttempts=1 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:50:16.553 [native-video-host][control] resume id=20740 accepted=0 verdict=probe evidence=pending probeAttempts=3 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:50:17.111 [native-video-host][control] resume id=20740 accepted=0 verdict=probe evidence=pending probeAttempts=5 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:50:17.851 [native-video-host][control] resume id=20741 accepted=0 verdict=probe evidence=idle probeAttempts=1 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:50:18.407 [native-video-host][control] resume id=20741 accepted=0 verdict=probe evidence=pending probeAttempts=3 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:50:18.971 [native-video-host][control] resume id=20741 accepted=0 verdict=probe evidence=pending probeAttempts=5 probes=1 wake=0 negotiated=1 peer=same serving=1
+    09-28 22:50:19.526 [native-video-host][control] udp control session ended epoch=1 resumed=1 reason=peer-lost
+    09-28 22:50:19.526 [native-video-host][control] resume id=20741 accepted=1 verdict=serve evidence=probe-failed probeAttempts=0 probes=1 wake=1 negotiated=1 peer=same serving=1
+    09-28 22:50:20.027 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:20.587 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:21.146 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:21.702 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:22.264 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:22.765 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:23.323 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:23.823 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:24.382 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:24.941 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:25.499 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:26.058 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:26.615 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:27.171 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:27.726 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:28.282 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:28.839 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:29.396 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=1 rekeyed=0
+    09-28 22:50:29.689 [native-video-host][control] udp control session ended epoch=1 resumed=1 reason=none
+    09-28 22:50:29.695 [native-video-host] capture-pipeline-flushed reason=stream-inactive streamGen=1 selectedId=22351036 targetHwnd=0x1550cbc pid=20692 process=remote60_control_resume_e2e_test.exe title=remote60 c3 inject target pid 20692 b1928a6d version=2
+    09-28 22:50:29.695 [native-video-host] stream inactive
+    09-28 22:50:29.955 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=0 rekeyed=0
+    09-28 22:50:30.514 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=0 rekeyed=0
+    09-28 22:50:31.074 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=0 rekeyed=0
+    09-28 22:50:31.637 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=0 rekeyed=0
+    09-28 22:50:32.195 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=0 rekeyed=0
+    09-28 22:50:32.751 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=0 rekeyed=0
+    09-28 22:50:33.310 [native-video-host][control] resume replay id=20741 streamId=2147566614 serving=0 rekeyed=0
+PASS  [C5] THE HOST REFUSED THAT HELLO -- and case 1's resume above still went through  refused=1 repaired=1
+capture: 09-28 22:49:40.565 [native-video-host] capture-window target hwnd=0x1550cbc pid=20692 process=remote60_control_resume_e2e_test.exe title=remote60 c3 inject target pid 20692 b1928a6d clientOnly=0 (this pid 20692)
+PASS  the host captured the window this test paints, not a monitor  host: "09-28 22:49:40.565 [native-video-host] capture-window target hwnd=0x1550cbc pid=20692 process=remote60_control_resume_e2e_test.exe title=remote60 c3 inject target pid 20692 b1928a6d clientOnly=0"  want: "capture-window target hwnd=0x1550cbc pid=20692 "
+PASS  [case 5] the host refused that id because its channel answered
+PASS  [case 5] AND LATER SERVED THE SAME ID, once it stopped answering  one verdict per instant, not one per recovery
+PASS  the scratch directory is cleaned up
+
+RESULT: ALL PASS  (60 checks, 0 failed, 0 not judged)

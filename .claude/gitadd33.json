@@ -1,0 +1,11 @@
+{
+  "repo_path": "D:/remote/remote",
+  "files": [
+    "apps/android_direct_client/app/src/test/java/com/remote60/androiddirect/ObserveVectorsTest.kt",
+    "apps/directory/test/observe_contract_test.js",
+    "apps/directory/test/run.js",
+    "apps/native_poc/CMakeLists.txt",
+    "apps/native_poc/src/observe_vectors_test.cpp",
+    "apps/shared/observe_endpoint_vectors.txt"
+  ]
+}

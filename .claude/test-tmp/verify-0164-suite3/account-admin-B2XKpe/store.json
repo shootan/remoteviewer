@@ -1,0 +1,88 @@
+{
+  "accounts": {
+    "veteran": {
+      "id": "veteran",
+      "salt": "b4249467555ef7fcab8b5b70c4929ad8",
+      "hash": "583affcb5a1d12c3682e759eb392e088b2ba9574b11eda41a92fe7d17de4ec76",
+      "createdAt": 1700000000000,
+      "status": "active",
+      "updatedAt": 1793279205574,
+      "approvedAt": 1793279205574,
+      "lastLoginAt": 1793279204962,
+      "memo": ""
+    },
+    "alice-long": {
+      "id": "alice-long",
+      "salt": "f5a3ccd1d3cfd145d3dae2626cceb0df",
+      "hash": "0fa090bcb7cb3fb4985a69c3dd431a95ea0cc1b7fe2af8e3211729d2704a2e78",
+      "status": "pending",
+      "createdAt": 1793279203031,
+      "updatedAt": 1793279203031,
+      "approvedAt": null,
+      "memo": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+      "lastLoginAt": null
+    },
+    "edge-pw": {
+      "id": "edge-pw",
+      "salt": "6d51b8e4c4f09999114e27d7f16e3939",
+      "hash": "ab6f417c9bb3fd2aab5a7b862180698f952930f8b467940e2e7d3bcf892e269c",
+      "status": "pending",
+      "createdAt": 1793279203077,
+      "updatedAt": 1793279203077,
+      "approvedAt": null,
+      "memo": "",
+      "lastLoginAt": null
+    },
+    "one-too-many": {
+      "id": "one-too-many",
+      "salt": "921d9b804a5ef122d782b1e878521ffb",
+      "hash": "2f3ed5ce37d7b5f7ab0f26c8cd4b32b050724291ff0985ce47e23002c63614d9",
+      "status": "pending",
+      "createdAt": 1793279203117,
+      "updatedAt": 1793279203117,
+      "approvedAt": null,
+      "memo": "",
+      "lastLoginAt": null
+    },
+    "selfmade": {
+      "id": "selfmade",
+      "salt": "1b0039a222526b804ad6871b4c70d081",
+      "hash": "a9c0387fde2b2b72ca7a0bf701ad7134ff0ca084ce7a926ad9aed4aee170a466",
+      "status": "pending",
+      "createdAt": 1793279205306,
+      "updatedAt": 1793279205306,
+      "approvedAt": null,
+      "memo": "",
+      "lastLoginAt": null
+    },
+    "twin": {
+      "id": "twin",
+      "salt": "3906af69d628ab40cd84197947b0d595",
+      "hash": "2964ca6ae912dc50907d9c79153fc788c7c909427c216ef3bd4cf5fe045dd7cb",
+      "status": "active",
+      "createdAt": 1793279206883,
+      "updatedAt": 1793279206884,
+      "approvedAt": 1793279206884,
+      "memo": "",
+      "lastLoginAt": null
+    }
+  },
+  "hosts": {
+    "289db3b184c97940": {
+      "hostId": "289db3b184c97940",
+      "accountId": "veteran",
+      "machineId": "machine-veteran",
+      "hostName": "Fixture PC",
+      "tokenHash": "86f7cd7140e3d4665227dd95b599e40daee50dc18e4b76317df5012964a63992",
+      "lastSeen": 0,
+      "publicIp": "",
+      "publicUdpPort": 0,
+      "wireIp": "",
+      "wirePort": 0,
+      "localIps": [],
+      "localUdpPort": 0,
+      "alternateUdpPort": 0
+    }
+  },
+  "devices": {}
+}

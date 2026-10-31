@@ -1,0 +1,27 @@
+PASS  login  status=200
+PASS  host registers  status=200
+PASS  two standby connects are reserved, each offered the relay  b=reserved c=reserved
+PASS  the heartbeat lists the clients AND one relay-facing entry per standby lease, under tokens no client holds  ["127.0.0.1:63971","127.0.0.1:63973","127.0.0.1:63972","127.0.0.1:63974"]
+PASS  both StandbyHellos reach the host, from two DIFFERENT relay ports -- neither the observe socket  b=63973 c=63974 observe=18081
+PASS  ...and they are the ports the heartbeat told the host to punch
+PASS  ...at the host-NAT socket the lease pinned (not the heartbeat tuple)  nat=2 media=0
+PASS  each client gets ITS Ack back (entries differ)
+PASS  pings: each client gets only its own pongs  b=3 c=3
+PASS  B activates over the SAME lease (no new connect): its HelloAck comes back to B
+PASS  session packets: B's arrive from B's lease port only, C's from C's -- the host's address gate can tell them apart  b=4 c=4
+PASS  host -> client: what the host sends to B's lease reaches B only, C's lease C only
+PASS  a datagram to B's host-facing port from another port (not the pinned host tuple) reaches nobody
+PASS  after another heartbeat, B's lease still goes to the tuple it pinned (the NAT socket), not the heartbeat's  nat=1 media=0
+PASS  a legacy connect is offered the relay as before (no standbyRelay field)
+PASS  the legacy Hello reaches the host from the OBSERVE socket, and its HelloAck comes back  src=18081
+PASS  ...and the standby leases were not dropped by it (both still pong)
+PASS  a second legacy connect still takes over the legacy lease (newest wins): L's packets are no longer carried
+PASS  ...the standby leases stay through that takeover too
+PASS  a standby capability in a LEGACY Hello opens nothing (no takeover with it)  host=0 nat=0 x=0
+PASS  a legacy capability in a StandbyHello opens nothing  host=0 nat=0 y=0
+FAIL  four more standby connects fill the host to eight (3 standby + 1 legacy + 4), the fifth is refused host-full  ["reserved","reserved","reserved","reserved","reserved"]
+PASS  ...and a refused standby connect is offered no relay candidate (the direct ones as always)
+PASS  the host is full: B's second standby connect is refused too
+
+RESULT: FAILED  (1 failed)
+runner: test exit 1; server log D:\remote\remote\.claude\caplife\ka_mut$m.server.log

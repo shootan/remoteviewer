@@ -1,0 +1,715 @@
+#pragma once
+
+#include <atomic>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <functional>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <vector>
+
+#include "poc_protocol.hpp"
+#include "prelogin_sas_wire.hpp"
+#include "reboot_wire.hpp"
+
+namespace remote60::native_poc {
+
+class WindowPanelStateModel;
+
+struct QueuedControlInputMessage {
+  MessageType type = MessageType::ControlInputEvent;
+  ControlInputEventMessage inputEvent{};
+  ControlInputTextMessage inputText{};
+  ControlPhysicalKeyMessage physicalKey{};
+  // P0 telemetry (#351): when the UI generated this event, kept CLIENT-LOCAL (never on the wire, so
+  // no Android/old-host size contract change). clientSendQpcUs on the wire is overwritten at send.
+  uint64_t generatedUs = 0;
+  uint64_t queuedAtMs = 0;  // local steady clock; not serialized, independent of peer/QPC clocks
+};
+
+// ka-pc-impl r7 (Codex N1): the ONE release rule -- nonzero for a key up, a mouse button up (left, right, middle, X1,
+// X2) and a physical key up; what DropAllButReleases keeps and what an owner fence's release-only drain may send.
+uint32_t control_input_release_identity(const QueuedControlInputMessage& msg);
+
+class ClientInputQueue {
+ public:
+  uint32_t NextSequence();
+  void Enqueue(const QueuedControlInputMessage& msg);
+  bool TryDequeue(QueuedControlInputMessage* out);
+  // keepalive r1: nothing waiting to be sent (a park waits for its releases to drain).
+  bool Empty() const;
+  // Wake immediately on typing/mouse input; periodic control work still gets a bounded wait.
+  void WaitForInput(uint32_t timeoutMs);
+  uint64_t dropped_count() const;
+  uint64_t coalesced_move_count() const;  // P0 (#351): moves replaced by a newer one (latest-wins)
+  // Drops every queued action (downs, moves, wheel, text) and keeps every release edge (key-up,
+  // button-up, physical key-up) in order. What a control resume does with a queue that filled
+  // while the channel was dead: the actions are stale, but a release that was never delivered is
+  // the only thing that lets go of a key the host is still holding. (RV-01)
+  void DropAllButReleases(uint32_t* dropped, uint32_t* kept);
+  void Reset();
+
+ private:
+  mutable std::mutex mu_;
+  std::condition_variable ready_;
+  std::deque<QueuedControlInputMessage> queue_;
+  bool backpressured_ = false;
+  std::atomic<uint32_t> nextSeq_{0};
+  std::atomic<uint64_t> dropped_{0};
+  std::atomic<uint64_t> coalescedMoves_{0};  // P0 (#351)
+};
+
+// The two input messages, built one way for every client (viewer ledger F-09: the Android session
+// and the Windows viewer each assembled them by hand, field for field).
+//
+// One ControlInputEvent: header, the queue's next sequence, the fields, the send stamp. `buttons`
+// is masked to the five wire bits (kMouseWireMask). Whether the X pair may be set at all against
+// this host is the caller's fence (viewer_input_forward.cpp), not this builder's.
+QueuedControlInputMessage make_control_input_event(ClientInputQueue& queue, uint16_t kind,
+                                                   uint16_t buttons, int32_t x, int32_t y,
+                                                   int32_t wheelDelta, uint32_t keyCode,
+                                                   uint64_t nowUs);
+// Splits UTF-16 text into ControlInputText messages of at most kControlInputTextMaxUtf16 units,
+// sequenced and queued in order. Returns how many were queued (0 for no text).
+size_t enqueue_control_input_text(ClientInputQueue& queue, const uint16_t* text, size_t count,
+                                  uint64_t nowUs);
+
+struct KeyframeRequestAttempt {
+  bool queued = false;
+  const char* throttleCause = "none";
+  uint64_t throttledCount = 0;
+};
+
+class KeyframeRequestState {
+ public:
+  KeyframeRequestState(uint64_t minIntervalUs, uint64_t tokenRefillUs, uint32_t tokenCapacity);
+
+  void Configure(uint64_t minIntervalUs, uint64_t tokenRefillUs, uint32_t tokenCapacity);
+  void Reset();
+  KeyframeRequestAttempt Request(uint16_t reason, uint64_t nowUs);
+  bool ConsumePending(uint16_t* outReason);
+  uint32_t NextSequence();
+  uint64_t min_interval_us() const;
+  uint64_t token_refill_us() const;
+  uint32_t token_capacity() const;
+
+ private:
+  std::atomic<bool> pending_{false};
+  std::atomic<uint16_t> pendingReason_{0};
+  std::atomic<uint32_t> nextRequestSeq_{0};
+  std::atomic<uint64_t> lastRequestUs_{0};
+  std::atomic<uint64_t> minIntervalUs_;
+  std::atomic<uint64_t> tokenRefillUs_;
+  std::atomic<uint32_t> tokenCapacity_;
+  std::atomic<uint64_t> throttledCount_{0};
+  mutable std::mutex limiterMu_;
+  double tokens_ = 1.0;
+  uint64_t lastRefillUs_ = 0;
+};
+
+struct PendingCaptureModeRequest {
+  uint32_t seq = 0;
+  uint16_t mode = 0;
+  uint32_t xPermille = 5000;
+  uint32_t yPermille = 5000;
+};
+
+class CaptureModeRequestState {
+ public:
+  void Reset();
+  void Request(uint16_t mode, uint32_t xPermille, uint32_t yPermille);
+  bool ConsumePending(PendingCaptureModeRequest* out);
+
+ private:
+  std::atomic<bool> pending_{false};
+  std::atomic<uint32_t> nextSeq_{0};
+  std::atomic<uint16_t> mode_{0};
+  std::atomic<uint32_t> xPermille_{5000};
+  std::atomic<uint32_t> yPermille_{5000};
+};
+
+struct PendingStreamStateRequest {
+  uint32_t seq = 0;
+  bool active = false;
+};
+
+class StreamStateControl {
+ public:
+  void Reset();
+  void Request(bool active);
+  bool ConsumePending(PendingStreamStateRequest* out);
+
+ private:
+  std::atomic<bool> pending_{false};
+  std::atomic<uint32_t> nextSeq_{0};
+  std::atomic<bool> active_{false};
+};
+
+struct PendingDesktopBackendRequest {
+  uint32_t seq = 0;
+  uint16_t backend = 1;  // 1:dxgi, 2:wgc; 0 = ask only (capture-lifecycle r1)
+  bool wantsStatus = false;  // capture-lifecycle r1: ask the host's answer (90) -- only a 0x100000 host
+};
+
+class DesktopBackendControl {
+ public:
+  void Reset();
+  void Request(uint16_t backend);
+  bool ConsumePending(PendingDesktopBackendRequest* out);
+  // capture-lifecycle r1 (UA-2): whether the connected host answers (kCaptureFlagDesktopBackendStatusV1,
+  // from its pong). Only then does a request ask for the answer, and may a question be asked at all.
+  void SetHostAnswers(bool answers) { hostAnswers_.store(answers, std::memory_order_release); }
+  bool HostAnswers() const { return hostAnswers_.load(std::memory_order_acquire); }
+  // Ask what runs now, changing nothing. False (nothing queued) toward a host that does not answer.
+  // capture-lifecycle r2 (Codex N3): a question never replaces a change. A change and a question pending
+  // together go out as the change alone -- its answer (asked for toward a host that answers) IS the status; a
+  // question taken first goes out first and a change after it is still sent. One message per ConsumePending.
+  bool Query();
+
+private:
+  std::atomic<bool> pending_{false};       // a change (backend_) is waiting
+  std::atomic<bool> queryPending_{false};  // r2 N3: a question is waiting -- kept apart from the change
+  std::atomic<uint32_t> nextSeq_{0};
+  std::atomic<uint16_t> backend_{2};
+  std::atomic<bool> hostAnswers_{false};
+};
+
+// capture-lifecycle r1 (UA-2): the host's last answer (ControlDesktopBackendStatus, 90). valid = one came on
+// this connection; codes 1 dxgi, 2 wgc, 3 gdi; flags kDesktopBackendStatusFlag*.
+struct DesktopBackendStatusSnapshot {
+  bool valid = false;
+  uint32_t seq = 0;
+  uint16_t requested = 0;
+  uint16_t effective = 0;
+  uint16_t active = 0;
+  uint16_t flags = 0;
+  uint32_t changeCount = 0;
+  uint64_t receivedUs = 0;
+};
+
+struct PendingRuntimeTuneRequest {
+  ControlRuntimeEncoderConfigMessage message{};
+};
+
+class RuntimeTuneState {
+ public:
+  RuntimeTuneState(uint32_t bitrateMin, uint32_t bitrateMax, uint32_t bitrateStep,
+                   uint32_t keyintMin, uint32_t keyintMax);
+
+  void Reset(uint32_t bitrate, uint32_t keyint, uint32_t fps = 0);
+  void SetEnabled(bool enabled);
+  bool enabled() const;
+  void MarkDirty();
+  void SetTargets(uint32_t bitrate, uint32_t keyint, uint32_t fps);
+  void ApplyDelta(int bitrateStepCount, int keyintStepCount, uint32_t observedRecvMbpsX1000);
+  bool ConsumePending(uint64_t nowUs, uint32_t observedRecvMbpsX1000, PendingRuntimeTuneRequest* out);
+
+ private:
+  void EnsureDefaults(uint32_t observedRecvMbpsX1000);
+
+  const uint32_t bitrateMin_;
+  const uint32_t bitrateMax_;
+  const uint32_t bitrateStep_;
+  const uint32_t keyintMin_;
+  const uint32_t keyintMax_;
+  std::atomic<bool> enabled_{false};
+  std::atomic<bool> dirty_{false};
+  std::atomic<uint32_t> nextSeq_{0};
+  std::atomic<uint32_t> targetBitrate_{0};
+  std::atomic<uint32_t> targetKeyint_{0};
+  std::atomic<uint32_t> targetFps_{0};
+  std::atomic<uint64_t> lastSentUs_{0};
+};
+
+struct ClientControlMetricsSnapshot {
+  ControlClientMetricsMessage message{};
+  uint64_t updatedQpcUs = 0;
+};
+
+// C0 stage 1: the latest bandwidth observation, sent once per new report -- and only when the
+// caller passes one, which the viewer does only for a host that acknowledged
+// kUdpFeatureBandwidthObserve. seq and clientSendQpcUs are the scheduler's to fill.
+struct ClientBandwidthSnapshot {
+  ControlClientBandwidthMessage message{};
+  uint64_t updatedQpcUs = 0;
+};
+
+enum class ControlOutboundActionKind : uint8_t {
+  None = 0,
+  Ping,
+  WindowListRequest,
+  WindowSelect,
+  StreamState,
+  CaptureMode,
+  Metrics,
+  KeyframeRequest,
+  RuntimeTune,
+  DesktopBackend,
+  InputEvent,
+  InputText,
+  PhysicalKey,
+  MonitorListRequest,
+  MonitorSelect,
+  UnlockChallengeRequest,
+  UnlockSealedRequest,
+  UnlockStatusRequest,
+  ImeStateRequest,
+  ClientBandwidth,  // C0 stage 1, no reply
+  RebootRequest,    // prelogin-service r3: ControlRebootRequest (84), expects ControlRebootReply (85)
+  PreloginControl,  // prelogin-ui r9 R5: ControlPreloginControl (83), expects ControlPreloginStatus (82)
+  LockCredRetryChallengeRequest,  // lk-ux-retry r1: ControlLockCredRetryChallengeRequest (89), expects 41
+};
+
+struct ControlOutboundAction {
+  ControlOutboundActionKind kind = ControlOutboundActionKind::None;
+  std::optional<MessageType> expectedResponseType;
+  uint16_t expectedResponseSize = 0;
+  ControlPingMessage ping{};
+  ControlWindowListRequestMessage windowListRequest{};
+  ControlWindowSelectMessage windowSelect{};
+  ControlMonitorListRequestMessage monitorListRequest{};
+  ControlMonitorSelectMessage monitorSelect{};
+  ControlStreamStateMessage streamState{};
+  ControlCaptureModeRequestMessage captureMode{};
+  ControlClientMetricsMessage metrics{};
+  ControlRequestKeyFrameMessage keyframe{};
+  ControlRuntimeEncoderConfigMessage runtimeTune{};
+  ControlDesktopBackendRequestMessage desktopBackend{};
+  ControlInputEventMessage inputEvent{};
+  ControlInputTextMessage inputText{};
+  ControlPhysicalKeyMessage physicalKey{};
+  ControlUnlockChallengeRequestMessage unlockChallengeReq{};
+  ControlLockCredRetryChallengeRequestMessage lockCredRetryReq{};  // lk-ux-retry r1
+  ControlUnlockSealedRequestMessage unlockSealed{};
+  ControlUnlockStatusRequestMessage unlockStatusReq{};
+  ControlImeStateRequestMessage imeStateReq{};
+  ControlClientBandwidthMessage clientBandwidth{};
+  ControlRebootRequestMessage reboot{};  // prelogin-service r3 (reboot_wire.hpp)
+  ControlPreloginControlMessage preloginControl{};  // prelogin-ui r9 R5 (prelogin_sas_wire.hpp)
+  uint64_t inputGeneratedUs = 0;  // P0 (#351): local diagnostic — when the UI generated this input
+  // t-970r4zgo: for a WindowSelect, the local selection it was asked for (the sink's tag when the
+  // request was queued). The answer is handed to the sink with it, so a late answer to an earlier
+  // selection cannot open a later selection's gate.
+  uint64_t selectionTag = 0;
+};
+
+/**
+ * How often a client pings the host when it has nothing else to send.
+ *
+ * This is the uplink KEEPALIVE, not only a latency probe, and that is why it is short. A relay
+ * that sees no packets from a client for a few seconds calls it silent and drops the session, and
+ * the host then reports peer-lost -- which is how a healthy session got torn down while its video
+ * was still arriving perfectly. Halved from the old 1000 ms so an otherwise quiet session keeps
+ * proving it is there, for the price of one tiny message every half second.
+ *
+ * Shared by the Windows viewer (viewer_args) and the Android session (ClientSessionConnectArgs) so
+ * the two cannot drift apart. The scheduler clamps whatever it is handed to [20, 10000].
+ */
+constexpr uint32_t kClientControlIntervalMsDefault = 500;
+
+class ClientControlScheduler {
+ public:
+  void Reset(uint32_t controlIntervalMs, uint64_t nowUs);
+  void OnPingCompleted(uint64_t doneUs);
+  // keepalive r1: the next pass sends a Ping (a park's fence after its pause).
+  void RequestPingNow() { nextPingUs_ = 0; }
+  bool NextAction(uint64_t nowUs,
+                 const ClientControlMetricsSnapshot& metrics,
+                 WindowPanelStateModel* windowPanel,
+                 StreamStateControl* streamState,
+                 CaptureModeRequestState* captureMode,
+                 KeyframeRequestState* keyframeRequests,
+                 RuntimeTuneState* runtimeTune,
+                 ClientInputQueue* inputQueue,
+                  ControlOutboundAction* out,
+                 DesktopBackendControl* desktopBackend = nullptr,
+                 const ClientBandwidthSnapshot* bandwidth = nullptr);
+  uint64_t RecordInputAck(uint32_t inputLogEvery);
+
+ private:
+  uint32_t nextPingSeq_ = 0;
+  uint32_t inputBurstCount_ = 0;
+  uint32_t nextMetricsSeq_ = 0;
+  uint32_t nextWindowListSeq_ = 0;
+  uint32_t nextWindowSelectSeq_ = 0;
+  uint32_t nextMonitorSeq_ = 0;
+  uint64_t nextPingUs_ = 0;
+  uint64_t lastMetricsSentUs_ = 0;
+  uint32_t nextBandwidthSeq_ = 0;
+  uint64_t lastBandwidthSentUs_ = 0;
+  uint64_t inputAckCount_ = 0;
+  uint32_t controlIntervalMs_ = 1000;
+};
+
+enum class UdpH264AssemblyDisposition : uint8_t {
+  Ignored = 0,
+  Partial,
+  Completed,
+  Malformed,
+  Dropped,
+  // In-order hold on (ConfigureInOrderHold): this datagram completed its AU, which now waits in
+  // sequence order for PopDelivery instead of being handed out here. (Windows NACK wiring.)
+  Queued,
+};
+
+struct UdpH264AssembledFrame {
+  EncodedFrameHeader header{};
+  std::vector<uint8_t> payload;
+};
+
+struct UdpH264AssemblyStepResult;
+/**
+ * What a receiver does when the assembler reports a sequence gap (droppedPreviousIncomplete).
+ *
+ * A gap is revealed by the AU that arrives after it. If that AU is itself a complete keyframe, it
+ * resyncs the decoder on its own -- and the gap is usually the host's doing, not the network's: an
+ * arriving IDR supersedes the sender's backlog, whose seqs are never sent. Asking for another IDR
+ * then only buys a second one, which clears the backlog again and opens the next gap.
+ *
+ * The Windows viewer learned this in history #390 (90 of 90 reason-2 requests right after a
+ * complete keyframe). The shared session -- the Android app -- had not: measured 2026-09-27, 46 of
+ * 46 phone requests came within 250 ms of a host keyframe, and each also reset the Android codec
+ * through OnVideoDiscontinuity (the video size flipping 1080 <-> 1088 in apk.log). quality r4.
+ */
+struct SequenceGapResponse {
+  bool requestKeyframe = false;   // ask the host for an IDR
+  bool discontinuity = false;     // tell the sink the reference chain broke
+};
+SequenceGapResponse respond_to_sequence_gap(const UdpH264AssemblyStepResult& result);
+
+struct UdpH264AssemblyStepResult {
+  UdpH264AssemblyDisposition disposition = UdpH264AssemblyDisposition::Ignored;
+  bool startedNewAssembly = false;
+  bool droppedPreviousIncomplete = false;
+  bool reorderDetected = false;
+  bool oversizePayload = false;
+  bool fecRecovered = false;
+  uint32_t fecRecoveredChunks = 0;
+  uint32_t packetSeq = 0;
+  uint32_t expectedSeq = 0;
+  uint32_t packetChunkOffset = 0;
+  uint32_t expectedNextOffset = 0;
+  uint32_t rejectedPayloadSize = 0;
+  UdpH264AssembledFrame frame{};
+};
+
+class UdpH264FrameAssembler {
+ public:
+  void Reset();
+  UdpH264AssemblyStepResult PushDatagram(const uint8_t* data, size_t len);
+  // Same, stamping the AU's first arrival with `nowUs` (the in-order hold clock below).
+  UdpH264AssemblyStepResult PushDatagram(const uint8_t* data, size_t len, uint64_t nowUs);
+
+  // --- In-order delivery hold (video NACK) ---
+  // Without it a completed AU is delivered the moment it completes and every OLDER incomplete AU
+  // is discarded with it (the seq gap then reads as loss). At 60 fps the next P completes ~16 ms
+  // after a lost chunk, before a NACK round (25 ms grace) can bring the chunk back -- so NACK only
+  // ever helped a sparse (static-screen) stream. With maxHoldUs > 0, PushDatagram returns Queued
+  // for a completed AU and PopDelivery hands AUs out in sequence order: a completed AU waits behind
+  // an older incomplete one for up to maxHoldUs (its retransmit may still land); past that the
+  // older AU is dropped and delivery resumes carrying droppedPreviousIncomplete. maxHoldUs = 0
+  // keeps the legacy immediate delivery (the Android path is unchanged). `maxConcurrent` bounds
+  // the assemblies held (legacy 3; a hold of ~120 ms at 60 fps needs ~8).
+  // `maxHeldBytes` bounds the payload held across assemblies (0 = unbounded); past it the
+  // oldest assembly is given up, exactly like the count cap. (Codex condition 1.)
+  void ConfigureInOrderHold(uint64_t maxHoldUs, size_t maxConcurrent,
+                            size_t maxHeldBytes = 8u * 1024u * 1024u);
+  bool InOrderHoldEnabled() const { return holdMaxUs_ > 0; }
+  size_t HeldBytes() const;
+  // Deliver the next AU in sequence order if one is ready, or if the incomplete AU ahead of it has
+  // outlived its hold. `repairNonKey` false: an IDR is awaited, so an incomplete NON-key head is
+  // not worth waiting for and is released at once (an incomplete keyframe still is -- it is the
+  // only recovery point). Call after every datagram and on every receive timeout, until false.
+  bool PopDelivery(uint64_t nowUs, bool repairNonKey, UdpH264AssemblyStepResult* out);
+  size_t PendingCount() const { return assemblies_.size(); }
+  // True when a held assembly is complete -- PopDelivery has something to release once the
+  // incomplete head ahead of it is given up. False on a quiet link with only the stuck head.
+  bool AnyComplete() const;
+  // Gives up exactly the incomplete assembly (generation, seq) the caller judged -- never an
+  // "oldest" by arrival or sequence order -- because its repair is over (A04 rule). False, and
+  // nothing removed, when it is not held or completed meanwhile (the give-up is cancelled). The
+  // next delivery reports the seq gap exactly as an expired hold does.
+  //
+  // The identity is remembered (a tombstone), because the host may still be sending that AU's
+  // chunks: without it the next late chunk re-creates the very assembly that was just abandoned
+  // and blocks the head again, so the caller gives the same AU up over and over (measured: the
+  // same seq abandoned 3 times, and the good AU behind it never delivered). `nowUs` only stamps
+  // the record for diagnostics -- retirement is by boundary, not by clock (see abandoned_).
+  bool GiveUpIncomplete(uint64_t generation, uint32_t seq, uint64_t nowUs = 0);
+  // True while (generation, seq) is tombstoned: its chunks are ignored as stale traffic.
+  bool IsAbandoned(uint64_t generation, uint32_t seq) const;
+  size_t AbandonedCount() const { return abandoned_.size(); }
+
+  // Saturation (A04). The abandoned list has a cap, but reaching it must never make the
+  // assembler forget an identity: forgetting one means accepting it again, which is the defect
+  // the list exists to prevent. Instead the cap starts a single RECOVERY EPISODE:
+  //   - no new non-key assembly is started (the ones already held keep being repaired; the
+  //     non-key ones still held when the episode begins are dropped, and need no record because
+  //     they cannot be re-created while it lasts);
+  //   - at most kSaturationKeyCandidates keyframes assemble at once. A newer key replaces the
+  //     oldest candidate, and the floor rises to the replaced candidate's seq so its late chunks
+  //     cannot re-create it. The floor only rises within the episode, survives having no
+  //     candidate at all, and never hides a candidate that is still assembling (a live lookup
+  //     comes first, so a repair in progress is never interrupted by it);
+  //   - a candidate is only created or replaced when the caller's admission filter accepts the
+  //     generation. On a refusal nothing changes -- not the candidates, not the floor, not the
+  //     delivery state -- so a generation the viewer would refuse anyway cannot evict a good
+  //     candidate or raise the floor past it.
+  // The episode ends when the caller reports that one of the delivered candidates passed the
+  // admission boundary (NoteKeyAccepted -- assembly/gate admission, not a decode success): that
+  // key is the recovery point, so everything the watermark covers is retired. If newer records
+  // still hold the list at the cap, the episode continues. There is no time-based exit and no
+  // eviction; a new session object is the only other way back to a clean state.
+  //
+  // The filter is the caller's own generation gate (the viewer passes SelectionGateState::
+  // AdmitGeneration). Unset -- the Android path -- means "admit", so that path is unchanged.
+  void SetSaturationAdmitFilter(std::function<bool(uint64_t)> admit) { saturationAdmit_ = std::move(admit); }
+  bool saturated() const { return saturated_; }
+  bool saturation_floor_set() const { return saturationFloorSet_; }
+  // Raises the episode's floor (monotone within the episode).
+  void RaiseSaturationFloor(uint32_t seq);
+  uint32_t saturation_floor_seq() const { return saturationFloorSeq_; }
+  size_t saturation_candidates() const;
+  size_t delivered_key_candidates() const { return deliveredKeyCandidates_.size(); }
+  // Called by the receiver immediately after a completed key AU passed its generation gate and
+  // the frame gate's Decode verdict, BEFORE the decode itself: the claim is "this key was
+  // accepted as the recovery point", not "it decoded". Ignored unless it names one of the key
+  // candidates this episode delivered.
+  void NoteKeyAccepted(uint64_t generation, uint32_t seq);
+
+  struct IncompleteAuInfo {
+    uint32_t seq = 0;
+    uint64_t generation = 0;
+    uint16_t chunkCount = 0;
+    uint16_t missingTotal = 0;  // total missing data chunks (may exceed what fit in missingOut)
+    // Highest received data-chunk index + 1. A missing index < highWater is a confirmed hole (a
+    // later chunk already arrived, so its tail is here); a missing index >= highWater is the
+    // still-in-flight tail and must NOT be NACKed early (premature NACK ignites a retransmit flood
+    // on large frames whose send time exceeds the reorder grace). (Codex: frame-end aware NACK.)
+    uint16_t highWater = 0;
+    bool keyFrame = false;  // repairing the keyframe is allowed even while waiting for a keyframe
+    // When the AU's first datagram arrived (PushDatagram's nowUs; 0 on the legacy overload), so the
+    // NACK graces run from the AU's own age rather than from when the scheduler first saw it.
+    uint64_t firstPacketUs = 0;
+    // Last time this AU made progress: a NEW data chunk arrived or FEC recovered one. A duplicate
+    // chunk, a parity packet that repairs nothing, control traffic or another AU do not count.
+    uint64_t lastProgressUs = 0;
+  };
+  // Video NACK: describe the oldest still-incomplete AU (the one blocking delivery) and list up to
+  // `maxMissing` of its missing data-chunk indices in `missingOut` (indices are ascending, so the
+  // caller can split holes < highWater from the in-flight tail). Returns false when every held
+  // assembly has all its data chunks. Pure query. (video NACK.)
+  bool OldestIncomplete(uint16_t* missingOut, uint16_t maxMissing, IncompleteAuInfo* info) const;
+
+ private:
+  struct Assembly {
+    uint32_t seq = 0;
+    uint32_t payloadSize = 0;
+    uint16_t chunkCount = 0;
+    uint32_t chunkStride = 0;
+    uint32_t receivedCount = 0;
+    EncodedFrameHeader header{};
+    std::vector<uint8_t> payload;
+    std::vector<uint8_t> received;
+    std::vector<std::vector<uint8_t>> parity;
+    std::vector<uint8_t> parityReceived;
+    // Which layout this frame's parity uses, learned from the first parity packet to arrive.
+    uint8_t parityInterleaved = 0;
+    // In-order hold bookkeeping: when the first datagram of this AU arrived (the hold clock), whether
+    // every data chunk is in (awaiting PopDelivery), and how many chunks parity repaired.
+    uint64_t firstPacketUs = 0;
+    uint64_t lastProgressUs = 0;  // see IncompleteAuInfo::lastProgressUs
+    bool complete = false;
+    uint32_t fecRecoveredChunks = 0;
+  };
+
+  UdpH264AssemblyStepResult DeliverAssembly(Assembly& assembly);
+
+  // A04: identities given up on. Deliberately NOT expressed by moving lastDeliveredSeq_ forward:
+  // that would claim the AU was delivered, change what the next delivery reports as a sequence
+  // gap (and with it the IDR recovery contract), and swallow AUs that were never judged. A
+  // tombstone blocks exactly the judged (generation, seq) and nothing else -- another generation
+  // restarts the seq space and never matches one.
+  //
+  // Retirement is by BOUNDARY, not by a clock: a host that keeps resending the abandoned AU for
+  // longer than any timeout would otherwise get it re-assembled and abandoned a second time. An
+  // entry is retired when delivery has moved past it in its own generation (`lastDeliveredSeq_`
+  // is at or beyond it): from then on the ordinary stale guard covers those chunks, so the
+  // tombstone is redundant. Reset() clears everything with the rest of the assembler state.
+  //
+  // UNFINISHED, RELEASE-BLOCKING: what happens when many identities are abandoned with no
+  // delivery in between is not decided yet. Dropping the oldest record was rejected -- forgetting
+  // an identity means accepting it again, which is the very defect this exists to prevent -- and
+  // a time-to-live was rejected for the same reason. Today the list simply grows in that case
+  // (each entry is 24 bytes and the give-up rule makes many outstanding give-ups without a single
+  // delivery a pathological case), and the saturation design that closes it properly is being
+  // confirmed. Retirement on a generation change is likewise not settled: the assembler must not
+  // follow a late packet's generation, and today nothing calls Reset() from the receive path.
+  struct AbandonedAu {
+    uint64_t generation = 0;
+    uint32_t seq = 0;
+    uint64_t atUs = 0;  // diagnostics only
+  };
+  std::deque<AbandonedAu> abandoned_;
+  // Saturation episode (see SetSaturationAdmitFilter). kAbandonedSaturationCap is the trigger,
+  // never an eviction bound.
+  static constexpr size_t kAbandonedSaturationCap = 16;
+  static constexpr size_t kSaturationKeyCandidates = 2;
+  static constexpr size_t kDeliveredKeyCandidateRing = 8;
+  bool saturated_ = false;
+  bool saturationFloorSet_ = false;
+  // Session-wide sequence, not a per-generation one: the host's seq is monotone across a UDP
+  // session (it only restarts with a new session object), so a key of any generation at or below
+  // the floor is one this episode has already moved past.
+  uint32_t saturationFloorSeq_ = 0;
+  // Candidates this episode delivered, bounded: a caller whose final gate keeps refusing
+  // completed keys must not grow it without end. A key pushed out of the ring can no longer end
+  // the episode even if it is accepted later -- conservative on purpose: it costs a further
+  // recovery attempt, and no abandoned identity is forgotten by it.
+  std::deque<AbandonedAu> deliveredKeyCandidates_;
+  std::function<bool(uint64_t)> saturationAdmit_;
+
+  std::deque<Assembly> assemblies_;
+  bool deliveredAny_ = false;
+  uint32_t lastDeliveredSeq_ = 0;
+  uint64_t holdMaxUs_ = 0;      // 0 = legacy immediate delivery
+  size_t maxConcurrent_ = 3;    // kMaxConcurrentVideoAssemblies unless ConfigureInOrderHold raised it
+  size_t maxHeldBytes_ = 0;     // hold mode only; 0 = unbounded
+};
+
+struct WindowTargetUiEntry {
+  uint64_t id = 0;
+  uint32_t pid = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  bool minimized = false;
+  std::string title;
+};
+
+// One attached screen. The host orders them primary-first then left to right, so the index is
+// what the UI numbers: "monitor 1" is the same screen every time.
+struct MonitorEntry {
+  uint32_t id = 0;
+  int32_t x = 0;
+  int32_t y = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  bool primary = false;
+  // The host's device name for the screen ("\\.\DISPLAY2"): with the rectangle, what identifies it
+  // to a later connection (dxgi-wedge-fix r1) -- the id is only an index into this list.
+  std::string name;
+};
+
+struct WindowPanelSnapshot {
+  std::vector<WindowTargetUiEntry> items;
+  uint64_t selectedId = 0;
+  std::string selectedTitle = "desktop";
+  uint32_t selectedWidth = 0;
+  uint32_t selectedHeight = 0;
+  bool selectionLocked = false;
+  /**
+   * The machine-readable token. Matched by prefix (`should_append_selected_title`) and written to
+   * the log, so its spelling is a contract -- do not translate it.
+   */
+  std::string status = "waiting_control";
+  /**
+   * The same moment, said to the user.
+   *
+   * Kept apart because one field could not be both: `window_list_received count=3` was appearing
+   * on screen as the picker's subheading, which is a log line wearing a user's clothes. Empty
+   * means the drawing code falls back to whatever it showed before.
+   */
+  std::string displayStatus;
+  uint32_t lastSelectSeq = 0;
+  bool lastSelectOk = false;
+  uint64_t lastSelectWindowId = 0;
+  uint64_t lastSelectStreamGeneration = 0;
+  uint64_t lastSelectHostSendQpcUs = 0;
+  int scrollIndex = 0;
+  // The attached screens, and which one desktop mode is showing. Empty until the host answers,
+  // and it only will if it advertised support -- an older one drains the request in silence.
+  bool hostSupportsMonitors = false;
+  // t-970r4zgo: this connection's host selects a monitor through the window-select transaction
+  // (kControlWindowListFlagMonitorSelectTransactionV1). Learnt from this connection's window
+  // list only; reset with the panel on every connect.
+  bool hostSupportsMonitorSelect = false;
+  // r3 M4: moves whenever a monitor list that differs from the last one is applied. A screen pick
+  // names an index into the list the user was shown; it is sent only against that same list.
+  uint64_t monitorListRevision = 0;
+  uint32_t selectedMonitorId = 0;
+  std::vector<MonitorEntry> monitors;
+};
+
+struct WindowListApplyResult {
+  std::string logLine;
+};
+
+struct WindowSelectApplyResult {
+  std::string logLine;
+  bool ok = false;
+  // r4 M2-A: false = the answer belongs to another selection than the one now requested, and the
+  // panel was left as it was.
+  bool shown = true;
+};
+
+class WindowPanelStateModel {
+ public:
+  void Reset();
+  // keepalive r2 K1: a park takes back every list / select / monitor request not yet sent.
+  void CancelPendingRequests();
+  void RequestList(const char* statusText = nullptr);
+  bool TakeListRequest();
+  // monitorListRevision: for a monitor-select target, the list the index was taken from
+  // (kAnyMonitorListRevision = the current one). If another list arrives before the request goes
+  // out, it is not sent (status window_select_failed: monitor_list_changed).
+  bool RequestSelect(uint64_t windowId, const char* statusText = nullptr, uint64_t selectionTag = 0,
+                     uint64_t monitorListRevision = ~0ULL);
+  bool TakeSelectRequest(uint64_t* outWindowId, uint64_t* outSelectionTag = nullptr);
+  void SetHostSupportsMonitorSelect(bool supported);
+  void RequestMonitorList();
+  bool TakeMonitorListRequest();
+  /** Returns true when support was newly discovered, so the caller can fetch the list once. */
+  bool SetHostSupportsMonitors(bool supported);
+  bool RequestMonitorSelect(uint32_t monitorId);
+  bool TakeMonitorSelectRequest(uint32_t* outMonitorId);
+  void ApplyMonitorList(const ControlMonitorListMessage& msg);
+  void SetStatus(const std::string& status);
+  /**
+   * The line the user reads, as opposed to the token a test matches.
+   *
+   * The field has existed since the panel was written and nothing ever wrote it -- the drawing
+   * code falls back to the token when it is empty, which is why nobody noticed. The connect
+   * path needs it: "호스트 응답 대기 중" is not a state anything else can infer.
+   */
+  void SetDisplayStatus(const std::string& displayStatus);
+  WindowListApplyResult ApplyWindowList(const ControlWindowListMessage& msg, int visibleCount);
+  WindowSelectApplyResult ApplyWindowSelected(const ControlWindowSelectedMessage& msg);
+  // r4 M2-A: the answer to a request queued under `selectionTag`. Shown only if that is still the
+  // selection most recently requested here -- compared and applied under the one lock RequestSelect
+  // takes, so a pick made between the two cannot be overwritten. selectionTag 0 = untracked, shown.
+  WindowSelectApplyResult ApplyWindowSelectedFor(const ControlWindowSelectedMessage& msg, uint64_t selectionTag);
+  void Scroll(int deltaSteps, int visibleCount);
+  bool TryResolveWindowIdForVisibleRow(int row, int visibleCount, uint64_t* outWindowId) const;
+  WindowPanelSnapshot Snapshot() const;
+  bool IsDesktopSelected() const;
+
+ private:
+  mutable std::mutex mu_;
+  WindowPanelSnapshot state_;
+  bool listRequestPending_ = false;
+  bool selectRequestPending_ = false;
+  uint64_t pendingSelectId_ = 0;
+  uint64_t pendingSelectTag_ = 0;
+  uint64_t currentSelectTag_ = 0;  // the selection most recently requested (r4 M2-A)
+  uint64_t pendingSelectListRevision_ = ~0ULL;
+  // The last applied monitor list, entry by entry (with the host's device names), to tell a
+  // changed list from the same one fetched again.
+  std::vector<ControlMonitorEntry> lastMonitorEntries_;
+  bool monitorListRequestPending_ = false;
+  bool monitorSelectRequestPending_ = false;
+  uint32_t pendingMonitorId_ = 0;
+};
+
+}  // namespace remote60::native_poc

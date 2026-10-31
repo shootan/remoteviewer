@@ -1,0 +1,170 @@
+﻿host_standby_admission_e2e_test (keepalive-r2 A spike)
+
+[direct: two standby entries, one active, no interference, explicit takeover]
+PASS  the fake directory starts
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  a real GNLinkStream starts
+PASS  the host registers  t] directory cache path=C:\work\gnlink-wt\ka-r3\build\test-scratch\run-18256-3609540774049-0\punch_standby-1\host_cache.json (--directory-cache)
+
+10-26 20:45:40.528 [native-video-host] directory agent started url=http://127.0.0.1:50092
+
+10-26 20:45:40.529 [native-video-host][dir-cycle] n=1 start cause=first
+
+10-26 20:45:40.532 [native-video-host] directory registered hostId=h-standby name=SHOTAN
+
+
+PASS  A (device A1) is admitted as a standby entry  status=0
+PASS  B (device B1) is admitted as a standby entry, its own
+PASS  ...and NEITHER admission started a session (no epoch, no stream)  -host] directory capability endpoint translated expected=211.218.222.1:60420 actual=127.0.0.1:59412
+
+10-26 20:45:41.544 [native-video-host][standby] hello admitted entries=1 active=0
+
+10-26 20:45:41.544 [native-video-host] directory capability endpoint translated expected=211.218.222.1:60420 actual=127.0.0.1:59413
+
+10-26 20:45:41.544 [native-video-host][standby] hello admitted entries=2 active=0
+
+
+PASS  A's explicit activation is answered with a HelloAck (DirectoryAuth)  refusal=0
+PASS  ...through the session admission: the first session, logged as an activation (no rollover yet)  1.544 [native-video-host][standby] hello admitted entries=2 active=0
+
+10-26 20:45:41.545 [native-video-host][standby] first session by activation entries=2
+
+10-26 20:45:41.545 [native-video-host] secure-input ready=0 status=secure input requires elevated host
+
+10-26 20:45:41.545 [native-video-host] client connected transport=udp
+
+10-26 20:45:41.545 [native-video-host] socket sndbuf=1048576 bytes
+
+
+PASS  A's control works (its window-select is processed)
+  -- B, parked, keeps itself alive and retries; A must not notice --
+PASS  B's pings are answered Ok (10)
+PASS  B's StandbyHello retransmit (same gen) replays the SAME entry (capability not needed again)
+PASS  B 'reconnects' (new gen, new capability): a new entry replaces its old one
+PASS  ...the old one is gone
+PASS  A's control still works after all that (fence)
+PASS  NO new session, NO control-session end while B pinged / re-admitted / sent control  2342174721 streamGen=1 reason=window_not_found_or_not_shareable title=<empty>
+
+10-26 20:45:41.783 [native-video-host][control] window-select seq=7 requestedId=11574251042342174722 pending
+
+10-26 20:45:41.792 [native-video-host][control] window-select seq=7 requestedId=11574251042342174722 applied=0 selectedId=11574251042342174722 streamGen=1 reason=window_not_found_or_not_shareable title=<empty>
+
+
+PASS  B's control datagrams were dropped (never processed)
+  -- explicit takeover by B; A parked; A's late packets --
+PASS  B's explicit activation takes the session  2342174721 streamGen=1 reason=window_not_found_or_not_shareable title=<empty>
+
+10-26 20:45:41.783 [native-video-host][control] window-select seq=7 requestedId=11574251042342174722 pending
+
+10-26 20:45:41.792 [native-video-host][control] window-select seq=7 requestedId=11574251042342174722 applied=0 selectedId=11574251042342174722 streamGen=1 reason=window_not_found_or_not_shareable title=<empty>
+
+
+PASS  ...a new epoch (3) and a new keyframe for B
+PASS  B's control works
+PASS  A's late control (old session) is refused
+PASS  A is parked, not dropped: its entry still answers
+PASS  A's DELAYED Activate (old gen 1) is refused as superseded -- no re-takeover  refusal=0
+PASS  B still has the session (fence)
+PASS  A's NEW explicit activation (gen 2) takes it back
+  -- bounds --
+PASS  six more devices fill the host to eight entries  6
+PASS  a ninth device is answered BUSY  status=1
+PASS  after one Release, a new device gets a place  status=0
+PASS  A's session went through all of it untouched
+  -- lease --
+PASS  an entry that stops pinging lapses after its lease (20 s)
+  -- r3 S3: the active grant ends with its session --
+PASS  A's session has really ended (its control session ended)  420
+
+10-26 20:46:01.941 [native-video-host] directory punch -> 211.218.222.1:60420
+
+10-26 20:46:01.941 [native-video-host] directory punch -> 211.218.222.1:60420
+
+10-26 20:46:01.941 [native-video-host] directory punch -> 211.218.222.1:60420
+
+10-26 20:46:01.941 [native-video-host] directory punch -> 211.218.222.1:60420
+
+10-26 20:46:01.941 [native-video-host] directory punch -> 211.218.222.1:60420
+
+
+PASS  S3: A's SAME activation again (gen 2) is refused -- the grant ended with its session, no Ack of it  refusal=0
+PASS  S3: ...A, parked again, still answers its pings
+PASS  S3: a NEW activation (gen 3) is a new session
+PASS  the host exited cleanly
+
+[relay stand-in, per-client host-facing socket: A direct active, B and C through the relay]
+PASS  the fake directory starts
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  a real GNLinkStream starts
+PASS  the host registers
+PASS  the relay stand-in starts
+PASS  A (direct) is admitted and activated
+PASS  B and C are admitted THROUGH the relay, each its own entry  b=0 c=0
+PASS  their pings are told apart by entry, not by address
+PASS  A's direct session is untouched by both
+PASS  B activates through the relay: takes the session
+PASS  B's control (through the relay) works
+PASS  C, parked behind the same relay, still answers
+PASS  ...and A, parked, too
+  -- r3 S4: C, parked behind the relay, sends session packets while B is active --
+PASS  S4: C's control data / ACKs through its own relay leg are never processed
+PASS  S4: C's activation with a wrong secret and with gen 0 are refused  wrong-secret=2 gen0=3
+PASS  S4: C's control-NACK / video-NACK / resume / bulk get NOTHING back on C's leg (no retransmit, no ResumeAck)
+PASS  S4: ...C's resume is ignored as from another peer (no reply, no state)  1 sendDurUs=1694 queueDepth=0 epoch=2 clampBurst=0 burstWin2s=524883 cap2r=2000000
+
+10-26 20:46:11.057 [native-video-host] frame-gating mode=motion changePm=4 staticStreak=0 motionStreak=1
+
+10-26 20:46:11.080 [native-video-host] wire seq=43 key=0 bytes=13463 chunks=15 wireIntUs=68357 targetIntUs=33333 queueWaitUs=22 sendDurUs=7876 queueDepth=0 epoch=2 clampBurst=0 burstWin2s=524883 cap2r=2000000
+
+
+PASS  S4: ...B keeps the session: no new epoch, no control-session end, its control still works
+PASS  S4: ...and the host still sends B's control data back down B's own leg
+
+[the real directory server.js relay: two standby leases through it, one active]
+PASS  node and the repository's server.js are found
+PASS  the real directory server starts (relay on, loopback, its own staging)
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  a real GNLinkStream starts against it
+PASS  the host registers with the real server and is online  st][dir-socket] media bind=127.0.0.1:63946 pid=41464
+
+10-26 20:46:12.082 [native-video-host] directory cache path=C:\work\gnlink-wt\ka-r3\build\test-scratch\run-18256-3609540774049-0\punch_realdir-4\host_cache.json (--directory-cache)
+
+10-26 20:46:12.082 [native-video-host] directory agent started url=http://127.0.0.1:57260
+
+10-26 20:46:12.083 [native-video-host][dir-cycle] n=1 start cause=first
+
+
+PASS  a client signs in and sees the host  login=200
+PASS  two standby connects: each reserved its own relay lease  {"hostPublicIp":"127.0.0.1","hostPublicUdpPort":63946,"candidates":[{"ip":"192.168.0.76","port":63946,"kind":"private"},{"ip":"172.22.224.1","port":63946,"kind":"private"},{"ip":"127.0.0.1","port":63946,"kind":"public"},{"ip":"127.0.0.1","port":63945,"kind":"relay"}],"punchToken":"91e07ddc6369aac0ea413c38271624dd","standbyRelay":"reserved","connectId":"cea66523"} | {"hostPublicIp":"127.0.0.1","hostPublicUdpPort":63946,"candidates":[{"ip":"192.168.0.76","port":63946,"kind":"private"},{"ip":"172.22.224.1","port":63946,"kind":"private"},{"ip":"127.0.0.1","port":63946,"kind":"public"},{"ip":"127.0.0.1","port":63945,"kind":"relay"}],"punchToken":"4bbfd68e20a583f34b5b276cb2003a1c","standbyRelay":"reserved","connectId":"a913518f"}
+PASS  the host collects them and punches both reserved host-facing ports; both leases pin the host
+PASS  B and C are admitted as standby entries THROUGH the real relay, each its own  b=0 c=0
+PASS  ...the relay saw both leases bound and ready (two host-facing sockets)
+PASS  ...and no session started
+PASS  B activates over its lease: HelloAck through the relay, the relay marks the lease active  refusal=0
+PASS  B's control (through the real relay) works
+PASS  C, parked on its own lease, keeps pinging
+PASS  C's session packets through its lease are never processed (the host tells the leases apart by address)
+PASS  ...B keeps the session, its control still works
+PASS  C's explicit activation takes it (a new epoch), its control works
+PASS  B's late control (its old session) is refused
+PASS  B, parked again, still pings Ok through its lease
+PASS  the host exited cleanly
+
+[an OLDER host (no standby): StandbyHello is not answered and takes nothing]
+PASS  the fake directory starts
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  the older GNLinkStream starts
+PASS  it registers
+PASS  A holds a session on the older host (ordinary Hello)
+PASS  B's StandbyHello gets NO answer (= 'not supported'; a client stops here, sends no Hello)
+PASS  A's session on the older host is untouched
+
+RESULT: ALL PASS  (89 checks, 0 failed)

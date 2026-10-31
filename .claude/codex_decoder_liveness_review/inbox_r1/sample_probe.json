@@ -1,0 +1,22 @@
+{
+  "input_cpu": 37.5,
+  "input_mem": 2.4,
+  "output": [
+    "SAMPLE pure-review epoch_ms=1793288486300 app_pss_kb=12345 app_cpu_pct=37.5 emu_loadavg=\"0.1 0.2 0.3 1/100 5\" qemu_cpu_ms=777 app_pid=123"
+  ],
+  "qemu_queries": [
+    [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "(Get-Process -Name 'qemu-system-x86_64-headless' -ErrorAction Stop | Select-Object -First 1).Id"
+    ],
+    [
+      "powershell",
+      "-NoProfile",
+      "-Command",
+      "[int64](Get-Process -Id 777 -ErrorAction Stop).TotalProcessorTime.TotalMilliseconds"
+    ]
+  ],
+  "cpu_parse_result": "correct: CPU37.5, not MEM2.4; initial concern retracted"
+}

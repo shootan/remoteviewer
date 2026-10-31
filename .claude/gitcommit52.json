@@ -1,0 +1,4 @@
+{
+ "repo_path": "D:/remote/remote",
+ "message": "docs(update): split \"not inline\" from \"does not block\"\n\nThey were in one paragraph, which lets the confirmed half carry the\nunverified one. Written as two statements now: the wait provably runs on its\nown thread, owning the handles -- and whether the window keeps answering\nwhile it does is not asserted anywhere.\n\nAlso recorded why the obvious test is not worth writing: \"starting a thread\nreturns immediately\" tests std::thread, and would be green while saying\nnothing about the product.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+}

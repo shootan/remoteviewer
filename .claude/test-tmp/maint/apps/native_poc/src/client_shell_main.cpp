@@ -1,0 +1,2008 @@
+﻿// The window a person actually opens.
+//
+// It signs in, lists the PCs on the account and starts a session on the one they pick. The
+// session itself runs in GNLinkViewer.exe as a child process -- the same arrangement the host
+// side already uses, where GNLinkHost supervises GNLinkStream, and for the same reasons: the
+// video path is four thousand lines of window loop and global state that would have to be
+// restructured to embed, and a crash in it should not take the interface with it.
+//
+// The interface is a page in a WebView2. Drawing it in Win32 would mean owning every pixel, font
+// and DPI case by hand for a result that still looks like 1998. Nothing about the video crosses
+// into the page: it arrives on a UDP socket, decodes through Media Foundation and is drawn by
+// D3D11, in the other process, untouched.
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+// Before windows.h, always: winsock2 redefines sockaddr and friends, and including them the
+// other way round produces forty errors inside the SDK that name nothing about this file.
+#include "native_socket.hpp"
+
+#include <windows.h>
+#include <shellapi.h>
+#include <shlobj.h>
+#include <wrl.h>
+
+#include <atomic>
+#include <fstream>
+#include <memory>
+#include <optional>
+#include <mutex>
+#include <sstream>
+#include <map>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "WebView2.h"
+#include "client_shell_bridge.hpp"
+#include "viewer_cancel_channel.hpp"
+#include "client_update_gate.hpp"
+#include "async_worker_group.hpp"
+#include "env_util.hpp"
+#include "update_check.hpp"
+#include "update_credential_channel.hpp"
+#include "update_handoff.hpp"
+#include "directory_client.hpp"
+#include "directory_session_client.hpp"
+#include "fixed_directory.hpp"
+#include "json_profile.hpp"
+#include "log_upload.hpp"
+#include "login_credential_store.hpp"
+#include "login_flow.hpp"
+#include "product_version.hpp"
+#include "viewer_restore_target.hpp"
+
+using Microsoft::WRL::Callback;
+using Microsoft::WRL::ComPtr;
+using namespace remote60::native_poc;
+
+namespace {
+
+constexpr wchar_t kWindowClass[] = L"GNLinkClientShell";
+
+ComPtr<ICoreWebView2Controller> gController;
+ComPtr<ICoreWebView2> gWebView;
+HRESULT create_shell_webview();
+HWND gWindow = nullptr;
+std::atomic<bool> gClosing{false};
+void post_status(const std::string& state, const std::string& detail);
+void post_ui(std::function<void()> action);
+AsyncWorkerGroup gWorkers([] { post_ui([] { post_status("error", "작업 중 오류가 발생했습니다. 다시 시도해 주세요."); }); });
+std::atomic<bool> gUpdateHandoffActive{false};
+constexpr UINT_PTR kUpdateRetryTimer = 88;
+uint32_t gUpdateRetryAttempts = 0;
+uint64_t gViewerOperation = 0;  // UI thread only: stale child exits cannot change a newer session
+
+/**
+ * The viewer currently open for each host, so a replacement can call the old one off.
+ *
+ * This shell starts another GNLinkViewer when the user picks a PC and never closes the one that
+ * was already there. For two different PCs that is right -- two sessions is an ordinary thing.
+ * For the SAME PC it is not: the old process keeps punching and saying hello, and can still
+ * establish a session afterwards, against a host that has already been handed a newer
+ * capability.
+ *
+ * What is kept is the HANDLE to that viewer's cancel event, not a name.
+ *
+ * The first version used a named event, `Local\GNLinkViewerCancel-<pid>`, with default security.
+ * Any process in the session could open that with EVENT_MODIFY_STATE knowing only a pid, and
+ * cancel somebody's connection as often as it liked. A secret in the name would not have helped:
+ * a viewer's command line is readable by the same processes. The event is unnamed now, so there
+ * is no name to open -- the only way to it is this handle, and the only other process that has
+ * one is the child it was given to.
+ *
+ * UI thread only, like gViewerOperation: begin_session writes it, handle_viewer_exit clears it.
+ */
+struct ViewerCancelSlot {
+  DWORD pid = 0;
+  HANDLE cancelEvent = nullptr;   // owned here; closed when the viewer is forgotten
+  // A SYNCHRONIZE duplicate of the viewer's process handle, so "is it still running" can be
+  // answered without reopening by pid -- a pid that has been reused would answer about
+  // somebody else. SYNCHRONIZE and nothing more: this is for waiting, never for killing.
+  HANDLE process = nullptr;
+  // The begin_session that launched it. What an exit is matched against: a pid can come round
+  // again between the exit and its handling, an operation number cannot. (RV-06)
+  uint64_t operation = 0;
+#ifdef REMOTE60_SHELL_TEST_SEAM
+  // TEST BUILDS ONLY. (RV-17) A terminate-capable duplicate taken from the LAUNCH handle, so a
+  // test can end a viewer it caused to be started without reopening anything by pid -- a pid
+  // can have been reused, and OpenProcess ignores its low two bits (measured on this PC: a
+  // made-up 1049 opens the real 1048). Slots a test makes up by hand have none, and are
+  // therefore never killed.
+  HANDLE testTerminate = nullptr;
+#endif
+};
+std::map<std::string, ViewerCancelSlot> gViewerByHost;
+
+/** Closes every handle a slot owns. */
+void close_slot_handles(ViewerCancelSlot& slot) {
+  if (slot.process) CloseHandle(slot.process);
+  slot.process = nullptr;
+#ifdef REMOTE60_SHELL_TEST_SEAM
+  if (slot.testTerminate) CloseHandle(slot.testTerminate);
+  slot.testTerminate = nullptr;
+#endif
+}
+uint32_t gReconnectAttempts = 0;
+std::optional<ShellConnectRequest> gReconnectRequest;
+uint64_t gReconnectOwnerEpoch = 0;
+// dxgi-wedge-fix r1 (Codex B6): what the pending automatic reconnect restores ("" = the picker). Set
+// only from the exiting operation's own report, cleared with gReconnectRequest everywhere.
+std::string gReconnectRestore;
+// The last CONFIRMED + RENDERED target each operation's viewer reported on its stdout
+// ([viewer-restore] target=...), as a --restore-target value. Written by that viewer's pump thread,
+// taken by handle_viewer_exit on the UI thread. An automatic reconnect's operation starts with the
+// target it was asked to restore -- still the last one rendered until its viewer reports another.
+std::mutex gRestoreMu;
+std::map<uint64_t, std::string> gRestoreByOperation;
+std::string take_operation_restore(uint64_t operation) {
+  std::lock_guard<std::mutex> lock(gRestoreMu);
+  const auto it = gRestoreByOperation.find(operation);
+  if (it == gRestoreByOperation.end()) return {};
+  std::string arg = std::move(it->second);
+  gRestoreByOperation.erase(it);
+  return arg;
+}
+constexpr UINT_PTR kReconnectTimer = 89;
+
+void post_ui(std::function<void()> action) {
+  if (gClosing.load(std::memory_order_acquire)) return;
+  auto* payload = new std::function<void()>(std::move(action));
+  if (!PostMessageW(gWindow, WM_APP + 2, 0, reinterpret_cast<LPARAM>(payload))) delete payload;
+}
+
+// Guards everything the worker threads write and the UI thread reads.
+std::mutex gStateMu;
+std::string gAccountId;
+/**
+ * Counts sign-ins in this process.
+ *
+ * The account name and the server address are not enough to tell one sign-in from the next: sign
+ * out and back in as the same user and both are identical, while the session token -- the thing
+ * actually handed to an updater -- is a different one. An attempt authorised under the old
+ * session must not inherit the new token, and comparing urls cannot see that.
+ */
+std::atomic<uint64_t> gOwnerEpoch{0};
+struct PostedJson { std::string body; uint64_t epoch; };
+std::string gSessionToken;
+// Defaults chosen for a desktop rather than a phone: this is usually wired or on home Wi-Fi,
+// where the picture is worth more than the bytes. The relay is the exception, and the interface
+// says so where the number is set.
+ShellRuntimeSettings gSettings{12000, 60, 0};
+std::atomic<uint32_t> gActiveViewers{0};
+
+std::wstring widen(const std::string& text) {
+  if (text.empty()) return {};
+  const int size = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+  std::wstring out(size > 0 ? size - 1 : 0, L'\0');
+  if (size > 0) MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, out.data(), size);
+  return out;
+}
+
+std::string narrow(const std::wstring& text) {
+  if (text.empty()) return {};
+  const int size = WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, nullptr, 0, nullptr, nullptr);
+  std::string out(size > 0 ? size - 1 : 0, '\0');
+  if (size > 0) {
+    WideCharToMultiByte(CP_UTF8, 0, text.c_str(), -1, out.data(), size, nullptr, nullptr);
+  }
+  return out;
+}
+
+std::wstring executable_dir() {
+  wchar_t path[MAX_PATH]{};
+  GetModuleFileNameW(nullptr, path, MAX_PATH);
+  std::wstring full(path);
+  const size_t slash = full.find_last_of(L"\\/");
+  return slash == std::wstring::npos ? L"." : full.substr(0, slash);
+}
+
+/**
+ * Where the account id and the picture settings are remembered between runs.
+ *
+ * The password is not among them. Remembering it would save one field and hand anyone with the
+ * user's profile a working login to every PC on the account.
+ */
+#ifdef REMOTE60_SHELL_TEST_SEAM
+// TEST BUILDS ONLY -- never defined for GNLinkClient. (RV-00)
+//
+// Where a test that compiles this file in keeps client.txt and the shell logs. The per-user path
+// below comes from SHGetKnownFolderPath, which does not follow a LOCALAPPDATA override, so a test
+// runner that isolated the environment still had the real file written: on 2026-09-23
+// client_recovery_ui_test overwrote the user's %LOCALAPPDATA%\GNLink\client.txt exactly that way.
+// It fails CLOSED -- a test that forgets to set this ends instead of reaching the real file.
+std::wstring gShellTestDataDir;
+// TEST BUILDS ONLY: the viewer begin_session starts instead of GNLinkViewer.exe. Empty = the real one.
+std::wstring gShellTestViewerExe;
+// TEST BUILDS ONLY: the fixture directory this shell talks to in place of kFixedDirectoryUrl.
+// GNLinkClient has no such variable and no input that could stand in for one.
+std::string gShellTestDirectoryUrl;
+#endif
+
+/**
+ * The directory server. Every request this shell makes, and every child it starts, gets its
+ * address from here -- not from the page and not from client.txt.
+ *
+ * A test build fails CLOSED, the same way settings_path() does: a test that forgot to name its
+ * fixture ends here instead of signing a fixture account in to the real server.
+ */
+std::string shell_directory_url() {
+#ifdef REMOTE60_SHELL_TEST_SEAM
+  if (gShellTestDirectoryUrl.empty()) {
+    std::fputs("[shell-test-seam] shell_directory_url() with no fixture directory; refusing to "
+               "fall back to the product's server\n", stderr);
+    std::fflush(stderr);
+    TerminateProcess(GetCurrentProcess(), 97);
+  }
+  return gShellTestDirectoryUrl;
+#else
+  return kFixedDirectoryUrl;
+#endif
+}
+
+std::wstring settings_path() {
+#ifdef REMOTE60_SHELL_TEST_SEAM
+  if (gShellTestDataDir.empty()) {
+    std::fputs("[shell-test-seam] settings_path() with no test data dir; refusing to fall back to "
+               "the user's real settings\n", stderr);
+    std::fflush(stderr);
+    TerminateProcess(GetCurrentProcess(), 97);
+  }
+  CreateDirectoryW(gShellTestDataDir.c_str(), nullptr);
+  return gShellTestDataDir + L"\\client.txt";
+#else
+  wchar_t* roaming = nullptr;
+  std::wstring dir;
+  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &roaming)) && roaming) {
+    dir = std::wstring(roaming) + L"\\GNLink";
+    CoTaskMemFree(roaming);
+  } else {
+    dir = executable_dir();
+  }
+  CreateDirectoryW(dir.c_str(), nullptr);
+  return dir + L"\\client.txt";
+#endif
+}
+
+void save_settings(const std::string& accountId, const ShellRuntimeSettings& settings) {
+  std::ofstream file(settings_path(), std::ios::trunc);
+  if (!file) return;
+  // One value per line, in a fixed order. A settings file this small does not need a format.
+  //
+  // The first line is still the server address, although nothing here reads it back: a build
+  // from before the address was fixed reads it, and that is the build a rollback installs.
+  file << shell_directory_url() << "\n"
+       << accountId << "\n"
+       << settings.bitrateKbps << "\n"
+       << settings.fps << "\n"
+       << settings.monitorId << "\n";
+}
+
+void load_settings(std::string* accountId, ShellRuntimeSettings* settings) {
+  std::ifstream file(settings_path());
+  if (!file) return;
+  // The first line is the server address an older build wrote, or the one save_settings writes
+  // for it. Read past, never used: whatever it says, the server is shell_directory_url().
+  std::string storedServer;
+  std::getline(file, storedServer);
+  std::getline(file, *accountId);
+  // Written on Windows, so a stray carriage return is likelier than not.
+  while (!accountId->empty() && (accountId->back() == '\r' || accountId->back() == '\n')) {
+    accountId->pop_back();
+  }
+  std::string line;
+  auto read_u32 = [&](uint32_t* target) {
+    if (!std::getline(file, line) || line.empty()) return;
+    // A file edited by hand, or written by an older build, must not take the app down.
+    try {
+      *target = static_cast<uint32_t>(std::stoul(line));
+    } catch (...) {
+    }
+  };
+  if (settings) {
+    read_u32(&settings->bitrateKbps);
+    read_u32(&settings->fps);
+    read_u32(&settings->monitorId);
+  }
+}
+
+/**
+ * Everything an update attempt is judged against, read once under one lock.
+ *
+ * Read separately, these four can disagree: the session can be cleared between reading the
+ * account and reading the epoch, and the answer is then a mixture of two owners that never
+ * existed at the same time. One lock, one snapshot.
+ */
+struct OwnerSnapshot {
+  std::string session;
+  std::string account;
+  std::string serverUrl;
+  uint64_t epoch = 0;
+};
+
+/**
+ * A line in the client's log.
+ *
+ * The window can only show one short sentence, and when signing in fails that sentence is
+ * whatever the server said -- which does not distinguish "the address is wrong" from "the
+ * account is". This file does. It records what was attempted and what came back; never the
+ * password, and never the session token, which is as good as one until it expires.
+ */
+/**
+ * Numbered log rotation: <path>.1 is the newest backup ... .10 the oldest, which is deleted.
+ * A single .old generation destroyed the very window a long repro needed on the second rotation,
+ * so both this shell's logs and the host app rotate the same way.
+ */
+void rotate_numbered_log(const std::wstring& path, ULONGLONG capBytes) {
+  WIN32_FILE_ATTRIBUTE_DATA info{};
+  if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info)) return;
+  ULARGE_INTEGER size{};
+  size.LowPart = info.nFileSizeLow;
+  size.HighPart = info.nFileSizeHigh;
+  if (size.QuadPart <= capBytes) return;
+  constexpr int kMaxLogBackups = 10;
+  DeleteFileW((path + L"." + std::to_wstring(kMaxLogBackups)).c_str());
+  for (int i = kMaxLogBackups - 1; i >= 1; --i) {
+    MoveFileExW((path + L"." + std::to_wstring(i)).c_str(),
+                (path + L"." + std::to_wstring(i + 1)).c_str(), MOVEFILE_REPLACE_EXISTING);
+  }
+  MoveFileExW(path.c_str(), (path + L".1").c_str(), MOVEFILE_REPLACE_EXISTING);
+  // Adopt the legacy single-generation .old AFTER the shift, into the FIRST free slot ascending
+  // (.2 upward, no replace). The rotation assumes generations are contiguous from .1 and always
+  // deletes .10 first, so parking the legacy at a sparse high slot (.10) would erase it on the
+  // very next rotation; placed contiguously it ages one slot per rotation like every generation.
+  // If every slot is taken, .old stays on disk rather than being silently lost.
+  const std::wstring legacy = path + L".old";
+  if (GetFileAttributesW(legacy.c_str()) != INVALID_FILE_ATTRIBUTES) {
+    for (int i = 2; i <= kMaxLogBackups; ++i) {
+      if (MoveFileExW(legacy.c_str(), (path + L"." + std::to_wstring(i)).c_str(), 0)) break;
+    }
+  }
+}
+
+std::wstring log_dir_path() {
+  std::wstring path = settings_path();
+  const size_t slash = path.find_last_of(L'\\');
+  return slash == std::wstring::npos ? L"." : path.substr(0, slash);
+}
+
+void log_line(const std::string& text) {
+  static std::mutex logMu;
+  std::lock_guard<std::mutex> lock(logMu);
+  SYSTEMTIME now{};
+  GetLocalTime(&now);
+  char stamp[32]{};
+  std::snprintf(stamp, sizeof(stamp), "%02d-%02d %02d:%02d:%02d ", now.wMonth, now.wDay,
+                now.wHour, now.wMinute, now.wSecond);
+  // The upload gets the same stamped line the file gets: a line without its time cannot be
+  // placed against the server's journal, which is the whole reason it is being uploaded.
+  remote60::native_poc::log_upload_enqueue("client", std::string(stamp) + text);
+  const std::wstring path = log_dir_path() + L"\\client.log";
+
+  // A few lines per session, but appended forever: without a cap this is the one file in the
+  // install that only ever grows.
+  rotate_numbered_log(path, 512u * 1024);
+
+  std::ofstream file(path, std::ios::app);
+  if (!file) return;
+  file << stamp << text << "\n";
+}
+
+/**
+ * Appends one stamped line to viewer.log through a single process-wide serialized sink.
+ *
+ * One shared handle + one mutex, not a handle per session: with two sessions pumping, a second
+ * append handle made the rotation rename fail with a sharing violation, which silently disabled
+ * the size cap. Every write, size check, close, rotate and reopen serializes here, and the handle
+ * is opened with FILE_SHARE_DELETE so our own sink never pins the rotation rename (an external reader opened without share-delete still can; the next line simply retries the rotate).
+ */
+void viewer_log_write_line(const std::string& line, const std::string& identity) {
+  static std::mutex mu;
+  static HANDLE sink = INVALID_HANDLE_VALUE;
+  std::lock_guard<std::mutex> lock(mu);
+  const std::wstring path = log_dir_path() + L"\\viewer.log";
+  auto open_sink = [&]() -> HANDLE {
+    return CreateFileW(path.c_str(), FILE_APPEND_DATA,
+                       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                       OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  };
+  if (sink == INVALID_HANDLE_VALUE) sink = open_sink();
+  if (sink != INVALID_HANDLE_VALUE) {
+    LARGE_INTEGER size{};
+    if (GetFileSizeEx(sink, &size) && size.QuadPart > 2LL * 1024 * 1024) {
+      CloseHandle(sink);
+      sink = INVALID_HANDLE_VALUE;
+      rotate_numbered_log(path, 0);
+      sink = open_sink();
+    }
+  }
+  SYSTEMTIME now{};
+  GetLocalTime(&now);
+  char stamp[40]{};
+  std::snprintf(stamp, sizeof(stamp), "%02d-%02d %02d:%02d:%02d.%03d ", now.wMonth, now.wDay,
+                now.wHour, now.wMinute, now.wSecond, now.wMilliseconds);
+  remote60::native_poc::log_upload_enqueue_for_identity("viewer", std::string(stamp) + line, identity);
+  if (sink == INVALID_HANDLE_VALUE) return;
+  std::string out = std::string(stamp) + line + "\n";
+  DWORD wrote = 0;
+  WriteFile(sink, out.data(), static_cast<DWORD>(out.size()), &wrote, nullptr);
+}
+
+/**
+ * Drains the viewer's stdout/stderr pipe into viewer.log.
+ *
+ * The viewer logs per-frame stream telemetry (assembly/decode/present, keyframe requests) to
+ * stdout, but it is launched with CREATE_NO_WINDOW and no redirect, so all of it was silently
+ * discarded -- exactly the client-side evidence a stutter investigation needed. Runs on its own
+ * thread per session; ends when the child exits and the pipe hits EOF.
+ */
+void pump_viewer_output_to_log(HANDLE readEnd, const std::string& identity, const std::string& context,
+                               uint64_t operation) {
+  std::string pending;
+  char buffer[1024];
+  DWORD read = 0;
+  while (!gWorkers.Stopping() && ReadFile(readEnd, buffer, sizeof(buffer), &read, nullptr) && read > 0) {
+    pending.append(buffer, read);
+    size_t newline;
+    while ((newline = pending.find('\n')) != std::string::npos) {
+      std::string line = pending.substr(0, newline);
+      pending.erase(0, newline + 1);
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      // dxgi-wedge-fix r1: this operation's viewer reporting a confirmed, rendered target. Strictly
+      // parsed (shape only, no free text kept); anything else is just a log line.
+      if (const auto restore = remote60::native_poc::viewer::ParseRestoreLine(line)) {
+        std::lock_guard<std::mutex> lock(gRestoreMu);
+        gRestoreByOperation[operation] = remote60::native_poc::viewer::FormatRestoreArg(*restore);
+      }
+      viewer_log_write_line(line + context + " collectedTickMs=" + std::to_string(GetTickCount64()), identity);
+    }
+    if (pending.size() > 8192) {
+      // An oversized fragment without a newline: flush rather than drop, so a wedged child's
+      // final partial line still reaches the log.
+      viewer_log_write_line(pending + context + " collectedTickMs=" + std::to_string(GetTickCount64()), identity);
+      pending.clear();
+    }
+  }
+  if (!pending.empty()) viewer_log_write_line(pending + context, identity);  // tail without a trailing newline
+  CloseHandle(readEnd);
+}
+
+/** Pushes one JSON message into the page. Safe to call from any thread. */
+void post_to_page(const std::string& json) {
+  if (!gWindow || gClosing.load(std::memory_order_acquire)) return;
+  // Marshalled onto the UI thread: WebView2 is apartment-threaded and calling it from a worker
+  // fails in ways that look like the message was simply ignored.
+  auto* payload = new PostedJson{json, gOwnerEpoch.load()};
+  if (!PostMessageW(gWindow, WM_APP + 1, 0, reinterpret_cast<LPARAM>(payload))) delete payload;
+}
+
+void post_status(const std::string& state, const std::string& detail) {
+  post_to_page(shell_status_json(state, detail));
+}
+
+/**
+ * Whether the page has said it is ready to receive, and a notice waiting for that to happen.
+ *
+ * The start-up check and the WebView both start at once and neither waits for the other, so the
+ * answer can arrive before there is anywhere to put it. It is held rather than dropped, and sent
+ * when the page reports ready.
+ */
+std::mutex gUpdateNoticeMu;
+std::string gPendingUpdateNotice;
+bool gPageReady = false;
+/** The version the last check found, empty when there is nothing to install. */
+std::string gAvailableVersion;
+/**
+ * Set from the moment an install is asked for until it has been started or has failed.
+ *
+ * The page disables its button while this is true, but the page is not where this can be
+ * enforced: a second message can already be in flight when the first one is being handled. The
+ * decision lives on this side, where there is one of it.
+ */
+bool gUpdateStarting = false;
+
+void deliver_update_notice(const std::string& json) {
+  {
+    std::lock_guard<std::mutex> lock(gUpdateNoticeMu);
+    if (!gPageReady) {
+      gPendingUpdateNotice = json;
+      return;
+    }
+  }
+  post_to_page(json);
+}
+
+void flush_pending_update_notice() {
+  std::string json;
+  {
+    std::lock_guard<std::mutex> lock(gUpdateNoticeMu);
+    gPageReady = true;
+    json.swap(gPendingUpdateNotice);
+  }
+  if (!json.empty()) post_to_page(json);
+}
+
+/**
+ * Asks whether there is a newer version, without anything waiting for the answer.
+ *
+ * Started before the WebView exists and never joined. That is the requirement rather than an
+ * optimisation: a client that will not show its sign-in window until an update server answers is
+ * a client that cannot be used on a machine with no route to that server, and "cannot sign in
+ * because the update check is still going" is a worse failure than never checking at all.
+ *
+ * Only "there is a newer version" reaches the user. Everything else goes to the log -- see
+ * shell_update_notice for why.
+ *
+ * Design: docs/업데이트_기능_설계.md 3.5.
+ */
+/**
+ * Asks for consent once, and starts the updater with it.
+ *
+ * The client is not an administrator program, so it cannot replace anything in %ProgramFiles%
+ * itself. It asks the shell to run the updater elevated, which puts exactly one consent prompt in
+ * front of the user.
+ *
+ * Declining is an answer, not a failure. Nothing is shown, nothing is retried, and the client
+ * carries on exactly as it was -- the user still has a working program, which is the whole reason
+ * the prompt could be declined in the first place. Reporting a decline as an error would be
+ * telling someone that the thing they just chose did not work.
+ */
+/** Where the host writes its health report. Mirrors host_app_main.cpp's log_file_path(). */
+std::wstring host_health_log_path() {
+  wchar_t base[MAX_PATH]{};
+  const DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", base, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH) return {};
+  return std::wstring(base) + L"\\GNLink\\host_app.log";
+}
+
+void start_client_update(const std::string& availableVersion) {
+  namespace upd = remote60::native_poc::update;
+
+  const std::wstring installDir = executable_dir();
+  // A sibling of the install directory, never a child: a child would be inside the directory the
+  // updater is about to replace, and it refuses to run from there.
+  const std::wstring workDir = installDir + L".update";
+
+
+  upd::UpdaterLaunchSpec spec;
+  spec.installDir = installDir;
+  spec.stagingDir = workDir + L"\\staging";
+  spec.workDir = workDir;
+  // The same snapshot the check used.
+  // One lock, one snapshot. Read separately these three can straddle a sign-out and describe an
+  // owner that never existed at any single moment.
+  std::string launchSession;
+  std::string launchOwner;
+  uint64_t launchEpoch = 0;
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    launchSession = gSessionToken;
+    launchOwner = gAccountId;
+    launchEpoch = gOwnerEpoch;
+  }
+  const upd::UpdateEndpoint launchEndpoint =
+      remote60::native_poc::directory::update_endpoint_for(
+          remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+          shell_directory_url(), "windows",
+          launchSession.empty() ? std::string() : "Authorization: Bearer " + launchSession,
+          launchOwner, launchEpoch);
+  spec.manifestUrl = launchEndpoint.url;
+  spec.derivedEndpoint = launchEndpoint.derived;
+  // A name, not the credential.
+  if (!launchEndpoint.credentialHeader.empty()) {
+    spec.credentialPipeName =
+        upd::make_credential_pipe_name(GetCurrentProcessId(), GetTickCount64());
+  }
+  spec.platform = "windows";
+  spec.installedVersion = narrow(kProductVersion);
+  // The HOST's log, not this process's: health evidence is the host reporting its own version,
+  // and this program does not write that line.
+  spec.healthLogPath = host_health_log_path();
+  spec.logPath = workDir + L"\\updater.log";
+  spec.serviceName = L"GNLinkSecureInput";
+  spec.registryRoot = L"HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\GNLink";
+  spec.parentPid = GetCurrentProcessId();
+  // Without a credential there is nothing to withhold, so there is nothing to wait for: this
+  // process is not elevated and does not need permission to leave, and the updater stops it the
+  // same way it stops any other product process.
+  //
+  // With one, the handshake is the only place the update can still be stopped. The download takes
+  // minutes and the user can sign out or sign in as somebody else while it runs; the
+  // acknowledgement is checked against the owner and withheld if it changed, and an updater that
+  // is not acknowledged stops nothing. That is why the client now takes part in a handshake it
+  // used to skip.
+  spec.readyEventName =
+      spec.credentialPipeName.empty()
+          ? std::wstring()
+          : upd::make_ready_event_name(GetCurrentProcessId(), GetTickCount64());
+
+  std::wstring parameters;
+  for (const std::wstring& arg : upd::updater_arguments(spec)) {
+    if (!parameters.empty()) parameters += L" ";
+    parameters += L"\"";
+    parameters += arg;
+    parameters += L"\"";
+  }
+  const std::wstring exePath = installDir + L"\\GNLinkUpdater.exe";
+
+  // Created before the elevated process starts. The client used to launch and immediately walk
+  // away; with a credential to hand over it has to stay for the exchange, and the deadline below
+  // is what keeps "stay" from becoming "hang".
+  auto credentialServer = std::make_shared<upd::CredentialServer>();
+  HANDLE readyEvent = nullptr;
+  HANDLE ackEvent = nullptr;
+  if (!spec.credentialPipeName.empty()) {
+    std::string error;
+    if (!credentialServer->Create(spec.credentialPipeName, &error)) {
+      log_line("update: could not open the credential channel -- " + error);
+      post_status("error", "업데이트를 시작하지 못했습니다.");
+      return;
+    }
+    // Both made before the updater starts, and from one stem, so an attempt cannot end up
+    // answering on another's channel.
+    const std::wstring ackName = upd::make_ack_event_name(spec.readyEventName);
+    ackEvent = CreateEventW(nullptr, TRUE, FALSE, ackName.c_str());
+    readyEvent = CreateEventW(nullptr, TRUE, FALSE, spec.readyEventName.c_str());
+    if (!readyEvent || !ackEvent) {
+      if (readyEvent) CloseHandle(readyEvent);
+      if (ackEvent) CloseHandle(ackEvent);
+      credentialServer->Close();
+      log_line("update: could not create the handshake events");
+      post_status("error", "업데이트를 시작하지 못했습니다.");
+      return;
+    }
+  }
+
+  SHELLEXECUTEINFOW info{};
+  info.cbSize = sizeof(info);
+  info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_FLAG_NO_UI;
+  info.lpVerb = L"runas";  // one consent prompt, and only one
+  info.lpFile = exePath.c_str();
+  info.lpParameters = parameters.c_str();
+  info.lpDirectory = installDir.c_str();
+  info.nShow = SW_SHOWNORMAL;
+
+  const BOOL launched = ShellExecuteExW(&info);
+  const upd::ElevationOutcome outcome =
+      upd::elevation_outcome(launched != FALSE, static_cast<uint32_t>(GetLastError()));
+
+  if (launched && info.hProcess && !spec.credentialPipeName.empty()) {
+    // Off the UI thread. This wait can last as long as an elevation prompt plus a slow start, and
+    // it used to sit inline in the page-message handler -- so the window stopped answering for up
+    // to two minutes while it ran. Overlapped I/O does not help when the caller waits for it on
+    // the thread that has to keep painting.
+    //
+    // The process handle and the pipe move with it: the handle is what pins the process id the
+    // check compares against, so it cannot be closed here.
+    HANDLE elevated = info.hProcess;
+    info.hProcess = nullptr;  // owned by the thread now
+    gUpdateHandoffActive.store(true);
+    gWorkers.Launch([elevated, credentialServer, launchEndpoint, readyEvent, ackEvent,
+                 readyName = spec.readyEventName]() {
+      struct Completion {
+        ~Completion() {
+          gUpdateHandoffActive.store(false);
+          post_ui([] {
+            { std::lock_guard<std::mutex> lock(gUpdateNoticeMu); gUpdateStarting = false; }
+            post_to_page(shell_update_busy_json(false));
+          });
+        }
+      } completion;
+      // Re-read rather than reused: the user may have signed out, signed back in, or changed
+      // servers between deciding to update and answering the consent prompt.
+      std::string nowSession;
+      std::string nowOwner;
+      uint64_t nowEpoch = 0;
+      {
+        std::lock_guard<std::mutex> lock(gStateMu);
+        nowSession = gSessionToken;
+        nowOwner = gAccountId;
+        nowEpoch = gOwnerEpoch;
+      }
+      const upd::UpdateEndpoint nowEndpoint =
+          remote60::native_poc::directory::update_endpoint_for(
+              remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+              shell_directory_url(), "windows",
+              nowSession.empty() ? std::string() : "Authorization: Bearer " + nowSession, nowOwner,
+              nowEpoch);
+
+      std::string payload;
+      std::string why;
+      // The owner, not the destination. Comparing the url and the origin asks whether the SERVER
+      // changed; sign out and back in on the same server and both are identical while the token
+      // is a different one -- so that comparison would hand an attempt authorised by one sign-in
+      // the credential of the next.
+      if (!nowEndpoint.same_owner_as(launchEndpoint)) {
+        why = "the signed-in owner changed after the updater was started";
+      } else if (nowEndpoint.url != launchEndpoint.url ||
+                 nowEndpoint.origin != launchEndpoint.origin) {
+        why = "the update endpoint changed after the updater was started";
+      } else if (nowEndpoint.credentialHeader.empty()) {
+        why = "there is no longer a session to authorise the update with";
+      } else {
+        payload = upd::encode_update_descriptor(nowEndpoint);
+        if (payload.empty()) why = "the credential descriptor could not be built";
+      }
+
+      bool delivered = false;
+      if (!payload.empty()) {
+        std::string error;
+        delivered = credentialServer->Serve(elevated, payload, 120000, &error);
+        if (!delivered) why = error;
+      }
+      credentialServer->Close();
+
+      if (delivered) {
+        log_line("update: the updater received its credential");
+        // And now the veto. The updater signals when it has a verified download and waits to be
+        // told it may proceed; the owner is checked at that moment, because that is the last
+        // point at which anything can still be withheld.
+        std::string why;
+        const upd::HandoffStep step = upd::await_handoff(
+            readyEvent, ackEvent, elevated, readyName, 10 * 60 * 1000, nullptr, &why, [&]() {
+              std::string checkSession;
+              std::string checkOwner;
+              uint64_t checkEpoch = 0;
+              {
+                std::lock_guard<std::mutex> lock(gStateMu);
+                checkSession = gSessionToken;
+                checkOwner = gAccountId;
+                checkEpoch = gOwnerEpoch;
+              }
+              const upd::UpdateEndpoint atReady =
+                  remote60::native_poc::directory::update_endpoint_for(
+                      remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+                      shell_directory_url(), "windows",
+                      checkSession.empty() ? std::string()
+                                           : "Authorization: Bearer " + checkSession,
+                      checkOwner, checkEpoch);
+              // A credential has to still exist as well: signing out clears the session and
+              // moves the epoch, and without this an attempt would be acknowledged for a user
+              // who has left even if the epoch comparison were ever to miss it.
+              return atReady.same_owner_as(launchEndpoint) &&
+                     atReady.url == launchEndpoint.url &&
+                     !atReady.credentialHeader.empty();
+            });
+        log_line(std::string("update: handoff ") + upd::handoff_step_name(step) + ": " + why);
+        if (step != upd::HandoffStep::ExitNow) {
+          post_status("error", "업데이트가 진행되지 않았습니다. " + why);
+        }
+      } else {
+        // Distinct from "started". The updater is running and will stop without installing
+        // anything; saying the update began would leave the user waiting for a result that is
+        // not coming.
+        log_line("update: no credential was delivered -- " + why);
+        post_status("error", "업데이트를 시작하지 못했습니다. 다시 로그인한 뒤 시도해 주세요.");
+      }
+      // Closed last: the handle is what pins the process id, and await_handoff watches it.
+      CloseHandle(elevated);
+      if (readyEvent) CloseHandle(readyEvent);
+      if (ackEvent) CloseHandle(ackEvent);
+    });
+  }
+
+  if (info.hProcess) CloseHandle(info.hProcess);
+
+  switch (outcome) {
+    case upd::ElevationOutcome::Launched:
+      log_line("update: started the updater for " + availableVersion);
+      post_status("idle", "업데이트를 시작했습니다. 잠시 후 프로그램이 다시 시작됩니다.");
+      return;
+    case upd::ElevationOutcome::Cancelled:
+      // Recorded, not shown. The user declined and still has a working program.
+      log_line("update: the user declined the elevation prompt");
+      return;
+    case upd::ElevationOutcome::Failed:
+      log_line("update: could not start the updater");
+      post_status("error", "업데이트를 시작하지 못했습니다. 설치된 버전은 그대로입니다.");
+      return;
+  }
+}
+
+/** The gate's memory. Guarded by gStateMu, like everything else it is compared against. */
+remote60::native_poc::client::UpdateGateState gUpdateGate;
+
+void start_update_check() {
+  namespace upd = remote60::native_poc::update;
+  namespace cli = remote60::native_poc::client;
+
+  // ONE snapshot. The url is not part of it any more because it cannot change: it is the same
+  // address before sign-in, after it, and whatever client.txt says.
+  std::string session;
+  std::string owner;
+  uint64_t epoch = 0;
+  const std::string url = shell_directory_url();
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    session = gSessionToken;
+    owner = gAccountId;
+    epoch = gOwnerEpoch;
+  }
+
+  {
+    // Invited from more than one place now -- start-up and every sign-in -- so the same session
+    // must not be asked twice. Signing in again moves the epoch, which is a new question.
+    std::lock_guard<std::mutex> lock(gStateMu);
+    if (!cli::should_check(gUpdateGate, owner, epoch)) {
+      log_line("update check: already asked for this session");
+      return;
+    }
+    cli::note_checked(&gUpdateGate, owner, epoch);
+  }
+
+  const upd::UpdateEndpoint endpoint =
+      remote60::native_poc::directory::update_endpoint_for(
+          remote60::native_poc::env_string_or_empty("REMOTE60_UPDATE_MANIFEST_URL"),
+          url, "windows",
+          session.empty() ? std::string() : "Authorization: Bearer " + session, owner, epoch);
+
+  upd::CheckConfig config;
+  config.manifestUrl = endpoint.url;
+  config.derivedEndpoint = endpoint.derived;
+  config.credentialHeader = endpoint.credentialHeader;
+  config.credentialOrigin = endpoint.origin;
+  config.trustedPublicKeyHex = upd::trusted_public_key_hex();
+  config.platform = "windows";
+  config.installedVersion = narrow(kProductVersion);
+
+  upd::check_for_update_async(
+      config, upd::manifest_fetcher_for(config), upd::default_verifier(),
+      [owner, epoch](upd::CheckResult result) {
+        post_ui([owner, epoch, result = std::move(result)] {
+        const ShellUpdateNotice notice = shell_update_notice(
+            upd::check_outcome_name(result.outcome), result.availableVersion, result.detail);
+        log_line(notice.logLine);
+        if (!notice.show) {
+          std::lock_guard<std::mutex> lock(gStateMu);
+          if (owner == gAccountId && epoch == gOwnerEpoch &&
+              result.outcome == upd::CheckOutcome::Unreachable && gUpdateRetryAttempts < 4) {
+            gUpdateGate.checked = false;
+            SetTimer(gWindow, kUpdateRetryTimer, 2500u << gUpdateRetryAttempts++, nullptr);
+          }
+          return;
+        }
+        // The answer describes the session that asked. A sign-out or a sign-in as somebody else
+        // while this was in flight makes it an answer about a session that no longer exists, and
+        // publishing it would put one account's update notice on another's screen.
+        std::string currentOwner;
+        uint64_t currentEpoch = 0;
+        {
+          std::lock_guard<std::mutex> lock(gStateMu);
+          currentOwner = gAccountId;
+          currentEpoch = gOwnerEpoch;
+        }
+        if (!remote60::native_poc::client::may_publish(owner, epoch, currentOwner, currentEpoch)) {
+          log_line("update check: answer arrived for a session that has ended; not shown");
+          return;
+        }
+        {
+          std::lock_guard<std::mutex> lock(gUpdateNoticeMu);
+          gAvailableVersion = result.availableVersion;
+        }
+        // A message with the version in a field of its own. The status line still carries the
+        // sentence; what the page needs in order to put up a button is the version, and reading
+        // it back out of Korean prose would break the first time the wording changed.
+        deliver_update_notice(shell_update_available_json(result.availableVersion, notice.text));
+        });
+      });
+}
+
+// ---------------------------------------------------------------- staying signed in
+//
+// The rules are in login_flow.hpp; the files are beside client.txt. What is here is when each
+// step runs and what the page is told. Every step runs on a worker -- each one waits for the
+// store and for the network -- and every result is adopted on the UI thread, under the epoch
+// that was current when the step began.
+
+/** Beside client.txt, wherever that is: the user's profile, or a test's fixture. */
+login_store::Store sign_in_store() {
+  std::wstring path = settings_path();
+  const size_t slash = path.find_last_of(L"\\/");
+  return login_store::Store(slash == std::wstring::npos ? std::wstring(L".") : path.substr(0, slash));
+}
+
+login_flow::Deps sign_in_deps() {
+  const std::string server = shell_directory_url();
+  login_flow::Deps deps;
+  deps.serverOrigin = directory::directory_origin_key(server);
+  deps.refresh = [server](const std::string& deviceId, const std::string& credential,
+                          DeviceSignIn* out, std::string* error) {
+    return directory_session_refresh(server, deviceId, credential, out, error);
+  };
+  deps.revoke = [server](const std::string& deviceId, const std::string& revokeToken,
+                         std::string* error) {
+    return directory_session_logout(server, deviceId, revokeToken, std::string(), error);
+  };
+  deps.log = [](const std::string& line) { log_line(line); };
+  return deps;
+}
+
+/** What this device is called in the account's list of devices: the computer's name. */
+std::string device_label() {
+  wchar_t name[MAX_COMPUTERNAME_LENGTH + 1] = {};
+  DWORD length = MAX_COMPUTERNAME_LENGTH + 1;
+  if (GetComputerNameW(name, &length) && name[0] != L'\0') return narrow(name);
+  return "PC";
+}
+
+/** What the page is told about an attempt to come back signed in. */
+void post_auto_login(const char* state, const std::string& accountId, const std::string& text) {
+  post_to_page(shell_auto_login_json(state, accountId, text));
+}
+
+/**
+ * Takes a session into use: the account, the token, the log uploader, the update check and the
+ * host list. UI thread only, and only for the epoch the session was obtained under.
+ */
+void adopt_session(const std::string& accountId, const std::string& token,
+                   const std::vector<DirectoryHostEntry>& hosts) {
+  const std::string server = shell_directory_url();
+  log_line("hosts ok count=" + std::to_string(hosts.size()));
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    gAccountId = accountId;
+    gSessionToken = token;
+  }
+  {
+    // Now that a token exists the shell can hand its logs to the directory, which is the only
+    // way the phone's and this machine's logs ever sit side by side. A second login re-points
+    // the uploader (a restarted server forgets every session; the old token then gets 401),
+    // and a login as a different account discards what was queued under the previous one.
+    remote60::native_poc::log_upload_set_auth_rejected_callback([] {
+      log_line("log upload: the server rejected the session token; sign in again to resume");
+      post_status("error", "로그 업로드 인증이 만료됐습니다. 다시 로그인하면 재개됩니다.");
+    });
+    remote60::native_poc::LogUploadConfig upload;
+    upload.directoryUrl = server;
+    upload.sessionToken = token;
+    upload.identity = accountId + "@" + server;
+    std::string reason;
+    log_line(remote60::native_poc::log_upload_configure(upload, &reason)
+                 ? "log upload on " + reason
+                 : "log upload off: " + reason);
+  }
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    save_settings(accountId, gSettings);
+  }
+
+  // The check that ran at start-up had neither a token nor an address and reported "not
+  // configured" -- correctly, and then nothing asked again, so signing in never produced an
+  // update check at all. Signing in is exactly the moment both appear, so it is asked here.
+  // Asynchronous, not waited on: a server that never answers must not hold up the host list.
+  gUpdateRetryAttempts = 0;
+  start_update_check();
+
+  std::string message = shell_hosts_json(hosts);
+  // The page shows which account it is listing, so it travels with the list.
+  const std::string suffix = ",\"accountId\":\"" + accountId + "\"}";
+  message = message.substr(0, message.size() - 1) + suffix;
+  post_to_page(message);
+}
+
+bool epoch_is(uint64_t epoch) {
+  std::lock_guard<std::mutex> lock(gStateMu);
+  return epoch == gOwnerEpoch;
+}
+
+/**
+ * Login and refresh results are adopted only on the UI thread and current operation epoch.
+ *
+ * The page supplies an account and a password and nothing else. Where they are sent is decided
+ * here, so a page that posted a `server` of its own would have it ignored.
+ *
+ * A sign-in that succeeds is remembered -- as a device credential the directory issued, never
+ * as the password -- unless something happened to the store while it was in flight. The epoch
+ * below guards this process; the store's own counter guards every other one.
+ */
+void begin_login(std::string accountId, std::string password) {
+  const std::string server = shell_directory_url();
+  uint64_t epoch = 0;
+  { std::lock_guard<std::mutex> lock(gStateMu); epoch = ++gOwnerEpoch; gSessionToken.clear(); }
+  log_upload_clear_credentials("new sign-in operation");
+  log_line("login attempt server=" + server + " account=" + accountId);
+  if (!gWorkers.Launch([server, accountId, password = std::move(password), epoch]() mutable {
+    const login_store::Store store = sign_in_store();
+    const login_flow::Deps deps = sign_in_deps();
+    const uint64_t generation = login_flow::begin_sign_in(store, deps);
+
+    std::string error;
+    DeviceSignIn signedIn;
+    bool ok = false;
+    if (generation != 0) {
+      ok = directory_login_with_device(server, accountId, password, "windows-client",
+                                       device_label(), &signedIn, &error) == SessionCall::Ok;
+    } else {
+      // The store could not be had. Signing in anyway would leave whatever is stored where it
+      // is -- another account's sign-in, which the next start would come back as -- and would
+      // have nothing to be checked against if a sign-out happened meanwhile. Nothing is sent.
+      error = "저장된 로그인 정보를 열 수 없어 로그인하지 못했습니다. 잠시 후 다시 시도해 주세요.";
+    }
+    if (!password.empty()) SecureZeroMemory(password.data(), password.size());
+
+    std::vector<DirectoryHostEntry> hosts;
+    const bool signedInAtDirectory = ok;
+    if (ok) ok = directory_list_hosts(server, signedIn.sessionToken, &hosts, &error);
+
+    if (signedInAtDirectory && (!ok || !epoch_is(epoch))) {
+      // The directory signed this device in and the sign-in is not going to be used: the list
+      // did not come, or this window signed out -- or began another sign-in -- while the
+      // answer was on its way. The window's own epoch is asked here as well as the store's
+      // counter, because it is the one barrier that needs nothing written. What the directory
+      // issued is ended rather than left alive with nobody holding it.
+      login_flow::discard_sign_in(store, deps, signedIn,
+                                  ok ? "this window moved on while it was in flight"
+                                     : "the PC list could not be fetched");
+      ok = false;
+      if (error.empty()) error = "로그인하는 동안 로그아웃됐습니다. 다시 로그인해 주세요.";
+    }
+    if (ok) {
+      const login_flow::Remembered remembered =
+          login_flow::remember_sign_in(store, deps, generation, accountId, signedIn);
+      log_line(std::string("sign-in remembered: ") + login_flow::remembered_name(remembered));
+      if (remembered == login_flow::Remembered::Superseded) {
+        // Signed out -- here or in another window -- while this was in flight. The device the
+        // directory issued has been ended, and its session with it.
+        ok = false;
+        error = "로그인하는 동안 로그아웃됐습니다. 다시 로그인해 주세요.";
+      } else if (remembered == login_flow::Remembered::NotSaved) {
+        ok = false;
+        error = "로그인 정보를 저장하지 못했습니다. 다시 시도해 주세요.";
+      } else {
+        (void)login_flow::settle_owed_sign_outs(store, deps);
+      }
+    }
+    if (!signedIn.deviceCredential.empty()) {
+      SecureZeroMemory(signedIn.deviceCredential.data(), signedIn.deviceCredential.size());
+    }
+    if (!signedIn.revokeToken.empty()) {
+      SecureZeroMemory(signedIn.revokeToken.data(), signedIn.revokeToken.size());
+    }
+
+    post_ui([accountId, token = signedIn.sessionToken, hosts = std::move(hosts), error, ok,
+             epoch]() {
+      if (!epoch_is(epoch)) return;
+      if (!ok) { log_line("login failed: " + error); post_status("error", error); return; }
+      log_line("login ok");
+      adopt_session(accountId, token, hosts);
+    });
+  })) post_status("error", "로그인 작업을 시작하지 못했습니다.");
+}
+
+/**
+ * Comes back signed in, if this device was left signed in.
+ *
+ * Asked once when the page is ready, and again when the user presses the retry the page shows
+ * after a failure. One attempt holds the form; if there was no answer ABOUT THE CREDENTIAL --
+ * the server was out of reach, or busy -- the form is given back and up to three more attempts
+ * follow behind it, a little further apart each time. Typing a password ends them: a sign-in
+ * moves the epoch.
+ */
+void begin_auto_login() {
+  uint64_t epoch = 0;
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    if (!gSessionToken.empty()) return;
+    epoch = ++gOwnerEpoch;
+  }
+  post_auto_login("checking", std::string(), std::string());
+  if (!gWorkers.Launch([epoch]() {
+    const std::string server = shell_directory_url();
+    const login_store::Store store = sign_in_store();
+    const login_flow::Deps deps = sign_in_deps();
+    (void)login_flow::settle_owed_sign_outs(store, deps);
+
+    constexpr DWORD kWaitsMs[] = {1000, 4000, 15000};
+    login_flow::ReturnResult result;
+    for (size_t attempt = 0;; ++attempt) {
+      result = login_flow::come_back(store, deps);
+      const bool later = result.outcome == login_flow::Return::TryLater ||
+                         result.outcome == login_flow::Return::Busy;
+      if (!later || attempt >= std::size(kWaitsMs)) break;
+      post_ui([epoch, accountId = result.accountId] {
+        if (epoch_is(epoch)) {
+          post_auto_login("retrying", accountId, "서버에 연결할 수 없습니다. 다시 시도하는 중입니다.");
+        }
+      });
+      const uint64_t until = GetTickCount64() + kWaitsMs[attempt];
+      while (GetTickCount64() < until && !gWorkers.Stopping() && epoch_is(epoch)) Sleep(100);
+      if (gWorkers.Stopping() || !epoch_is(epoch)) return;
+    }
+    log_line(std::string("auto sign-in: ") + login_flow::return_name(result.outcome));
+
+    std::vector<DirectoryHostEntry> hosts;
+    std::string error;
+    bool listed = false;
+    if (result.outcome == login_flow::Return::SignedIn) {
+      listed = directory_list_hosts(server, result.sessionToken, &hosts, &error);
+    }
+    post_ui([epoch, result, hosts = std::move(hosts), listed, error]() {
+      if (!epoch_is(epoch)) return;
+      switch (result.outcome) {
+        case login_flow::Return::SignedIn:
+          if (listed) {
+            log_line("auto sign-in ok");
+            adopt_session(result.accountId, result.sessionToken, hosts);
+          } else {
+            // Signed in, and then the list did not come. The session is kept: the page shows
+            // the form with a retry, and the retry finds the credential that was just stored.
+            post_auto_login("failed", result.accountId,
+                            "PC 목록을 불러오지 못했습니다. " + error);
+          }
+          return;
+        case login_flow::Return::Rejected:
+          post_auto_login("rejected", result.accountId, "다시 로그인해 주세요.");
+          return;
+        case login_flow::Return::SignedOut:
+        case login_flow::Return::NoCredential:
+        case login_flow::Return::Unreadable:
+        case login_flow::Return::ServerCannot:
+          post_auto_login("none", result.accountId, std::string());
+          return;
+        case login_flow::Return::TryLater:
+        case login_flow::Return::Busy:
+        case login_flow::Return::NotSaved:
+          post_auto_login("failed", result.accountId,
+                          "서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.");
+          return;
+      }
+    });
+  })) post_auto_login("none", std::string(), std::string());
+}
+
+void begin_refresh_hosts() {
+  const std::string server = shell_directory_url();
+  std::string accountId, token;
+  uint64_t epoch = 0;
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    accountId = gAccountId; token = gSessionToken; epoch = gOwnerEpoch;
+  }
+  if (token.empty()) return;
+  gWorkers.Launch([server, accountId, token, epoch]() mutable {
+    std::string error;
+    std::vector<DirectoryHostEntry> hosts;
+    uint32_t status = 0;
+    bool ok = directory_list_hosts(server, token, &hosts, &error, &status);
+    bool renewed = false;
+    bool signedOut = false;
+    bool otherAccount = false;
+    if (!ok && status == 401) {
+      // The session is no longer one: twelve hours went by, or the server was restarted. This
+      // device may still hold what gets another -- asked once, not in a loop, and only for
+      // the account this window is signed in as. What is stored may be somebody else's by
+      // now: another window may have signed in as another account since.
+      const login_flow::ReturnResult back =
+          login_flow::come_back(sign_in_store(), sign_in_deps(), accountId);
+      log_line(std::string("session refused; coming back: ") +
+               login_flow::return_name(back.outcome));
+      otherAccount = back.outcome == login_flow::Return::OtherAccount;
+      if (back.outcome == login_flow::Return::SignedIn && back.accountId == accountId) {
+        token = back.sessionToken;
+        renewed = true;
+        ok = directory_list_hosts(server, token, &hosts, &error, &status);
+      } else if (back.outcome != login_flow::Return::TryLater &&
+                 back.outcome != login_flow::Return::Busy) {
+        signedOut = true;
+      }
+    }
+    post_ui([accountId, token, epoch, ok, renewed, signedOut, otherAccount,
+             hosts = std::move(hosts), error]() {
+      if (!epoch_is(epoch)) return;
+      if (signedOut) {
+        {
+          std::lock_guard<std::mutex> lock(gStateMu);
+          gSessionToken.clear();
+          ++gOwnerEpoch;
+        }
+        remote60::native_poc::log_upload_clear_credentials("the session ended");
+        post_to_page("{\"type\":\"signedOut\"}");
+        post_auto_login("rejected", accountId,
+                        otherAccount
+                            ? "이 PC에서 다른 계정으로 로그인했습니다. 다시 로그인해 주세요."
+                            : "로그인이 만료됐습니다. 다시 로그인해 주세요.");
+        return;
+      }
+      if (!ok) { post_status("error", error + " — 다시 로그인해 주세요"); return; }
+      if (renewed) {
+        adopt_session(accountId, token, hosts);
+        return;
+      }
+      std::string message = shell_hosts_json(hosts);
+      message = message.substr(0, message.size() - 1) + ",\"accountId\":\"" + accountId + "\"}";
+      post_to_page(message);
+    });
+  });
+}
+
+/**
+ * Signs this device out: here at once, and at the directory as soon as it can be told.
+ *
+ * The session in memory is already gone by the time this runs (the caller cleared it under the
+ * lock and moved the epoch). This is the part that outlives the process.
+ */
+void begin_sign_out(std::string sessionToken) {
+  gWorkers.Launch([sessionToken = std::move(sessionToken)]() mutable {
+    const login_flow::SignOutResult result = login_flow::sign_out(sign_in_store(), sign_in_deps());
+    log_line(std::string("sign-out: local=") + (result.localDone ? "done" : "NOT done") +
+             " server=" + (result.serverTold ? "told" : (result.owed ? "owed" : "nothing to tell")));
+    if (!result.serverTold && !result.owed && !sessionToken.empty()) {
+      // A session that came from a sign-in with no device credential has no family to end;
+      // the session itself is what the directory is asked to forget.
+      std::string error;
+      (void)directory_session_logout(shell_directory_url(), std::string(), std::string(),
+                                     sessionToken, &error);
+    }
+    if (!sessionToken.empty()) SecureZeroMemory(sessionToken.data(), sessionToken.size());
+    if (!result.localDone) {
+      // This window is signed out: its session is gone from memory. What is STORED is not,
+      // and the next start may come back signed in. That is said, where the user is looking,
+      // together with the way to try again.
+      log_line("sign-out NOT completed: " + result.detail);
+      post_ui([] {
+        post_auto_login("failed", std::string(),
+                        "로그아웃을 완료하지 못했습니다. 저장된 로그인이 남아 있어 다음 실행 때 다시 "
+                        "로그인될 수 있습니다. 다시 로그인한 뒤 로그아웃을 한 번 더 눌러 주세요.");
+      });
+    }
+  });
+}
+
+// UI-thread adoption of an owned viewer exit. Count all live viewers, but only the latest
+// selected operation may replace the pending automatic reconnect.
+void handle_viewer_exit(const ShellConnectRequest& request, uint64_t operation, uint64_t ownerEpoch,
+                        DWORD waited, DWORD exitCode, uint64_t ranMs, DWORD exitedPid) {
+  // Forgotten only if it is still the one recorded. A replacement has already overwritten this
+  // entry, and erasing it here would forget the viewer that is actually open.
+  {
+    // By the operation that launched it, not by pid. (RV-06)
+    (void)exitedPid;
+    const auto it = gViewerByHost.find(request.hostId);
+    if (it != gViewerByHost.end() && it->second.operation == operation) {
+      if (it->second.cancelEvent) CloseHandle(it->second.cancelEvent);
+      close_slot_handles(it->second);
+      gViewerByHost.erase(it);
+    }
+  }
+  const uint32_t remaining = gActiveViewers.load();
+  // dxgi-wedge-fix r1: this operation's last confirmed + rendered target, whatever happens next -- taken
+  // (and forgotten) here so no later operation can inherit it except through the reconnect below.
+  const std::string restore = take_operation_restore(operation);
+  { std::lock_guard<std::mutex> lock(gStateMu); if (ownerEpoch != gOwnerEpoch) return; }
+  if (operation != gViewerOperation) {
+    // Older viewers still contribute to main's live-session count, but cannot replace a
+    // newer viewer's reconnect request or reset its retry budget.
+    //
+    // Nor can they put the shell back to idle while a NEWER viewer is still there (RV-05). The
+    // usual case is a replacement: the user pressed the same PC again, the old viewer was called
+    // off and exits a moment later -- and posting idle then unlocked the list and showed the PC
+    // as "available" while the new viewer was still connecting, so pressing it again cancelled
+    // the connection in progress. The newer viewer's own exit reports the state.
+    bool newerViewerRunning = false;
+    for (const auto& entry : gViewerByHost) {
+      if (entry.second.operation > operation) newerViewerRunning = true;
+    }
+    if (newerViewerRunning) {
+      log_line("viewer from operation " + std::to_string(operation) +
+               " ended; a newer viewer is running, the shell state is left to it");
+      return;
+    }
+    if (!gReconnectRequest)
+      post_status("idle", remaining > 0 ? std::to_string(remaining) + "개 연결이 계속 실행 중입니다." : "");
+    return;
+  }
+  if (ranMs >= 60000) gReconnectAttempts = 0;
+  const bool recoverable = exitCode == 43 || exitCode == 44 || exitCode == 46;
+  if (waited == WAIT_OBJECT_0 && recoverable && gReconnectAttempts < 3) {
+    gReconnectRequest = request;
+    gReconnectOwnerEpoch = ownerEpoch;
+    gReconnectRestore = restore;
+    const UINT delayMs = 1000u << gReconnectAttempts++;
+    SetTimer(gWindow, kReconnectTimer, delayMs, nullptr);
+    // dxgi-wedge-fix r1 (Codex B8): the reconnect branch says what it did, in one line, no credential.
+    log_line("viewer exit operation=" + std::to_string(operation) + " code=" + std::to_string(exitCode) +
+             " ranMs=" + std::to_string(ranMs) + " reconnect=scheduled attempt=" + std::to_string(gReconnectAttempts) +
+             " delayMs=" + std::to_string(delayMs) + " host=" + request.hostId +
+             " restore=" + (restore.empty() ? std::string("picker") : restore));
+    post_status("reconnecting", "연결이 끊겨 다시 연결하는 중입니다.");
+  } else if (waited == WAIT_OBJECT_0 && exitCode != 0) {
+    log_line("viewer exit operation=" + std::to_string(operation) + " code=" + std::to_string(exitCode) +
+             " ranMs=" + std::to_string(ranMs) + " reconnect=no reason=" +
+             (recoverable ? std::string("attempts-exhausted") : std::string("not-recoverable")));
+    post_status("error", request.hostName + " 연결에 실패했습니다 (코드 " + std::to_string(exitCode) + ")");
+  } else {
+    gReconnectAttempts = 0;
+    post_status("idle", remaining > 0 ? std::to_string(remaining) + "개 연결이 계속 실행 중입니다." : "");
+  }
+}
+
+/**
+ * Starts the session on the chosen PC.
+ *
+ * The session token is passed rather than the password: a command line can be read by any
+ * process that cares to look, and a token expires where a password does not.
+ */
+void begin_session(const ShellConnectRequest& request, bool automatic = false, const std::string& restore = {}) {
+  // Everything that can refuse comes first, before anything is changed. (RV-06) The operation
+  // number and the reconnect timer used to be touched first, so a refused start still moved the
+  // operation on -- and the viewer still running then ended as a "stale" one: no automatic
+  // reconnect for its 43/44/46, idle instead of its error, and another PC's pending reconnect
+  // gone. And the old viewer was called off before it was known whether a new one could start.
+  uint64_t ownerEpoch = 0;
+  const std::string server = shell_directory_url();
+  std::string account;
+  std::string token;
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    account = gAccountId;
+    token = gSessionToken;
+    ownerEpoch = gOwnerEpoch;
+  }
+  if (token.empty()) {
+    post_status("error", "로그인이 필요합니다");
+    return;
+  }
+
+  std::wstring exe = executable_dir() + L"\\GNLinkViewer.exe";
+#ifdef REMOTE60_SHELL_TEST_SEAM
+  // TEST BUILDS ONLY: a stand-in for the viewer, so a test can run begin_session itself fifty
+  // times -- replacement and failed launch alike -- without fifty real viewers. (RV-16)
+  if (!gShellTestViewerExe.empty()) exe = gShellTestViewerExe;
+#endif
+  if (GetFileAttributesW(exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    post_status("error", "GNLinkViewer.exe 를 찾을 수 없습니다");
+    return;
+  }
+
+  // Call off the viewer already open on this PC, if there is one. It may be mid-connect -- up to
+  // thirty seconds of hello -- and if it finishes it will bind a session the user has just
+  // replaced. Signalled through the handle this shell has held since it launched that viewer.
+  {
+    const auto previous = gViewerByHost.find(request.hostId);
+    if (previous != gViewerByHost.end()) {
+      // asked=0 when there was no event to signal, which is the pipe-less case, or when the
+      // signal itself failed. It has to read as "not asked" rather than "asked and fine".
+      const bool asked =
+          remote60::native_poc::viewer::viewer_request_cancel(previous->second.cancelEvent);
+      log_line(std::string("cancelling the viewer already open on this PC pid=") +
+               std::to_string(previous->second.pid) + " asked=" + (asked ? "1" : "0"));
+
+      // If it could not be asked, the old viewer is still connecting -- and starting another one
+      // would leave two of them racing for the same host, which is the thing the cancel channel
+      // exists to prevent. So the replacement is refused instead, unless the old process has
+      // already gone on its own.
+      //
+      // Asked through the duplicated handle, not by reopening the pid: a pid that has come round
+      // again would answer about a stranger.
+      //
+      // NOT TerminateProcess. That right is not needed here and killing a viewer that may have a
+      // established session is a worse outcome than declining to start a second one.
+      // The test is "has it been confirmed DEAD", not "has it been confirmed alive". Written
+      // the other way round it fails open twice: a slot whose process handle could not be
+      // duplicated has process == nullptr, and a wait that returns WAIT_FAILED says nothing
+      // either -- and both of those went on to replace an uncancellable viewer, which is the
+      // case this whole branch exists to prevent.
+      const DWORD liveness = previous->second.process
+                                 ? WaitForSingleObject(previous->second.process, 0)
+                                 : WAIT_FAILED;
+      const bool confirmedDead = liveness == WAIT_OBJECT_0;
+      if (!asked && !confirmedDead) {
+        // Told apart because they mean different things to whoever reads the log: one viewer
+        // is definitely still there, the other cannot be asked about at all.
+        const char* why = (liveness == WAIT_TIMEOUT) ? "uncancellable" : "liveness-unknown";
+        log_line(std::string("replacement refused pid=") +
+                 std::to_string(previous->second.pid) + " reason=" + why);
+        // What the user can actually do. "Close the existing window" was not it: a viewer that
+        // is still connecting has no message pump until its hello ends, so its window does not
+        // close. Waiting for that attempt to end and pressing again does work. (RV-06)
+        post_status("error",
+                    "이 PC 로의 이전 연결 시도를 멈추지 못해 새로 시작하지 않았습니다. "
+                    "이전 시도가 끝난 뒤(보통 수십 초 안) 다시 눌러 주세요.");
+        return;   // the slot stays; handle_viewer_exit clears it when that viewer ends
+      }
+
+      if (previous->second.cancelEvent) CloseHandle(previous->second.cancelEvent);
+      close_slot_handles(previous->second);
+      gViewerByHost.erase(previous);
+    }
+  }
+
+  // Past every refusal: from here this is the newest operation. (RV-06)
+  KillTimer(gWindow, kReconnectTimer);
+  gReconnectRequest.reset();
+  gReconnectRestore.clear();
+  if (!automatic) gReconnectAttempts = 0;
+  const uint64_t operation = ++gViewerOperation;
+  // dxgi-wedge-fix r1: only an AUTOMATIC reconnect restores; a session the user started is theirs.
+  const std::string restoreArg = automatic ? restore : std::string();
+  if (!restoreArg.empty()) {
+    std::lock_guard<std::mutex> lock(gRestoreMu);
+    gRestoreByOperation[operation] = restoreArg;  // still the last rendered target until this viewer reports
+  }
+
+  ShellRuntimeSettings settings;
+  {
+    std::lock_guard<std::mutex> lock(gStateMu);
+    settings = gSettings;
+  }
+
+  // Unnamed, so nothing can open it; inheritable, so this one child can be given it. Created
+  // before the command line because the handle value goes ON that command line, and it rides
+  // the same inherit whitelist as the pipe -- bInheritHandles alone would hand the child every
+  // inheritable handle this process has.
+  HANDLE cancelEvent = remote60::native_poc::viewer::viewer_create_cancel_event();
+
+  std::wstringstream command;
+  command << L"\"" << exe << L"\""
+          << L" --transport udp --codec h264"
+          // Controlling someone else's desktop is the entire point here, and the viewer keeps
+          // the input channel off unless asked -- it was written as a measurement tool first.
+          << L" --enable-input-channel"
+          << L" --directory-url \"" << widen(server) << L"\""
+          << L" --directory-session \"" << widen(token) << L"\""
+          << L" --directory-host-id \"" << widen(request.hostId) << L"\""
+          // Open on the target picker, not straight into the host's default desktop: the session
+          // shows the Windows list and a Desktop card first, and starts the stream only once the
+          // user picks a target -- the same order the Android client uses. Passed as an explicit
+          // flag rather than an inherited env var so a stray env in the parent cannot flip it.
+          << L" --initial-view targets"
+          // Bits per second on the wire; the interface talks in kbps because that is what the
+          // numbers on a plan are quoted in.
+          << L" --runtime-bitrate " << (settings.bitrateKbps * 1000u)
+          << L" --runtime-fps " << settings.fps
+          << L" --monitor " << settings.monitorId;
+  if (automatic) {
+    // "재연결 중" instead of "연결하는 중", and -- when the previous viewer reported one -- the target to
+    // go back to. An ASCII token checked by the parser on both sides (viewer_restore_target.hpp).
+    command << L" --reconnect";
+    if (!restoreArg.empty()) command << L" --restore-target " << widen(restoreArg);
+  }
+
+  // Hand the child a pipe for stdout/stderr: the viewer's per-frame telemetry went to stdout,
+  // and CREATE_NO_WINDOW without a redirect silently discarded all of it. Inheritance is limited
+  // to an explicit PROC_THREAD_ATTRIBUTE_HANDLE_LIST whitelist -- bInheritHandles=TRUE alone
+  // would leak every inheritable handle in this process into the child. stdin gets a real NUL
+  // handle because STARTF_USESTDHANDLES copies all three values verbatim, valid or not.
+  SECURITY_ATTRIBUTES sa{};
+  sa.nLength = sizeof(sa);
+  sa.bInheritHandle = TRUE;
+  HANDLE pipeRead = nullptr;
+  HANDLE pipeWrite = nullptr;
+  HANDLE nulIn = INVALID_HANDLE_VALUE;
+
+  bool pipeOk = CreatePipe(&pipeRead, &pipeWrite, &sa, 0) != 0;
+  if (pipeOk) {
+    SetHandleInformation(pipeRead, HANDLE_FLAG_INHERIT, 0);
+    nulIn = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                        OPEN_EXISTING, 0, nullptr);
+    if (nulIn == INVALID_HANDLE_VALUE) {
+      CloseHandle(pipeRead);
+      CloseHandle(pipeWrite);
+      pipeOk = false;
+    }
+  }
+
+  STARTUPINFOEXW six{};
+  PROCESS_INFORMATION pi{};
+  HANDLE inheritList[3] = {nullptr, nullptr, nullptr};
+  if (pipeOk) {
+    // Microsoft's documented dance: the sizing probe FAILS with ERROR_INSUFFICIENT_BUFFER and
+    // returns the byte count -- anything else means the API is unusable here, so fall back to a
+    // pipe-less launch. HeapAlloc because the attribute list is opaque memory with no alignment
+    // contract a char buffer can promise.
+    SIZE_T attrSize = 0;
+    const BOOL probe = InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
+    bool listInitialized = false;
+    if (!probe && GetLastError() == ERROR_INSUFFICIENT_BUFFER && attrSize > 0) {
+      six.lpAttributeList = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(
+          HeapAlloc(GetProcessHeap(), 0, attrSize));
+      if (six.lpAttributeList &&
+          InitializeProcThreadAttributeList(six.lpAttributeList, 1, 0, &attrSize)) {
+        listInitialized = true;
+        inheritList[0] = pipeWrite;
+        inheritList[1] = nulIn;
+        inheritList[2] = cancelEvent;
+        // The size is the USED bytes, not the array's: a null third entry would be passed as a
+        // handle to inherit and the launch fails with ERROR_INVALID_PARAMETER.
+        const SIZE_T inheritBytes =
+            sizeof(HANDLE) * (cancelEvent ? 3u : 2u);
+        if (!UpdateProcThreadAttribute(six.lpAttributeList, 0,
+                                       PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inheritList,
+                                       inheritBytes, nullptr, nullptr)) {
+          // Delete BEFORE dropping the pointer, or the initialized list's resources leak.
+          DeleteProcThreadAttributeList(six.lpAttributeList);
+          listInitialized = false;
+        }
+      }
+    }
+    if (!listInitialized) {
+      if (six.lpAttributeList) {
+        HeapFree(GetProcessHeap(), 0, six.lpAttributeList);
+        six.lpAttributeList = nullptr;
+      }
+      CloseHandle(pipeRead);
+      CloseHandle(pipeWrite);
+      CloseHandle(nulIn);
+      nulIn = INVALID_HANDLE_VALUE;
+      pipeOk = false;
+    }
+  }
+  six.StartupInfo.cb = pipeOk ? sizeof(six) : sizeof(six.StartupInfo);
+  if (pipeOk) {
+    six.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+    six.StartupInfo.hStdOutput = pipeWrite;
+    six.StartupInfo.hStdError = pipeWrite;
+    six.StartupInfo.hStdInput = nulIn;
+  }
+  // The handle, by value, and only once it is known that the child will actually inherit it --
+  // pipeOk is what decides whether the whitelist and bInheritHandles are in play at all. A flag
+  // naming a handle the child does not have would make it wait on nothing.
+  if (cancelEvent && pipeOk) {
+    command << L" --cancel-event "
+            << remote60::native_poc::viewer::viewer_cancel_handle_arg(cancelEvent);
+  }
+
+  std::wstring mutableCommand = command.str();
+
+  // H.264 is still behind a build-time experiment switch in the viewer, and a build without it
+  // refuses --codec h264 and exits at once. The product has no other path, so the switch is
+  // turned on for the child rather than left to how it was built -- the same thing the host app
+  // does for the streaming host.
+  SetEnvironmentVariableW(L"REMOTE60_NATIVE_ENCODED_EXPERIMENT_FORCE", L"1");
+  // Host-side IME v2 is the field-test default for this build: Korean composes live in the host app,
+  // English/GMux (Electron) get real scan input, and Han/Yeong toggles the host IME. Set it ONLY
+  // when the user has not already chosen -- an explicit REMOTE60_HOST_IME=0/false/off is preserved as
+  // the instant rollback to the legacy client-side IME path. (Codex: env-unset -> 1, 0 opt-out kept.)
+  {
+    wchar_t existing[8]{};
+    if (GetEnvironmentVariableW(L"REMOTE60_HOST_IME", existing, 8) == 0) {
+      SetEnvironmentVariableW(L"REMOTE60_HOST_IME", L"1");
+    }
+  }
+  // The viewer is a console-subsystem executable, and without this flag Windows gives it a
+  // console window -- a black cmd box full of scrolling telemetry next to every session.
+  // Launched from a terminal by hand it still inherits that terminal, so probes and manual
+  // debugging keep their output.
+  const BOOL launched = CreateProcessW(
+      nullptr, mutableCommand.data(), nullptr, nullptr, pipeOk ? TRUE : FALSE,
+      CREATE_NO_WINDOW | (pipeOk ? EXTENDED_STARTUPINFO_PRESENT : 0), nullptr,
+      executable_dir().c_str(), &six.StartupInfo, &pi);
+  const DWORD launchErr = launched ? 0 : GetLastError();
+  if (six.lpAttributeList) {
+    DeleteProcThreadAttributeList(six.lpAttributeList);
+    HeapFree(GetProcessHeap(), 0, six.lpAttributeList);
+  }
+  // The child holds its own copies now (or the launch failed); the parent's NUL is done either way.
+  if (nulIn != INVALID_HANDLE_VALUE) CloseHandle(nulIn);
+  if (!launched) {
+    if (pipeOk) {
+      CloseHandle(pipeRead);
+      CloseHandle(pipeWrite);
+    }
+    log_line("session launch failed err=" + std::to_string(launchErr));
+    // The cancel event dies with the attempt. It was created before the launch and is owned
+    // here until the registry takes it, so every failed launch leaked one -- invisible until
+    // a shell that has been open all day runs out of handles.
+    cancelEvent = remote60::native_poc::viewer::viewer_cancel_slot_handle(false, cancelEvent);
+    post_status("error", "세션을 시작하지 못했습니다");
+    return;
+  }
+  ++gActiveViewers;
+  // pc2-connect-diag: without the pipe the viewer's entire output is discarded -- no local
+  // viewer.log, nothing uploaded -- and that was silent. A session with no log at all and a
+  // session that produced none looked the same, which is exactly the ambiguity that made the
+  // missing 13:02-13:09 viewer.log unexplainable.
+  if (!pipeOk) log_line("session output not captured (no pipe); viewer log will be empty");
+  if (pipeOk) {
+    // The parent's copy of the write end must close, or the reader never sees EOF after exit.
+    CloseHandle(pipeWrite);
+    const std::string context = " viewerSession=" + std::to_string(pi.dwProcessId) + "-" +
+        std::to_string(GetTickCount64()) + " viewerPid=" + std::to_string(pi.dwProcessId) +
+        " hostId=" + request.hostId + " productVersion=" + narrow(remote60::native_poc::kProductVersion);
+    gWorkers.Launch([pipeRead, identity = account + "@" + server, context, operation] {
+      pump_viewer_output_to_log(pipeRead, identity, context, operation);
+    });
+  }
+  log_line("session started host=" + request.hostId + " kbps=" +
+           std::to_string(settings.bitrateKbps) + " fps=" + std::to_string(settings.fps) +
+           " monitor=" + std::to_string(settings.monitorId));
+  CloseHandle(pi.hThread);
+  // Kept so a later begin_session for this host can signal it. Ownership sits here until the
+  // viewer exits or is replaced.
+  //
+  // ...but only if the child actually got it. Without the pipe there is no attribute list and
+  // no bInheritHandles, so the handle was never inherited and no --cancel-event was passed --
+  // and storing it anyway meant a later replacement signalled an event nobody was waiting on,
+  // logged asked=1, and left the old viewer running. A cancel that reports success and does
+  // nothing is worse than one that says it cannot.
+  if (!pipeOk) {
+    log_line("no stdout pipe for this viewer, so it did not inherit a cancel event -- "
+             "it cannot be called off when replaced");
+  }
+  cancelEvent = remote60::native_poc::viewer::viewer_cancel_slot_handle(pipeOk, cancelEvent);
+  // SYNCHRONIZE only: enough to ask whether it is still running, not enough to end it.
+  HANDLE liveness = nullptr;
+  if (!DuplicateHandle(GetCurrentProcess(), pi.hProcess, GetCurrentProcess(), &liveness,
+                       SYNCHRONIZE, FALSE, 0)) {
+    liveness = nullptr;
+    log_line("could not duplicate the viewer process handle; whether this viewer is still "
+             "running cannot be asked, so replacing it will be refused until it ends");
+  }
+  gViewerByHost[request.hostId] = ViewerCancelSlot{pi.dwProcessId, cancelEvent, liveness};
+  gViewerByHost[request.hostId].operation = operation;
+#ifdef REMOTE60_SHELL_TEST_SEAM
+  {
+    HANDLE terminate = nullptr;
+    if (DuplicateHandle(GetCurrentProcess(), pi.hProcess, GetCurrentProcess(), &terminate,
+                        PROCESS_TERMINATE | SYNCHRONIZE, FALSE, 0)) {
+      gViewerByHost[request.hostId].testTerminate = terminate;
+    }
+  }
+#endif
+  cancelEvent = nullptr;  // the map owns it now
+
+  // Watched rather than forgotten: when the session window closes the list has to become usable
+  // again, and if it exits immediately that is a failure the user should hear about.
+  gWorkers.Launch([handle = pi.hProcess, request, operation, ownerEpoch,
+                   pid = pi.dwProcessId, startedMs = GetTickCount64()]() {
+    DWORD waited = WAIT_TIMEOUT;
+    while (!gWorkers.Stopping() && (waited = WaitForSingleObject(handle, 250)) == WAIT_TIMEOUT) {}
+    if (gWorkers.Stopping()) { CloseHandle(handle); return; }
+    DWORD exitCode = 0;
+    GetExitCodeProcess(handle, &exitCode);
+    CloseHandle(handle);
+    gActiveViewers.fetch_sub(1);
+    const uint64_t ranMs = GetTickCount64() - startedMs;
+    post_ui([request, operation, ownerEpoch, waited, exitCode, ranMs, pid] {
+      handle_viewer_exit(request, operation, ownerEpoch, waited, exitCode, ranMs, pid);
+    });
+  });
+
+  post_status("connecting", request.hostName + " 창을 여는 중");
+}
+
+void handle_page_message(const std::string& json) {
+  const std::string type = shell_message_type(json);
+
+  if (type == "ready") {
+    std::string accountId;
+    ShellRuntimeSettings settings;
+    {
+      std::lock_guard<std::mutex> lock(gStateMu);
+      settings = gSettings;
+      load_settings(&accountId, &settings);
+      gSettings = settings;
+    }
+    bool signedIn = false;
+    {
+      std::lock_guard<std::mutex> lock(gStateMu);
+      signedIn = !gSessionToken.empty();
+    }
+    // Before anything is posted to the page. Coming back signed in is a new operation and moves
+    // the epoch, and a message posted under the epoch before it is dropped as stale when it
+    // arrives -- which is what happened to the restore below when it went first: the form came
+    // up with the id field empty.
+    if (!signedIn) begin_auto_login();  // a device that was left signed in comes back signed in
+    post_to_page(shell_restore_json(accountId, settings));
+    // Anything the start-up check found while the page was still loading goes out now.
+    flush_pending_update_notice();
+    if (signedIn) begin_refresh_hosts();  // an authenticated page after a WebView process restart
+    return;
+  }
+  if (type == "autologin") {
+    begin_auto_login();  // the retry the page offers after an attempt that got no answer
+    return;
+  }
+  if (type == "update") {
+    std::string version;
+    {
+      std::lock_guard<std::mutex> lock(gUpdateNoticeMu);
+      version = gAvailableVersion;
+      // Two clicks arriving together must not become two updaters, each asking for consent and
+      // each replacing the same files. The page disables its button, but a message can already
+      // be in flight when it does; this is the check that actually decides.
+      if (gUpdateStarting) {
+        log_line("update: already starting; the second request was ignored");
+        return;
+      }
+      if (!version.empty()) gUpdateStarting = true;
+    }
+    // Only when a check actually found something. A page that asked otherwise would be asking to
+    // elevate for no reason, and one consent prompt with nothing behind it is worse than none.
+    if (version.empty()) {
+      post_status("idle", "설치할 새 버전이 없습니다.");
+      post_to_page(shell_update_cleared_json());
+      return;
+    }
+    post_to_page(shell_update_busy_json(true));
+    start_client_update(version);
+    if (gUpdateHandoffActive.load()) return;
+    // start_client_update reports its own outcome. Whatever it was, the request is over: leaving
+    // the flag set would mean a failed attempt could never be retried.
+    {
+      std::lock_guard<std::mutex> lock(gUpdateNoticeMu);
+      gUpdateStarting = false;
+    }
+    post_to_page(shell_update_busy_json(false));
+    return;
+  }
+  if (type == "settings") {
+    std::string accountId;
+    {
+      std::lock_guard<std::mutex> lock(gStateMu);
+      shell_parse_settings(json, &gSettings);
+      accountId = gAccountId;
+      save_settings(accountId, gSettings);
+    }
+    // Applied to the next session rather than the running one: the child owns its own encoder
+    // negotiation once started, and reaching into it from here would duplicate that logic.
+    post_status("idle", "설정을 저장했습니다. 다음 연결부터 적용됩니다.");
+    return;
+  }
+  if (type == "login") {
+    // Two fields. A `server` in the message is not read: the page is not where that is decided.
+    std::string accountId;
+    std::string password;
+    json_profile::json_get_string(json, "accountId", &accountId);
+    json_profile::json_get_string(json, "password", &password);
+    begin_login(accountId, password);
+    return;
+  }
+  if (type == "hosts") {
+    begin_refresh_hosts();
+    return;
+  }
+  if (type == "cancelReconnect") {
+    KillTimer(gWindow, kReconnectTimer);
+    gReconnectRequest.reset(); gReconnectRestore.clear(); ++gViewerOperation; gReconnectAttempts = 0;
+    post_status("idle", "자동 재연결을 취소했습니다.");
+    return;
+  }
+  if (type == "logout") {
+    ++gViewerOperation;
+    KillTimer(gWindow, kReconnectTimer);
+    gReconnectRequest.reset();
+    gReconnectRestore.clear();
+    gReconnectAttempts = 0;
+    std::string endedSession;
+    {
+      std::lock_guard<std::mutex> lock(gStateMu);
+      endedSession.swap(gSessionToken);
+      // Signing out is an owner change. Without this the account name and the server address are
+      // unchanged and the epoch is unchanged, so an attempt started while signed in would still
+      // compare as the same owner -- and would be acknowledged after the user had left.
+      ++gOwnerEpoch;
+    }
+    remote60::native_poc::log_upload_clear_credentials("logged out");
+    // What is stored goes too, and the directory is told: the next start is the sign-in form.
+    begin_sign_out(std::move(endedSession));
+    {
+      // The answer described the session that asked for it. Leaving the button up would offer
+      // the next person to sign in an install that was found for somebody else.
+      std::lock_guard<std::mutex> lock(gUpdateNoticeMu);
+      gAvailableVersion.clear();
+      gPendingUpdateNotice.clear();
+    }
+    post_to_page(shell_update_cleared_json());
+    post_to_page("{\"type\":\"signedOut\"}");
+    return;
+  }
+  if (type == "openlog") {
+    // Open the log FOLDER (client.log*, viewer.log* and their rotated generations live together);
+    // opening a single file made reaching the others a chore. The directory always exists by the
+    // time the page is up -- settings and logs were written on startup.
+    ShellExecuteW(nullptr, L"open", log_dir_path().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    return;
+  }
+  ShellConnectRequest connect{};
+  if (shell_parse_connect(json, &connect)) {
+    begin_session(connect);
+  }
+}
+
+void resize_webview() {
+  if (!gController || !gWindow) return;
+  RECT bounds{};
+  GetClientRect(gWindow, &bounds);
+  gController->put_Bounds(bounds);
+}
+
+LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+  switch (msg) {
+    case WM_SIZE:
+      resize_webview();
+      return 0;
+    case WM_APP + 1: {
+      // One message pushed from a worker thread, now on the thread WebView2 requires.
+      std::unique_ptr<PostedJson> payload(reinterpret_cast<PostedJson*>(lParam));
+      if (gWebView && payload && payload->epoch == gOwnerEpoch.load())
+        gWebView->PostWebMessageAsJson(widen(payload->body).c_str());
+      return 0;
+    }
+    case WM_APP + 2: {
+      std::unique_ptr<std::function<void()>> action(reinterpret_cast<std::function<void()>*>(lParam));
+      if (action && !gClosing.load()) (*action)();
+      return 0;
+    }
+    case WM_APP + 3: {
+      static uint64_t windowStart = 0;
+      static uint32_t failures = 0;
+      const uint64_t now = GetTickCount64();
+      if (!windowStart || now - windowStart > 60000) { windowStart = now; failures = 0; }
+      if (++failures > 3) {
+        if (MessageBoxW(hwnd, L"화면을 다시 여는 데 실패했습니다. 다시 시도하시겠습니까?",
+                        L"GNLink", MB_RETRYCANCEL | MB_ICONERROR) != IDRETRY) {
+          DestroyWindow(hwnd); return 0;
+        }
+        failures = 0;
+      }
+      if (gController) gController->Close();
+      gWebView.Reset(); gController.Reset();
+      if (FAILED(create_shell_webview())) {
+        MessageBoxW(hwnd, L"화면을 시작하지 못했습니다. 프로그램을 다시 실행해 주세요.", L"GNLink", MB_ICONERROR);
+      }
+      return 0;
+    }
+    case WM_TIMER:
+      if (wParam == kUpdateRetryTimer) { KillTimer(hwnd, kUpdateRetryTimer); start_update_check(); }
+      if (wParam == kReconnectTimer) {
+        KillTimer(hwnd, kReconnectTimer);
+        auto request = std::move(gReconnectRequest);
+        gReconnectRequest.reset();
+        uint64_t epoch = 0;
+        { std::lock_guard<std::mutex> lock(gStateMu); epoch = gOwnerEpoch; }
+        const std::string restore = std::move(gReconnectRestore);
+        gReconnectRestore.clear();
+        if (request && epoch == gReconnectOwnerEpoch) {
+          log_line("reconnect attempt=" + std::to_string(gReconnectAttempts) + " host=" + request->hostId +
+                   " restore=" + (restore.empty() ? std::string("picker") : restore));
+          begin_session(*request, true, restore);
+        }
+      }
+      return 0;
+    case WM_DESTROY:
+      { std::lock_guard<std::mutex> lock(gStateMu); ++gOwnerEpoch; gSessionToken.clear(); }
+      gClosing.store(true, std::memory_order_release);
+      PostQuitMessage(0);
+      return 0;
+    default:
+      return DefWindowProcW(hwnd, msg, wParam, lParam);
+  }
+}
+
+/** The page, loaded from beside the executable so it can be edited without a rebuild. */
+std::wstring shell_page_uri() {
+  const std::wstring local = executable_dir() + L"\\ui\\shell.html";
+  if (GetFileAttributesW(local.c_str()) != INVALID_FILE_ATTRIBUTES) return L"file:///" + local;
+  // Running from a build tree, where the source layout still has it.
+  return L"file:///" + executable_dir() + L"\\..\\..\\..\\..\\apps\\native_poc\\ui\\shell.html";
+}
+
+HRESULT create_shell_webview() {
+  wchar_t userData[MAX_PATH]{};
+  GetTempPathW(MAX_PATH, userData);
+  wcscat_s(userData, L"GNLinkClient");
+
+  const HRESULT created = CreateCoreWebView2EnvironmentWithOptions(
+      nullptr, userData, nullptr,
+      Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
+          [](HRESULT result, ICoreWebView2Environment* env) -> HRESULT {
+            if (FAILED(result) || !env) {
+              // The runtime ships with Edge and is on any recent Windows, so its absence is worth
+              // naming rather than failing silently.
+              MessageBoxW(gWindow,
+                          L"WebView2 런타임을 찾을 수 없습니다.\n"
+                          L"Microsoft Edge WebView2 런타임을 설치한 뒤 다시 실행해 주세요.",
+                          L"GNLink", MB_ICONERROR);
+              PostQuitMessage(3);
+              return result;
+            }
+            env->CreateCoreWebView2Controller(
+                gWindow,
+                Callback<ICoreWebView2CreateCoreWebView2ControllerCompletedHandler>(
+                    [](HRESULT hr, ICoreWebView2Controller* controller) -> HRESULT {
+                      if (FAILED(hr) || !controller) {
+                        PostQuitMessage(4);
+                        return hr;
+                      }
+                      gController = controller;
+                      gController->get_CoreWebView2(&gWebView);
+                      resize_webview();
+
+                      ComPtr<ICoreWebView2Settings> settings;
+                      if (SUCCEEDED(gWebView->get_Settings(&settings)) && settings) {
+                        // Nothing here is a browser: no dev tools, no context menu, no status
+                        // bar. They would only advertise that this is a web view.
+                        settings->put_AreDevToolsEnabled(FALSE);
+                        settings->put_AreDefaultContextMenusEnabled(FALSE);
+                        settings->put_IsStatusBarEnabled(FALSE);
+                      }
+
+                      EventRegistrationToken token{};
+                      gWebView->add_ProcessFailed(
+                          Callback<ICoreWebView2ProcessFailedEventHandler>(
+                            [](ICoreWebView2*, ICoreWebView2ProcessFailedEventArgs*) -> HRESULT {
+                              PostMessageW(gWindow, WM_APP + 3, 0, 0); return S_OK;
+                            }).Get(), &token);
+                      gWebView->add_WebMessageReceived(
+                          Callback<ICoreWebView2WebMessageReceivedEventHandler>(
+                              [](ICoreWebView2*, ICoreWebView2WebMessageReceivedEventArgs* args)
+                                  -> HRESULT {
+                                LPWSTR raw = nullptr;
+                                if (SUCCEEDED(args->TryGetWebMessageAsString(&raw)) && raw) {
+                                  handle_page_message(narrow(raw));
+                                  CoTaskMemFree(raw);
+                                }
+                                return S_OK;
+                              })
+                              .Get(),
+                          &token);
+
+                      gWebView->Navigate(shell_page_uri().c_str());
+                      return S_OK;
+                    })
+                    .Get());
+            return S_OK;
+          })
+          .Get());
+  return created;
+}
+
+}  // namespace
+
+int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, LPWSTR, int) {
+  if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED))) return 1;
+  SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+  std::string socketError;
+  if (!initialize_sockets(&socketError)) {
+    MessageBoxW(nullptr, widen(socketError).c_str(), L"GNLink", MB_ICONERROR);
+    return 1;
+  }
+
+  // The uploader's worker is a std::thread inside a static, and nothing here used to stop it: the
+  // static was destroyed with the thread still joinable, which is std::terminate(). Declared
+  // after the sockets it needs and before anything that can configure it -- a sign-in arrives on
+  // a page message, so from here on -- and it covers the early returns below as well as the end
+  // of the message loop. This thread holds no lock at that point, which matters: the auth
+  // callback runs on the worker and posts to this window.
+  const remote60::native_poc::LogUploadShutdown uploaderShutdown;
+  struct WorkerShutdown {
+    ~WorkerShutdown() { gClosing.store(true); gWorkers.Shutdown(); }
+  } workerShutdown;
+
+  WNDCLASSEXW wc{};
+  wc.cbSize = sizeof(wc);
+  wc.lpfnWndProc = wnd_proc;
+  wc.hInstance = instance;
+  wc.lpszClassName = kWindowClass;
+  wc.hCursor = LoadCursorW(nullptr, reinterpret_cast<LPCWSTR>(IDC_ARROW));
+  wc.hbrBackground = CreateSolidBrush(RGB(0x0f, 0x13, 0x19));
+  RegisterClassExW(&wc);
+
+  const std::wstring title = std::wstring(L"GNLink ") + kProductVersion;
+  gWindow = CreateWindowExW(0, kWindowClass, title.c_str(),
+                            WS_OVERLAPPEDWINDOW & ~WS_MAXIMIZEBOX, CW_USEDEFAULT, CW_USEDEFAULT,
+                            520, 720, nullptr, nullptr, instance, nullptr);
+  if (!gWindow) return 2;
+  ShowWindow(gWindow, SW_SHOW);
+
+  // Before the WebView is created, and not waited on. The window is already up, so a server that
+  // never answers costs nothing here.
+  start_update_check();
+
+  const HRESULT created = create_shell_webview();
+  if (FAILED(created)) {
+    MessageBoxW(gWindow, L"WebView2 를 시작하지 못했습니다.", L"GNLink", MB_ICONERROR);
+    return 5;
+  }
+
+  MSG msg{};
+  while (GetMessageW(&msg, nullptr, 0, 0)) {
+    TranslateMessage(&msg);
+    DispatchMessageW(&msg);
+  }
+  return 0;
+}

@@ -1,0 +1,11 @@
+{
+ "repo_path": "D:/remote/remote",
+ "files": [
+  "apps/android_direct_client/app/build.gradle.kts",
+  "apps/android_direct_client/app/src/main/java/com/remote60/androiddirect/UpdateManifest.kt",
+  "apps/android_direct_client/app/src/test/java/com/remote60/androiddirect/UpdateManifestTest.kt",
+  "apps/native_poc/src/product_version.hpp",
+  "apps/native_poc/src/update_manifest.cpp",
+  "apps/native_poc/src/update_manifest_test.cpp"
+ ]
+}

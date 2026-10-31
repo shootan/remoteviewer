@@ -1,0 +1,50 @@
+{
+  "A-round1-picker.bmp": {
+    "sha256": "f62e2dbaa017cf599ae7aa1227de546b3593b9f298af187fdb083c1395b0746d",
+    "size": [
+      1586,
+      893
+    ],
+    "interior_box": [
+      20,
+      60,
+      1566,
+      873
+    ],
+    "interior_distinct_rgb": 1,
+    "interior_colors": [
+      [
+        1256898,
+        [
+          255,
+          255,
+          255
+        ]
+      ]
+    ]
+  },
+  "A-round2-picker.bmp": {
+    "sha256": "f62e2dbaa017cf599ae7aa1227de546b3593b9f298af187fdb083c1395b0746d",
+    "size": [
+      1586,
+      893
+    ],
+    "interior_box": [
+      20,
+      60,
+      1566,
+      873
+    ],
+    "interior_distinct_rgb": 1,
+    "interior_colors": [
+      [
+        1256898,
+        [
+          255,
+          255,
+          255
+        ]
+      ]
+    ]
+  }
+}

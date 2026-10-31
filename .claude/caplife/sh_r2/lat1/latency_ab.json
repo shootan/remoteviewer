@@ -1,0 +1,26 @@
+{
+ "A_off": {
+  "lines": 0,
+  "drawWallUs": [],
+  "segment_p95us_last": null,
+  "glDrawn": 0,
+  "glSkipped": 0,
+  "sample": ""
+ },
+ "A_s60": {
+  "lines": 0,
+  "drawWallUs": [],
+  "segment_p95us_last": null,
+  "glDrawn": 0,
+  "glSkipped": 0,
+  "sample": ""
+ },
+ "B_s60": {
+  "lines": 0,
+  "drawWallUs": [],
+  "segment_p95us_last": null,
+  "glDrawn": 0,
+  "glSkipped": 0,
+  "sample": ""
+ }
+}

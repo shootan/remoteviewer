@@ -1,0 +1,301 @@
+diff --git a/automation/old_apk_lane/oa_avd.py b/automation/old_apk_lane/oa_avd.py
+index 7a5b58a..39e264d 100644
+--- a/automation/old_apk_lane/oa_avd.py
++++ b/automation/old_apk_lane/oa_avd.py
+@@ -145,6 +145,32 @@ def applog():
+         return ''
+ 
+ 
++def applog_snapshot():
++    """r7f (6, Codex codex_old_apk_lane_src_r7d_r2.md N2): the app log as ONE read that is known to have worked --
++    (True, text) only when the pull succeeded and the file was read; else (False, why). applog() turns a failure into
++    '' (its callers search it); a check of "nothing changed" must not read that '' as a valid, unchanged log."""
++    p = os.path.join(OUT, '_snap.log')
++    try:
++        if os.path.exists(p):
++            os.remove(p)
++        ka.adb('pull', ka.LOG_PATH, p)
++        return True, open(p, encoding='utf-8', errors='replace').read()
++    except Exception as e:  # noqa: BLE001 -- any failure is "no snapshot", never "no change"
++        return False, f'app log not read ({type(e).__name__}: {str(e)[:80]})'
++
++
++def host_snapshot():
++    """r7f (6): the host log as one read known to have worked -- (True, text) or (False, why)."""
++    try:
++        ready = open(os.path.join(ROOT, 'a', 'directoryhost_ready.txt'), encoding='utf-8').read().strip()
++        m = re.match(r'^ready run=(\S+) harness_pid=\d+ host_pid=\d+ host_log=(\S+)$', ready)
++        if not m or m.group(1) != os.path.basename(os.path.normpath(ROOT)) + '-a':
++            return False, f"the host's readiness is not this run's: {ready[:80]}"
++        return True, open(m.group(2), encoding='utf-8', errors='replace').read()
++    except Exception as e:  # noqa: BLE001
++        return False, f'host log not read ({type(e).__name__}: {str(e)[:80]})'
++
++
+ def cursor():
+     lines = [l for l in applog().splitlines() if l.strip()]
+     return lines[-1] if lines else ''
+@@ -200,7 +226,23 @@ def ime_state():
+     return 'unknown', []
+ 
+ 
+-PICK_MARK = []  # [app log cursor, host log length, pinned id] at the last successful pick
++PICK_MARK = []  # [app log cursor, host log length, pinned id, host prefix sha256] at the last successful pick
++
++
++def set_pick_mark(pinned):
++    """r7f (6): the marker "the same viewer, the same connection" is measured from -- registered ONLY from two reads that
++    worked: the app log (its last line, which must be non-empty) and this run's host log (non-empty; its length and the
++    sha256 of everything up to it, so a later read can show it CONTINUES this log). -> (ok, why)."""
++    PICK_MARK[:] = []
++    ok_a, app = applog_snapshot()
++    ok_h, hl = host_snapshot()
++    lines = [l for l in app.splitlines() if l.strip()] if ok_a else []
++    if not ok_a or not lines:
++        return False, app if not ok_a else 'app log empty'
++    if not ok_h or not hl:
++        return False, hl if not ok_h else 'host log empty'
++    PICK_MARK[:] = [lines[-1], len(hl), pinned, hashlib.sha256(hl.encode('utf-8')).hexdigest()]
++    return True, f'app marker {lines[-1][:40]!r}, host offset {len(hl)}'
+ 
+ 
+ def same_viewer():
+@@ -209,8 +251,23 @@ def same_viewer():
+     host logged no `udp control session ended` / new `client connected`. -> (ok, detail)."""
+     if not PICK_MARK:
+         return False, 'no pick to compare with'
+-    app = since(PICK_MARK[0])
+-    hl = host_log()[PICK_MARK[1]:]
++    # r7f (6): only snapshots that were really read, the app marker still in the app log, the host log at least as long
++    # as at the pick and beginning with exactly what it held then -- else "cannot tell", never "nothing changed"
++    ok_a, app_all = applog_snapshot()
++    if not ok_a:
++        return False, f'no app snapshot: {app_all}'
++    i = app_all.rfind(PICK_MARK[0])
++    if i < 0:
++        return False, 'the pick marker is gone from the app log (rotated / replaced): cannot tell'
++    ok_h, host_all = host_snapshot()
++    if not ok_h:
++        return False, f'no host snapshot: {host_all}'
++    if len(host_all) < PICK_MARK[1]:
++        return False, f'the host log shrank ({len(host_all)} < {PICK_MARK[1]} at the pick): cannot tell'
++    if hashlib.sha256(host_all[:PICK_MARK[1]].encode('utf-8')).hexdigest() != PICK_MARK[3]:
++        return False, 'the host log does not continue the one read at the pick (replaced): cannot tell'
++    app = app_all[i + len(PICK_MARK[0]):]
++    hl = host_all[PICK_MARK[1]:]
+     scenes = re.findall(r'\[scene\] (\S+)', app)
+     status = [st for st in re.findall(r'\[status\] ([^\n]*)', app) if not st.startswith('connected')]
+     picks = re.findall(r'\[select_request\][^\n]*', app)
+@@ -446,7 +503,11 @@ def pick_pinned(tag):
+     time.sleep(0.5)
+     digest = shot(tag.split()[0] + '_window_first_frame')
+     vd = re.findall(r'\[video_debug\][^\n]* out=(\d+)', since(n0))
+-    PICK_MARK[:] = [cursor(), len(host_log()), pinned]  # r8: what "the same viewer, the same connection" is measured from
++    marked, mwhy = set_pick_mark(pinned)  # r8 / r7f (6): what "the same viewer, the same connection" is measured from
++    if not marked:
++        verdict(f'{tag}: the pinned window picked (id {pinned}, Windows tab) -> first frame', False,
++                f'{detail[:200]} -- but no marker could be taken: {mwhy}')
++        return None
+     verdict(f'{tag}: the pinned window picked (id {pinned}, Windows tab) -> first frame', True,
+             f'{tab_note} {detail[:300]} (wall {time.time() - t0:.1f} s) screenshot={digest[:16]} video_debug out={vd[-1] if vd else "?"}')
+     return digest
+diff --git a/automation/old_apk_lane/oa_pick_test.py b/automation/old_apk_lane/oa_pick_test.py
+index afd561a..0b02219 100644
+--- a/automation/old_apk_lane/oa_pick_test.py
++++ b/automation/old_apk_lane/oa_pick_test.py
+@@ -37,7 +37,7 @@ def check(what, ok, detail=''):
+ 
+ 
+ def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novideo=False, back='ime', scene=None,
+-         avd=None, sh='ok', drop=None, frozen=False, pw_text=None):
++         avd=None, sh='ok', drop=None, frozen=False, pw_text=None, arm='S'):
+     """A fresh run folder, the fake's state, and oa_avd loaded anew against it. -> (module, paths)"""
+     run_id = f'{tag}-{time.strftime("%Y%m%d%H%M%S")}-{os.getpid()}'
+     root = os.path.join(RUNS, run_id)
+@@ -46,12 +46,14 @@ def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novide
+         f.write('oatest notarealpassword\n')
+     host_log = os.path.join(root, 'a', 'host.log')
+     with open(host_log, 'w', encoding='utf-8') as f:
+-        f.write(CAPTURE + f'10-30 00:00:00.000 [native-video-host][control] window-list seq=1 count=1 selectedId={listed_id}\n')
++        f.write(CAPTURE + f'10-30 00:00:00.000 [native-video-host][control] window-list seq=1 count=1 selectedId={listed_id}\n'
++                '10-30 00:00:00.000 [native-video-host] waiting client bindPort=50000\n')
+     with open(os.path.join(root, 'a', 'directoryhost_ready.txt'), 'w', encoding='ascii') as f:
+         f.write(f'ready run={run_id}-a harness_pid=1 host_pid=2 host_log={host_log}\n')
+     # r7e: what oa_avd.main reads before it starts (a fixture, an APK the fake hands back as the installed one)
+     with open(os.path.join(root, 'fixture_ready.txt'), 'w', encoding='ascii') as f:
+-        f.write(f'ready run={run_id} hosts=a standby=none controlPort=0 relay=10.0.2.2\n')
++        f.write(f'ready run={run_id} hosts=a standby=none controlPort={18460 if arm == "P" else 0} '
++                f'relay={"127.0.0.1" if arm == "P" else "10.0.2.2"}\n')
+     apk = os.path.join(root, 'none.apk')
+     with open(apk, 'wb') as f:
+         f.write(b'PK fake apk for ' + run_id.encode())
+@@ -66,8 +68,9 @@ def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novide
+                        'OA_FAKE_HOSTLOG': host_log, 'OA_FAKE_UI_VARIANT': variant, 'OA_FAKE_INPUT': input_mode,
+                        'OA_FAKE_IME': ime, 'OA_FAKE_NOVIDEO': '1' if novideo else '0', 'OA_FAKE_BACK': back,
+                        'OA_FAKE_ADB_APK': apk, 'OA_FAKE_SH': sh, 'OA_FAKE_DROP_SEC': drop or '',
+-                       'OA_FAKE_FROZEN': '1' if frozen else '0', 'OA_FAKE_PW_TEXT': pw_text or 'Password'})
+-    sys.argv = ['oa_avd.py', root, 'S', os.path.join(root, 'none.apk'), os.path.join(root, 'avd')]
++                       'OA_FAKE_FROZEN': '1' if frozen else '0', 'OA_FAKE_PW_TEXT': pw_text or 'Password',
++                       'OA_FAKE_PULL_FAIL': '0'})
++    sys.argv = ['oa_avd.py', root, arm, os.path.join(root, 'none.apk'), os.path.join(root, 'avd')]
+     spec = importlib.util.spec_from_file_location(f'oa_avd_{tag.replace("-", "_")}', avd or os.path.join(E, 'oa_avd.py'))
+     m = importlib.util.module_from_spec(spec)
+     spec.loader.exec_module(m)
+@@ -208,7 +211,7 @@ def main():
+     # arm must end there: no tap of any kind after 4's, and 5 / 6 / 7 NOT RUN in result.json. The contrast: the same
+     # flow against c468c27's oa_avd.py (it threw 4's answer away and went on into the menu).
+     def run_flow(tag, avd=None, **kw):
+-        m, p = case(tag, 'ok', input_mode=kw.pop('input_mode', 'none'), scene='login', avd=avd, **kw)
++        m, p = case(tag, 'ok', input_mode=kw.pop('input_mode', 'none'), scene=kw.pop('scene', 'login'), avd=avd, **kw)
+         try:
+             rc = m.main()
+         except RuntimeError as e:  # c468c27 went on into the menu and raised there (its result.json is still written)
+@@ -362,6 +365,83 @@ def main():
+     check('r7f: arm S driven from the install, the Settings control not usable -> INVALID (exit 2): nothing picked, '
+           'nothing tapped after', rc == 2 and not card and i4 < 0, f'rc={rc} card taps={card}')
+ 
++    # r7f (6, Codex codex_old_apk_lane_src_r7d_r2.md N2): "no snapshot" is not "nothing changed"
++    def not_same(tag, spoil, want):
++        m, p = case(tag, 'ok')
++        m.pick_pinned('3 the pinned window picked')
++        marked = bool(m.PICK_MARK)
++        spoil(p)
++        n_taps = len(taps(p))
++        ok4 = m.input_check()
++        os.environ['OA_FAKE_PULL_FAIL'] = '0'
++        r = last(m)
++        return marked and not ok4 and r[1] is False and want in r[2] and len(taps(p)) == n_taps, r[2][:200]
++
++    def pull_fails(p):
++        os.environ['OA_FAKE_PULL_FAIL'] = '1'
++
++    def host_shrinks(p):
++        t = open(p['host'], encoding='utf-8').read()
++        open(p['host'], 'w', encoding='utf-8').write(t[:len(t) // 2])
++
++    def host_replaced(p):
++        t = open(p['host'], encoding='utf-8').read()
++        open(p['host'], 'w', encoding='utf-8').write('X' * len(t) + '10-30 00:00:02.000 [native-video-host] other run\n')
++
++    def marker_lost(p):
++        open(p['app'], 'w', encoding='utf-8').write('2026-10-30 00:00:09.000 [scene] VIEWER\n')
++
++    for tag, spoil, want, what in (('same-pullfail', pull_fails, 'no app snapshot', 'the app log pull fails'),
++                                   ('same-hostshrink', host_shrinks, 'shrank', 'the host log is shorter than at the pick'),
++                                   ('same-hostreplaced', host_replaced, 'does not continue', 'the host log was replaced'),
++                                   ('same-markerlost', marker_lost, 'marker is gone', 'the pick marker is gone from the app log')):
++        ok, d = not_same(tag, spoil, want)
++        check(f'NEGATIVE 4 r7f(6): {what} after the pick -> "cannot tell" -> FAIL with NO tap', ok, d)
++    # the 30 s watch (3w) uses the same check: a failed read during it is a FAIL, never "held"
++    for tag, spoil, want, what in (('watch-pullfail', pull_fails, 'no app snapshot', 'the app log pull fails'),
++                                   ('watch-hostshrink', host_shrinks, 'shrank', 'the host log shrinks')):
++        m, p = case(tag, 'ok')
++        m.pick_pinned('3 the pinned window picked')
++        spoil(p)
++        n_taps = len(taps(p))
++        okw = m.observe_connection('3w the connection')
++        os.environ['OA_FAKE_PULL_FAIL'] = '0'
++        r = last(m)
++        check(f'NEGATIVE 3w r7f(6): {what} during the watch -> FAIL ("cannot tell"), no input', not okw and r[1] is False
++              and want in r[2] and len(taps(p)) == n_taps, r[2][:200])
++    old = os.path.join(RUNS, f'oa_avd_9cec590-{os.getpid()}.py')
++    with open(old, 'wb') as f:
++        f.write(subprocess.run(['git', '-C', WT, 'show', '9cec590:automation/old_apk_lane/oa_avd.py'], capture_output=True,
++                               check=True).stdout)
++    m, p = case('same-pullfail-9cec590', 'ok', avd=old)
++    m.pick_pinned('3 the pinned window picked')
++    os.environ['OA_FAKE_PULL_FAIL'] = '1'
++    same_old, why_old = m.same_viewer()
++    os.environ['OA_FAKE_PULL_FAIL'] = '0'
++    check('r7f(6) contrast: 9cec590\'s same_viewer with the app log pull failing said "the same" (True) -- the hole',
++          same_old is True, why_old[:160])
++    m, p = case('same-unchanged', 'ok')
++    m.pick_pinned('3 the pinned window picked')
++    same, why = m.same_viewer()
++    check('control r7f(6): two good reads, nothing changed since the pick -> the same viewer (True)', same is True, why[:160])
++    m, p = case('mark-pullfail', 'ok')
++    os.environ['OA_FAKE_PULL_FAIL'] = '1'
++    marked, why = m.set_pick_mark(PINNED)
++    os.environ['OA_FAKE_PULL_FAIL'] = '0'
++    check('NEGATIVE r7f(6): the marker is NOT registered from a failed app log read', not marked and not m.PICK_MARK, why[:120])
++    m, p = case('mark-hostempty', 'ok')
++    open(p['host'], 'w').close()
++    marked, why = m.set_pick_mark(PINNED)
++    check('NEGATIVE r7f(6): the marker is NOT registered from an empty host log', not marked and not m.PICK_MARK, why[:120])
++    # arm P driven from its start (auto_login NO_CREDENTIAL, manual connect) to 4, which FAILs: nothing after it
++    rc, four, nr, i4, after = run_flow('flow-p-4fail', scene='login', arm='P')
++    res = run_flow.res['results']
++    steps_p = {r[0].split()[0]: r[1] for r in res}
++    check('r7f(6): arm P from its start through 2 (P) / 2k / 2s / 3 / 3s / 3w, 4 FAILs -> no tap after 4 (no menu, no '
++          '연결 해제), 5 6 7 NOT RUN', rc != 0 and four and four[-1][1] is False and i4 >= 0 and not after and
++          all(c in nr for c in '567') and steps_p.get('2k') is True and steps_p.get('3w') is True,
++          f'rc={rc} steps={steps_p} taps after 4={after} not run={nr}')
++
+     print(f'\n{checks} checks, {fails} failed\nRESULT: {"PASS" if fails == 0 else "FAIL"}')
+     return 0 if fails == 0 else 1
+ 
+diff --git a/automation/old_apk_lane/stubs/fake_ui_adb.py b/automation/old_apk_lane/stubs/fake_ui_adb.py
+index 365c6ff..ee70b57 100644
+--- a/automation/old_apk_lane/stubs/fake_ui_adb.py
++++ b/automation/old_apk_lane/stubs/fake_ui_adb.py
+@@ -35,6 +35,10 @@ the PinnedSelectTest host log when a card / the picture is tapped. Every call is
+        OA_FAKE_DROP_SEC=<s>: that long after the picture the connection breaks (the app: scene HOSTS, status error; the
+        host: udp control session ended) and the PC list shows the error text (statusText).
+        OA_FAKE_PW_TEXT: the login password field's text (to see that a record never writes it).
++  r7f (6): OA_FAKE_PULL_FAIL=1  a pull of the app log fails (exit 1, nothing written).
++       arm P: `am start ... --es host` -> the app's start (auto_login NO_CREDENTIAL; loginManualButton), the manual
++       button -> the connect form (connectButton), connect -> the targets (login_manual, targets_ready; the host: a TCP
++       control client).
+ """
+ import json
+ import os
+@@ -83,6 +87,8 @@ def card_text():
+     return 'Notepad' if variant == 'nopinned' else 'remote60 mobile abr…'
+ 
+ 
++MANUAL = (40, 1000, 1040, 1100)
++CONNECT = (40, 1200, 1040, 1300)
+ LOGIN = {'loginIdInput': (40, 480, 1040, 560, 'ID'), 'loginPasswordInput': (40, 630, 1040, 720, 'Password'),
+          'loginButton': (40, 800, 1040, 900, 'Sign In')}
+ 
+@@ -92,6 +98,10 @@ def nodes():
+     if state.get('scene') == 'login':
+         return root + [(k, v[:4], os.environ.get('OA_FAKE_PW_TEXT', v[4]) if k == 'loginPasswordInput' else v[4])
+                        for k, v in LOGIN.items()]
++    if state.get('scene') == 'start':
++        return root + [('loginManualButton', MANUAL, '수동 연결')]
++    if state.get('scene') == 'connect':
++        return root + [('connectButton', CONNECT, '연결')]
+     if state.get('scene') == 'hosts':
+         out = root + [('hostCardName', HOSTCARD, 'oa-pc-a')]
+         if state.get('err'):
+@@ -147,7 +157,14 @@ elif cmd.startswith('shell input tap'):
+     x, y = int(args[3]), int(args[4])
+     hit = [n for n in nodes() if n[1][0] <= x <= n[1][2] and n[1][1] <= y <= n[1][3] and n[0] != 'android:id/content']
+     rid = hit[0][0] if hit else ''
+-    if rid == 'loginButton':
++    if rid == 'loginManualButton':
++        state['scene'] = 'connect'
++    elif rid == 'connectButton':
++        state['scene'] = 'targets'
++        app('[login_manual] host=10.0.2.2')
++        app('[targets_ready] origin=connect ms=1 items=1 gen=1')
++        host('client connected transport=tcp')
++    elif rid == 'loginButton':
+         state['scene'] = 'hosts'
+         app('[login_attempt] server=http://10.0.2.2:18410 id=oatest')
+     elif rid == 'hostCardName':
+@@ -218,6 +235,13 @@ elif cmd == 'shell input keyevent 4':
+     elif state.get('scene') == 'hosts':
+         state['dialog'] = True
+     json.dump(state, open(state_path, 'w', encoding='utf-8'))
++elif cmd.startswith('shell am start') and '--es' in args:
++    state['scene'] = 'start'
++    app('[auto_login] NO_CREDENTIAL')
++    json.dump(state, open(state_path, 'w', encoding='utf-8'))
++elif args[:1] == ['pull'] and not args[1].endswith('base.apk') and os.environ.get('OA_FAKE_PULL_FAIL') == '1':
++    sys.stderr.write('adb: error: failed to stat remote object: Permission denied (fake)\n')
++    sys.exit(1)
+ elif args[:1] == ['pull']:
+     if args[1].endswith('base.apk'):
+         shutil.copyfile(os.environ['OA_FAKE_ADB_APK'], args[2])

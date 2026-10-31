@@ -1,0 +1,58 @@
+--- a/apps/native_poc/src/udp_control_channel.cpp
++++ b/apps/native_poc/src/udp_control_channel.cpp
+@@ -163,7 +163,7 @@
+   std::lock_guard<std::mutex> lock(mu_);
+   const uint64_t now = now_us();
+   auto ago = [now](uint64_t t) { return t == 0 ? std::string("-") : std::to_string((now - t) / 1000); };
+-  std::string line = "diag{ack seen=" + std::to_string(diag_.acksSeen) +
++  std::string line = "close-diag-first-loss-v1 diag{ack seen=" + std::to_string(diag_.acksSeen) +
+                      " wrongStream=" + std::to_string(diag_.acksWrongStream) +
+                      " accepted=" + std::to_string(diag_.acksAccepted) + " stale=" + std::to_string(diag_.acksStale) +
+                      " probe=" + std::to_string(diag_.probeAcks) + " nack=" + std::to_string(diag_.nacks) +
+@@ -510,15 +510,17 @@
+     if (now - head.lastSendUs >= timings_.retransmitIntervalUs) {
+       if (++head.attempts > timings_.maxAttempts) {
+ #ifdef REMOTE60_CONTROL_CLOSE_DIAG
+-        diag_.lost = true;
+-        diag_.lostSeq = head.seq;
+-        diag_.lostAttempts = head.attempts;
+-        diag_.lostFrags = head.fragCount;
+-        diag_.lostQueue = txQueue_.size();
+-        diag_.lostFirstSendUs = head.firstSendUs;
+-        diag_.lostLastSendUs = head.lastSendUs;
+-        diag_.lostAtUs = now;
+-        diag_.lostType = HeaderType(head.payload);
++        if (!diag_.lost) {  // record the FIRST budget exhaustion, even if Tick runs again while closed
++          diag_.lost = true;
++          diag_.lostSeq = head.seq;
++          diag_.lostAttempts = head.attempts;
++          diag_.lostFrags = head.fragCount;
++          diag_.lostQueue = txQueue_.size();
++          diag_.lostFirstSendUs = head.firstSendUs;
++          diag_.lostLastSendUs = head.lastSendUs;
++          diag_.lostAtUs = now;
++          diag_.lostType = HeaderType(head.payload);
++        }
+ #endif
+         auto expected = ControlCloseReason::None;
+         closeReason_.compare_exchange_strong(expected, ControlCloseReason::PeerLost,
+--- a/apps/native_poc/src/udp_control_close_diag_test.cpp
++++ b/apps/native_poc/src/udp_control_close_diag_test.cpp
+@@ -85,6 +85,17 @@
+           line.find("lost{seq=1 type=37 attempts=4 ") != std::string::npos, line);
+     check("... and that no ACK was accepted", line.find(" accepted=0 ") != std::string::npos);
+     check("nothing of the payload past its header is in the line", line.find("NEVER-LOGGED") == std::string::npos);
++    // After close the receiver may still call Tick. The diagnostic must keep the FIRST loss, not a later sample.
++    const size_t lostAt = line.find("lost{");
++    const size_t agoAt = lostAt == std::string::npos ? std::string::npos : line.find(" agoMs=", lostAt);
++    const std::string firstLoss = agoAt == std::string::npos ? "" : line.substr(lostAt, agoAt - lostAt);
++    for (int i = 0; i < 2; ++i) {
++      std::this_thread::sleep_for(std::chrono::milliseconds(3));
++      p.a.Tick();
++    }
++    const std::string laterLoss = p.a.CloseDiagLine();
++    check("repeated Tick after close keeps the FIRST lost head / attempts / waited time", !firstLoss.empty() &&
++          laterLoss.find(firstLoss) != std::string::npos, laterLoss);
+     // the ACKs the peer did send, arriving only now: counted after the close, not accepted
+     // B acknowledged every copy it got; those ACK datagrams were dropped on the way -- delivered only now
+     size_t replayed = 0;

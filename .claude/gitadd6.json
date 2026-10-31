@@ -1,0 +1,12 @@
+{
+  "repo_path": "D:/remote/remote",
+  "files": [
+    "apps/native_poc/CMakeLists.txt",
+    "apps/native_poc/src/scn_dummy_main.cpp",
+    "apps/native_poc/src/update_relaunch.cpp",
+    "apps/native_poc/src/update_relaunch_test.cpp",
+    "apps/native_poc/src/updater_scenarios_test.cpp",
+    "docs/full_code_audit_2026-09-08.md",
+    "docs/history.md"
+  ]
+}

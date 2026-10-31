@@ -1,0 +1,13 @@
+{
+  "diag_unit.log": "fc991bceb911c69c644b7f1e0fcdc8bb1e805fe31a00ed9670d7703555cab78e",
+  "repeat_tick.log": "2736694a7274e1e20b18e2925d5546388019f1a5649d33807533fa221db05eb8",
+  "diag_unit_fixed.log": "b294ba34fd4c251fd3b271dd497655f67f8c6a85aad01341dca8c8e64660faca",
+  "guard_production.log": "1397fdaa24b39cc0424500c3f61ea79dc1339e7c2b0c25f171fd24d5221aac2e",
+  "guard_diag.log": "1397fdaa24b39cc0424500c3f61ea79dc1339e7c2b0c25f171fd24d5221aac2e",
+  "power_spy.log": "38be3e9d20bd3294fd4cf21def66f2296e294a870e05b31c149e07a7abbc1007",
+  "power_spy.imports.log": "66fdfab7ea411fba1169d24fb31d191d44e124a82f3c05663dadf88e72b33fed",
+  "power_spy_UNSAFE_original.exe": "65f08d8ce5a85a8f704f792a9477cc24819f15ff22935e314a2e7d87c4fe53f6",
+  "power_spy_UNSAFE_original.log": "a1acd05de8601a7bab8a9f63368181a606057c5ae8553be84f78393198c22389",
+  "power_spy_UNSAFE_original.imports.log": "aa065e7ecad2bb0a5ac9f97852bf50ac2bae1ccb8bd9092baa122fca467dd09a",
+  "first_loss_approved.patch": "23642cfce9327b43f0754b98dad421901bb0fe40577c8bd23d04c72432de5f03"
+}

@@ -1,0 +1,529 @@
+#include "directory_session_client.hpp"
+
+// windows.h defines min/max as macros, which breaks std::min in the socket header below.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#include <cstdlib>
+#include <cstring>
+#include <sstream>
+
+#include "directory_client.hpp"
+#include "json_profile.hpp"
+#include "native_socket.hpp"
+#include "winhttp_transport.hpp"
+
+namespace remote60::native_poc {
+
+using json_profile::json_get_bool;
+using json_profile::json_get_string;
+using json_profile::json_get_u32;
+
+namespace {
+
+// Long enough for a signup that hashes a password on a small VM, short enough that a wrong
+// address does not look like a hang.
+constexpr int kHttpTimeoutMs = 8000;
+// Nothing the directory returns comes close; this only stops a hostile or broken server from
+// making us read forever.
+// The limit lives with the transport contract now: this path and the WinHTTP one must refuse the
+// same size, or a response that works over http fails over https.
+constexpr size_t kMaxResponseBytes = net::kMaxHttpResponseBytes;
+
+bool resolve_ipv4(const std::string& host, uint16_t port, sockaddr_in* out) {
+  if (!out) return false;
+  addrinfoW hints{};
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+  const std::wstring whost(host.begin(), host.end());
+  const std::wstring wport = std::to_wstring(port);
+  PADDRINFOW result = nullptr;
+  if (GetAddrInfoW(whost.c_str(), wport.c_str(), &hints, &result) != 0 || !result) return false;
+  std::memcpy(out, result->ai_addr, sizeof(sockaddr_in));
+  FreeAddrInfoW(result);
+  return true;
+}
+
+SOCKET connect_with_timeout(const sockaddr_in& addr, int timeoutMs) {
+  SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (s == INVALID_SOCKET) return INVALID_SOCKET;
+  u_long nonBlocking = 1;
+  ioctlsocket(s, FIONBIO, &nonBlocking);
+  connect(s, reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+
+  fd_set writeSet;
+  FD_ZERO(&writeSet);
+  FD_SET(s, &writeSet);
+  timeval tv{};
+  tv.tv_sec = timeoutMs / 1000;
+  tv.tv_usec = (timeoutMs % 1000) * 1000;
+  const int ready = select(0, nullptr, &writeSet, nullptr, &tv);
+  u_long blocking = 0;
+  ioctlsocket(s, FIONBIO, &blocking);
+  if (ready <= 0) {
+    closesocket(s);
+    return INVALID_SOCKET;
+  }
+  return s;
+}
+
+/**
+ * One request, one response, connection closed.
+ *
+ * Closing per request rather than keeping the socket alive: these calls happen at human pace --
+ * a sign-in, a list refresh, a connect -- so a pool would be complexity bought for nothing, and
+ * `Connection: close` means the body ends at EOF instead of needing a chunked-encoding parser.
+ */
+bool http_request(const std::string& host, uint16_t port, bool secure, const char* method,
+                  const std::string& path, const std::string& bearer, const std::string& body,
+                  uint32_t* outStatus, std::string* outResponse) {
+  if (secure) {
+    // Same split as the host agent's: TLS on WinHTTP, cleartext on the socket that already
+    // works. The bearer header is written here in the shape the raw path writes it, so the two
+    // send the same request rather than two requests that resemble each other.
+    net::HttpResult result;
+    const std::string headers =
+        bearer.empty() ? std::string() : "Authorization: Bearer " + bearer + "\r\n";
+    const bool ok = net::http_exchange(host, port, true, method, path, headers, body,
+                                       "application/json", kHttpTimeoutMs, &result);
+    if (outStatus) *outStatus = result.status;
+    if (outResponse) *outResponse = result.body;
+    return ok;
+  }
+  sockaddr_in addr{};
+  if (!resolve_ipv4(host, port, &addr)) return false;
+  SOCKET s = connect_with_timeout(addr, kHttpTimeoutMs);
+  if (s == INVALID_SOCKET) return false;
+
+  // A server that accepts the connection and then says nothing would otherwise hang the UI
+  // thread for as long as the OS allows.
+  DWORD recvTimeout = static_cast<DWORD>(kHttpTimeoutMs);
+  setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&recvTimeout),
+             sizeof(recvTimeout));
+
+  std::ostringstream req;
+  req << method << " " << path << " HTTP/1.1\r\n"
+      << "Host: " << host << ":" << port << "\r\n";
+  if (!bearer.empty()) req << "Authorization: Bearer " << bearer << "\r\n";
+  if (!body.empty()) {
+    req << "Content-Type: application/json\r\n"
+        << "Content-Length: " << body.size() << "\r\n";
+  }
+  req << "Connection: close\r\n\r\n"
+      << body;
+  const std::string reqText = req.str();
+
+  size_t sent = 0;
+  while (sent < reqText.size()) {
+    const int n = send(s, reqText.data() + sent, static_cast<int>(reqText.size() - sent), 0);
+    if (n <= 0) {
+      closesocket(s);
+      return false;
+    }
+    sent += static_cast<size_t>(n);
+  }
+
+  std::string raw;
+  char buf[4096];
+  bool tooLarge = false;
+  for (;;) {
+    const int n = recv(s, buf, sizeof(buf), 0);
+    if (n <= 0) break;
+    raw.append(buf, static_cast<size_t>(n));
+    if (raw.size() > kMaxResponseBytes) {
+      tooLarge = true;
+      break;
+    }
+  }
+  closesocket(s);
+  if (tooLarge) return false;
+
+  if (raw.rfind("HTTP/", 0) != 0) return false;
+  const size_t statusStart = raw.find(' ');
+  if (statusStart == std::string::npos) return false;
+  if (outStatus) {
+    *outStatus = static_cast<uint32_t>(std::strtoul(raw.c_str() + statusStart + 1, nullptr, 10));
+  }
+  const size_t bodyStart = raw.find("\r\n\r\n");
+  if (outResponse) {
+    *outResponse = bodyStart == std::string::npos ? std::string() : raw.substr(bodyStart + 4);
+  }
+  return true;
+}
+
+/** The server's own wording when it has one; the status code alone explains too little. */
+std::string error_from_response(uint32_t status, const std::string& body) {
+  std::string message;
+  if (json_get_string(body, "error", &message) && !message.empty()) return message;
+  return "server returned HTTP " + std::to_string(status);
+}
+
+std::string json_escape(const std::string& value) {
+  std::string out;
+  out.reserve(value.size() + 8);
+  for (const char c : value) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default: out += c; break;
+    }
+  }
+  return out;
+}
+
+/**
+ * Walks the top-level objects of a JSON array named `key`.
+ *
+ * The directory's replies are small and shaped by us at both ends, so a brace-depth scan is
+ * enough and keeps this file free of a JSON dependency. It does mean a string containing a brace
+ * would confuse it -- host names and ids come from the same server, and nothing else is parsed
+ * this way.
+ */
+std::vector<std::string> json_array_objects(const std::string& json, const std::string& key) {
+  std::vector<std::string> out;
+  const size_t keyPos = json.find("\"" + key + "\"");
+  if (keyPos == std::string::npos) return out;
+  const size_t arrayStart = json.find('[', keyPos);
+  if (arrayStart == std::string::npos) return out;
+
+  int depth = 0;
+  size_t objectStart = std::string::npos;
+  for (size_t i = arrayStart; i < json.size(); ++i) {
+    const char c = json[i];
+    if (c == '{') {
+      if (depth == 0) objectStart = i;
+      ++depth;
+    } else if (c == '}') {
+      --depth;
+      if (depth == 0 && objectStart != std::string::npos) {
+        out.push_back(json.substr(objectStart, i - objectStart + 1));
+        objectStart = std::string::npos;
+      }
+    } else if (c == ']' && depth == 0) {
+      break;
+    }
+  }
+  return out;
+}
+
+bool split_url(const std::string& url, std::string* host, uint16_t* port, bool* secure,
+               std::string* error) {
+  return directory::parse_directory_url(url, host, port, error, secure);
+}
+
+}  // namespace
+
+bool directory_observe_from_health(const std::string& url, directory::ObserveEndpoint* outObserve,
+                                   std::string* outError) {
+  // One implementation, in directory_client. It used to live here, which is why the host -- which
+  // does not link this file -- had no way to ask the question at all, and a host resuming from a
+  // cached token therefore never learned where observations go.
+  return directory::observe_endpoint_from_health(url, outObserve, outError);
+}
+
+bool directory_login(const std::string& url, const std::string& accountId,
+                     const std::string& password, std::string* outSessionToken,
+                     std::string* outError,
+                     directory::ObserveEndpoint* outObserve) {
+  std::string host;
+  uint16_t port = 0;
+  bool secure = false;
+  if (!split_url(url, &host, &port, &secure, outError)) return false;
+
+  std::ostringstream body;
+  body << "{\"id\":\"" << json_escape(accountId) << "\",\"pw\":\"" << json_escape(password) << "\"}";
+
+  uint32_t status = 0;
+  std::string response;
+  if (!http_request(host, port, secure, "POST", "/api/login", {}, body.str(), &status, &response)) {
+    if (outError) *outError = "cannot reach the server";
+    return false;
+  }
+  if (status != 200) {
+    if (outError) *outError = error_from_response(status, response);
+    return false;
+  }
+  std::string token;
+  // Optional and additive: an older directory does not send it, and that is a documented state
+  // rather than an error -- see observe_port_for.
+  if (outObserve) directory::parse_observe_metadata(response, outObserve);
+  if (!json_get_string(response, "sessionToken", &token) || token.empty()) {
+    if (outError) *outError = "server did not return a session";
+    return false;
+  }
+  if (outSessionToken) *outSessionToken = token;
+  return true;
+}
+
+namespace {
+
+SessionCall session_call_for(uint32_t status) {
+  if (status == 200) return SessionCall::Ok;
+  if (status == 401) return SessionCall::Rejected;
+  if (status == 404 || status == 405) return SessionCall::Unsupported;
+  if (status == 429) return SessionCall::Limited;
+  return SessionCall::Failed;
+}
+
+/**
+ * One call that carries a secret in its body.
+ *
+ * The body is built here and zeroed here. What comes back is only ever described by its status
+ * and the server's own error text -- never echoed -- so that nothing a caller logs about a
+ * failure can contain what was sent.
+ */
+SessionCall secret_call(const std::string& url, const char* path, std::string body,
+                        const std::string& bearer, std::string* outResponse,
+                        std::string* outError) {
+  std::string host;
+  uint16_t port = 0;
+  bool secure = false;
+  if (!split_url(url, &host, &port, &secure, outError)) return SessionCall::Failed;
+
+  uint32_t status = 0;
+  std::string response;
+  const bool exchanged =
+      http_request(host, port, secure, "POST", path, bearer, body, &status, &response);
+  if (!body.empty()) SecureZeroMemory(body.data(), body.size());
+  if (!exchanged) {
+    if (outError) *outError = "cannot reach the server";
+    return SessionCall::Unreachable;
+  }
+  const SessionCall call = session_call_for(status);
+  if (call != SessionCall::Ok && outError) *outError = error_from_response(status, response);
+  if (outResponse) *outResponse = std::move(response);
+  return call;
+}
+
+}  // namespace
+
+const char* session_call_name(SessionCall call) {
+  switch (call) {
+    case SessionCall::Ok: return "ok";
+    case SessionCall::Rejected: return "rejected";
+    case SessionCall::Unsupported: return "unsupported";
+    case SessionCall::Limited: return "limited";
+    case SessionCall::Failed: return "failed";
+    case SessionCall::Unreachable: return "unreachable";
+  }
+  return "?";
+}
+
+SessionCall directory_login_with_device(const std::string& url, const std::string& accountId,
+                                        const std::string& password, const std::string& kind,
+                                        const std::string& label, DeviceSignIn* out,
+                                        std::string* outError) {
+  if (out) *out = DeviceSignIn{};
+  std::string body = "{\"id\":\"" + json_escape(accountId) + "\",\"pw\":\"" +
+                     json_escape(password) + "\",\"device\":{\"kind\":\"" + json_escape(kind) +
+                     "\",\"label\":\"" + json_escape(label) + "\"}}";
+  std::string response;
+  const SessionCall call =
+      secret_call(url, "/api/login", std::move(body), {}, &response, outError);
+  if (call != SessionCall::Ok) return call;
+
+  DeviceSignIn read;
+  if (!json_get_string(response, "sessionToken", &read.sessionToken) ||
+      read.sessionToken.empty()) {
+    if (outError) *outError = "server did not return a session";
+    return SessionCall::Failed;
+  }
+  // All three or none. A directory from before device credentials sends none, and the sign-in
+  // stands; one that sends some of them has sent something this client cannot use.
+  json_get_string(response, "deviceId", &read.deviceId);
+  json_get_string(response, "deviceCredential", &read.deviceCredential);
+  json_get_string(response, "revokeToken", &read.revokeToken);
+  if (read.deviceId.empty() || read.deviceCredential.empty() || read.revokeToken.empty()) {
+    read.deviceId.clear();
+    read.deviceCredential.clear();
+    read.revokeToken.clear();
+  }
+  if (out) *out = std::move(read);
+  return SessionCall::Ok;
+}
+
+SessionCall directory_session_refresh(const std::string& url, const std::string& deviceId,
+                                      const std::string& deviceCredential, DeviceSignIn* out,
+                                      std::string* outError) {
+  if (out) *out = DeviceSignIn{};
+  std::string body = "{\"deviceId\":\"" + json_escape(deviceId) + "\",\"deviceCredential\":\"" +
+                     json_escape(deviceCredential) + "\"}";
+  std::string response;
+  const SessionCall call =
+      secret_call(url, "/api/session/refresh", std::move(body), {}, &response, outError);
+  if (call != SessionCall::Ok) return call;
+
+  DeviceSignIn read;
+  read.deviceId = deviceId;
+  if (!json_get_string(response, "sessionToken", &read.sessionToken) ||
+      read.sessionToken.empty() ||
+      !json_get_string(response, "deviceCredential", &read.deviceCredential) ||
+      read.deviceCredential.empty()) {
+    // A 200 without the next credential would leave this device holding one the server has
+    // just replaced. It is not treated as a sign-in.
+    if (outError) *outError = "server did not return a session and the next credential";
+    return SessionCall::Failed;
+  }
+  if (out) *out = std::move(read);
+  return SessionCall::Ok;
+}
+
+SessionCall directory_session_logout(const std::string& url, const std::string& deviceId,
+                                     const std::string& revokeToken,
+                                     const std::string& sessionToken, std::string* outError) {
+  std::string body = "{\"deviceId\":\"" + json_escape(deviceId) + "\"";
+  if (!revokeToken.empty()) body += ",\"revokeToken\":\"" + json_escape(revokeToken) + "\"";
+  body += "}";
+  return secret_call(url, "/api/session/logout", std::move(body), sessionToken, nullptr,
+                     outError);
+}
+
+bool directory_list_hosts(const std::string& url, const std::string& sessionToken,
+                          std::vector<DirectoryHostEntry>* outHosts, std::string* outError,
+                          uint32_t* outStatus) {
+  if (outStatus) *outStatus = 0;
+  std::string host;
+  uint16_t port = 0;
+  bool secure = false;
+  if (!split_url(url, &host, &port, &secure, outError)) return false;
+
+  uint32_t status = 0;
+  std::string response;
+  if (!http_request(host, port, secure, "GET", "/api/hosts", sessionToken, {}, &status, &response)) {
+    if (outError) *outError = "cannot reach the server";
+    return false;
+  }
+  if (outStatus) *outStatus = status;
+  if (status != 200) {
+    if (outError) *outError = error_from_response(status, response);
+    return false;
+  }
+
+  if (outHosts) {
+    outHosts->clear();
+    for (const auto& object : json_array_objects(response, "hosts")) {
+      DirectoryHostEntry entry{};
+      if (!json_get_string(object, "hostId", &entry.hostId) || entry.hostId.empty()) continue;
+      json_get_string(object, "hostName", &entry.hostName);
+      json_get_bool(object, "online", &entry.online);
+      uint32_t lastSeen = 0;
+      if (json_get_u32(object, "lastSeen", &lastSeen)) entry.lastSeenMs = lastSeen;
+      outHosts->push_back(std::move(entry));
+    }
+  }
+  return true;
+}
+
+bool directory_standby_support(const std::string& url, const std::string& sessionToken, bool* outSupported,
+                               bool* outRelay, std::string* outError) {
+  if (outSupported) *outSupported = false;
+  if (outRelay) *outRelay = false;
+  std::string host;
+  uint16_t port = 0;
+  bool secure = false;
+  if (!split_url(url, &host, &port, &secure, outError)) return false;
+  uint32_t status = 0;
+  std::string response;
+  if (!http_request(host, port, secure, "GET", "/api/hosts", sessionToken, {}, &status, &response)) {
+    if (outError) *outError = "cannot reach the server";
+    return false;
+  }
+  if (status != 200) {
+    if (outError) *outError = error_from_response(status, response);
+    return false;
+  }
+  // {"hosts":[...],"standby":{"supported":true,"relay":true}} -- the object after the host list
+  const size_t at = response.find("\"standby\":{");
+  if (at == std::string::npos) return true;  // an older server: no standby
+  const size_t end = response.find('}', at);
+  const std::string object = response.substr(at, end == std::string::npos ? std::string::npos : end - at + 1);
+  bool supported = false, relay = false;
+  json_get_bool(object, "supported", &supported);
+  json_get_bool(object, "relay", &relay);
+  if (outSupported) *outSupported = supported;
+  if (outRelay) *outRelay = supported && relay;
+  return true;
+}
+
+bool directory_connect(const std::string& url, const std::string& sessionToken,
+                       const std::string& hostId, const std::string& observeToken,
+                       DirectoryConnectTarget* outTarget, std::string* outError,
+                       uint32_t* outStatus, bool standby, bool relayEarly) {
+  std::string host;
+  uint16_t port = 0;
+  bool secure = false;
+  if (!split_url(url, &host, &port, &secure, outError)) return false;
+
+  std::ostringstream body;
+  body << "{\"hostId\":\"" << json_escape(hostId) << "\",\"observeToken\":\""
+       << json_escape(observeToken) << "\"" << (standby ? ",\"standby\":true" : "")
+       << (relayEarly ? ",\"relayEarly\":true" : "") << "}";
+
+  uint32_t status = 0;
+  std::string response;
+  if (!http_request(host, port, secure, "POST", "/api/connect", sessionToken, body.str(), &status,
+                    &response)) {
+    if (outError) *outError = "cannot reach the server";
+    return false;
+  }
+  if (outStatus) *outStatus = status;
+  if (status != 200) {
+    if (outError) *outError = error_from_response(status, response);
+    return false;
+  }
+  if (!outTarget) return true;
+
+  *outTarget = DirectoryConnectTarget{};
+  json_get_string(response, "punchToken", &outTarget->punchToken);
+  json_get_string(response, "connectId", &outTarget->connectId);  // pc2-connect-diag
+  json_get_string(response, "standbyRelay", &outTarget->standbyRelay);  // keepalive-r2 (2)
+  if (relayEarly) json_get_string(response, "relayEarly", &outTarget->relayEarly);  // np-impl r1, asked only
+  json_get_string(response, "hostPublicIp", &outTarget->hostPublicIp);
+  uint32_t publicPort = 0;
+  if (json_get_u32(response, "hostPublicUdpPort", &publicPort)) {
+    outTarget->hostPublicUdpPort = static_cast<uint16_t>(publicPort);
+  }
+
+  for (const auto& object : json_array_objects(response, "candidates")) {
+    ConnectCandidate candidate{};
+    uint32_t candidatePort = 0;
+    if (!json_get_string(object, "ip", &candidate.ip) || candidate.ip.empty()) continue;
+    if (!json_get_u32(object, "port", &candidatePort) || candidatePort == 0) continue;
+    candidate.port = static_cast<uint16_t>(candidatePort);
+    std::string kind;
+    json_get_string(object, "kind", &kind);
+    if (kind == "relay") {  // keepalive-r2 (2): where a standby lease goes when one is reserved
+      outTarget->relayIp = candidate.ip;
+      outTarget->relayPort = candidate.port;
+    }
+    // An unknown kind is kept rather than dropped: the server may learn new ones, and a
+    // candidate we cannot label is still a candidate we can punch.
+    if (!candidate_kind_from_name(kind, &candidate.kind)) {
+      candidate.kind = CandidateKind::Public;
+    }
+    outTarget->candidates.push_back(std::move(candidate));
+  }
+
+  // A host that predates the candidate list still answers with the single address, and dialling
+  // it is exactly what the old client did.
+  if (outTarget->candidates.empty() && !outTarget->hostPublicIp.empty() &&
+      outTarget->hostPublicUdpPort != 0) {
+    ConnectCandidate fallback{};
+    fallback.ip = outTarget->hostPublicIp;
+    fallback.port = outTarget->hostPublicUdpPort;
+    fallback.kind = CandidateKind::Public;
+    outTarget->candidates.push_back(std::move(fallback));
+  }
+
+  if (outTarget->punchToken.empty()) {
+    if (outError) *outError = "server did not return a capability";
+    return false;
+  }
+  return true;
+}
+
+}  // namespace remote60::native_poc

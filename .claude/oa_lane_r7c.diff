@@ -1,0 +1,574 @@
+﻿diff --git a/automation/old_apk_lane/oa_avd.py b/automation/old_apk_lane/oa_avd.py
+index aa2909f..9b3d716 100644
+--- a/automation/old_apk_lane/oa_avd.py
++++ b/automation/old_apk_lane/oa_avd.py
+@@ -1,20 +1,32 @@
+ """rel-0164 old-APK lane (Codex codex_rel_0164_split_decision.md (2), legacy combination 1): APK 0.2.32 on the shared test
+ AVD against the 0.2.164 candidate's server and host (oa_fixture.ps1: one pinned test host oa-pc-a through the shared
+ injection / power guard). Judged ONLY from what 0.2.32 (b554e76) itself has: its UI ids (loginIdInput, hostCardName,
+-listDevicesButton, targetCardTitle, viewerMenuButton / viewerMenuHostsButton, loginManualButton / connectButton) and its
++listWindowsButton / listDevicesButton, targetCardTitle, viewerMenuButton / viewerMenuHostsButton, loginManualButton /
++connectButton) and its
+ diagnostics tags (login_attempt, login_manual, directory_chosen, targets_ready, select_ready, park_begin,
+ park_confirmed, park_reuse, park_refused, scene, video_debug) -- none of the 0.2.33 tags. The host's side from its own
+ log: the test host's `[input-trace]` lines (input injection none: the events are logged, never injected).
+ 
+   arm S  the same-source fixture build of 0.2.32 (DIRECTORY_URL = the fixture's): 1 sign in, 2 the ordinary connect
+-         (directory), 3 the desktop picked -> first frame (time, screenshot sha256), 4 one input reaches the host, 5 PC
++         (directory), 3 the PINNED window picked -> first frame (time, screenshot sha256), 4 one input reaches the host, 5 PC
+          목록: the park, 6 the parked PC again -> a picture again, 7 (with a standby lease) the lease undisturbed.
+   arm P  the PUBLISHED 0.2.32 (its DIRECTORY_URL is the fixed https server, which this lane does not use). r2 (Codex
+          codex_rel_0164_old_apk_lane_decision.md): its ONE app start must show an empty sign-in store (auto_login
+          NO_CREDENTIAL, no sign_in_store line) or the arm is INVALID; 1 NOT RUN; 2 its manual DIRECT connect (10.0.2.2:
+          UDP video + TCP control -- the host's own log must show one TCP control client); 3, 4 as S; 5 and 6 NOT RUN
+          (the manual UI has no PC 목록 / park); instead 5d 연결 해제 -> the connect form (the host's TCP client gone)
+-         and 6r connect again (a new session) -> the desktop -> a picture; 7 as S.
++         and 6r connect again (a new session) -> the pinned window -> a picture; 7 as S.
++  r7 (verify-0164 S/P runs, both FAIL at 3): the host is the PinnedSelectTest seam -- it serves ONE window and refuses
++  every other target by design (host_control_session.cpp:1699: windowId 0 = the desktop -> pinned_test_seam_refused). So
++  3 / 6b / 6r pick that window: its id from the host's own log (capture target hwnd == window-list selectedId), the
++  Windows tab, the one card whose title is that window's; judged on the app's select_request (that id, tab=WINDOWS), the
++  host's window-select applied=1 for that id, and select_ready. Any other card (the Desktop card, id 0) is a FAIL.
++  r7 (Codex codex_old_apk_lane_pinned_scope_r7.md): the pick is tied end to end -- the ONE non-zero target THIS run's host
++  listed, the app's requested id and selection gen, the host's applied id and streamGen (= the app's select_ack
++  streamGen), select_ready of the same gen, then a frame out after it. A listed id 0 or an id the host's own lines do
++  not agree on is refused with NO tap. 4 is the tap's own events: a button down then up on the host after it, inside
++  the window's picture -- not a count of lines. The seam is never relaxed and id 0 is never redirected to the window.
++  Scope: S window 3 4 + park 5 / reuse 6; P window 3 4, P-5d, P-6r (5 6 NOT RUN), 7 with P.
+ No clipboard is changed. No real password is shown: adb errors and steps are cleaned (oa_adb._clean).
+ 
+   python -I oa_avd.py <run folder> <S|P> <apk> <out>"""
+@@ -147,31 +159,181 @@ def menu(button):
+     raise RuntimeError(f'menu button not reached: {button}')
+ 
+ 
+-def pick_desktop(tag):
+-    """The targets screen: the desktop tab, the first card -> select_ready (0.2.32's own 'the first picture shown')."""
++def pinned_target(hl):
++    """r7: the window the PinnedSelectTest host serves, from ITS log: (id, title, detail). The capture target's hwnd and
++    the last window-list's selectedId must be the same non-zero id and the list must hold exactly that one window --
++    else (None, None, why): nothing is tapped."""
++    caps = re.findall(r'capture-window target hwnd=0x([0-9a-fA-F]+) pid=\d+ process=\S+ title=(.*?) clientOnly=', hl)
++    lists = re.findall(r'\[control\] window-list seq=\d+ count=(\d+) selectedId=(\d+)', hl)
++    if not caps or not lists:
++        return None, None, f'host log: capture target lines={len(caps)} window-list lines={len(lists)}'
++    hwnd, title = int(caps[-1][0], 16), caps[-1][1].strip()
++    count, sel = int(lists[-1][0]), int(lists[-1][1])
++    detail = f'capture hwnd=0x{hwnd:x} ({hwnd}) window-list count={count} selectedId={sel} title={title!r}'
++    if sel == 0 or sel != hwnd or count != 1 or not title:
++        return None, None, 'not one agreed pinned window: ' + detail
++    return sel, title, detail
++
++
++def card_shows(text, title):
++    """r7: a targetCardTitle shows the window's title, possibly cut with an ellipsis (0.2.33 on this AVD showed
++    'remote60 mobile abr…'): what it shows, without the ellipsis, is a non-trivial start of the title."""
++    shown = text.rstrip().rstrip('…').rstrip('.').rstrip()
++    return len(shown) >= 8 and title.startswith(shown)
++
++
++def judge_pick(app_since, host_since, pinned):
++    """r7: (ok, detail) for one pick, from what the app and the host logged after it. PASS only if ALL hold:
++    - the app's FIRST select_request is the pinned id on the Windows tab (its gen G)
++    - the host's window-select of that id says applied=1 (its streamGen S) and no window-select was refused
++    - the app's select_ack is gen G, streamGen S (the same selection on both ends)
++    - select_ready of the pinned id and gen G, and a video_debug after it with out > 0 (the first picture)
++    A frame after a request for another target (id 0 = the desktop) is NOT a pass."""
++    reqs = re.findall(r'\[select_request\] targetId=(-?\d+) label=(.*?) tab=(\S+) gen=(\d+)', app_since)
++    acks = re.findall(r'\[select_ack\] targetId=(-?\d+) gen=(\d+) streamGen=(\d+)', app_since)
++    m_ready = re.search(r'\[select_ready\] targetId=(-?\d+) gen=(\d+)[^\n]* ms=(-?\d+)', app_since)
++    failed = re.findall(r'\[select_failed\][^\n]*', app_since)
++    applied = re.findall(r'window-select seq=\d+ requestedId=(\d+) applied=(\d)(?: selectedId=\d+ streamGen=(\d+))?', host_since)
++    first = reqs[0] if reqs else None
++    gen = int(first[3]) if first else None
++    host_ok = [int(sg) for i, a, sg in applied if a == '1' and int(i) == pinned and sg]
++    stream_gen = host_ok[0] if host_ok else None
++    ack_ok = any(int(t) == pinned and int(g) == gen and int(sg) == stream_gen for t, g, sg in acks) if stream_gen else False
++    ready_ok = bool(m_ready) and int(m_ready.group(1)) == pinned and int(m_ready.group(2)) == gen
++    after = app_since[m_ready.end():] if m_ready else ''
++    outs = [int(o) for o in re.findall(r'\[video_debug\][^\n]* out=(\d+)', after)]
++    video_ok = any(o > 0 for o in outs)
++    ok = (first is not None and int(first[0]) == pinned and first[2] == 'WINDOWS' and stream_gen is not None
++          and not any(a != '1' for _, a, _ in applied) and ack_ok and ready_ok and video_ok and not failed)
++    detail = (f'pinned={pinned} request={"targetId=%s tab=%s gen=%s" % (first[0], first[2], first[3]) if first else "none"}'
++              f' host window-select={[(i, a, sg) for i, a, sg in applied][:3]} ack={acks[:2]}'
++              f' ready={m_ready.group(0)[:90] if m_ready else "none"} video out after ready={outs[:3]}'
++              + (f' failed={failed[0][:120]}' if failed else ''))
++    return ok, detail
++
++
++def window_size(hl):
++    """r7: the window's picture size as the host encodes it (its last [keyframe] size=WxH)."""
++    m = re.findall(r'\[keyframe\][^\n]* size=(\d+)x(\d+)', hl)
++    return (int(m[-1][0]), int(m[-1][1])) if m else None
++
++
++def judge_input(host_since, size, aim=None):
++    """r7 (4): the tap's own events, from the host's [input-trace] lines written AFTER it (the caller passes only the
++    log past the offset taken just before the tap). The PinnedSelectTest seam logs every pointer event (injection none;
++    host_control_session.cpp:1296, kinds: 1 move, 2 button down, 3 button up, 4 wheel). PASS only if the FIRST button
++    down after the tap is followed by a button up (a higher seq) at the SAME position (within 2 px), both inside the
++    pinned window's picture (0 <= x < W, 0 <= y < H; W x H = the host's [keyframe] size). Moves alone, an up without
++    its down, a down without an up, a pair outside the window or at two positions: FAIL.
++    LIMIT: 0.2.32's DIRECT tap sends the view point mapped into the picture (b554e76 MainActivity.kt:3057-3125,
++    mapTouchToVideoCoords; MOVE, DOWN at the mapped pixel, then UP); that mapping depends on the device's view layout and is NOT judged here. `aim` (the
++    expected picture point for a tap at the view's centre) is only recorded: the distance is reported, not judged."""
++    ev = [(int(q), int(k), int(x), int(y)) for q, k, x, y in
++          re.findall(r'\[input-trace\] seq=(\d+) kind=(\d+) x=(-?\d+) y=(-?\d+)', host_since)]
++    inside = (lambda x, y: size is not None and 0 <= x < size[0] and 0 <= y < size[1])
++    downs = [e for e in ev if e[1] == 2]
++    down = downs[0] if downs else None
++    up = None
++    if down:
++        ups = [e for e in ev if e[1] == 3 and e[0] > down[0]]
++        up = ups[0] if ups else None
++    same = bool(down and up and abs(down[2] - up[2]) <= 2 and abs(down[3] - up[3]) <= 2)
++    ok = bool(down and up and same and inside(down[2], down[3]) and inside(up[2], up[3]))
++    where = ''
++    if down and aim:
++        where = f' aim={aim} off={abs(down[2] - aim[0])},{abs(down[3] - aim[1])} (recorded, not judged)'
++    detail = (f'window={size} events after the tap={len(ev)} kinds={[e[1] for e in ev][:8]} '
++              + (f'down seq={down[0]} at {down[2]},{down[3]}' if down else 'no down')
++              + (f' -> up seq={up[0]} at {up[2]},{up[3]}' if up else ' -> no up')
++              + ('' if not (down and up) else (' same position' if same else ' MOVED')) + where)
++    return ok, detail
++
++
++def targets_ui(name):
++    """r7: the targets screen as uiautomator shows it (ids, text, enabled, bounds), kept as <OUT>/<name>.txt -- the
++    selectors' evidence from the real 0.2.32 UI."""
++    nodes = ka.dump()
++    lines = [f"{n['id'] or '-':<28} en={int(n['enabled'])} {n['bounds']} {n['text'][:60]!r}" for n in nodes
++             if n['id'] or n['text']]
++    open(os.path.join(OUT, name + '.txt'), 'w', encoding='utf-8').write('\n'.join(lines) + '\n')
++    step(f'  ui {name}.txt: ' + ' | '.join(l for l in lines if l.startswith(('list', 'targetCardTitle')))[:300])
++    return nodes
++
++
++def pick_pinned(tag):
++    """r7: the targets screen: the Windows tab, the pinned window's card -> select_ready (0.2.32's own 'the first
++    picture shown'), judged by judge_pick."""
+     n0 = cursor()
+-    if not ka.wait('listDevicesButton', 30):
+-        verdict(f'{tag}: the targets screen is shown', False)
++    hl0 = len(host_log())
++    tab = ka.wait('listWindowsButton', 30)
++    if not tab:
++        verdict(f'{tag}: the targets screen is shown (listWindowsButton visible)', False)
+         return None
+-    tap('listDevicesButton')
+-    if not ka.wait('targetCardTitle', 30):
+-        verdict(f'{tag}: a desktop card is listed', False)
++    tab_note = f"windowsTab shown={tab['bounds']} enabled={int(tab['enabled'])}"
++    if not tab['enabled']:
++        verdict(f'{tag}: the Windows tab (listWindowsButton) is visible and enabled', False, tab_note)
+         return None
+-    tap('targetCardTitle')
++    pinned, title, why = None, None, ''
++    end = time.time() + 15
++    while time.time() < end:
++        pinned, title, why = pinned_target(host_log())
++        if pinned:
++            break
++        time.sleep(0.5)
++    step(f'  {tag.split()[0]}: pinned window from the host log: {why}')
++    if not pinned:
++        verdict(f'{tag}: the host names one pinned window', False, why)
++        return None
++    tap('listWindowsButton')
++    cards = []
++    end = time.time() + 30
++    while time.time() < end:
++        nodes = ka.dump()
++        cards = [n for n in nodes if n['id'] == 'targetCardTitle' and n['bounds'][2] > n['bounds'][0]]
++        if any(card_shows(n['text'], title) for n in cards):
++            break
++        time.sleep(0.5)
++    nodes = targets_ui(tag.split()[0] + '_targets_ui')
++    cards = [n for n in nodes if n['id'] == 'targetCardTitle' and n['bounds'][2] > n['bounds'][0]]
++    mine = [n for n in cards if card_shows(n['text'], title)]
++    if len(mine) != 1 or not mine[0]['enabled']:
++        verdict(f'{tag}: the pinned window\'s card is listed on the Windows tab (exactly one, enabled)', False,
++                f'cards={[n["text"] for n in cards]} pinned title={title!r}')
++        return None
++    x1, y1, x2, y2 = mine[0]['bounds']
++    ka.adb('shell', 'input', 'tap', str((x1 + x2) // 2), str((y1 + y2) // 2))
++    step(f'tapped the pinned card at {(x1 + x2) // 2},{(y1 + y2) // 2} text={mine[0]["text"]!r}')
+     t0 = time.time()
+-    m = wait_log(r'\[select_ready\][^\n]* ms=(-?\d+)', n0, 30)
+-    if not m:
+-        verdict(f'{tag}: the desktop picked -> first frame within 30 s', False,
+-                ' | '.join(re.findall(r'\[(?:select_[a-z_]+)\][^\n]*', since(n0)))[:300])
++    wait_log(r'\[select_(?:ready|failed)\][^\n]*', n0, 30)
++    if '[select_ready]' in since(n0):
++        wait_log(r'\[select_ready\][\s\S]*\[video_debug\]', n0, 8)
++    time.sleep(1.0)
++    ok, detail = judge_pick(since(n0), host_log()[hl0:], pinned)
++    if not ok:
++        verdict(f'{tag}: the pinned window picked (id {pinned}, Windows tab) -> first frame', False, detail[:400])
+         return None
+-    time.sleep(1.5)
+-    digest = shot(tag.split()[0] + '_first_frame')
++    time.sleep(0.5)
++    digest = shot(tag.split()[0] + '_window_first_frame')
+     vd = re.findall(r'\[video_debug\][^\n]* out=(\d+)', since(n0))
+-    verdict(f'{tag}: the desktop picked -> first frame', True,
+-            f'{m.group(1)} ms (wall {time.time() - t0:.1f} s) screenshot={digest[:16]} video_debug out={vd[-1] if vd else "?"}')
++    verdict(f'{tag}: the pinned window picked (id {pinned}, Windows tab) -> first frame', True,
++            f'{tab_note} {detail[:300]} (wall {time.time() - t0:.1f} s) screenshot={digest[:16]} video_debug out={vd[-1] if vd else "?"}')
+     return digest
+ 
+ 
++def input_check():
++    """r7 (4): one tap on the window's picture; judged by judge_input on the host's lines after it."""
++    hl = host_log()
++    h0 = len(hl)
++    ka.adb('shell', 'input', 'tap', '1200', '540')
++    step('  one tap on the window picture at 1200,540')
++    time.sleep(3)
++    size = window_size(hl)
++    ok, detail = judge_input(host_log()[h0:], size, (size[0] // 2, size[1] // 2) if size else None)
++    verdict('4 the tap on the window reaches the host as its own button down -> up, one position, inside the window '
++            '([input-trace] after the tap; not injected: input none)', ok, detail[:340])
++    return ok
++
++
+ class Invalid(Exception):
+     """A precondition of the arm did not hold: nothing is judged (exit 2)."""
+ 
+@@ -394,17 +556,11 @@ def main():
+                 return 1
+ 
+         # 3
+-        if not pick_desktop('3 the desktop picked'):
++        if not pick_pinned('3 the pinned window picked'):
+             return 1
+ 
+-        # 4: one tap on the picture -> the host's log says it arrived (injection none: logged, not injected)
+-        n_in = len(re.findall(r'\[input-trace\][^\n]*', host_log()))
+-        ka.adb('shell', 'input', 'tap', '1200', '540')
+-        step('  one tap on the picture at 1200,540')
+-        time.sleep(3)
+-        traces = re.findall(r'\[input-trace\][^\n]*', host_log())[n_in:]
+-        verdict('4 one input reaches the host (its [input-trace]; not injected: input none)', len(traces) > 0,
+-                f'new={len(traces)} ' + ' | '.join(traces[:3])[:240])
++        # 4: one tap on the window's picture -> its own down/up on the host (injection none: logged, not injected)
++        input_check()
+ 
+         # 5 + 6
+         if ARM == 'S':
+@@ -424,7 +580,7 @@ def main():
+             m = wait_log(r'\[park_reuse\][^\n]*', n0, 30)
+             verdict('6a the parked PC again: 0.2.32 reuses the parked session (park_reuse)', m is not None,
+                     m.group(0)[:200] if m else ' | '.join(re.findall(r'\[(?:park_[a-z_]+|directory_[a-z_]+)\][^\n]*', since(n0)))[:240])
+-            pick_desktop('6b the desktop again after the park')
++            pick_pinned('6b the pinned window again after the park')
+         else:
+             # r2 (Codex: map 1-7 to what the arm's UI really has; no hidden handler, no fake capability)
+             skip_case('5 PC 목록 (park)', 'the manual UI offers no PC 목록: SessionPark.canPark is false in manual mode '
+@@ -434,7 +590,7 @@ def main():
+             if p_disconnect():
+                 shot('5d_connect_form')
+                 if p_reconnect(control_port):
+-                    pick_desktop('6r (P) the desktop again')
++                    pick_pinned('6r (P) the pinned window again')
+ 
+         # 7
+         if standby:
+diff --git a/automation/old_apk_lane/oa_pick_test.py b/automation/old_apk_lane/oa_pick_test.py
+new file mode 100644
+index 0000000..37df753
+--- /dev/null
++++ b/automation/old_apk_lane/oa_pick_test.py
+@@ -0,0 +1,150 @@
++"""old-APK lane r7 (verify-0164 S/P runs: 3 tapped the Desktop card, id 0, which the PinnedSelectTest host refuses by
++design; Codex codex_old_apk_lane_pinned_scope_r7.md): oa_avd.py's pick_pinned / judge_pick and input_check /
++judge_input against a FAKE adb that plays 0.2.32's targets screen and the two logs (stubs/fake_ui_adb.cmd: no device,
++no adb server, no emulator). The pinned window's card and the tap's own down->up PASS; every wrong one FAILs:
++  3  the r6 path itself (the Desktop card, id 0 -> refused), judged by judge_pick; a Windows card sent as id 0
++     (wrongid); id 0 applied with a frame after it (zeroready); the app's ack naming another streamGen (genmismatch);
++     no picture after select_ready (novideo); no pinned card listed (nopinned: no card tap); the host listing id 0, or
++     its capture target and window-list disagreeing (NO tap at all)
++  4  no events, an up alone, a down/up outside the window, a pair logged before the tap, moves only, a down without
++     an up, a down and an up at two positions (the tap is the offset: only the host's lines after it count)
++  the Windows tab: its node must be visible AND enabled (recorded on the 3 line)
++Each case runs in its own new folder under <worktree>/.claude/oa_runs (nothing outside it is written).
++  python -I oa_pick_test.py"""
++import importlib.util
++import json
++import os
++import sys
++import time
++
++E = os.path.dirname(os.path.abspath(__file__))
++WT = os.path.normpath(os.path.join(E, '..', '..'))
++RUNS = os.path.join(WT, '.claude', 'oa_runs')
++PINNED = 80809746
++CAPTURE = ('10-30 00:00:00.000 [native-video-host] capture-window target hwnd=0x4d10f12 pid=43948 '
++           'process=remote60_mobile_abr_session_e2e_test.exe title=remote60 mobile abr target pid 43948 92abc8fe '
++           'clientOnly=0\n'
++           '10-30 00:00:00.000 [native-video-host][keyframe] seq=1 bytes=1350 reasons=initial size=480x270 bitrate=1500000\n')
++checks = fails = 0
++
++
++def check(what, ok, detail=''):
++    global checks, fails
++    checks += 1
++    fails += 0 if ok else 1
++    print(f'{"PASS" if ok else "FAIL"}  {what}' + (f'  {detail}' if detail else ''), flush=True)
++
++
++def case(tag, variant, listed_id=PINNED, input_mode='pair'):
++    """A fresh run folder, the fake's state, and oa_avd loaded anew against it. -> (module, paths)"""
++    run_id = f'{tag}-{time.strftime("%Y%m%d%H%M%S")}-{os.getpid()}'
++    root = os.path.join(RUNS, run_id)
++    os.makedirs(os.path.join(root, 'a'))  # new: refused if it exists
++    with open(os.path.join(root, 'fixture_account.txt'), 'w', encoding='ascii') as f:
++        f.write('oatest notarealpassword\n')
++    host_log = os.path.join(root, 'a', 'host.log')
++    with open(host_log, 'w', encoding='utf-8') as f:
++        f.write(CAPTURE + f'10-30 00:00:00.000 [native-video-host][control] window-list seq=1 count=1 selectedId={listed_id}\n')
++    with open(os.path.join(root, 'a', 'directoryhost_ready.txt'), 'w', encoding='ascii') as f:
++        f.write(f'ready run={run_id}-a harness_pid=1 host_pid=2 host_log={host_log}\n')
++    applog = os.path.join(root, 'app.log')
++    with open(applog, 'w', encoding='utf-8') as f:
++        f.write('2026-10-30 00:00:00.000 [targets_ready] origin=connect ms=1 items=1\n')
++    st = os.path.join(root, 'ui_state.json')
++    json.dump({'tab': 'desktop'}, open(st, 'w', encoding='utf-8'))
++    calls = os.path.join(root, 'adb_calls.txt')
++    open(calls, 'w').close()
++    os.environ.update({'OA_FAKE_ADB_LOG': calls, 'OA_FAKE_UI_STATE': st, 'OA_FAKE_APPLOG': applog,
++                       'OA_FAKE_HOSTLOG': host_log, 'OA_FAKE_UI_VARIANT': variant, 'OA_FAKE_INPUT': input_mode})
++    sys.argv = ['oa_avd.py', root, 'S', os.path.join(root, 'none.apk'), os.path.join(root, 'avd')]
++    spec = importlib.util.spec_from_file_location(f'oa_avd_{tag.replace("-", "_")}', os.path.join(E, 'oa_avd.py'))
++    m = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(m)
++    return m, {'calls': calls, 'host': host_log, 'app': applog, 'out': os.path.join(root, 'avd')}
++
++
++def taps(paths):
++    return [l.split()[3:5] for l in open(paths['calls'], encoding='utf-8') if l.startswith('shell input tap')]
++
++
++def card_taps(paths):
++    """The `input tap`s that landed on the card (the fake's card spans x 100-470, y 1000-1100)."""
++    return [t for t in taps(paths) if 100 <= int(t[0]) <= 470 and 1000 <= int(t[1]) <= 1100]
++
++
++def last(m):
++    return m.results[-1] if m.results else ('', None, '')
++
++
++def main():
++    os.makedirs(RUNS, exist_ok=True)
++    print('oa_pick_test (old-APK lane r7): pick_pinned / judge_pick / input_check against a fake 0.2.32')
++    os.environ.pop('KE_ADB_SHA256', None)
++    os.environ.update({'OA_TEST_FAKE_ADB': os.path.join(E, 'stubs', 'fake_ui_adb.cmd'), 'KA_SERIAL': 'emulator-5554'})
++
++    # the control: the pinned card -> 3 PASS, then the tap's own down->up -> 4 PASS (the gates are not dead ends)
++    m, p = case('pick-ok', 'ok')
++    digest = m.pick_pinned('3 the pinned window picked')
++    r = last(m)
++    check('control 3: the Windows tab, the pinned card -> PASS (id, gen, streamGen, ready, picture after it)',
++          digest is not None and r[1] is True and len(card_taps(p)) == 1, r[2][:240])
++    check('the screenshot is named for the window', os.path.exists(os.path.join(p['out'], '3_window_first_frame.png')))
++    ui = os.path.join(p['out'], '3_targets_ui.txt')
++    check('the targets screen is kept as a UI dump (ids, text, bounds) for the record',
++          os.path.exists(ui) and 'listWindowsButton' in open(ui, encoding='utf-8').read(), ui)
++    ok4 = m.input_check()
++    check('control 4: the tap -> its own button down -> up inside the window -> PASS', ok4 and last(m)[1] is True,
++          last(m)[2][:200])
++
++    # NEGATIVE 3: the r6 path -- the Desktop tab, its first card (id 0); the same judge FAILs it
++    m, p = case('pick-r6', 'ok')
++    h0, n0 = len(open(p['host'], encoding='utf-8').read()), m.cursor()
++    m.tap('listDevicesButton')
++    m.tap('targetCardTitle')
++    ok, detail = m.judge_pick(m.since(n0), open(p['host'], encoding='utf-8').read()[h0:], PINNED)
++    check('NEGATIVE r6 path: the Desktop card (id 0) tapped -> judge_pick FAILs it', not ok and 'targetId=0' in detail
++          and 'DESKTOP' in detail, detail[:220])
++
++    for variant, what in (('wrongid', 'a Windows card whose request goes out as id 0 (the host refuses)'),
++                          ('zeroready', 'a request for id 0 that the host applies, with a frame after it'),
++                          ('genmismatch', "the app's select_ack names another streamGen than the host applied"),
++                          ('novideo', 'no picture (video_debug out > 0) after select_ready')):
++        m, p = case(f'pick-{variant}', variant)
++        digest = m.pick_pinned('3 the pinned window picked')
++        r = last(m)
++        check(f'NEGATIVE {variant}: {what} -> FAIL', digest is None and r[1] is False, r[2][:220])
++
++    m, p = case('pick-nopinned', 'nopinned')
++    digest = m.pick_pinned('3 the pinned window picked')
++    r = last(m)
++    check('NEGATIVE nopinned: no pinned card on the Windows tab -> FAIL, no card tapped',
++          digest is None and r[1] is False and not card_taps(p), f'card taps={card_taps(p)} {r[2][:160]}')
++
++    for tag, listed, what in (('pick-disagree', PINNED + 1, 'capture hwnd != window-list selectedId'),
++                              ('pick-listzero', 0, 'the host lists id 0')):
++        m, p = case(tag, 'ok', listed_id=listed)
++        digest = m.pick_pinned('3 the pinned window picked')
++        r = last(m)
++        check(f'NEGATIVE {tag[5:]}: {what} -> FAIL with NO tap at all', digest is None and r[1] is False and not taps(p),
++              f'taps={len(taps(p))} {r[2][:160]}')
++
++    for mode, what in (('none', 'no events'), ('uponly', 'an up without its down'),
++                       ('outside', 'a down/up outside the window'),
++                       ('pretap', 'a down/up logged BEFORE the tap (at the pick), nothing after it'),
++                       ('moveonly', 'moves only'), ('downonly', 'a down without an up'),
++                       ('moved', 'a down and an up at two positions')):
++        m, p = case(f'input-{mode}', 'ok', input_mode=mode)
++        m.pick_pinned('3 the pinned window picked')
++        ok4 = m.input_check()
++        r = last(m)
++        # pretap is a contrast only if the host log really holds a down/up from before the tap
++        before = mode != 'pretap' or ('[input-trace] seq=1 kind=2' in open(p['host'], encoding='utf-8').read())
++        check(f'NEGATIVE 4 {mode}: {what} -> FAIL', not ok4 and r[1] is False and r[0].startswith('4 ') and before,
++              r[2][:200] + ('' if mode != 'pretap' else f' | pair logged before the tap: {before}'))
++
++    print(f'\n{checks} checks, {fails} failed\nRESULT: {"PASS" if fails == 0 else "FAIL"}')
++    return 0 if fails == 0 else 1
++
++
++if __name__ == '__main__':
++    sys.exit(main())
+diff --git a/automation/old_apk_lane/stubs/fake_ui_adb.cmd b/automation/old_apk_lane/stubs/fake_ui_adb.cmd
+new file mode 100644
+index 0000000..5da85bf
+--- /dev/null
++++ b/automation/old_apk_lane/stubs/fake_ui_adb.cmd
+@@ -0,0 +1 @@
++@python -I "%~dp0fake_ui_adb.py" %*
+diff --git a/automation/old_apk_lane/stubs/fake_ui_adb.py b/automation/old_apk_lane/stubs/fake_ui_adb.py
+new file mode 100644
+index 0000000..e6f97cd
+--- /dev/null
++++ b/automation/old_apk_lane/stubs/fake_ui_adb.py
+@@ -0,0 +1,128 @@
++"""old-APK lane r7: a FAKE adb for oa_pick_test.py only (no device, no adb server). It plays 0.2.32's targets screen
++(b554e76 activity_main.xml listWindowsButton / listDevicesButton, target_card.xml targetCardTitle; the Windows tab lists
++the host's windows by title, the Desktop tab ONE card "Desktop" = id 0, MainActivity.kt:4513-4545) and what the app and
++the PinnedSelectTest host log when a card / the picture is tapped. Every call is appended to OA_FAKE_ADB_LOG.
++  OA_FAKE_UI_STATE    a JSON file: {"tab": "desktop" | "windows"}
++  OA_FAKE_APPLOG      the app's diagnostics log (what `pull` of it returns)
++  OA_FAKE_HOSTLOG     the host's log (appended to)
++  OA_FAKE_UI_VARIANT  ok          the Windows card is the pinned window: request id=pinned gen 1 tab=WINDOWS, applied=1
++                                  streamGen 2, select_ack gen 1 streamGen 2, select_ready gen 1, then video out > 0
++                      wrongid     the Windows card's request goes out as id 0 tab=DESKTOP: the host refuses (the seam)
++                      zeroready   a request for id 0 that the host applies AND a frame follows (select_ready id 0)
++                      nopinned    the Windows tab lists only another window ("Notepad")
++                      genmismatch as ok, but the app's select_ack names streamGen 7 (not the host's 2)
++                      novideo     as ok, but no video_debug after select_ready
++  OA_FAKE_INPUT       what the host logs for a tap on the picture (1200,540):
++                      pair (move, down, up inside 480x270) | none | uponly (an up alone) | outside (down/up at 900,700)
++                      | moveonly | downonly (no up) | moved (up elsewhere) | pretap (a pair logged at the pick, none after)
++"""
++import json
++import os
++import shutil
++import sys
++
++PINNED = int(os.environ.get('OA_FAKE_PINNED', '80809746'))
++TITLE = 'remote60 mobile abr target pid 43948 92abc8fe'
++PKG = 'com.remote60.androiddirect'
++TABS = {'listWindowsButton': (0, 380, 400, 430, 'Windows'), 'listDevicesButton': (420, 380, 660, 430, 'Desktop')}
++CARD = (100, 1000, 470, 1100)
++
++args = sys.argv[1:]
++if args[:1] == ['-s']:
++    args = args[2:]
++with open(os.environ['OA_FAKE_ADB_LOG'], 'a', encoding='utf-8') as f:
++    f.write(' '.join(args) + '\n')
++variant = os.environ.get('OA_FAKE_UI_VARIANT', 'ok')
++state_path = os.environ['OA_FAKE_UI_STATE']
++state = json.load(open(state_path, encoding='utf-8'))
++
++
++def app(line):
++    with open(os.environ['OA_FAKE_APPLOG'], 'a', encoding='utf-8') as f:
++        f.write('2026-10-30 00:00:00.000 ' + line + '\n')
++
++
++def host(line, tag='[control] '):
++    with open(os.environ['OA_FAKE_HOSTLOG'], 'a', encoding='utf-8') as f:
++        f.write('10-30 00:00:00.000 [native-video-host]' + tag + line + '\n')
++
++
++def card_text():
++    if state['tab'] == 'desktop':
++        return 'Desktop'
++    return 'Notepad' if variant == 'nopinned' else 'remote60 mobile abr…'
++
++
++def nodes():
++    out = [(k, v[:4], v[4]) for k, v in TABS.items()]
++    if state.get('scene') != 'viewer':
++        out.append(('targetCardTitle', CARD, card_text()))
++    return out
++
++
++def node_xml(rid, b, text):
++    return (f'<node resource-id="{PKG}:id/{rid}" text="{text}" content-desc="" enabled="true" clickable="true" '
++            f'bounds="[{b[0]},{b[1]}][{b[2]},{b[3]}]" />')
++
++
++def picture_tap():
++    mode = os.environ.get('OA_FAKE_INPUT', 'pair')
++    seq = state.get('inseq', 0)
++    events = {'pair': [(1, 240, 135), (2, 240, 135), (3, 240, 135)], 'none': [], 'uponly': [(3, 240, 135)],
++              'outside': [(2, 900, 700), (3, 900, 700)], 'moveonly': [(1, 240, 135), (1, 241, 136)],
++              'downonly': [(1, 240, 135), (2, 240, 135)], 'moved': [(2, 240, 135), (3, 300, 200)],
++              'pretap': []}[mode]
++    for kind, x, y in events:
++        seq += 1
++        host(f'seq={seq} kind={kind} x={x} y={y} buttons={1 if kind == 2 else 0}', tag='[input-trace] ')
++    state['inseq'] = seq
++
++
++cmd = ' '.join(args)
++if args[:1] == ['version']:
++    print('Android Debug Bridge version 1.0.41 (fake, oa_pick_test)')
++elif cmd.startswith('exec-out uiautomator'):
++    sys.stdout.buffer.write(('<?xml version="1.0" encoding="UTF-8"?><hierarchy rotation="0">' +
++                             ''.join(node_xml(*n) for n in nodes()) + '</hierarchy>').encode('utf-8'))
++elif cmd.startswith('shell input tap'):
++    x, y = int(args[3]), int(args[4])
++    hit = [n for n in nodes() if n[1][0] <= x <= n[1][2] and n[1][1] <= y <= n[1][3]]
++    rid = hit[0][0] if hit else ''
++    if rid == 'listWindowsButton':
++        state['tab'] = 'windows'
++        app('[tab_switch] tab=windows')
++        host(f'window-list seq=2 count=1 selectedId={PINNED}')
++    elif rid == 'listDevicesButton':
++        state['tab'] = 'desktop'
++        app('[tab_switch] tab=desktop')
++    elif rid == 'targetCardTitle':
++        if state['tab'] == 'windows' and variant in ('ok', 'genmismatch', 'novideo'):
++            tid, label, tab = PINNED, TITLE, 'WINDOWS'
++        elif state['tab'] == 'windows' and variant == 'nopinned':
++            tid, label, tab = 4242, 'Notepad', 'WINDOWS'
++        else:
++            tid, label, tab = 0, 'Desktop', 'DESKTOP'
++        app(f'[select_request] targetId={tid} label={label} tab={tab} gen=1 origin=tap expected=0x0')
++        host(f'window-select seq=1 requestedId={tid} pending')
++        if tid == PINNED or variant == 'zeroready':
++            host(f'window-select seq=1 requestedId={tid} applied=1 selectedId={tid} streamGen=2 reason=ok title={TITLE}')
++            app(f'[select_ack] targetId={tid} gen=1 streamGen={7 if variant == "genmismatch" else 2} hostSendQpcUs=1 title={TITLE}')
++            app(f'[select_ready] targetId={tid} gen=1 lastOutUs=1 title={TITLE} ms=900')
++            if variant != 'novideo':
++                app('[video_debug] surface=on codec=on in=3 out=3')
++            state['scene'] = 'viewer'
++            if os.environ.get('OA_FAKE_INPUT') == 'pretap':  # a down/up BEFORE the picture tap: not its events
++                for kind in (2, 3):
++                    state['inseq'] = state.get('inseq', 0) + 1
++                    host(f"seq={state['inseq']} kind={kind} x=240 y=135 buttons=0", tag='[input-trace] ')
++        else:
++            host(f'window-select seq=1 requestedId={tid} applied=0 reason=pinned_test_seam_refused')
++            app(f'[select_failed] targetId={tid} gen=1 seq=1 status=window_select_failed: pinned_test_only')
++    elif state.get('scene') == 'viewer' and (x, y) == (1200, 540):
++        picture_tap()
++    json.dump(state, open(state_path, 'w', encoding='utf-8'))
++elif args[:1] == ['pull']:
++    shutil.copyfile(os.environ['OA_FAKE_APPLOG'], args[2])
++elif cmd.startswith('exec-out screencap'):
++    sys.stdout.buffer.write(b'\x89PNG fake')
++sys.exit(0)

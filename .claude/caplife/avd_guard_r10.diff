@@ -1,0 +1,240 @@
+--- avd_guard_r9_snapshot/ke_avd.py	2026-10-29 23:43:12.630619800 +0900
++++ avd_guard_r10_snapshot/ke_avd.py	2026-10-30 00:26:47.544706900 +0900
+@@ -46,7 +46,15 @@
+ # 2026-10-28 (test-injection-finding): the older host (a build from before standby -- and before the power policy)
+ # cannot pass the shared injection / power guard: the old-host cases are NOT RUN, and the fixture starts no old host.
+ OLD_HOST = False
+-H = {k: f'ke-pc-{k}' for k in (('a', 'b', 'c', 'old') if OLD_HOST else ('a', 'b', 'c'))}
++# AVD r10: the plan decides which PCs exist (the fixture starts only those): an E2-only plan has ke-pc-a alone.
++PLAN = os.environ.get('KE_PLAN', 'full')
++E2_ONLY = PLAN in ('e2-sh', 'e2-shoff')
++H = {k: f'ke-pc-{k}' for k in (('a',) if E2_ONLY else ('a', 'b', 'c', 'old') if OLD_HOST else ('a', 'b', 'c'))}
++# AVD r10 (Codex inbox decision r1 (4)): the watch after the first frame (A/B: 120 s), sampled every SAMPLE_SEC
++WATCH_SEC = int(os.environ.get('KE_WATCH_SEC', '60'))
++if not 10 <= WATCH_SEC <= 600:
++    raise RuntimeError(f'KE_WATCH_SEC out of range: {WATCH_SEC}')
++SAMPLE_SEC = 10
+ TARGET = 'tcard:remote60 mobile abr'
+ PKG = ka_avd.PKG
+ STEPS = open(os.path.join(OUT, 'steps.txt'), 'a', encoding='utf-8')
+@@ -352,6 +360,55 @@
+         step(f'  the app is not in front after am start (attempt {attempt + 1}): started again')
+ 
+ 
++def segment(name, edge):
++    """AVD r10: a segment boundary (startup / watch / list) on the run's clock AND as epoch ms, so the Host log, the
++    relay trace and the app log (each its own clock) can be cut at the same instants."""
++    step(f'SEGMENT {name} {edge} epoch_ms={int(time.time() * 1000)}')
++
++
++_qemu_pid = None
++
++
++def sample(tag):
++    """AVD r10: one sample, the same in every arm -- the app's memory (dumpsys meminfo TOTAL PSS), the emulator's
++    load, the app's CPU (top), and on this PC the emulator process's total CPU time. Recorded only."""
++    global _qemu_pid
++    pss = re.search(r'TOTAL PSS:\s+(\d+)|TOTAL\s+(\d+)', adb('shell', 'dumpsys', 'meminfo', PKG))
++    pss_kb = (pss.group(1) or pss.group(2)) if pss else '?'
++    load = adb('shell', 'cat', '/proc/loadavg').strip()
++    pid = adb('shell', 'pidof', PKG).strip()
++    cpu = '?'
++    if pid:
++        top = adb('shell', 'top', '-b', '-n', '1', '-p', pid.split()[0])
++        m = re.search(r'^\s*' + re.escape(pid.split()[0]) + r'\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+\S+\s+([\d.]+)', top, re.M)
++        cpu = m.group(1) if m else '?'
++    qms = '?'
++    try:
++        if _qemu_pid is None:
++            r = subprocess.run(['powershell', '-NoProfile', '-Command',
++                                "(Get-Process -Name 'qemu-system-x86_64-headless' -ErrorAction Stop | Select-Object -First 1).Id"],
++                               capture_output=True, timeout=20)
++            _qemu_pid = r.stdout.decode(errors='replace').strip() or ''
++        if _qemu_pid:
++            r = subprocess.run(['powershell', '-NoProfile', '-Command',
++                                f'[int64](Get-Process -Id {_qemu_pid} -ErrorAction Stop).TotalProcessorTime.TotalMilliseconds'],
++                               capture_output=True, timeout=20)
++            qms = r.stdout.decode(errors='replace').strip() or '?'
++    except Exception as e:  # noqa: BLE001 -- a sample that cannot be had is recorded as such
++        qms = f'error:{type(e).__name__}'
++    step(f'SAMPLE {tag} epoch_ms={int(time.time() * 1000)} app_pss_kb={pss_kb} app_cpu_pct={cpu} '
++         f'emu_loadavg="{load}" qemu_cpu_ms={qms} app_pid={pid or "-"}')
++
++
++def env_once():
++    """AVD r10: the emulator's fixed shape, once per run (CPUs, memory, screen, GL driver) -- recorded only."""
++    nproc = adb('shell', 'nproc').strip()
++    mem = adb('shell', 'cat', '/proc/meminfo').splitlines()[:1]
++    size = adb('shell', 'wm', 'size').strip().replace('\n', ' ')
++    gles = re.findall(r'GLES:[^\n]*', adb('shell', 'dumpsys', 'SurfaceFlinger'))[:1]
++    step(f'  env[once]: nproc={nproc} {mem[0].strip() if mem else "?"} {size} {gles[0][:140] if gles else "GLES:?"}')
++
++
+ def env_note(tag):
+     """decoder-liveness r1 (2): the emulator's state at this point, recorded only -- uptime, load, this boot's id."""
+     up = adb('shell', 'cat', '/proc/uptime').split()
+@@ -416,24 +473,34 @@
+         verdict('E2-SH the effective sharpening path is known from the app log (requested / effective / fallback)',
+                 bool(paths) and bool(requested), f'effective={effective} | ' + ' | '.join(paths)[:260])
+     env_note('after E2 select')
+-    # AVD r8 (Codex design r3 D2): the session watched, untouched, for 60 s after its first frame -- the FIRST end, if
+-    # any, recorded as it is (so a later menu step cannot look like the first failure).
++    segment('startup', 'end')
++    # AVD r8 (Codex design r3 D2): the session watched, untouched, for WATCH_SEC (r10; was 60 s) after its first frame
++    # -- the FIRST end, if any, recorded as it is (so a later menu step cannot look like the first failure). r10: a
++    # sample every SAMPLE_SEC; an early end is recorded with the length actually watched (never scaled up).
+     if first_ms is not None:
+         n_watch = cursor()
+         t_watch = time.time()
++        segment('watch', 'begin')
+         first_end = None
+-        while time.time() - t_watch < 60:
+-            time.sleep(5)
++        next_sample = t_watch
++        while time.time() - t_watch < WATCH_SEC:
++            if time.time() >= next_sample:
++                sample(f'watch+{time.time() - t_watch:.0f}s')
++                next_sample += SAMPLE_SEC
++            time.sleep(1)
+             seen = re.findall(r'[^\n]*\[(?:keep_end|scene)\][^\n]*', since(n_watch))
+             ends = [l for l in seen if '[keep_end]' in l or '[scene] HOSTS' in l]
+             if ends and first_end is None:
+                 first_end = ends[0]
+                 step(f'  FIRST END at +{time.time() - t_watch:.1f}s of the watch: {first_end[:200]}')
++        sample('watch-end')
++        segment('watch', 'end')
+         watched = since(n_watch)
+         traces = len(re.findall(r'\[liveness_trace\]', watched))
+-        verdict(f'{tag} the session stayed up 60 s after its first frame (no keep_end, still the viewer)',
++        verdict(f'{tag} the session stayed up {WATCH_SEC} s after its first frame (no keep_end, still the viewer)',
+                 first_end is None, f'liveness_trace lines={traces}' + (f' first end: {first_end[:160]}' if first_end else ''))
+-        env_note('after the 60 s watch')
++        env_note(f'after the {WATCH_SEC} s watch')
++    segment('list', 'begin')
+     n0, ok = to_list('E2')
+     st = wait_card(H['a'], '대기 중', 40)
+     log = since(n0)
+@@ -444,6 +511,7 @@
+             ' | '.join(re.findall(r'\[standby_capability\][^\n]*', log))[:200])
+     verdict('E2 A shows 대기 중 (a confirmed entry on a live lease)', st is not None and st[0] == '대기 중', str(st))
+     env_note('end')
++    segment('list', 'end')
+     for case in ('E3', 'E4', 'E5', 'E6', 'E7', 'E7b', 'E7c', 'E7e', 'E7f', 'E7g', 'E7h', 'E8', 'E9', 'E10', 'E11', 'E12',
+                  'E13', 'E13b'):
+         skip_case(case, f'plan {"e2-shoff" if sh_off else "e2-sh"}: E1 and E2 only (decoder-liveness r1 (2) / r5)')
+@@ -472,18 +540,21 @@
+             if not logcat_stopping.is_set():
+                 step(f'  LOGCAT ENDED rc={rc} -- no logcat from here (a gap, not an absence of events)')
+         threading.Thread(target=_logcat_watch, args=(logcat,), daemon=True).start()
++        env_once()
++        sample('idle-before-start')  # AVD r10: the load before the product runs (the A/B arms alike)
++        segment('startup', 'begin')
+         start_app(APK_OFF, clear=True)
+ 
+         # E1
+         n0 = cursor()
+-        verdict('E1 signed in; four PCs listed', login())
++        verdict(f'E1 signed in; the plan\'s PCs listed ({", ".join(H.values())})', login())
+         time.sleep(4)
+         log = since(n0)
+         verdict('E1 OFF: the app prepares nothing on its own', '[standby_start]' not in log and '[preconnect_off]' in log,
+                 ' | '.join(re.findall(r'\[preconnect_off\][^\n]*', log)))
+ 
+-        plan = os.environ.get('KE_PLAN', 'full')
+-        step(f'plan: {plan}')
++        plan = PLAN
++        step(f'plan: {plan} hosts={",".join(H)} watch={WATCH_SEC}s')
+         # AVD r9 (Codex src r5): e2-sh -- the default sharpening -- next to e2-shoff; each stops after E2's watch.
+         # `full` is never used for these runs (it goes on to E3 and beyond).
+         if plan in ('e2-shoff', 'e2-sh'):
+--- avd_guard_r9_snapshot/ke_fixture.ps1	2026-10-29 21:31:38.186038000 +0900
++++ avd_guard_r10_snapshot/ke_fixture.ps1	2026-10-30 00:26:47.544182900 +0900
+@@ -7,7 +7,9 @@
+   # what starts a host's harness and the directory -- the product files by default; the orchestration test
+   # (ke_orchestration_test.ps1) passes stand-ins here (no host, no node, no AVD)
+   [string[]]$HarnessCmd = @(),
+-  [string[]]$NodeCmd = @()
++  [string[]]$NodeCmd = @(),
++  # AVD r10: the hosts this plan uses (ke_slot.ps1 passes them; an E2-only plan: a)
++  [string]$Hosts = 'a,b,c'
+ )
+ # keepalive-r2 ② e (kept model A) AVD fixture: a REAL server.js on loopback (its relay on, the test account only) and
+ # three pinned TEST hosts (ke-pc-a ff00ff, ke-pc-b 00ffff, ke-pc-c ffff00), each through mobile_abr_session_e2e_test
+@@ -160,10 +162,13 @@
+     $HarnessCmd = @("$b\remote60_mobile_abr_session_e2e_test.exe")
+     Say "  harness $((Get-FileHash $HarnessCmd[0]).Hash.ToLower()) test host $((Get-FileHash "$b\GNLinkStreamPinnedSelectTest.exe").Hash.ToLower())"
+   }
+-  $hostsDef = @(
++  if ($Hosts -notmatch '^[abc](,[abc])*$') { throw "-Hosts must be a list of a / b / c ($Hosts)" }
++  $wanted = @($Hosts -split ',')
++  $hostsDef = @(@(
+     @{ n = 'a'; name = 'ke-pc-a'; mark = 'ff00ff' },
+     @{ n = 'b'; name = 'ke-pc-b'; mark = '00ffff' },
+-    @{ n = 'c'; name = 'ke-pc-c'; mark = 'ffff00' })
++    @{ n = 'c'; name = 'ke-pc-c'; mark = 'ffff00' }) | Where-Object { $wanted -contains $_.n })
++  Say "  hosts: $(($hostsDef | ForEach-Object { $_.name }) -join ', ') (asked: $Hosts)"
+   foreach ($h in $hostsDef) {
+     $dead = Dead-Child
+     if ($dead) { throw "before host $($h.n): $dead" }
+@@ -197,7 +202,7 @@
+   # ---- every host ready AND every child still alive: said whole, then wait for the bundle's stop
+   $dead = Dead-Child
+   if ($dead) { throw "before the fixture's readiness: $dead" }
+-  "ready run=$RunId hosts=a,b,c" | Out-File "$Root\fixture_ready.tmp" -Encoding ascii
++  "ready run=$RunId hosts=$Hosts" | Out-File "$Root\fixture_ready.tmp" -Encoding ascii
+   Move-Item -LiteralPath "$Root\fixture_ready.tmp" -Destination "$Root\fixture_ready.txt"
+   Say "  fixture ready"
+   if ($env:KE_FIXTURE_TEST_CRASH_AFTER_READY -eq '1') { Say "  TEST: the fixture crashes now (no cleanup of its own)"; [Environment]::Exit(9) }
+--- avd_guard_r9_snapshot/ke_orchestration_test.ps1	2026-10-29 17:43:34.362174500 +0900
++++ avd_guard_r10_snapshot/ke_orchestration_test.ps1	2026-10-30 00:29:58.111494400 +0900
+@@ -120,6 +120,22 @@
+ Check 'G2 one cleanup error: a killed after its error, b c node ended, rc 3, nothing left' ($r.rc -eq 3 -and $r.result -match 'a stop error' -and
+   $r.result -match '  b exit 0' -and $r.result -match '  c exit 0' -and $r.result -match '  node ended' -and $r.left -eq 0) "rc=$($r.rc) left=$($r.left)"
+ 
++"--- AVD r10: an E2-only plan (KE_PLAN=e2-shoff) starts host a ONLY; its readiness names a"
++$r = Run-Case 'orch-e2only' 'a=ok,b=ok,c=ok' @{ KE_PLAN = 'e2-shoff' }
++$readyText = if ($r.root -and (Test-Path "$($r.root)\fixture_ready.txt")) { (Get-Content "$($r.root)\fixture_ready.txt" -Raw).Trim() } else { '' }
++Check 'r10 e2-only: only a started (b / c never), readiness "hosts=a", the AVD ran, rc 0, nothing left' ($r.avd -and
++  ($r.started -join '') -eq 'a' -and $readyText -match ' hosts=a$' -and $r.rc -eq 0 -and $r.result -notmatch '  b ' -and
++  $r.left -eq 0) "rc=$($r.rc) started=$($r.started -join '') ready='$readyText'"
++
++"--- AVD r10: E2-only, host a fails at once: no AVD, nothing else started"
++$r = Run-Case 'orch-e2only-afail' 'a=exit2,b=ok,c=ok' @{ KE_PLAN = 'e2-shoff' }
++Check 'r10 e2-only a exit2: no AVD, only a was started, rc != 0, nothing left' (-not $r.avd -and ($r.started -join '') -eq 'a' -and
++  $r.rc -ne 0 -and $r.left -eq 0) "rc=$($r.rc) started=$($r.started -join '')"
++
++"--- AVD r10: plan full keeps three hosts"
++$r = Run-Case 'orch-full3' 'a=ok,b=ok,c=ok' @{ KE_PLAN = 'full' }
++Check 'r10 full: a, b and c started, the AVD ran, rc 0' ($r.avd -and ($r.started -join '') -eq 'abc' -and $r.rc -eq 0) "rc=$($r.rc) started=$($r.started -join '')"
++
+ "--- a run folder is never reused: the fixture refuses a root that already holds a host"
+ $stale = "$e\runs\orch-stale-0"
+ if (-not (Test-Path $stale)) { New-Item -ItemType Directory $stale | Out-Null; New-Item -ItemType Directory "$stale\a" | Out-Null }
+--- avd_guard_r9_snapshot/ke_slot.ps1	2026-10-29 21:31:53.427568400 +0900
++++ avd_guard_r10_snapshot/ke_slot.ps1	2026-10-30 00:26:47.542074100 +0900
+@@ -93,9 +93,16 @@
+ $jobRun = "$wt\build\apps\native_poc\Release\e2e_job_run.exe"
+ if (-not (Test-Path -LiteralPath $jobRun)) { "FAIL  SETUP slot: $jobRun is not built`nRESULT: INVALID"; exit 2 }
+ $graceSec = 3 * ($StopWaitSec + 15) + 60   # the fixture's own worst stop (each harness in turn, then the node)
++# AVD r10 (Codex codex_apk_decoder_inbox_decision_r1.md (5)): an E2-only plan (KE_PLAN e2-sh / e2-shoff) starts host
++# a ONLY -- b and c had no client and failed their capture assertion (ke-r23 / r25 / r26: bundle rc 3); `full` keeps
++# three. The fixture is told which, and its readiness must name exactly those.
++$plan = if ($env:KE_PLAN) { $env:KE_PLAN } else { 'full' }
++$hostSet = if ($plan -in @('e2-sh', 'e2-shoff')) { 'a' } else { 'a,b,c' }
++Say "  plan $plan hosts $hostSet"
+ $q = { param($x) '"' + $x + '"' }
+ $fxCmd = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File $(& $q "$e\ke_fixture.ps1") -Root $(& $q $root) -RunId $runId " +
+          "-HostSec 2400 -ReadyTimeoutSec $ReadyTimeoutSec -StopWaitSec $StopWaitSec"
++$fxCmd += " -Hosts $hostSet"
+ if ($HarnessCmd.Count) { $fxCmd += " -HarnessCmd $(& $q ($HarnessCmd -join ','))" }
+ if ($NodeCmd.Count) { $fxCmd += " -NodeCmd $(& $q ($NodeCmd -join ','))" }
+ $fx = Start-Process -FilePath $jobRun -ArgumentList @('--stop-file', (& $q "$root\stop_fixture"), '--grace-sec', "$graceSec", '--cmd', (& $q ($fxCmd -replace '"', '\"'))) `
+@@ -130,7 +137,7 @@
+ $ready = $false
+ while ((Get-Date) -lt $deadline -and -not $fx.HasExited) {
+   if (Test-Path -LiteralPath "$root\fixture_ready.txt") {
+-    $ready = (Get-Content -LiteralPath "$root\fixture_ready.txt" -Raw) -match "^ready run=$([regex]::Escape($runId)) hosts=a,b,c"
++    $ready = (Get-Content -LiteralPath "$root\fixture_ready.txt" -Raw) -match "^ready run=$([regex]::Escape($runId)) hosts=$([regex]::Escape($hostSet))\s*$"
+     break
+   }
+   Start-Sleep -Milliseconds 500

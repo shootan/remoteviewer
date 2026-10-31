@@ -1,0 +1,146 @@
+2026-10-22 00:47:38.089 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=13 connects=13 hellos=13 observes=13 punches=13 staleRefused=0 staleClosed=0
+2026-10-22 00:47:38.459 [directory_chosen] 211.218.222.1:43000|public
+2026-10-22 00:47:39.193 [targets_ready] origin=connect ms=1095 items=2 gen=14 connects=14 hellos=14 observes=14 punches=14 staleRefused=0 staleClosed=0
+2026-10-22 00:47:45.623 [park_begin] episode=10 host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=14 gen=14 connects=14 hellos=14 observes=14 punches=14 staleRefused=0 staleClosed=0
+2026-10-22 00:47:47.508 [park_end] episode=10 reason=other_host heldMs=1885 gen=14 connects=14 hellos=14 observes=14 punches=14 staleRefused=0 staleClosed=0
+2026-10-22 00:47:47.520 [directory_connect] host=shotan Desktop id=f6e8e54a7d5aff7c gen=14 connects=14 hellos=14 observes=14 punches=14 staleRefused=0 staleClosed=0
+2026-10-22 00:47:50.294 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-22 00:47:50.733 [targets_ready] origin=connect ms=3210 items=6 gen=15 connects=15 hellos=15 observes=15 punches=15 staleRefused=0 staleClosed=0
+2026-10-22 00:52:08.674 [park_begin] episode=11 host=shotan Desktop id=f6e8e54a7d5aff7c gen=15 gen=15 connects=15 hellos=15 observes=15 punches=15 staleRefused=0 staleClosed=0
+2026-10-22 00:52:10.744 [park_end] episode=11 reason=app_stopped heldMs=2070 gen=15 connects=15 hellos=15 observes=15 punches=15 staleRefused=0 staleClosed=0
+2026-10-22 01:13:59.792 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=15 connects=15 hellos=15 observes=15 punches=15 staleRefused=0 staleClosed=0
+2026-10-22 01:14:00.358 [directory_chosen] 211.218.222.1:43000|public
+2026-10-22 01:14:01.353 [targets_ready] origin=connect ms=1556 items=2 gen=16 connects=16 hellos=16 observes=16 punches=16 staleRefused=0 staleClosed=0
+2026-10-22 01:14:13.055 [park_begin] episode=12 host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=16 gen=16 connects=16 hellos=16 observes=16 punches=16 staleRefused=0 staleClosed=0
+2026-10-22 01:14:42.946 [park_reuse] episode=12 heldMs=29885 host=DEV-SHOTAN-L gen=16 connects=16 hellos=16 observes=16 punches=16 staleRefused=0 staleClosed=0
+2026-10-22 01:14:43.313 [targets_ready] origin=reuse ms=373 items=2 gen=16 connects=16 hellos=16 observes=16 punches=16 staleRefused=0 staleClosed=0
+2026-10-22 01:14:48.032 [park_begin] episode=13 host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=16 gen=16 connects=16 hellos=16 observes=16 punches=16 staleRefused=0 staleClosed=0
+2026-10-22 01:14:49.603 [park_end] episode=13 reason=app_stopped heldMs=1571 gen=16 connects=16 hellos=16 observes=16 punches=16 staleRefused=0 staleClosed=0
+2026-10-22 01:18:09.649 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=16 connects=16 hellos=16 observes=16 punches=16 staleRefused=0 staleClosed=0
+2026-10-22 01:18:10.183 [directory_chosen] 211.218.222.1:43000|public
+2026-10-22 01:18:10.768 [targets_ready] origin=connect ms=1113 items=2 gen=17 connects=17 hellos=17 observes=17 punches=17 staleRefused=0 staleClosed=0
+2026-10-22 01:23:10.918 [directory_connect] host=shotan Desktop id=f6e8e54a7d5aff7c gen=17 connects=17 hellos=17 observes=17 punches=17 staleRefused=0 staleClosed=0
+2026-10-22 01:23:13.510 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-22 01:23:14.401 [targets_ready] origin=connect ms=3478 items=6 gen=18 connects=18 hellos=18 observes=18 punches=18 staleRefused=0 staleClosed=0
+2026-10-22 01:25:49.286 [park_begin] episode=14 host=shotan Desktop id=f6e8e54a7d5aff7c gen=18 gen=18 connects=18 hellos=18 observes=18 punches=18 staleRefused=0 staleClosed=0
+2026-10-22 01:25:51.967 [park_end] episode=14 reason=app_stopped heldMs=2682 gen=18 connects=18 hellos=18 observes=18 punches=18 staleRefused=0 staleClosed=0
+2026-10-22 01:28:14.234 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=18 connects=18 hellos=18 observes=18 punches=18 staleRefused=0 staleClosed=0
+2026-10-22 01:28:14.755 [directory_chosen] 211.218.222.1:43000|public
+2026-10-22 01:28:15.472 [targets_ready] origin=connect ms=1234 items=2 gen=19 connects=19 hellos=19 observes=19 punches=19 staleRefused=0 staleClosed=0
+2026-10-22 01:28:41.840 [park_begin] episode=15 host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=19 gen=19 connects=19 hellos=19 observes=19 punches=19 staleRefused=0 staleClosed=0
+2026-10-22 01:28:43.781 [park_end] episode=15 reason=other_host heldMs=1941 gen=19 connects=19 hellos=19 observes=19 punches=19 staleRefused=0 staleClosed=0
+2026-10-22 01:28:43.796 [directory_connect] host=shotan Desktop id=f6e8e54a7d5aff7c gen=19 connects=19 hellos=19 observes=19 punches=19 staleRefused=0 staleClosed=0
+2026-10-22 01:28:46.371 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-22 01:28:47.010 [targets_ready] origin=connect ms=3208 items=6 gen=20 connects=20 hellos=20 observes=20 punches=20 staleRefused=0 staleClosed=0
+2026-10-22 01:34:08.166 [park_begin] episode=16 host=shotan Desktop id=f6e8e54a7d5aff7c gen=20 gen=20 connects=20 hellos=20 observes=20 punches=20 staleRefused=0 staleClosed=0
+2026-10-22 01:34:09.214 [park_end] episode=16 reason=other_host heldMs=1048 gen=20 connects=20 hellos=20 observes=20 punches=20 staleRefused=0 staleClosed=0
+2026-10-22 01:34:09.229 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=20 connects=20 hellos=20 observes=20 punches=20 staleRefused=0 staleClosed=0
+2026-10-22 01:34:09.706 [directory_chosen] 211.218.222.1:43000|public
+2026-10-22 01:34:10.332 [targets_ready] origin=connect ms=1095 items=2 gen=21 connects=21 hellos=21 observes=21 punches=21 staleRefused=0 staleClosed=0
+2026-10-22 01:44:47.476 [park_begin] episode=17 host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=21 gen=21 connects=21 hellos=21 observes=21 punches=21 staleRefused=0 staleClosed=0
+2026-10-22 01:44:49.373 [park_end] episode=17 reason=app_stopped heldMs=1897 gen=21 connects=21 hellos=21 observes=21 punches=21 staleRefused=0 staleClosed=0
+2026-10-22 01:48:19.310 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=21 connects=21 hellos=21 observes=21 punches=21 staleRefused=0 staleClosed=0
+2026-10-22 01:48:19.909 [directory_chosen] 211.218.222.1:43000|public
+2026-10-22 01:48:19.989 [targets_ready] origin=connect ms=672 items=2 gen=22 connects=22 hellos=22 observes=22 punches=22 staleRefused=0 staleClosed=0
+2026-10-22 02:00:05.819 [directory_connect] host=shotan Desktop id=f6e8e54a7d5aff7c gen=22 connects=22 hellos=22 observes=23 punches=22 staleRefused=0 staleClosed=0
+2026-10-22 02:00:08.143 [directory_connect] host=shotan Desktop id=f6e8e54a7d5aff7c gen=22 connects=22 hellos=22 observes=24 punches=22 staleRefused=0 staleClosed=0
+2026-10-22 02:00:10.775 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-22 02:00:10.861 [targets_ready] origin=connect ms=2710 items=6 gen=23 connects=23 hellos=23 observes=25 punches=23 staleRefused=0 staleClosed=0
+2026-10-22 02:03:58.341 [park_begin] episode=19 host=shotan Desktop id=f6e8e54a7d5aff7c gen=23 gen=23 connects=23 hellos=23 observes=25 punches=23 staleRefused=0 staleClosed=0
+2026-10-22 02:03:59.468 [park_end] episode=19 reason=other_host heldMs=1128 gen=23 connects=23 hellos=23 observes=25 punches=23 staleRefused=0 staleClosed=0
+2026-10-22 02:03:59.480 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=23 connects=23 hellos=23 observes=25 punches=23 staleRefused=0 staleClosed=0
+2026-10-22 02:04:00.096 [directory_chosen] 211.218.222.1:43000|public
+2026-10-22 02:04:00.394 [targets_ready] origin=connect ms=909 items=2 gen=24 connects=24 hellos=24 observes=26 punches=24 staleRefused=0 staleClosed=0
+2026-10-22 02:08:59.501 [park_begin] episode=20 host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=24 gen=24 connects=24 hellos=24 observes=26 punches=24 staleRefused=0 staleClosed=0
+2026-10-22 02:09:00.644 [park_end] episode=20 reason=other_host heldMs=1143 gen=24 connects=24 hellos=24 observes=26 punches=24 staleRefused=0 staleClosed=0
+2026-10-22 02:09:00.649 [directory_connect] host=shotan Desktop id=f6e8e54a7d5aff7c gen=24 connects=24 hellos=24 observes=26 punches=24 staleRefused=0 staleClosed=0
+2026-10-22 02:09:03.412 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-22 02:09:03.599 [targets_ready] origin=connect ms=2946 items=6 gen=25 connects=25 hellos=25 observes=27 punches=25 staleRefused=0 staleClosed=0
+2026-10-22 02:11:53.045 [park_begin] episode=21 host=shotan Desktop id=f6e8e54a7d5aff7c gen=25 gen=25 connects=25 hellos=25 observes=27 punches=25 staleRefused=0 staleClosed=0
+2026-10-22 02:11:55.331 [park_end] episode=21 reason=other_host heldMs=2287 gen=25 connects=25 hellos=25 observes=27 punches=25 staleRefused=0 staleClosed=0
+2026-10-22 02:11:55.352 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=25 connects=25 hellos=25 observes=27 punches=25 staleRefused=0 staleClosed=0
+2026-10-22 02:11:55.884 [directory_chosen] 211.218.222.1:43000|public
+2026-10-22 02:11:56.141 [targets_ready] origin=connect ms=784 items=2 gen=26 connects=26 hellos=26 observes=28 punches=26 staleRefused=0 staleClosed=0
+2026-10-22 11:12:41.921 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=26 connects=26 hellos=26 observes=28 punches=26 staleRefused=0 staleClosed=0
+2026-10-22 11:12:44.594 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-22 11:12:44.729 [targets_ready] origin=connect ms=2796 items=2 gen=27 connects=27 hellos=27 observes=29 punches=27 staleRefused=0 staleClosed=0
+2026-10-22 11:18:30.954 [park_begin] episode=22 host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=27 gen=27 connects=27 hellos=27 observes=29 punches=27 staleRefused=0 staleClosed=0
+2026-10-22 11:19:05.423 [park_end] episode=22 reason=app_stopped heldMs=34469 gen=27 connects=27 hellos=27 observes=29 punches=27 staleRefused=0 staleClosed=0
+2026-10-22 15:21:52.567 [directory_connect] host=shotan Desktop id=f6e8e54a7d5aff7c gen=0 connects=0 hellos=0 observes=0 punches=0 staleRefused=0 staleClosed=0
+2026-10-22 15:21:55.336 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-22 15:21:56.217 [targets_ready] origin=connect ms=3642 items=4 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-22 15:22:07.702 [park_begin] episode=1 host=shotan Desktop id=f6e8e54a7d5aff7c gen=1 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-22 15:22:10.328 [park_reuse] episode=1 heldMs=2625 host=shotan Desktop gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-22 15:22:10.830 [targets_ready] origin=reuse ms=502 items=4 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-22 15:24:13.561 [directory_connect] host=shotan Desktop id=f6e8e54a7d5aff7c gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-22 15:24:16.192 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-22 15:24:17.172 [targets_ready] origin=connect ms=3605 items=4 gen=2 connects=2 hellos=2 observes=2 punches=2 staleRefused=0 staleClosed=0
+2026-10-22 15:58:45.725 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=2 connects=2 hellos=2 observes=2 punches=2 staleRefused=0 staleClosed=0
+2026-10-22 15:58:48.481 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-22 15:58:48.606 [targets_ready] origin=connect ms=2878 items=1 gen=3 connects=3 hellos=3 observes=3 punches=3 staleRefused=0 staleClosed=0
+2026-10-22 16:33:49.226 [directory_connect] host=SHOTAN id=f6e8e54a7d5aff7c gen=3 connects=3 hellos=3 observes=3 punches=3 staleRefused=0 staleClosed=0
+2026-10-22 16:33:51.948 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-22 19:16:52.801 [directory_connect] host=SHOTAN id=f6e8e54a7d5aff7c gen=4 connects=4 hellos=4 observes=4 punches=4 staleRefused=0 staleClosed=0
+2026-10-22 19:16:53.427 [directory_chosen] 175.207.45.151:3478|public
+2026-10-22 19:16:54.259 [targets_ready] origin=connect ms=1453 items=6 gen=5 connects=5 hellos=5 observes=5 punches=5 staleRefused=0 staleClosed=0
+2026-10-22 19:16:54.982 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=5 connects=5 hellos=5 observes=5 punches=5 staleRefused=0 staleClosed=0
+2026-10-22 19:16:55.430 [directory_chosen] 211.218.222.1:43000|public
+2026-10-22 19:16:56.035 [targets_ready] origin=connect ms=1050 items=1 gen=6 connects=6 hellos=6 observes=6 punches=6 staleRefused=0 staleClosed=0
+2026-10-23 09:40:00.433 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=0 connects=0 hellos=0 observes=0 punches=0 staleRefused=0 staleClosed=0
+2026-10-23 09:40:03.073 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-23 09:40:03.316 [targets_ready] origin=connect ms=2879 items=1 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-23 09:45:43.849 [directory_connect] host=shotan Desktop id=f6e8e54a7d5aff7c gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-23 09:45:44.403 [directory_chosen] 175.207.45.151:3478|public
+2026-10-23 09:45:44.682 [targets_ready] origin=connect ms=826 items=6 gen=2 connects=2 hellos=2 observes=2 punches=2 staleRefused=0 staleClosed=0
+2026-10-23 09:45:46.302 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=2 connects=2 hellos=2 observes=2 punches=2 staleRefused=0 staleClosed=0
+2026-10-23 09:45:48.971 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-23 09:45:49.219 [targets_ready] origin=connect ms=2912 items=1 gen=3 connects=3 hellos=3 observes=3 punches=3 staleRefused=0 staleClosed=0
+2026-10-23 09:49:56.620 [park_begin] episode=1 host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=3 gen=3 connects=3 hellos=3 observes=3 punches=3 staleRefused=0 staleClosed=0
+2026-10-23 09:49:58.511 [park_end] episode=1 reason=app_stopped heldMs=1891 gen=3 connects=3 hellos=3 observes=3 punches=3 staleRefused=0 staleClosed=0
+2026-10-23 16:50:00.643 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=0 connects=0 hellos=0 observes=0 punches=0 staleRefused=0 staleClosed=0
+2026-10-23 16:50:03.513 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-23 16:50:04.129 [targets_ready] origin=connect ms=3485 items=5 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-23 16:50:42.520 [park_begin] episode=1 host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=1 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-23 16:50:44.790 [park_end] episode=1 reason=app_stopped heldMs=2271 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-23 17:13:15.344 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-23 17:13:17.986 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-23 17:13:18.366 [targets_ready] origin=connect ms=3016 items=4 gen=2 connects=2 hellos=2 observes=2 punches=2 staleRefused=0 staleClosed=0
+2026-10-23 17:20:58.971 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=2 connects=2 hellos=2 observes=2 punches=2 staleRefused=0 staleClosed=0
+2026-10-23 17:21:01.552 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-23 17:21:11.604 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=3 connects=3 hellos=3 observes=3 punches=3 staleRefused=0 staleClosed=0
+2026-10-23 17:21:14.137 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-23 17:39:37.209 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=4 connects=4 hellos=4 observes=4 punches=4 staleRefused=0 staleClosed=0
+2026-10-23 17:39:39.979 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-23 17:39:40.531 [targets_ready] origin=connect ms=3316 items=5 gen=5 connects=5 hellos=5 observes=5 punches=5 staleRefused=0 staleClosed=0
+2026-10-23 17:40:39.743 [park_begin] episode=2 host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=5 gen=5 connects=5 hellos=5 observes=5 punches=5 staleRefused=0 staleClosed=0
+2026-10-23 17:40:41.409 [park_end] episode=2 reason=app_stopped heldMs=1666 gen=5 connects=5 hellos=5 observes=5 punches=5 staleRefused=0 staleClosed=0
+2026-10-25 15:18:14.845 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=0 connects=0 hellos=0 observes=0 punches=0 staleRefused=0 staleClosed=0
+2026-10-25 15:18:15.250 [directory_chosen] 211.218.222.1:63895|public
+2026-10-25 15:18:15.421 [targets_ready] origin=connect ms=569 items=5 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-25 15:18:42.069 [park_begin] episode=1 host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=1 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-25 15:18:43.950 [park_end] episode=1 reason=app_stopped heldMs=1882 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-25 15:20:06.372 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-25 15:20:06.914 [directory_chosen] 211.218.222.1:63895|public
+2026-10-25 15:20:07.014 [targets_ready] origin=connect ms=640 items=5 gen=2 connects=2 hellos=2 observes=2 punches=2 staleRefused=0 staleClosed=0
+2026-10-25 15:21:40.487 [park_begin] episode=2 host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=2 gen=2 connects=2 hellos=2 observes=2 punches=2 staleRefused=0 staleClosed=0
+2026-10-25 15:21:42.016 [park_end] episode=2 reason=app_stopped heldMs=1530 gen=2 connects=2 hellos=2 observes=2 punches=2 staleRefused=0 staleClosed=0
+2026-10-25 15:21:49.712 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=2 connects=2 hellos=2 observes=2 punches=2 staleRefused=0 staleClosed=0
+2026-10-25 15:21:50.235 [directory_chosen] 211.218.222.1:63895|public
+2026-10-25 15:21:50.973 [targets_ready] origin=connect ms=1257 items=5 gen=3 connects=3 hellos=3 observes=3 punches=3 staleRefused=0 staleClosed=0
+2026-10-25 15:23:07.542 [park_begin] episode=3 host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=3 gen=3 connects=3 hellos=3 observes=3 punches=3 staleRefused=0 staleClosed=0
+2026-10-25 15:23:09.259 [park_end] episode=3 reason=app_stopped heldMs=1718 gen=3 connects=3 hellos=3 observes=3 punches=3 staleRefused=0 staleClosed=0
+2026-10-25 16:03:17.396 [directory_connect] host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=0 connects=0 hellos=0 observes=0 punches=0 staleRefused=0 staleClosed=0
+2026-10-25 16:03:17.928 [directory_chosen] 211.218.222.1:63895|public
+2026-10-25 16:03:18.382 [targets_ready] origin=connect ms=983 items=5 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-25 16:11:50.496 [park_begin] episode=1 host=DEV-SHOTAN-L id=df15b73b18cda3b1 gen=1 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-25 16:11:51.962 [park_end] episode=1 reason=app_stopped heldMs=1466 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-25 23:01:52.354 [directory_connect] host=shotan Desktop id=f6e8e54a7d5aff7c gen=0 connects=0 hellos=0 observes=0 punches=0 staleRefused=0 staleClosed=0
+2026-10-25 23:01:54.905 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-25 23:01:55.145 [targets_ready] origin=connect ms=2785 items=8 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-25 23:02:18.995 [park_begin] episode=1 host=shotan Desktop id=f6e8e54a7d5aff7c gen=1 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-25 23:02:20.665 [park_end] episode=1 reason=app_stopped heldMs=1670 gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-25 23:02:25.414 [directory_connect] host=shotan Desktop id=f6e8e54a7d5aff7c gen=1 connects=1 hellos=1 observes=1 punches=1 staleRefused=0 staleClosed=0
+2026-10-25 23:02:28.009 [directory_chosen] 175.207.45.151:29190|relay
+2026-10-25 23:02:28.403 [targets_ready] origin=connect ms=2983 items=8 gen=2 connects=2 hellos=2 observes=2 punches=2 staleRefused=0 staleClosed=0
+2026-10-25 23:02:45.029 [park_begin] episode=2 host=shotan Desktop id=f6e8e54a7d5aff7c gen=2 gen=2 connects=2 hellos=2 observes=2 punches=2 staleRefused=0 staleClosed=0
+2026-10-25 23:02:46.380 [park_end] episode=2 reason=app_stopped heldMs=1351 gen=2 connects=2 hellos=2 observes=2 punches=2 staleRefused=0 staleClosed=0

@@ -1,0 +1,56 @@
+﻿2026-09-08 11:24:50.734 elevated=True user=shotan\shotan pid=6732
+2026-09-08 11:24:50.783 status-before:
+
+?⑦궥 紐⑤땲?곌? ?ㅽ뻾?섍퀬 ?덉? ?딆뒿?덈떎.
+
+2026-09-08 11:24:50.877 filters-before:
+?⑦궥 ?꾪꽣:
+    ?놁쓬
+
+2026-09-08 11:24:50.916 filter-add: ?꾪꽣媛 異붽??섏뿀?듬땲??
+2026-09-08 11:24:50.993 start:  濡쒓굅 留ㅺ컻 蹂??     濡쒓굅 ?대쫫:        PktMon     濡쒓퉭 紐⑤뱶:       ?쒗솚     濡쒓렇 ?뚯씪:           D:\remote\remote\.claude\packet-capture-20260908\gnlink_host_20260908_112450.etl     理쒕? ?뚯씪 ?ш린:      128MB     ?ъ슜??硫붾え由?        512MB  ?섏쭛???곗씠??     ?⑦궥 移댁슫?? ?⑦궥 罹≪쿂  罹≪쿂 ?뺤떇:     紐⑤뱺 ?⑦궥  紐⑤땲?곕쭅?섎뒗 援ъ꽦 ?붿냼:     ?ㅽ듃?뚰겕 ?대뙌??  ?⑦궥 ?꾪꽣:      # ?대쫫        ?꾨줈?좎퐳    IP 二쇱냼            ?ы듃       - --        ----    -----            --       1 GNLinkUDP UDP     211.218.222.1 43000 
+2026-09-08 11:24:51.569 status-after:
+
+?섏쭛???곗씠??
+    ?⑦궥 移댁슫?? ?⑦궥 罹≪쿂
+
+罹≪쿂 ?뺤떇:
+    紐⑤뱺 ?⑦궥
+
+紐⑤땲?곕쭅?섎뒗 援ъ꽦 ?붿냼:
+    ?ㅽ듃?뚰겕 ?대뙌??
+
+?⑦궥 ?꾪꽣:
+     # ?대쫫        ?꾨줈?좎퐳    IP 二쇱냼            ?ы듃 
+     - --        ----    -----            -- 
+     1 GNLinkUDP UDP     211.218.222.1 43000 
+
+濡쒓굅 留ㅺ컻 蹂??
+    濡쒓굅 ?대쫫:        PktMon
+    濡쒓퉭 紐⑤뱶:       ?쒗솚
+    濡쒓렇 ?뚯씪:           D:\remote\remote\.claude\packet-capture-20260908\gnlink_host_20260908_112450.etl
+    理쒕? ?뚯씪 ?ш린:      128MB
+    ?ъ슜??硫붾え由?        512MB
+    ?먯떎???대깽??        0
+
+?대깽??怨듦툒??
+    ID                          ?섏?  ?ㅼ썙??
+    --                          --  --- 
+    Microsoft-Windows-PktMon     4 0x32 
+
+2026-09-08 11:24:51.585 START 20260908_112450 stopBy=11:34:51 filter=UDP/port43000/ip211.218.222.1 comp=nics pktsize=192 filesize=128MB circular file=D:\remote\remote\.claude\packet-capture-20260908\gnlink_host_20260908_112450.etl
+2026-09-08 11:31:41.706 stopping reason=request
+2026-09-08 11:31:42.503 stop:
+濡쒓렇瑜??뚮윭?쒗븯??以?..
+硫뷀??곗씠?곕? 援щЦ 遺꾩꽍?섎뒗 以?..
+濡쒓렇 ?뚯씪: D:\remote\remote\.claude\packet-capture-20260908\gnlink_host_20260908_112450.etl(?먯떎???대깽???놁쓬)
+
+2026-09-08 11:31:43.309 etl2pcap:
+泥섎━?섎뒗 以?..
+
+珥??⑦궥:       106256
+?⑦궥 ??젣 ??   0
+?뺤떇?붾맂 ?⑦궥:   106256
+?쒖떇 ?덈뒗 ?뚯씪:      D:\remote\remote\.claude\packet-capture-20260908\gnlink_host_20260908_112450.pcapng
+
+2026-09-08 11:31:43.314 DONE etl=D:\remote\remote\.claude\packet-capture-20260908\gnlink_host_20260908_112450.etl pcapng=D:\remote\remote\.claude\packet-capture-20260908\gnlink_host_20260908_112450.pcapng

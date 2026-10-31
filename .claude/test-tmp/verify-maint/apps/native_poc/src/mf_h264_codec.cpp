@@ -1,0 +1,2996 @@
+#include "mf_h264_codec.hpp"
+#include "time_utils.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
+#include <cstddef>
+#include <cstdio>
+#include <cstdint>
+#include <cstring>
+#include <cwchar>
+#include <iostream>
+#include <limits>
+#include <string>
+#include <utility>
+#include <vector>
+#include <emmintrin.h>
+
+#include <windows.h>
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+
+#include <codecapi.h>
+#include <mfapi.h>
+#include <mferror.h>
+#include <mfidl.h>
+#include <mfobjects.h>
+#include <mftransform.h>
+#include <wmcodecdsp.h>
+
+namespace remote60::native_poc {
+namespace {
+
+int clamp_u8_int(int v) {
+  return std::min(255, std::max(0, v));
+}
+
+bool set_codecapi_u32(IMFTransform* transform, const GUID& key, uint32_t value) {
+  if (!transform) return false;
+  Microsoft::WRL::ComPtr<ICodecAPI> codecApi;
+  if (FAILED(transform->QueryInterface(IID_PPV_ARGS(&codecApi))) || !codecApi) return false;
+  VARIANT v{};
+  v.vt = VT_UI4;
+  v.ulVal = value;
+  return SUCCEEDED(codecApi->SetValue(&key, &v));
+}
+
+// Like set_codecapi_u32 but surfaces the raw HRESULT, for the GOP-config telemetry that has to
+// tell "property rejected" apart from "accepted but the encoder chose a smaller GOP".
+HRESULT set_codecapi_u32_hr(IMFTransform* transform, const GUID& key, uint32_t value) {
+  if (!transform) return E_POINTER;
+  Microsoft::WRL::ComPtr<ICodecAPI> codecApi;
+  const HRESULT qhr = transform->QueryInterface(IID_PPV_ARGS(&codecApi));
+  if (FAILED(qhr) || !codecApi) return FAILED(qhr) ? qhr : E_NOINTERFACE;
+  VARIANT v{};
+  v.vt = VT_UI4;
+  v.ulVal = value;
+  return codecApi->SetValue(&key, &v);
+}
+
+// Reads back a u32 ICodecAPI property. Integer variants (VT_UI4/VT_I4) own no memory, so no
+// VariantClear is needed.
+bool get_codecapi_u32(IMFTransform* transform, const GUID& key, uint32_t* out) {
+  if (!transform || !out) return false;
+  Microsoft::WRL::ComPtr<ICodecAPI> codecApi;
+  if (FAILED(transform->QueryInterface(IID_PPV_ARGS(&codecApi))) || !codecApi) return false;
+  VARIANT v{};
+  if (FAILED(codecApi->GetValue(&key, &v))) return false;
+  if (v.vt == VT_UI4) { *out = v.ulVal; return true; }
+  if (v.vt == VT_I4) { *out = static_cast<uint32_t>(v.lVal); return true; }
+  return false;
+}
+
+// stutter-keyframe r2 (step 5): record whether a per-frame-type / key QP control is even SUPPORTED on
+// this MFT -- do NOT apply it. Codex contract 3: AVEncVideoEncodeFrameTypeQP is a fixed-QP contract,
+// and a global Min/MaxQP cannot be scoped to a single auto-emitted IDR of an async MFT, so a key-only
+// byte cap via QP is not reliable. r2 records support for the field decision rather than forcing
+// fixed-QP on the whole stream; the existing whole-stream maxQp ceiling (apply_rate_control) is
+// unchanged. This is the "record" path of the contract's "support only, else record".
+const char* codecapi_support_str(IMFTransform* transform, const GUID& key) {
+  if (!transform) return "noxform";
+  Microsoft::WRL::ComPtr<ICodecAPI> codecApi;
+  if (FAILED(transform->QueryInterface(IID_PPV_ARGS(&codecApi))) || !codecApi) return "noapi";
+  if (codecApi->IsSupported(&key) != S_OK) return "unsupported";
+  return (codecApi->IsModifiable(&key) == S_OK) ? "supported+modifiable" : "supported";
+}
+
+bool set_codecapi_bool(IMFTransform* transform, const GUID& key, bool value) {
+  if (!transform) return false;
+  Microsoft::WRL::ComPtr<ICodecAPI> codecApi;
+  if (FAILED(transform->QueryInterface(IID_PPV_ARGS(&codecApi))) || !codecApi) return false;
+  VARIANT v{};
+  v.vt = VT_BOOL;
+  v.boolVal = value ? VARIANT_TRUE : VARIANT_FALSE;
+  return SUCCEEDED(codecApi->SetValue(&key, &v));
+}
+
+bool set_mf_attr_u32(IMFTransform* transform, const GUID& key, uint32_t value) {
+  if (!transform) return false;
+  Microsoft::WRL::ComPtr<IMFAttributes> attrs;
+  if (FAILED(transform->GetAttributes(&attrs)) || !attrs) return false;
+  return SUCCEEDED(attrs->SetUINT32(key, value));
+}
+
+// The whole pipeline (CPU bgra_to_nv12, client D3D shader, client GDI fallback) uses
+// BT.709 limited range. Decoders that see no VUI colour description guess, and Android
+// MediaCodec guesses BT.709 for HD, so stamp it explicitly to keep every renderer aligned.
+void apply_video_colorimetry(IMFMediaType* type) {
+  if (!type) return;
+  (void)type->SetUINT32(MF_MT_YUV_MATRIX, MFVideoTransferMatrix_BT709);
+  (void)type->SetUINT32(MF_MT_VIDEO_NOMINAL_RANGE, MFNominalRange_16_235);
+  (void)type->SetUINT32(MF_MT_VIDEO_PRIMARIES, MFVideoPrimaries_BT709);
+  (void)type->SetUINT32(MF_MT_TRANSFER_FUNCTION, MFVideoTransFunc_709);
+  // bgra_to_nv12 box-averages 2x2 blocks, which is interstitial siting on both axes
+  // (MPEG-1 style); declaring MPEG-2 cosited here would shift chroma half a sample.
+  (void)type->SetUINT32(MF_MT_VIDEO_CHROMA_SITING,
+                        MFVideoChromaSubsampling_MPEG1);
+}
+
+// H.264 High profile enables CABAC and the 8x8 transform. Without an explicit request the
+// MFTs fall back to Baseline, which visibly softens small text at a fixed screen-share bitrate.
+// The level must satisfy BOTH MaxMBPS (throughput) and MaxFS (frame size): checking only
+// MBPS lets 1080p at a lowered fps claim level 3.2, which strict decoders refuse.
+uint32_t h264_level_for(uint32_t width, uint32_t height, uint32_t fps) {
+  const uint64_t frameMbs = static_cast<uint64_t>((width + 15) / 16) *
+                            static_cast<uint64_t>((height + 15) / 16);
+  const uint64_t mbps = frameMbs * static_cast<uint64_t>(fps == 0 ? 30 : fps);
+  struct LevelCap {
+    uint32_t level;
+    uint64_t maxMbps;
+    uint64_t maxFs;
+  };
+  static constexpr LevelCap kCaps[] = {
+      {eAVEncH264VLevel3_1, 108000, 3600},    // 720p30
+      {eAVEncH264VLevel3_2, 216000, 5120},
+      {eAVEncH264VLevel4, 245760, 8192},      // 1080p30
+      {eAVEncH264VLevel4_2, 522240, 8704},    // 1080p60
+      {eAVEncH264VLevel5, 589824, 22080},
+      {eAVEncH264VLevel5_1, 983040, 36864},   // 4K30
+  };
+  for (const auto& cap : kCaps) {
+    if (mbps <= cap.maxMbps && frameMbs <= cap.maxFs) return cap.level;
+  }
+  return eAVEncH264VLevel5_2;
+}
+
+uint32_t low_latency_vbv_bytes(uint32_t bitrate) {
+  // AVEncCommonBufferSize is in BYTES; T seconds of video is bitrate/8*T bytes. The
+  // original bitrate/80 was 100 ms, which under CBR smeared scene changes; bitrate/40 gives
+  // 200 ms of headroom for one large frame without letting worst-case burst latency grow
+  // past what the UDP path absorbs.
+  const uint32_t minBytes = 16384;
+  const uint32_t maxBytes = std::max<uint32_t>(65536, bitrate / 8);  // hard cap at 1 s
+  const uint32_t target = std::max<uint32_t>(minBytes, bitrate / 40);
+  return std::min<uint32_t>(maxBytes, target);
+}
+
+uint32_t stable_text_vbv_bytes(uint32_t bitrate) {
+  const uint32_t minBytes = 16384;
+  const uint32_t maxBytes = std::max<uint32_t>(65536, bitrate / 6);
+  const uint32_t target = std::max<uint32_t>(minBytes, bitrate / 40);
+  return std::min<uint32_t>(maxBytes, target);
+}
+
+uint32_t env_u32_or(const char* key, uint32_t fallback) {
+  const char* v = key ? std::getenv(key) : nullptr;
+  if (!v || !*v) return fallback;
+  char* end = nullptr;
+  const unsigned long parsed = std::strtoul(v, &end, 10);
+  if (end == v) return fallback;
+  return static_cast<uint32_t>(parsed);
+}
+
+bool env_string_equals_ci(const char* key, const char* expected) {
+  if (!key || !expected) return false;
+  const char* value = std::getenv(key);
+  if (!value || !*value) return false;
+  std::string lhs(value);
+  std::string rhs(expected);
+  std::transform(lhs.begin(), lhs.end(), lhs.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  std::transform(rhs.begin(), rhs.end(), rhs.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  return lhs == rhs;
+}
+
+bool annexb_contains_idr(const uint8_t* data, size_t size) {
+  if (!data || size < 5) return false;
+  for (size_t i = 0; i + 4 < size; ++i) {
+    const bool start3 = (data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1);
+    const bool start4 = (i + 4 < size && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 &&
+                         data[i + 3] == 1);
+    if (!start3 && !start4) continue;
+    const size_t nalPos = start4 ? (i + 4) : (i + 3);
+    if (nalPos >= size) continue;
+    const uint8_t nalType = (data[nalPos] & 0x1F);
+    if (nalType == 5) return true;
+  }
+  return false;
+}
+
+bool h264_has_start_code(const uint8_t* data, size_t size) {
+  if (!data || size < 4) return false;
+  for (size_t i = 0; i + 3 < size; ++i) {
+    if (data[i] == 0 && data[i + 1] == 0 &&
+        ((data[i + 2] == 1) || (i + 3 < size && data[i + 2] == 0 && data[i + 3] == 1))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool h264_avcc_to_annexb(const std::vector<uint8_t>& in, std::vector<uint8_t>* out) {
+  if (!out) return false;
+  out->clear();
+  if (in.size() < 5) return false;
+  size_t offset = 0;
+  while (offset + 4 <= in.size()) {
+    const uint32_t nalLen = (static_cast<uint32_t>(in[offset]) << 24) |
+                            (static_cast<uint32_t>(in[offset + 1]) << 16) |
+                            (static_cast<uint32_t>(in[offset + 2]) << 8) |
+                            static_cast<uint32_t>(in[offset + 3]);
+    offset += 4;
+    if (nalLen == 0 || offset + nalLen > in.size()) {
+      out->clear();
+      return false;
+    }
+    out->push_back(0);
+    out->push_back(0);
+    out->push_back(0);
+    out->push_back(1);
+    out->insert(out->end(), in.data() + offset, in.data() + offset + nalLen);
+    offset += nalLen;
+  }
+  return !out->empty();
+}
+
+bool h264_config_avcc_to_annexb(const uint8_t* data, size_t size, std::vector<uint8_t>* out) {
+  if (!data || size < 7 || !out) return false;
+  out->clear();
+  // AVCDecoderConfigurationRecord
+  size_t offset = 0;
+  const uint8_t configurationVersion = data[offset++];
+  if (configurationVersion != 1) return false;
+  offset += 3;  // profile/compat/level
+  if (offset >= size) return false;
+  offset += 1;  // lengthSizeMinusOne
+  if (offset >= size) return false;
+  const uint8_t numSps = static_cast<uint8_t>(data[offset++] & 0x1F);
+  for (uint8_t i = 0; i < numSps; ++i) {
+    if (offset + 2 > size) return false;
+    const uint16_t n = static_cast<uint16_t>(data[offset] << 8 | data[offset + 1]);
+    offset += 2;
+    if (n == 0 || offset + n > size) return false;
+    out->push_back(0);
+    out->push_back(0);
+    out->push_back(0);
+    out->push_back(1);
+    out->insert(out->end(), data + offset, data + offset + n);
+    offset += n;
+  }
+  if (offset >= size) return false;
+  const uint8_t numPps = data[offset++];
+  for (uint8_t i = 0; i < numPps; ++i) {
+    if (offset + 2 > size) return false;
+    const uint16_t n = static_cast<uint16_t>(data[offset] << 8 | data[offset + 1]);
+    offset += 2;
+    if (n == 0 || offset + n > size) return false;
+    out->push_back(0);
+    out->push_back(0);
+    out->push_back(0);
+    out->push_back(1);
+    out->insert(out->end(), data + offset, data + offset + n);
+    offset += n;
+  }
+  return !out->empty();
+}
+
+bool create_input_sample(const std::vector<uint8_t>& bytes, int64_t sampleTimeHns,
+                         int64_t sampleDurationHns, IMFSample** outSample) {
+  if (!outSample) return false;
+  *outSample = nullptr;
+  Microsoft::WRL::ComPtr<IMFSample> sample;
+  Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+  if (FAILED(MFCreateSample(&sample)) || !sample) return false;
+  if (FAILED(MFCreateMemoryBuffer(static_cast<DWORD>(bytes.size()), &buffer)) || !buffer) return false;
+  BYTE* dst = nullptr;
+  DWORD maxLen = 0;
+  DWORD curLen = 0;
+  if (FAILED(buffer->Lock(&dst, &maxLen, &curLen)) || !dst) return false;
+  std::memcpy(dst, bytes.data(), bytes.size());
+  buffer->Unlock();
+  if (FAILED(buffer->SetCurrentLength(static_cast<DWORD>(bytes.size())))) return false;
+  if (FAILED(sample->AddBuffer(buffer.Get()))) return false;
+  (void)sample->SetSampleTime(sampleTimeHns);
+  (void)sample->SetSampleDuration(sampleDurationHns);
+  *outSample = sample.Detach();
+  return true;
+}
+
+bool sample_to_bytes(IMFSample* sample, std::vector<uint8_t>* out) {
+  if (!sample || !out) return false;
+  Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+  if (FAILED(sample->ConvertToContiguousBuffer(&buffer)) || !buffer) return false;
+  BYTE* src = nullptr;
+  DWORD maxLen = 0;
+  DWORD curLen = 0;
+  if (FAILED(buffer->Lock(&src, &maxLen, &curLen)) || !src) return false;
+  out->assign(src, src + curLen);
+  buffer->Unlock();
+  return !out->empty();
+}
+
+bool sample_to_dxgi_texture(IMFSample* sample, ID3D11Texture2D** outTexture,
+                            uint32_t* outSubresource) {
+  if (!sample || !outTexture || !outSubresource) return false;
+  *outTexture = nullptr;
+  *outSubresource = 0;
+  DWORD count = 0;
+  if (FAILED(sample->GetBufferCount(&count))) return false;
+  for (DWORD i = 0; i < count; ++i) {
+    Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+    if (FAILED(sample->GetBufferByIndex(i, &buffer)) || !buffer) continue;
+    Microsoft::WRL::ComPtr<IMFDXGIBuffer> dxgiBuffer;
+    if (FAILED(buffer.As(&dxgiBuffer)) || !dxgiBuffer) continue;
+    Microsoft::WRL::ComPtr<ID3D11Texture2D> texture;
+    if (FAILED(dxgiBuffer->GetResource(IID_PPV_ARGS(&texture))) || !texture) continue;
+    UINT subresource = 0;
+    if (FAILED(dxgiBuffer->GetSubresourceIndex(&subresource))) subresource = 0;
+    *outSubresource = subresource;
+    *outTexture = texture.Detach();
+    return true;
+  }
+  return false;
+}
+
+bool sample_to_nv12_bytes_from_2d_buffer(IMFSample* sample, uint32_t width, uint32_t height,
+                                         std::vector<uint8_t>* out) {
+  if (!sample || !out || width == 0 || height == 0) return false;
+
+  DWORD bufferCount = 0;
+  if (FAILED(sample->GetBufferCount(&bufferCount)) || bufferCount == 0) return false;
+
+  for (DWORD i = 0; i < bufferCount; ++i) {
+    Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+    if (FAILED(sample->GetBufferByIndex(i, &buffer)) || !buffer) continue;
+
+    Microsoft::WRL::ComPtr<IMF2DBuffer> buffer2d;
+    if (FAILED(buffer.As(&buffer2d)) || !buffer2d) continue;
+
+    BYTE* scan0 = nullptr;
+    LONG pitch = 0;
+    if (FAILED(buffer2d->Lock2D(&scan0, &pitch)) || !scan0 || pitch == 0) continue;
+
+    const LONG absPitch = (pitch >= 0) ? pitch : -pitch;
+    const size_t yPlaneBytes = static_cast<size_t>(width) * static_cast<size_t>(height);
+    const size_t uvPlaneBytes =
+        static_cast<size_t>(width) * static_cast<size_t>((height + 1) / 2);
+    out->assign(yPlaneBytes + uvPlaneBytes, 0);
+    auto* dstY = out->data();
+    auto* dstUV = out->data() + yPlaneBytes;
+
+    const BYTE* yBase = (pitch >= 0)
+                            ? scan0
+                            : (scan0 + static_cast<ptrdiff_t>(height - 1) * absPitch);
+    for (uint32_t y = 0; y < height; ++y) {
+      const BYTE* srcRow =
+          (pitch >= 0) ? (yBase + static_cast<ptrdiff_t>(y) * absPitch)
+                       : (yBase - static_cast<ptrdiff_t>(y) * absPitch);
+      std::memcpy(dstY + static_cast<size_t>(y) * width, srcRow, width);
+    }
+
+    const uint32_t uvRows = (height + 1) / 2;
+    const BYTE* uvBase = (pitch >= 0)
+                             ? (yBase + static_cast<ptrdiff_t>(height) * absPitch)
+                             : (yBase - static_cast<ptrdiff_t>(height) * absPitch);
+    for (uint32_t y = 0; y < uvRows; ++y) {
+      const BYTE* srcRow =
+          (pitch >= 0) ? (uvBase + static_cast<ptrdiff_t>(y) * absPitch)
+                       : (uvBase - static_cast<ptrdiff_t>(y) * absPitch);
+      std::memcpy(dstUV + static_cast<size_t>(y) * width, srcRow, width);
+    }
+
+    buffer2d->Unlock2D();
+    return true;
+  }
+
+  return false;
+}
+
+bool env_truthy_local(const char* key) {
+  if (!key) return false;
+  const char* v = std::getenv(key);
+  if (!v) return false;
+  return (std::strcmp(v, "1") == 0) ||
+         (_stricmp(v, "true") == 0) ||
+         (_stricmp(v, "on") == 0);
+}
+
+uint32_t env_u32_local(const char* key, uint32_t defaultValue) {
+  if (!key) return defaultValue;
+  const char* v = std::getenv(key);
+  if (!v || !*v) return defaultValue;
+  char* end = nullptr;
+  const unsigned long raw = std::strtoul(v, &end, 10);
+  if (!end || *end != '\0') return defaultValue;
+  return static_cast<uint32_t>(raw);
+}
+
+std::string env_string_local(const char* key) {
+  if (!key) return {};
+  const char* v = std::getenv(key);
+  if (!v) return {};
+  return std::string(v);
+}
+
+std::string guid_to_string(const GUID& g) {
+  wchar_t wbuf[64] = {};
+  const int n = StringFromGUID2(g, wbuf, 64);
+  if (n <= 1) return "{}";
+  char buf[128] = {};
+  const int c = WideCharToMultiByte(CP_UTF8, 0, wbuf, -1, buf, static_cast<int>(sizeof(buf)), nullptr, nullptr);
+  if (c <= 1) return "{}";
+  return std::string(buf);
+}
+
+std::string hr_to_hex(HRESULT hr) {
+  char buf[32] = {};
+  std::snprintf(buf, sizeof(buf), "0x%08lX", static_cast<unsigned long>(hr));
+  return std::string(buf);
+}
+
+void codec_debug_log(const char* msg) {
+  if (!msg) return;
+  if (!env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) return;
+  std::fprintf(stderr, "[mf_h264_codec] %s\n", msg);
+  std::fflush(stderr);
+}
+
+// stutter-keyframe r1 (observe-1): the activated MFT's friendly name / CLSID / vendor are read today
+// only to substring-match a needle and then freed, so the NAS host.log never records WHICH encoder a
+// host actually used -- the GOP-clamp investigation could not name the company PC's MFT ("미확인"). Log
+// the identity of the transform we actually activate, unconditionally (same [native-video-host] stream
+// as the gop-config line), so a clamp can be tied to a concrete vendor/driver. A read failure prints
+// "?" rather than suppressing the line.
+std::string mft_attr_string(IMFActivate* act, const GUID& attr) {
+  if (!act) return "?";
+  WCHAR* w = nullptr;
+  UINT32 cch = 0;
+  std::string out = "?";
+  if (SUCCEEDED(act->GetAllocatedString(attr, &w, &cch)) && w) {
+    char buf[256] = {};
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, static_cast<int>(sizeof(buf)), nullptr, nullptr) > 1)
+      out = buf;
+  }
+  if (w) CoTaskMemFree(w);
+  return out;
+}
+
+// role is "encoder"/"decoder" so the field comparison does not mix the two MFTs a host activates
+// (an AMD encoder and the Microsoft decoder both log here). vendorId "?" is a legal absent optional
+// attribute -- not inferred. The name-match and CLSID-fallback selection paths are not on the live
+// h264 enum path (try_activate_first is), so their identity is not captured; that gap is noted at
+// those sites rather than guessed here.
+// encoder-rc-budget C2: the identity of the encoder MFT the LAST creation path activated, kept here
+// so initialize() can adopt it after create_h264_encoder_transform returns. The creation helpers
+// only hand back an IMFTransform; the vendor id lives on the IMFActivate they consumed. Set only for
+// role "encoder" (the decoder's identity is of no use to the rate-control policy), cleared at the
+// start of every encoder creation so a stale value cannot describe a later transform. Single
+// threaded: initialize() runs on the host's main loop.
+MftIdentity g_lastEncoderIdentity;
+bool g_lastEncoderIdentityValid = false;
+
+void log_mft_identity(IMFActivate* act, const char* role) {
+  if (!act) return;
+  const std::string friendly = mft_attr_string(act, MFT_FRIENDLY_NAME_Attribute);
+  const std::string vendor = mft_attr_string(act, MFT_ENUM_HARDWARE_VENDOR_ID_Attribute);
+  const std::string hwUrl = mft_attr_string(act, MFT_ENUM_HARDWARE_URL_Attribute);
+  std::string clsid = "?";
+  GUID g{};
+  if (SUCCEEDED(act->GetGUID(MFT_TRANSFORM_CLSID_Attribute, &g))) clsid = guid_to_string(g);
+  std::cout << "[native-video-host] h264 mft-identity role=" << (role ? role : "?")
+            << " friendlyName=\"" << friendly << "\" clsid=" << clsid << " vendorId=" << vendor
+            << " hwUrl=\"" << hwUrl << "\"\n";
+  if (role && std::strcmp(role, "encoder") == 0) {
+    g_lastEncoderIdentity.friendlyName = friendly;
+    g_lastEncoderIdentity.vendorId = vendor;
+    g_lastEncoderIdentity.clsid = clsid;
+    g_lastEncoderIdentityValid = true;
+  }
+}
+
+enum class MftBackendMode {
+  Auto,
+  HardwareOnly,
+  SoftwareOnly,
+};
+
+MftBackendMode parse_mft_backend_mode(const std::string& mode) {
+  // Default to auto so production/runtime picks hardware when available and falls back to SW.
+  if (mode.empty()) {
+    return MftBackendMode::Auto;
+  }
+  if (_stricmp(mode.c_str(), "mft_auto") == 0 || _stricmp(mode.c_str(), "auto") == 0) {
+    return MftBackendMode::Auto;
+  }
+  if (_stricmp(mode.c_str(), "mft_hw") == 0 || _stricmp(mode.c_str(), "hw") == 0) {
+    return MftBackendMode::HardwareOnly;
+  }
+  if (_stricmp(mode.c_str(), "mft_sw") == 0 || _stricmp(mode.c_str(), "sw") == 0) {
+    return MftBackendMode::SoftwareOnly;
+  }
+  return MftBackendMode::Auto;
+}
+
+void release_activate_array(IMFActivate** activates, UINT32 count) {
+  if (!activates) return;
+  for (UINT32 i = 0; i < count; ++i) {
+    if (activates[i]) activates[i]->Release();
+  }
+  CoTaskMemFree(activates);
+}
+
+bool try_activate_first(IMFActivate** activates, UINT32 count, IMFTransform** outTransform,
+                        const char* role = "?") {
+  if (!activates || !outTransform) return false;
+  *outTransform = nullptr;
+  for (UINT32 i = 0; i < count; ++i) {
+    if (!activates[i]) continue;
+    IMFTransform* candidate = nullptr;
+    if (SUCCEEDED(activates[i]->ActivateObject(IID_PPV_ARGS(&candidate))) && candidate) {
+      log_mft_identity(activates[i], role);  // stutter-keyframe r1/r2: which MFT we took + its role
+      *outTransform = candidate;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool try_activate_matching_name(IMFActivate** activates, UINT32 count, const wchar_t* nameNeedle,
+                                IMFTransform** outTransform, const char* role = "?") {
+  if (!activates || !nameNeedle || !outTransform) return false;
+  *outTransform = nullptr;
+  for (UINT32 i = 0; i < count; ++i) {
+    if (!activates[i]) continue;
+    WCHAR* friendly = nullptr;
+    UINT32 cch = 0;
+    const HRESULT hrName =
+        activates[i]->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &friendly, &cch);
+    const bool nameMatch = SUCCEEDED(hrName) && friendly && std::wcsstr(friendly, nameNeedle) != nullptr;
+    if (friendly) {
+      CoTaskMemFree(friendly);
+      friendly = nullptr;
+    }
+    if (!nameMatch) continue;
+    IMFTransform* candidate = nullptr;
+    if (SUCCEEDED(activates[i]->ActivateObject(IID_PPV_ARGS(&candidate))) && candidate) {
+      log_mft_identity(activates[i], role);  // r2 obs: also log identity on the name-match path
+      *outTransform = candidate;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool try_activate_matching_names(IMFActivate** activates, UINT32 count,
+                                 const wchar_t* const* nameNeedles, size_t needleCount,
+                                 IMFTransform** outTransform, const char* role = "?") {
+  if (!activates || !nameNeedles || needleCount == 0 || !outTransform) return false;
+  *outTransform = nullptr;
+  for (UINT32 i = 0; i < count; ++i) {
+    if (!activates[i]) continue;
+    WCHAR* friendly = nullptr;
+    UINT32 cch = 0;
+    const HRESULT hrName =
+        activates[i]->GetAllocatedString(MFT_FRIENDLY_NAME_Attribute, &friendly, &cch);
+    bool nameMatch = false;
+    if (SUCCEEDED(hrName) && friendly) {
+      for (size_t n = 0; n < needleCount; ++n) {
+        const wchar_t* needle = nameNeedles[n];
+        if (needle && *needle != L'\0' && std::wcsstr(friendly, needle) != nullptr) {
+          nameMatch = true;
+          break;
+        }
+      }
+    }
+    if (friendly) {
+      CoTaskMemFree(friendly);
+      friendly = nullptr;
+    }
+    if (!nameMatch) continue;
+    IMFTransform* candidate = nullptr;
+    if (SUCCEEDED(activates[i]->ActivateObject(IID_PPV_ARGS(&candidate))) && candidate) {
+      log_mft_identity(activates[i], role);  // r2 obs: also log identity on the name-match path
+      *outTransform = candidate;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool create_mft_from_clsid_string(const wchar_t* clsidString, IMFTransform** outTransform,
+                                  const char* role = "?") {
+  if (!clsidString || !outTransform) return false;
+  *outTransform = nullptr;
+  CLSID clsid{};
+  if (FAILED(CLSIDFromString(clsidString, &clsid))) return false;
+  IMFTransform* transform = nullptr;
+  const HRESULT hr = CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&transform));
+  if (FAILED(hr) || !transform) return false;
+  // r2 obs: a CoCreateInstance has no IMFActivate attributes (no friendly name/vendor), but the CLSID
+  // and role still pin which MFT the fallback took for the field comparison.
+  char buf[128] = {};
+  (void)WideCharToMultiByte(CP_UTF8, 0, clsidString, -1, buf, static_cast<int>(sizeof(buf)), nullptr, nullptr);
+  std::cout << "[native-video-host] h264 mft-identity role=" << (role ? role : "?")
+            << " friendlyName=? clsid=" << buf << " vendorId=? hwUrl=? via=clsid-fallback\n";
+  if (role && std::strcmp(role, "encoder") == 0) {
+    g_lastEncoderIdentity = MftIdentity{};
+    g_lastEncoderIdentity.clsid = buf;  // vendor stays "?": a CoCreateInstance has no activate attributes
+    g_lastEncoderIdentityValid = true;
+  }
+  *outTransform = transform;
+  return true;
+}
+
+bool decoder_supports_h264_input(IMFTransform* transform) {
+  if (!transform) return false;
+  Microsoft::WRL::ComPtr<IMFMediaType> inType;
+  if (FAILED(MFCreateMediaType(&inType)) || !inType) return false;
+  (void)inType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+  (void)inType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+  return SUCCEEDED(transform->SetInputType(0, inType.Get(), MFT_SET_TYPE_TEST_ONLY));
+}
+
+bool create_video_mft_from_enum(const GUID& category, const GUID& inSubtype, const GUID& outSubtype,
+                                DWORD flags, IMFTransform** outTransform) {
+  if (!outTransform) return false;
+  *outTransform = nullptr;
+  MFT_REGISTER_TYPE_INFO inputInfo{};
+  inputInfo.guidMajorType = MFMediaType_Video;
+  inputInfo.guidSubtype = inSubtype;
+  MFT_REGISTER_TYPE_INFO outputInfo{};
+  outputInfo.guidMajorType = MFMediaType_Video;
+  outputInfo.guidSubtype = outSubtype;
+
+  IMFActivate** activates = nullptr;
+  UINT32 count = 0;
+  const HRESULT hr = MFTEnumEx(category, flags, &inputInfo, &outputInfo, &activates, &count);
+  if (FAILED(hr) || count == 0 || !activates) return false;
+
+  IMFTransform* transform = nullptr;
+  const char* role = (IsEqualGUID(category, MFT_CATEGORY_VIDEO_ENCODER) ? "encoder"
+                      : IsEqualGUID(category, MFT_CATEGORY_VIDEO_DECODER) ? "decoder"
+                                                                         : "?");
+  const bool ok = try_activate_first(activates, count, &transform, role);
+  release_activate_array(activates, count);
+  if (!ok || !transform) return false;
+  *outTransform = transform;
+  return true;
+}
+
+bool create_video_mft_from_enum_matching_names(const GUID& category, const GUID& inSubtype,
+                                               const GUID& outSubtype, DWORD flags,
+                                               const wchar_t* const* nameNeedles, size_t needleCount,
+                                               IMFTransform** outTransform) {
+  if (!outTransform || !nameNeedles || needleCount == 0) return false;
+  *outTransform = nullptr;
+  MFT_REGISTER_TYPE_INFO inputInfo{};
+  inputInfo.guidMajorType = MFMediaType_Video;
+  inputInfo.guidSubtype = inSubtype;
+  MFT_REGISTER_TYPE_INFO outputInfo{};
+  outputInfo.guidMajorType = MFMediaType_Video;
+  outputInfo.guidSubtype = outSubtype;
+
+  IMFActivate** activates = nullptr;
+  UINT32 count = 0;
+  const HRESULT hr = MFTEnumEx(category, flags, &inputInfo, &outputInfo, &activates, &count);
+  if (FAILED(hr) || count == 0 || !activates) return false;
+
+  IMFTransform* transform = nullptr;
+  const char* role = (IsEqualGUID(category, MFT_CATEGORY_VIDEO_ENCODER) ? "encoder"
+                      : IsEqualGUID(category, MFT_CATEGORY_VIDEO_DECODER) ? "decoder"
+                                                                         : "?");
+  const bool ok =
+      try_activate_matching_names(activates, count, nameNeedles, needleCount, &transform, role);
+  release_activate_array(activates, count);
+  if (!ok || !transform) return false;
+  *outTransform = transform;
+  return true;
+}
+
+bool create_video_mft_from_enum_matching_name(const GUID& category, const GUID& inSubtype, const GUID& outSubtype,
+                                              DWORD flags, const wchar_t* nameNeedle,
+                                              IMFTransform** outTransform) {
+  if (!outTransform || !nameNeedle) return false;
+  const wchar_t* needles[1] = {nameNeedle};
+  return create_video_mft_from_enum_matching_names(category, inSubtype, outSubtype, flags, needles, 1,
+                                                   outTransform);
+}
+
+bool backend_is_any(const std::string& backendRaw, const char* const* values, size_t valueCount) {
+  if (!values || valueCount == 0) return false;
+  for (size_t i = 0; i < valueCount; ++i) {
+    const char* v = values[i];
+    if (v && _stricmp(backendRaw.c_str(), v) == 0) return true;
+  }
+  return false;
+}
+
+bool backend_is_auto_request(const std::string& backendRaw) {
+  static const char* const kAutoBackendNames[] = {"mft_auto", "auto"};
+  return backend_is_any(backendRaw, kAutoBackendNames,
+                        sizeof(kAutoBackendNames) / sizeof(kAutoBackendNames[0]));
+}
+
+bool create_h264_encoder_transform_from_mode(MftBackendMode backendMode, IMFTransform** outTransform,
+                                             bool* outUsingHardware, const char** outBackendName) {
+  if (!outTransform || !outUsingHardware || !outBackendName) return false;
+  IMFTransform* transform = nullptr;
+
+  if (backendMode != MftBackendMode::SoftwareOnly) {
+    // Prefer synchronous hardware MFT first. Async encoder MFTs may require an event-driven
+    // pipeline and can stall in this polling-style POC path.
+    constexpr DWORD kEnumFlagsHw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+    if (create_video_mft_from_enum(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_NV12, MFVideoFormat_H264,
+                                   kEnumFlagsHw, &transform)) {
+      *outTransform = transform;
+      *outUsingHardware = true;
+      *outBackendName = "mft_enum_hw";
+      return true;
+    }
+  }
+
+  if (backendMode == MftBackendMode::HardwareOnly) {
+    *outBackendName = "mft_hw_unavailable";
+    return false;
+  }
+
+  if (backendMode != MftBackendMode::HardwareOnly) {
+    constexpr DWORD kEnumFlagsSw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER | MFT_ENUM_FLAG_LOCALMFT;
+    if (create_video_mft_from_enum(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_NV12, MFVideoFormat_H264,
+                                   kEnumFlagsSw, &transform)) {
+      *outTransform = transform;
+      *outUsingHardware = false;
+      *outBackendName = "mft_enum_sw";
+      return true;
+    }
+  }
+
+  HRESULT hr = CoCreateInstance(CLSID_CMSH264EncoderMFT, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&transform));
+  if (FAILED(hr) || !transform) return false;
+  *outTransform = transform;
+  *outUsingHardware = false;
+  *outBackendName = "clsid_cmsh264enc";
+  return true;
+}
+
+bool create_h264_decoder_transform_from_mode(MftBackendMode backendMode, IMFTransform** outTransform,
+                                             bool* outUsingHardware, const char** outBackendName) {
+  if (!outTransform || !outUsingHardware || !outBackendName) return false;
+  IMFTransform* transform = nullptr;
+
+  if (backendMode != MftBackendMode::SoftwareOnly) {
+    constexpr DWORD kEnumFlagsHw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+    if (create_video_mft_from_enum(MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_H264, MFVideoFormat_NV12,
+                                   kEnumFlagsHw, &transform)) {
+      *outTransform = transform;
+      *outUsingHardware = true;
+      *outBackendName = "mft_enum_hw";
+      return true;
+    }
+  }
+
+  if (backendMode == MftBackendMode::HardwareOnly) {
+    *outBackendName = "mft_hw_unavailable";
+    return false;
+  }
+
+  if (backendMode != MftBackendMode::HardwareOnly) {
+    constexpr DWORD kEnumFlagsSw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER | MFT_ENUM_FLAG_LOCALMFT;
+    if (create_video_mft_from_enum(MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_H264, MFVideoFormat_NV12,
+                                   kEnumFlagsSw, &transform)) {
+      *outTransform = transform;
+      *outUsingHardware = false;
+      *outBackendName = "mft_enum_sw";
+      return true;
+    }
+  }
+
+  HRESULT hr = CoCreateInstance(CLSID_CMSH264DecoderMFT, nullptr, CLSCTX_INPROC_SERVER,
+                                IID_PPV_ARGS(&transform));
+  if (FAILED(hr) || !transform) return false;
+  *outTransform = transform;
+  *outUsingHardware = false;
+  *outBackendName = "clsid_cmsh264dec";
+  return true;
+}
+
+bool create_h264_encoder_transform(IMFTransform** outTransform, bool* outUsingHardware, const char** outBackendName) {
+  if (!outTransform || !outUsingHardware || !outBackendName) return false;
+  *outTransform = nullptr;
+  *outUsingHardware = false;
+  *outBackendName = "none";
+  g_lastEncoderIdentity = MftIdentity{};  // whatever this call activates is the identity, nothing older
+  g_lastEncoderIdentityValid = false;
+
+  IMFTransform* transform = nullptr;
+  const std::string backendRaw = env_string_local("REMOTE60_NATIVE_ENCODER_BACKEND");
+  auto try_create_amf_encoder = [&](bool markUnavailable) -> bool {
+    constexpr DWORD kEnumFlagsHw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+    if (create_video_mft_from_enum_matching_name(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_NV12, MFVideoFormat_H264,
+                                                 kEnumFlagsHw, L"AMDh264Encoder", &transform)) {
+      *outTransform = transform;
+      *outUsingHardware = true;
+      *outBackendName = "amf_mft_h264enc";
+      return true;
+    }
+    if (create_mft_from_clsid_string(L"{adc9bc80-0f41-46c6-ab75-d693d793597d}", &transform, "encoder")) {
+      *outTransform = transform;
+      *outUsingHardware = true;
+      *outBackendName = "amf_mft_h264enc";
+      return true;
+    }
+    if (markUnavailable) {
+      *outBackendName = "amf_mft_h264enc_unavailable";
+    }
+    return false;
+  };
+
+  if (backend_is_auto_request(backendRaw) &&
+      !env_truthy_local("REMOTE60_NATIVE_AUTO_BACKEND_DISABLE_VENDOR_PREFERENCE")) {
+    codec_debug_log("encoder backend=auto prefer-amf begin");
+    if (try_create_amf_encoder(false)) {
+      codec_debug_log("encoder backend=auto prefer-amf selected");
+      return true;
+    }
+    codec_debug_log("encoder backend=auto prefer-amf unavailable");
+  }
+
+  // AMD-specific direct backend (AMF MFT) to avoid generic hw enum ambiguity.
+  static const char* const kAmfBackendNames[] = {
+      "amf_hw", "amf_mft", "amd_hw", "amd_mft", "amd"};
+  if (backend_is_any(backendRaw, kAmfBackendNames,
+                     sizeof(kAmfBackendNames) / sizeof(kAmfBackendNames[0]))) {
+    codec_debug_log("encoder backend=amf_hw begin");
+    const bool ok = try_create_amf_encoder(true);
+    if (!ok) codec_debug_log("encoder backend=amf_hw unavailable");
+    return ok;
+  }
+  {
+    static const char* const kNvencBackendNames[] = {
+        "nvenc_hw", "nvenc_mft", "nvenc", "nvidia_hw", "nvidia_mft", "nvidia"};
+    if (backend_is_any(backendRaw, kNvencBackendNames,
+                       sizeof(kNvencBackendNames) / sizeof(kNvencBackendNames[0]))) {
+      codec_debug_log("encoder backend=nvenc_hw begin");
+      constexpr DWORD kEnumFlagsHw =
+          MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+      static const wchar_t* const kNvencFriendlyNeedles[] = {L"NVIDIA", L"NVENC"};
+      if (create_video_mft_from_enum_matching_names(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_NV12,
+                                                    MFVideoFormat_H264, kEnumFlagsHw,
+                                                    kNvencFriendlyNeedles,
+                                                    sizeof(kNvencFriendlyNeedles) /
+                                                        sizeof(kNvencFriendlyNeedles[0]),
+                                                    &transform)) {
+        *outTransform = transform;
+        *outUsingHardware = true;
+        *outBackendName = "nvenc_mft_h264enc";
+        return true;
+      }
+      codec_debug_log("encoder backend=nvenc_hw unavailable");
+      if (create_h264_encoder_transform_from_mode(MftBackendMode::Auto, outTransform, outUsingHardware,
+                                                  outBackendName)) {
+        std::string line =
+            std::string("encoder backend=nvenc_hw fallback=") + (*outBackendName ? *outBackendName : "unknown");
+        codec_debug_log(line.c_str());
+        return true;
+      }
+      *outBackendName = "nvenc_mft_h264enc_unavailable";
+      return false;
+    }
+  }
+  {
+    static const char* const kQsvBackendNames[] = {
+        "qsv_hw", "qsv_mft", "qsv", "intel_hw", "intel_mft", "intel"};
+    if (backend_is_any(backendRaw, kQsvBackendNames,
+                       sizeof(kQsvBackendNames) / sizeof(kQsvBackendNames[0]))) {
+      codec_debug_log("encoder backend=qsv_hw begin");
+      constexpr DWORD kEnumFlagsHw =
+          MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+      static const wchar_t* const kQsvFriendlyNeedles[] = {L"Intel", L"Quick Sync", L"QSV"};
+      if (create_video_mft_from_enum_matching_names(MFT_CATEGORY_VIDEO_ENCODER, MFVideoFormat_NV12,
+                                                    MFVideoFormat_H264, kEnumFlagsHw,
+                                                    kQsvFriendlyNeedles,
+                                                    sizeof(kQsvFriendlyNeedles) /
+                                                        sizeof(kQsvFriendlyNeedles[0]),
+                                                    &transform)) {
+        *outTransform = transform;
+        *outUsingHardware = true;
+        *outBackendName = "qsv_mft_h264enc";
+        return true;
+      }
+      codec_debug_log("encoder backend=qsv_hw unavailable");
+      if (create_h264_encoder_transform_from_mode(MftBackendMode::Auto, outTransform, outUsingHardware,
+                                                  outBackendName)) {
+        std::string line =
+            std::string("encoder backend=qsv_hw fallback=") + (*outBackendName ? *outBackendName : "unknown");
+        codec_debug_log(line.c_str());
+        return true;
+      }
+      *outBackendName = "qsv_mft_h264enc_unavailable";
+      return false;
+    }
+  }
+
+  const MftBackendMode backendMode = parse_mft_backend_mode(backendRaw);
+  return create_h264_encoder_transform_from_mode(backendMode, outTransform, outUsingHardware, outBackendName);
+}
+
+bool create_h264_decoder_transform(IMFTransform** outTransform, bool* outUsingHardware, const char** outBackendName) {
+  if (!outTransform || !outUsingHardware || !outBackendName) return false;
+  *outTransform = nullptr;
+  *outUsingHardware = false;
+  *outBackendName = "none";
+
+  IMFTransform* transform = nullptr;
+  const std::string backendRaw = env_string_local("REMOTE60_NATIVE_DECODER_BACKEND");
+  // AMD-specific direct backend (AMF D3D11 decoder MFT).
+  static const char* const kAmfBackendNames[] = {
+      "amf_hw", "amf_mft", "amd_hw", "amd_mft", "amd"};
+  if (backend_is_any(backendRaw, kAmfBackendNames,
+                     sizeof(kAmfBackendNames) / sizeof(kAmfBackendNames[0]))) {
+    codec_debug_log("decoder backend=amf_hw begin");
+    constexpr DWORD kEnumFlagsHw = MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+    if (create_video_mft_from_enum_matching_name(MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_H264, MFVideoFormat_NV12,
+                                                 kEnumFlagsHw, L"AMD D3D11 Hardware MFT Playback Decoder",
+                                                 &transform)) {
+      if (decoder_supports_h264_input(transform)) {
+        *outTransform = transform;
+        *outUsingHardware = true;
+        *outBackendName = "amf_mft_h264dec";
+        return true;
+      }
+      transform->Release();
+      transform = nullptr;
+    }
+    if (create_mft_from_clsid_string(L"{17796aeb-0f66-4663-b8fb-99cbee0224ce}", &transform, "decoder")) {
+      if (decoder_supports_h264_input(transform)) {
+        *outTransform = transform;
+        *outUsingHardware = true;
+        *outBackendName = "amf_mft_h264dec";
+        return true;
+      }
+      transform->Release();
+      transform = nullptr;
+    }
+    if (create_video_mft_from_enum(MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_H264, MFVideoFormat_NV12,
+                                   kEnumFlagsHw, &transform)) {
+      *outTransform = transform;
+      *outUsingHardware = true;
+      *outBackendName = "mft_enum_hw";
+      return true;
+    }
+    *outBackendName = "amf_mft_h264dec_unavailable";
+    codec_debug_log("decoder backend=amf_hw unavailable");
+    return false;
+  }
+  {
+    static const char* const kNvencBackendNames[] = {
+        "nvenc_hw", "nvenc_mft", "nvenc", "nvidia_hw", "nvidia_mft", "nvidia"};
+    if (backend_is_any(backendRaw, kNvencBackendNames,
+                       sizeof(kNvencBackendNames) / sizeof(kNvencBackendNames[0]))) {
+      codec_debug_log("decoder backend=nvenc_hw begin");
+      constexpr DWORD kEnumFlagsHw =
+          MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+      static const wchar_t* const kNvdecFriendlyNeedles[] = {L"NVIDIA", L"NVDEC"};
+      if (create_video_mft_from_enum_matching_names(MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_H264,
+                                                    MFVideoFormat_NV12, kEnumFlagsHw,
+                                                    kNvdecFriendlyNeedles,
+                                                    sizeof(kNvdecFriendlyNeedles) /
+                                                        sizeof(kNvdecFriendlyNeedles[0]),
+                                                    &transform)) {
+        if (decoder_supports_h264_input(transform)) {
+          *outTransform = transform;
+          *outUsingHardware = true;
+          *outBackendName = "nvenc_mft_h264dec";
+          return true;
+        }
+        transform->Release();
+        transform = nullptr;
+      }
+      codec_debug_log("decoder backend=nvenc_hw unavailable");
+      if (create_h264_decoder_transform_from_mode(MftBackendMode::Auto, outTransform, outUsingHardware,
+                                                  outBackendName)) {
+        std::string line =
+            std::string("decoder backend=nvenc_hw fallback=") + (*outBackendName ? *outBackendName : "unknown");
+        codec_debug_log(line.c_str());
+        return true;
+      }
+      *outBackendName = "nvenc_mft_h264dec_unavailable";
+      return false;
+    }
+  }
+  {
+    static const char* const kQsvBackendNames[] = {
+        "qsv_hw", "qsv_mft", "qsv", "intel_hw", "intel_mft", "intel"};
+    if (backend_is_any(backendRaw, kQsvBackendNames,
+                       sizeof(kQsvBackendNames) / sizeof(kQsvBackendNames[0]))) {
+      codec_debug_log("decoder backend=qsv_hw begin");
+      constexpr DWORD kEnumFlagsHw =
+          MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_HARDWARE | MFT_ENUM_FLAG_SORTANDFILTER;
+      static const wchar_t* const kQsvFriendlyNeedles[] = {L"Intel", L"Quick Sync", L"QSV"};
+      if (create_video_mft_from_enum_matching_names(MFT_CATEGORY_VIDEO_DECODER, MFVideoFormat_H264,
+                                                    MFVideoFormat_NV12, kEnumFlagsHw,
+                                                    kQsvFriendlyNeedles,
+                                                    sizeof(kQsvFriendlyNeedles) /
+                                                        sizeof(kQsvFriendlyNeedles[0]),
+                                                    &transform)) {
+        if (decoder_supports_h264_input(transform)) {
+          *outTransform = transform;
+          *outUsingHardware = true;
+          *outBackendName = "qsv_mft_h264dec";
+          return true;
+        }
+        transform->Release();
+        transform = nullptr;
+      }
+      codec_debug_log("decoder backend=qsv_hw unavailable");
+      if (create_h264_decoder_transform_from_mode(MftBackendMode::Auto, outTransform, outUsingHardware,
+                                                  outBackendName)) {
+        std::string line =
+            std::string("decoder backend=qsv_hw fallback=") + (*outBackendName ? *outBackendName : "unknown");
+        codec_debug_log(line.c_str());
+        return true;
+      }
+      *outBackendName = "qsv_mft_h264dec_unavailable";
+      return false;
+    }
+  }
+
+  const MftBackendMode backendMode = parse_mft_backend_mode(backendRaw);
+  return create_h264_decoder_transform_from_mode(backendMode, outTransform, outUsingHardware, outBackendName);
+}
+
+}  // namespace
+
+bool bgra_to_nv12_buffer(const uint8_t* bgra, uint32_t width, uint32_t height,
+                         uint32_t bgraStride, uint8_t* outNv12, size_t outNv12Size) {
+  if (!bgra || width == 0 || height == 0 || !outNv12 ||
+      bgraStride < static_cast<size_t>(width) * 4) {
+    return false;
+  }
+  const size_t yPlaneSize = static_cast<size_t>(width) * static_cast<size_t>(height);
+  const size_t uvPlaneSize = static_cast<size_t>(width) * static_cast<size_t>((height + 1) / 2);
+  if (outNv12Size < yPlaneSize + uvPlaneSize) return false;
+
+  auto* yPlane = outNv12;
+  auto* uvPlane = outNv12 + yPlaneSize;
+
+  struct BgraToNv12Tables {
+    int yR[256]{};
+    int yG[256]{};
+    int yB[256]{};
+  };
+  // BT.709 limited range (16-235 luma / 16-240 chroma). Must stay in lockstep with
+  // nv12_to_bgra below, the client D3D pixel shader, and apply_video_colorimetry.
+  static const BgraToNv12Tables kTbl = []() {
+    BgraToNv12Tables t{};
+    for (int i = 0; i < 256; ++i) {
+      t.yR[i] = 47 * i;
+      t.yG[i] = 157 * i;
+      t.yB[i] = 16 * i;
+    }
+    return t;
+  }();
+
+  // Luma accounts for two thirds of the output pixels. Process four BGRA pixels per
+  // iteration with SSE2 (available on every supported x64 Windows host), preserving the
+  // exact integer BT.709 coefficients used by the scalar path.
+  const __m128i zero = _mm_setzero_si128();
+  const __m128i mask = _mm_set1_epi32(0xff);
+  const __m128i coeffB = _mm_set1_epi16(16);
+  const __m128i coeffG = _mm_set1_epi16(157);
+  const __m128i coeffR = _mm_set1_epi16(47);
+  const __m128i rounding = _mm_set1_epi16(128);
+  const __m128i offset = _mm_set1_epi16(16);
+  for (uint32_t y = 0; y < height; ++y) {
+    const uint8_t* src = bgra + static_cast<size_t>(y) * bgraStride;
+    uint8_t* dst = yPlane + static_cast<size_t>(y) * width;
+    uint32_t x = 0;
+    for (; x + 4 <= width; x += 4) {
+      const __m128i pixels = _mm_loadu_si128(reinterpret_cast<const __m128i*>(src + x * 4));
+      const __m128i b16 = _mm_packs_epi32(_mm_and_si128(pixels, mask), zero);
+      const __m128i g16 = _mm_packs_epi32(_mm_and_si128(_mm_srli_epi32(pixels, 8), mask), zero);
+      const __m128i r16 = _mm_packs_epi32(_mm_and_si128(_mm_srli_epi32(pixels, 16), mask), zero);
+      __m128i y16 = _mm_add_epi16(_mm_mullo_epi16(b16, coeffB),
+                                  _mm_mullo_epi16(g16, coeffG));
+      y16 = _mm_add_epi16(y16, _mm_mullo_epi16(r16, coeffR));
+      y16 = _mm_add_epi16(_mm_srli_epi16(_mm_add_epi16(y16, rounding), 8), offset);
+      const uint32_t packed = static_cast<uint32_t>(_mm_cvtsi128_si32(_mm_packus_epi16(y16, zero)));
+      std::memcpy(dst + x, &packed, sizeof(packed));
+    }
+    for (; x < width; ++x) {
+      const uint8_t* p = src + static_cast<size_t>(x) * 4;
+      const int yy = ((kTbl.yR[p[2]] + kTbl.yG[p[1]] + kTbl.yB[p[0]] + 128) >> 8) + 16;
+      dst[x] = static_cast<uint8_t>(clamp_u8_int(yy));
+    }
+  }
+
+  for (uint32_t y = 0; y < height; y += 2) {
+    const uint32_t y1 = std::min<uint32_t>(y + 1, height - 1);
+    const uint8_t* row0 = bgra + static_cast<size_t>(y) * bgraStride;
+    const uint8_t* row1 = bgra + static_cast<size_t>(y1) * bgraStride;
+    uint8_t* uvRow = uvPlane + static_cast<size_t>(y / 2) * width;
+
+    for (uint32_t x = 0; x < width; x += 2) {
+      const uint32_t x1 = std::min<uint32_t>(x + 1, width - 1);
+      const uint8_t* p00 = row0 + static_cast<size_t>(x) * 4;
+      const uint8_t* p10 = row0 + static_cast<size_t>(x1) * 4;
+      const uint8_t* p01 = row1 + static_cast<size_t>(x) * 4;
+      const uint8_t* p11 = row1 + static_cast<size_t>(x1) * 4;
+
+      const int b00 = p00[0], g00 = p00[1], r00 = p00[2];
+      const int b10 = p10[0], g10 = p10[1], r10 = p10[2];
+      const int b01 = p01[0], g01 = p01[1], r01 = p01[2];
+      const int b11 = p11[0], g11 = p11[1], r11 = p11[2];
+
+      const int rAvg = (r00 + r10 + r01 + r11 + 2) >> 2;
+      const int gAvg = (g00 + g10 + g01 + g11 + 2) >> 2;
+      const int bAvg = (b00 + b10 + b01 + b11 + 2) >> 2;
+      const int uu = ((-26 * rAvg - 87 * gAvg + 113 * bAvg + 128) >> 8) + 128;
+      const int vv = ((112 * rAvg - 102 * gAvg - 10 * bAvg + 128) >> 8) + 128;
+      uvRow[x] = static_cast<uint8_t>(clamp_u8_int(uu));
+      if (x + 1 < width) uvRow[x + 1] = static_cast<uint8_t>(clamp_u8_int(vv));
+    }
+  }
+
+  return true;
+}
+
+bool bgra_to_nv12(const uint8_t* bgra, uint32_t width, uint32_t height, uint32_t bgraStride,
+                  std::vector<uint8_t>* outNv12) {
+  if (!bgra || width == 0 || height == 0 || !outNv12) return false;
+  const size_t yPlaneSize = static_cast<size_t>(width) * static_cast<size_t>(height);
+  const size_t uvPlaneSize = static_cast<size_t>(width) * static_cast<size_t>((height + 1) / 2);
+  outNv12->resize(yPlaneSize + uvPlaneSize);
+  return bgra_to_nv12_buffer(bgra, width, height, bgraStride, outNv12->data(), outNv12->size());
+}
+
+bool nv12_to_bgra(const uint8_t* nv12, uint32_t width, uint32_t height, std::vector<uint8_t>* outBgra) {
+  if (!nv12 || width == 0 || height == 0 || !outBgra) return false;
+  const size_t yPlaneSize = static_cast<size_t>(width) * static_cast<size_t>(height);
+  const auto* yPlane = nv12;
+  const auto* uvPlane = nv12 + yPlaneSize;
+  outBgra->resize(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
+
+  struct Nv12Tables {
+    int yScale[256]{};
+    int rv[256]{};
+    int gu[256]{};
+    int gv[256]{};
+    int bu[256]{};
+  };
+  // BT.709 limited range inverse of bgra_to_nv12.
+  static const Nv12Tables kTbl = []() {
+    Nv12Tables t{};
+    for (int i = 0; i < 256; ++i) {
+      const int y = std::max(0, i - 16);
+      const int uv = i - 128;
+      t.yScale[i] = 298 * y;
+      t.rv[i] = 459 * uv;
+      t.gu[i] = -55 * uv;
+      t.gv[i] = -136 * uv;
+      t.bu[i] = 541 * uv;
+    }
+    return t;
+  }();
+
+  for (uint32_t y = 0; y < height; ++y) {
+    const uint8_t* yRow = yPlane + static_cast<size_t>(y) * width;
+    const uint8_t* uvRow = uvPlane + static_cast<size_t>(y / 2) * width;
+    uint8_t* out = outBgra->data() + static_cast<size_t>(y) * width * 4;
+
+    uint32_t x = 0;
+    for (; x + 1 < width; x += 2) {
+      const uint8_t u = uvRow[x + 0];
+      const uint8_t v = uvRow[x + 1];
+      const int rv = kTbl.rv[v];
+      const int guv = kTbl.gu[u] + kTbl.gv[v];
+      const int bu = kTbl.bu[u];
+
+      const int y0 = kTbl.yScale[yRow[x + 0]];
+      const int r0 = (y0 + rv + 128) >> 8;
+      const int g0 = (y0 + guv + 128) >> 8;
+      const int b0 = (y0 + bu + 128) >> 8;
+      out[(x + 0) * 4 + 0] = static_cast<uint8_t>(clamp_u8_int(b0));
+      out[(x + 0) * 4 + 1] = static_cast<uint8_t>(clamp_u8_int(g0));
+      out[(x + 0) * 4 + 2] = static_cast<uint8_t>(clamp_u8_int(r0));
+      out[(x + 0) * 4 + 3] = 255;
+
+      const int y1 = kTbl.yScale[yRow[x + 1]];
+      const int r1 = (y1 + rv + 128) >> 8;
+      const int g1 = (y1 + guv + 128) >> 8;
+      const int b1 = (y1 + bu + 128) >> 8;
+      out[(x + 1) * 4 + 0] = static_cast<uint8_t>(clamp_u8_int(b1));
+      out[(x + 1) * 4 + 1] = static_cast<uint8_t>(clamp_u8_int(g1));
+      out[(x + 1) * 4 + 2] = static_cast<uint8_t>(clamp_u8_int(r1));
+      out[(x + 1) * 4 + 3] = 255;
+    }
+
+    if (x < width) {
+      const uint32_t uvBase = (x / 2u) * 2u;
+      const uint8_t u = uvRow[uvBase];
+      const uint8_t v = uvRow[std::min<uint32_t>(uvBase + 1u, width - 1u)];
+      const int yy = kTbl.yScale[yRow[x]];
+      const int r = (yy + kTbl.rv[v] + 128) >> 8;
+      const int g = (yy + kTbl.gu[u] + kTbl.gv[v] + 128) >> 8;
+      const int b = (yy + kTbl.bu[u] + 128) >> 8;
+      out[x * 4 + 0] = static_cast<uint8_t>(clamp_u8_int(b));
+      out[x * 4 + 1] = static_cast<uint8_t>(clamp_u8_int(g));
+      out[x * 4 + 2] = static_cast<uint8_t>(clamp_u8_int(r));
+      out[x * 4 + 3] = 255;
+    }
+  }
+  return true;
+}
+
+H264Encoder::~H264Encoder() {
+  shutdown();
+}
+
+bool H264Encoder::set_d3d11_device(ID3D11Device* device) {
+  d3dManager_.Reset();
+  d3dManagerResetToken_ = 0;
+  if (!device) return false;
+
+  UINT token = 0;
+  Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> manager;
+  if (FAILED(MFCreateDXGIDeviceManager(&token, &manager)) || !manager) {
+    return false;
+  }
+  if (FAILED(manager->ResetDevice(device, token))) {
+    return false;
+  }
+  d3dManager_ = manager;
+  d3dManagerResetToken_ = token;
+  return true;
+}
+
+bool H264Encoder::configure_types(const char* stageReason) {
+  if (!enc_) return false;
+
+  // stutter-keyframe r1 (step-4a observability, cadence-neutral): try the GOP size BEFORE the output
+  // media type is set and log the readback, so the field test can see whether the company PC's MFT
+  // honours a pre-type GOP (some MFTs only apply AVEncMPVGOPSize before SetOutputType). This does NOT
+  // change the key period -- it sets the same value the authoritative post-type set in
+  // apply_low_latency_codec_api applies afterwards; it only adds a comparison point. A readback that
+  // equals the request pre-type but gets clamped post-type (or vice versa) tells the ordering story.
+  {
+    const uint32_t preGop = std::max<uint32_t>(1, keyint_);
+    const HRESULT preSetHr = set_codecapi_u32_hr(enc_.Get(), CODECAPI_AVEncMPVGOPSize, preGop);
+    uint32_t preReadback = 0;
+    const bool preGetOk = get_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, &preReadback);
+    char preLine[224];
+    std::snprintf(preLine, sizeof(preLine),
+                  "[native-video-host] h264 gop-config stage=pre-type reason=%s backend=%s requestedGop=%u "
+                  "setHr=0x%08lX readbackOk=%d readbackGop=%u",
+                  stageReason ? stageReason : "init", backendName_, preGop,
+                  static_cast<unsigned long>(preSetHr), preGetOk ? 1 : 0, preReadback);
+    std::cout << preLine << "\n";
+  }
+
+  auto make_output_h264_type = [&]() -> Microsoft::WRL::ComPtr<IMFMediaType> {
+    Microsoft::WRL::ComPtr<IMFMediaType> outType;
+    if (FAILED(MFCreateMediaType(&outType)) || !outType) return nullptr;
+    (void)outType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    (void)outType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_H264);
+    (void)MFSetAttributeSize(outType.Get(), MF_MT_FRAME_SIZE, width_, height_);
+    (void)MFSetAttributeRatio(outType.Get(), MF_MT_FRAME_RATE, fps_, 1);
+    (void)MFSetAttributeRatio(outType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+    (void)outType->SetUINT32(MF_MT_AVG_BITRATE, bitrate_);
+    (void)outType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    (void)outType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
+    (void)outType->SetUINT32(MF_MT_MPEG2_LEVEL, h264_level_for(width_, height_, fps_));
+    apply_video_colorimetry(outType.Get());
+    return outType;
+  };
+
+  auto make_input_nv12_type = [&]() -> Microsoft::WRL::ComPtr<IMFMediaType> {
+    Microsoft::WRL::ComPtr<IMFMediaType> inType;
+    if (FAILED(MFCreateMediaType(&inType)) || !inType) return nullptr;
+    (void)inType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    (void)inType->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_NV12);
+    (void)MFSetAttributeSize(inType.Get(), MF_MT_FRAME_SIZE, width_, height_);
+    (void)MFSetAttributeRatio(inType.Get(), MF_MT_FRAME_RATE, fps_, 1);
+    (void)MFSetAttributeRatio(inType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+    (void)inType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    apply_video_colorimetry(inType.Get());
+    return inType;
+  };
+
+  auto try_direct_types = [&]() -> bool {
+    auto outType = make_output_h264_type();
+    auto inType = make_input_nv12_type();
+    if (!outType || !inType) return false;
+
+    // Some hardware MFTs expect input-first, others output-first. Try both orders.
+    if (SUCCEEDED(enc_->SetInputType(0, inType.Get(), 0)) &&
+        SUCCEEDED(enc_->SetOutputType(0, outType.Get(), 0))) {
+      return true;
+    }
+    if (SUCCEEDED(enc_->SetOutputType(0, outType.Get(), 0)) &&
+        SUCCEEDED(enc_->SetInputType(0, inType.Get(), 0))) {
+      return true;
+    }
+    return false;
+  };
+
+  if (std::strcmp(backendName_, "amf_mft_h264enc") == 0) {
+    codec_debug_log("encoder configure types: direct path for amf");
+    for (DWORD i = 0; i < 8; ++i) {
+      IMFMediaType* outTypeRaw = nullptr;
+      const HRESULT hr = enc_->GetOutputAvailableType(0, i, &outTypeRaw);
+      if (hr == MF_E_NO_MORE_TYPES) break;
+      if (FAILED(hr) || !outTypeRaw) {
+        std::string line = "encoder amf: GetOutputAvailableType failed idx=" + std::to_string(i) +
+                           " hr=" + hr_to_hex(hr);
+        codec_debug_log(line.c_str());
+        continue;
+      }
+      Microsoft::WRL::ComPtr<IMFMediaType> outType;
+      outType.Attach(outTypeRaw);
+      GUID st{};
+      if (SUCCEEDED(outType->GetGUID(MF_MT_SUBTYPE, &st))) {
+        const std::string s = guid_to_string(st);
+        std::string line = "encoder amf: out subtype=" + s;
+        codec_debug_log(line.c_str());
+      }
+    }
+    for (DWORD i = 0; i < 8; ++i) {
+      IMFMediaType* inTypeRaw = nullptr;
+      const HRESULT hr = enc_->GetInputAvailableType(0, i, &inTypeRaw);
+      if (hr == MF_E_NO_MORE_TYPES) break;
+      if (FAILED(hr) || !inTypeRaw) {
+        std::string line = "encoder amf: GetInputAvailableType failed idx=" + std::to_string(i) +
+                           " hr=" + hr_to_hex(hr);
+        codec_debug_log(line.c_str());
+        continue;
+      }
+      Microsoft::WRL::ComPtr<IMFMediaType> inType;
+      inType.Attach(inTypeRaw);
+      GUID st{};
+      if (SUCCEEDED(inType->GetGUID(MF_MT_SUBTYPE, &st))) {
+        const std::string s = guid_to_string(st);
+        std::string line = "encoder amf: in subtype=" + s;
+        codec_debug_log(line.c_str());
+      }
+    }
+
+    bool outConfigured = false;
+    for (DWORD i = 0; i < 64; ++i) {
+      IMFMediaType* outTypeRaw = nullptr;
+      const HRESULT hr = enc_->GetOutputAvailableType(0, i, &outTypeRaw);
+      if (hr == MF_E_NO_MORE_TYPES) break;
+      if (FAILED(hr) || !outTypeRaw) continue;
+      Microsoft::WRL::ComPtr<IMFMediaType> outType;
+      outType.Attach(outTypeRaw);
+
+      GUID st{};
+      if (FAILED(outType->GetGUID(MF_MT_SUBTYPE, &st))) continue;
+      if (st != MFVideoFormat_H264) continue;
+
+      (void)MFSetAttributeSize(outType.Get(), MF_MT_FRAME_SIZE, width_, height_);
+      (void)MFSetAttributeRatio(outType.Get(), MF_MT_FRAME_RATE, fps_, 1);
+      (void)MFSetAttributeRatio(outType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+      (void)outType->SetUINT32(MF_MT_AVG_BITRATE, bitrate_);
+      (void)outType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+      apply_video_colorimetry(outType.Get());
+      (void)outType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
+      (void)outType->SetUINT32(MF_MT_MPEG2_LEVEL, h264_level_for(width_, height_, fps_));
+      if (SUCCEEDED(enc_->SetOutputType(0, outType.Get(), 0))) {
+        outConfigured = true;
+        codec_debug_log("encoder amf: output type configured by enum (high profile)");
+        break;
+      }
+      // Not every enumerated type accepts an explicit profile/level; fall back to the
+      // MFT's own defaults rather than losing the whole type.
+      (void)outType->DeleteItem(MF_MT_MPEG2_PROFILE);
+      (void)outType->DeleteItem(MF_MT_MPEG2_LEVEL);
+      if (SUCCEEDED(enc_->SetOutputType(0, outType.Get(), 0))) {
+        outConfigured = true;
+        codec_debug_log("encoder amf: output type configured by enum (default profile)");
+        break;
+      }
+    }
+
+    bool inConfigured = false;
+    for (DWORD i = 0; i < 64; ++i) {
+      IMFMediaType* inTypeRaw = nullptr;
+      const HRESULT hr = enc_->GetInputAvailableType(0, i, &inTypeRaw);
+      if (hr == MF_E_NO_MORE_TYPES) break;
+      if (FAILED(hr) || !inTypeRaw) continue;
+      Microsoft::WRL::ComPtr<IMFMediaType> inType;
+      inType.Attach(inTypeRaw);
+
+      GUID st{};
+      if (FAILED(inType->GetGUID(MF_MT_SUBTYPE, &st))) continue;
+      if (st != MFVideoFormat_NV12) continue;
+
+      (void)MFSetAttributeSize(inType.Get(), MF_MT_FRAME_SIZE, width_, height_);
+      (void)MFSetAttributeRatio(inType.Get(), MF_MT_FRAME_RATE, fps_, 1);
+      (void)MFSetAttributeRatio(inType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+      (void)inType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+      apply_video_colorimetry(inType.Get());
+      if (SUCCEEDED(enc_->SetInputType(0, inType.Get(), 0))) {
+        inConfigured = true;
+        codec_debug_log("encoder amf: input type configured by enum");
+        break;
+      }
+    }
+
+    if (outConfigured && inConfigured) {
+      return true;
+    }
+
+    auto outType = make_output_h264_type();
+    auto inType = make_input_nv12_type();
+    if (!outType || !inType) return false;
+
+    codec_debug_log("encoder amf: fallback test output type");
+    {
+      const HRESULT hr = enc_->SetOutputType(0, outType.Get(), MFT_SET_TYPE_TEST_ONLY);
+      std::string line = "encoder amf: fallback test output hr=" + hr_to_hex(hr);
+      codec_debug_log(line.c_str());
+    }
+    codec_debug_log("encoder amf: fallback test input type");
+    {
+      const HRESULT hr = enc_->SetInputType(0, inType.Get(), MFT_SET_TYPE_TEST_ONLY);
+      std::string line = "encoder amf: fallback test input hr=" + hr_to_hex(hr);
+      codec_debug_log(line.c_str());
+    }
+
+    codec_debug_log("encoder amf: fallback set input type");
+    {
+      const HRESULT hr = enc_->SetInputType(0, inType.Get(), 0);
+      std::string line = "encoder amf: fallback set input hr=" + hr_to_hex(hr);
+      codec_debug_log(line.c_str());
+      if (SUCCEEDED(hr)) {
+      codec_debug_log("encoder amf: fallback set output type");
+        const HRESULT hrOut = enc_->SetOutputType(0, outType.Get(), 0);
+        std::string lineOut = "encoder amf: fallback set output hr=" + hr_to_hex(hrOut);
+        codec_debug_log(lineOut.c_str());
+        if (SUCCEEDED(hrOut)) {
+        codec_debug_log("encoder amf: fallback direct types configured(input->output)");
+        return true;
+        }
+      }
+    }
+    codec_debug_log("encoder amf: fallback retry output->input");
+    {
+      const HRESULT hrOut = enc_->SetOutputType(0, outType.Get(), 0);
+      const HRESULT hrIn = SUCCEEDED(hrOut) ? enc_->SetInputType(0, inType.Get(), 0) : E_FAIL;
+      std::string line = "encoder amf: fallback retry output hr=" + hr_to_hex(hrOut) +
+                         " input hr=" + hr_to_hex(hrIn);
+      codec_debug_log(line.c_str());
+      if (SUCCEEDED(hrOut) && SUCCEEDED(hrIn)) {
+      codec_debug_log("encoder amf: fallback direct types configured(output->input)");
+      return true;
+      }
+    }
+    codec_debug_log("encoder amf: configure types failed");
+    return false;
+  }
+
+  // Try direct type setup first to avoid expensive/unstable full type enumeration.
+  if (try_direct_types()) {
+    return true;
+  }
+
+  for (DWORD i = 0;; ++i) {
+    IMFMediaType* outTypeRaw = nullptr;
+    const HRESULT hr = enc_->GetOutputAvailableType(0, i, &outTypeRaw);
+    if (hr == MF_E_NO_MORE_TYPES) return false;
+    if (FAILED(hr) || !outTypeRaw) continue;
+    Microsoft::WRL::ComPtr<IMFMediaType> outType;
+    outType.Attach(outTypeRaw);
+
+    GUID st{};
+    if (FAILED(outType->GetGUID(MF_MT_SUBTYPE, &st)) || st != MFVideoFormat_H264) continue;
+    (void)MFSetAttributeSize(outType.Get(), MF_MT_FRAME_SIZE, width_, height_);
+    (void)MFSetAttributeRatio(outType.Get(), MF_MT_FRAME_RATE, fps_, 1);
+    (void)outType->SetUINT32(MF_MT_AVG_BITRATE, bitrate_);
+    (void)outType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    apply_video_colorimetry(outType.Get());
+    (void)outType->SetUINT32(MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High);
+    (void)outType->SetUINT32(MF_MT_MPEG2_LEVEL, h264_level_for(width_, height_, fps_));
+    if (SUCCEEDED(enc_->SetOutputType(0, outType.Get(), 0))) break;
+    (void)outType->DeleteItem(MF_MT_MPEG2_PROFILE);
+    (void)outType->DeleteItem(MF_MT_MPEG2_LEVEL);
+    if (SUCCEEDED(enc_->SetOutputType(0, outType.Get(), 0))) break;
+  }
+
+  for (DWORD i = 0;; ++i) {
+    IMFMediaType* inTypeRaw = nullptr;
+    const HRESULT hr = enc_->GetInputAvailableType(0, i, &inTypeRaw);
+    if (hr == MF_E_NO_MORE_TYPES) return false;
+    if (FAILED(hr) || !inTypeRaw) continue;
+    Microsoft::WRL::ComPtr<IMFMediaType> inType;
+    inType.Attach(inTypeRaw);
+
+    GUID st{};
+    if (FAILED(inType->GetGUID(MF_MT_SUBTYPE, &st)) || st != MFVideoFormat_NV12) continue;
+    (void)MFSetAttributeSize(inType.Get(), MF_MT_FRAME_SIZE, width_, height_);
+    (void)MFSetAttributeRatio(inType.Get(), MF_MT_FRAME_RATE, fps_, 1);
+    (void)MFSetAttributeRatio(inType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+    (void)inType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    apply_video_colorimetry(inType.Get());
+    if (SUCCEEDED(enc_->SetInputType(0, inType.Get(), 0))) return true;
+  }
+}
+
+void H264Encoder::apply_low_latency_codec_api() {
+  if (!enc_) return;
+  // quality r6 diagnostic switches (all default to today's settings): REMOTE60_NATIVE_LOW_LATENCY=0
+  // leaves the three low-latency hints off, REMOTE60_NATIVE_REALTIME=0 the real-time one. Used to
+  // look for a configuration in which this PC's MFT follows its mean bitrate.
+  const bool lowLatency = !env_string_equals_ci("REMOTE60_NATIVE_LOW_LATENCY", "0");
+  const bool realTime = !env_string_equals_ci("REMOTE60_NATIVE_REALTIME", "0");
+  if (lowLatency) {
+    (void)set_mf_attr_u32(enc_.Get(), MF_LOW_LATENCY, 1);
+    (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVLowLatencyMode, true);
+    (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncCommonLowLatency, true);
+  }
+  if (realTime) (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncCommonRealTime, true);
+
+  // encoder-rc-budget C2: the legacy profile sets its rate control here, after the types -- today's
+  // order, read back as set on the AMD MFT. The NVIDIA profile already set its plan before the types
+  // and does not re-issue it: on that MFT a post-types SetValue returns S_OK without being applied,
+  // and a needless SetValue on a running instance is the thing C3 rules out.
+  if (rcProfile_ != RcProfile::NvidiaPreTypes) (void)apply_rate_control("init");
+
+  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVDefaultBPictureCount, 0);
+  (void)set_codecapi_bool(enc_.Get(), CODECAPI_AVEncMPVGOPOpen, false);
+  // GOP-config telemetry (FIX-4 investigation): the field showed keyint=120 requested but an IDR
+  // cadence of ~60 frames. AVEncMPVGOPSize is a MAXIMUM GOP, so a smaller observed cadence can be
+  // spec-legal encoder policy rather than the property being ignored. Log requested vs SetValue
+  // HRESULT vs GetValue readback vs backend so the three cases separate: setHr!=S_OK => rejected;
+  // setHr=S_OK & readback=requested & observed<requested => encoder policy; readback<requested =>
+  // clamped/not applied.
+  // quality r4 note: the host counts its periodic key from the last key of ANY reason
+  // (EncoderState::realInputsSinceKey), so an IDR this GOP produces on its own restarts that
+  // count and is not followed by a second one. A longer GOP here was tried and REVERTED: at
+  // four periods the recovery rig (viewer_udp_recovery_test) stopped resuming on the forced
+  // recovery IDR in 4-8 of its cases, reproducibly, and passed again at one period.
+  const uint32_t requestedGop = std::max<uint32_t>(1, keyint_);
+  const HRESULT gopSetHr = set_codecapi_u32_hr(enc_.Get(), CODECAPI_AVEncMPVGOPSize, requestedGop);
+  uint32_t gopReadback = 0;
+  const bool gopGetOk = get_codecapi_u32(enc_.Get(), CODECAPI_AVEncMPVGOPSize, &gopReadback);
+  // r4 R5 R5-1 (Codex e1bc633): a clamp is a POSITIVE readback strictly below the request. A readback of
+  // 0 is "unknown" (the MFT did not report a GOP), NOT a clamp -- promoting 0 to a clamp would wrongly
+  // gate the burst on an encoder that never clamps. Require gopReadback > 0.
+  gopReadbackClamped_ = gopGetOk && gopReadback > 0 && gopReadback < requestedGop;  // r4 G3: MFT clamped
+  char gopLine[192];
+  std::snprintf(gopLine, sizeof(gopLine),
+                "[native-video-host] h264 gop-config stage=post-type backend=%s requestedGop=%u setHr=0x%08lX "
+                "readbackOk=%d readbackGop=%u",
+                backendName_, requestedGop, static_cast<unsigned long>(gopSetHr),
+                gopGetOk ? 1 : 0, gopReadback);
+  std::cout << gopLine << "\n";
+  const uint32_t qualityVsSpeed =
+      env_u32_or("REMOTE60_NATIVE_QUALITY_VS_SPEED", stableTextTune_ ? 68u : 100u);  // r6 switch
+  (void)set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonQualityVsSpeed, qualityVsSpeed);
+  std::cout << "[native-video-host] h264 encoder-hints lowLatency=" << (lowLatency ? 1 : 0)
+            << " realTime=" << (realTime ? 1 : 0) << " qualityVsSpeed=" << qualityVsSpeed << "\n";
+  // stutter-keyframe r2 (step 5): record key-QP controllability for the field decision (not applied).
+  std::cout << "[native-video-host] h264 key-qp-probe frameTypeQP="
+            << codecapi_support_str(enc_.Get(), CODECAPI_AVEncVideoEncodeFrameTypeQP)
+            << " encodeQP=" << codecapi_support_str(enc_.Get(), CODECAPI_AVEncVideoEncodeQP)
+            << " minQP=" << codecapi_support_str(enc_.Get(), CODECAPI_AVEncVideoMinQP)
+            << " maxQP=" << codecapi_support_str(enc_.Get(), CODECAPI_AVEncVideoMaxQP) << "\n";
+}
+
+/**
+ * One rate-control policy for the whole encoder lifetime.
+ *
+ * Screen content is bursty: a text-heavy scene change needs several times the average
+ * bitrate for one frame, and strict CBR cannot give it. The encoder's only remaining lever
+ * is quantiser, so it blurs the text to fit the budget and then sharpens again over the
+ * following second. Peak-constrained VBR lets that frame borrow bits instead, and a
+ * quantiser ceiling stops it degrading past legibility even when the peak is exhausted.
+ * Set REMOTE60_NATIVE_RATE_CONTROL=cbr to restore the old behaviour.
+ *
+ * Runtime bitrate changes go through here too: the old reconfigure path hardcoded a
+ * 110%/130% peak, so the first settings change silently cut the scene-change headroom to a
+ * third and text degraded only after a change -- the policy must not depend on when the
+ * bitrate was set.
+ */
+bool H264Encoder::apply_rate_control(const char* reason) {
+  if (!enc_) return false;
+  const bool useCbr = env_string_equals_ci("REMOTE60_NATIVE_RATE_CONTROL", "cbr");
+  const uint32_t peakMultiplierPercent =
+      env_u32_or("REMOTE60_NATIVE_PEAK_BITRATE_PERCENT", useCbr ? 110u : 200u);
+  const uint32_t maxBitrate = static_cast<uint32_t>(std::min<uint64_t>(
+      (static_cast<uint64_t>(bitrate_) * std::max<uint32_t>(100u, peakMultiplierPercent)) / 100ULL,
+      200000000ULL));
+  const uint32_t vbvBytes = stableTextTune_ ? stable_text_vbv_bytes(bitrate_)
+                                            : low_latency_vbv_bytes(bitrate_);
+
+  // quality r6 diagnostic switches: REMOTE60_NATIVE_RC_MODE_NUM picks the eAVEncCommonRateControlMode
+  // value directly (0 CBR, 1 PeakConstrainedVBR, 2 UnconstrainedVBR, 4 LowDelayVBR, ...), and
+  // REMOTE60_NATIVE_RC_MEAN_OVERRIDE gives the encoder a different mean (peak scaled with it) while
+  // the host keeps its own target -- the test of whether the output follows the mean at one size.
+  const uint32_t modeNum = env_u32_or("REMOTE60_NATIVE_RC_MODE_NUM", 0xFFFFFFFFu);
+  const uint32_t rcMode = modeNum != 0xFFFFFFFFu
+                              ? modeNum
+                              : static_cast<uint32_t>(useCbr ? eAVEncCommonRateControlMode_CBR
+                                                             : eAVEncCommonRateControlMode_PeakConstrainedVBR);
+  const uint32_t meanOverride = env_u32_or("REMOTE60_NATIVE_RC_MEAN_OVERRIDE", 0u);
+  const uint32_t mean = meanOverride >= 100000u ? meanOverride : bitrate_;
+  const uint32_t peak = meanOverride >= 100000u
+                            ? static_cast<uint32_t>(std::min<uint64_t>(
+                                  static_cast<uint64_t>(mean) * std::max<uint32_t>(100u, peakMultiplierPercent) / 100ULL,
+                                  200000000ULL))
+                            : maxBitrate;
+  const bool rcSet = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonRateControlMode, rcMode);
+  const bool meanSet = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMeanBitRate, mean);
+  const bool peakSet = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonMaxBitRate, peak);
+  const bool vbvSet = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncCommonBufferSize, vbvBytes);
+  const bool ok = meanSet && peakSet && vbvSet;
+
+  // 0 disables the ceiling. 32 keeps small text readable; higher values blur sooner. The rate
+  // governor (quality r5) raises it while the output stays well over the target.
+  const uint32_t maxQp = maxQpOverride_ != 0 ? maxQpOverride_ : configured_max_qp();
+  bool qpSet = false;
+  if (maxQp > 0 && maxQp <= 51) {
+    qpSet = set_codecapi_u32(enc_.Get(), CODECAPI_AVEncVideoMaxQP, maxQp);
+  }
+
+  // quality r5: what the MFT holds afterwards, read back -- an S_OK SetValue is not proof the
+  // value is in force (Codex 4). -1 = the MFT would not report it.
+  auto readback = [this](const GUID& key) -> long long {
+    uint32_t v = 0;
+    return get_codecapi_u32(enc_.Get(), key, &v) ? static_cast<long long>(v) : -1LL;
+  };
+  const long long rbMode = readback(CODECAPI_AVEncCommonRateControlMode);
+  const long long rbMean = readback(CODECAPI_AVEncCommonMeanBitRate);
+  const long long rbPeak = readback(CODECAPI_AVEncCommonMaxBitRate);
+  const long long rbVbv = readback(CODECAPI_AVEncCommonBufferSize);
+  const long long rbMaxQp = readback(CODECAPI_AVEncVideoMaxQP);
+
+  // Not every MFT honours these, and a rejected call leaves the previous mode in place, so
+  // report what actually stuck rather than what was asked for.
+  std::cout << "[native-video-host] h264 rate-control reason=" << reason
+            << " mode=" << (useCbr ? "cbr" : "vbr_peak") << " modeNum=" << rcMode
+            << " modeAccepted=" << (rcSet ? 1 : 0)
+            << " mean=" << mean
+            << " peak=" << peak
+            << " vbvBytes=" << vbvBytes
+            << " maxQp=" << maxQp
+            << " maxQpAccepted=" << (qpSet ? 1 : 0)
+            << " valuesAccepted=" << (ok ? 1 : 0)
+            << " readbackMode=" << rbMode << " readbackMean=" << rbMean << " readbackPeak=" << rbPeak
+            << " readbackVbv=" << rbVbv << " readbackMaxQp=" << rbMaxQp
+            << "\n";
+  // encoder-rc-budget C3 / r2 R2 / r3 S1: what was requested, whether each Set was accepted and what
+  // each field reads back -- per field (RcFieldStatus), then the plan-level summaries derived from
+  // them. The no-op basis for the next call is the effective plan, not the request; a runtime caller
+  // is answered from the fields IT changed (set_max_qp / reconfigure_bitrate).
+  rcPlan_.rcMode = rcMode;
+  rcPlan_.meanBps = mean;
+  rcPlan_.peakBps = peak;
+  rcPlan_.vbvBytes = vbvBytes;
+  rcPlan_.maxQpSet = maxQp > 0 && maxQp <= 51;
+  rcPlan_.maxQp = rcPlan_.maxQpSet ? maxQp : 0;
+  rc_fields_reset(rcPlan_);
+  rcFieldMode_.setOk = rcSet;
+  rcFieldMean_.setOk = meanSet;
+  rcFieldPeak_.setOk = peakSet;
+  rcFieldVbv_.setOk = vbvSet;
+  rcFieldMaxQp_.setOk = qpSet;
+  rcFieldMode_.readback = rbMode;
+  rcFieldMean_.readback = rbMean;
+  rcFieldPeak_.readback = rbPeak;
+  rcFieldVbv_.readback = rbVbv;
+  rcFieldMaxQp_.readback = rbMaxQp;
+  rc_fields_derive();
+  return ok;  // unchanged contract for the init caller: the mean/peak/VBV acceptance
+}
+
+void H264Encoder::rc_fields_reset(const RcPlan& plan) {
+  rcFieldMode_ = RcFieldStatus{true, false, plan.rcMode, -1};
+  rcFieldMean_ = RcFieldStatus{true, false, plan.meanBps, -1};
+  rcFieldPeak_ = RcFieldStatus{true, false, plan.peakBps, -1};
+  rcFieldVbv_ = RcFieldStatus{true, false, plan.vbvBytes, -1};
+  rcFieldMaxQp_ = RcFieldStatus{plan.maxQpSet, false, plan.maxQpSet ? static_cast<long long>(plan.maxQp) : -1LL, -1};
+}
+
+void H264Encoder::rc_fields_derive() {
+  const RcFieldStatus* fields[] = {&rcFieldMode_, &rcFieldMean_, &rcFieldPeak_, &rcFieldVbv_, &rcFieldMaxQp_};
+  bool allSet = true, anyMismatch = false, anyUnknown = false;
+  for (const RcFieldStatus* f : fields) {
+    if (!f->requested) continue;
+    if (!f->setOk) allSet = false;
+    if (f->knownMismatch()) anyMismatch = true;
+    else if (f->readback < 0) anyUnknown = true;
+  }
+  rcSetAccepted_ = allSet;
+  rcPlanState_ = anyMismatch ? RcPlanState::Mismatch : (anyUnknown ? RcPlanState::Unknown : RcPlanState::Accepted);
+}
+
+// ------------------------------------------------------------------ encoder-rc-budget C2/C3
+
+// Who the transform is: the activate the creation path consumed (vendor id, friendly name, CLSID),
+// supplemented from the transform's own attribute store for whatever the activate did not say -- the
+// CLSID fallback has no activate, a test transform has only its attributes. Vendor id is the one
+// field policy decides on, and it is never inferred from the friendly name.
+void H264Encoder::adopt_identity() {
+  identity_ = MftIdentity{};
+  if (!testTransform_ && g_lastEncoderIdentityValid) identity_ = g_lastEncoderIdentity;
+  if (enc_) {
+    Microsoft::WRL::ComPtr<IMFAttributes> attrs;
+    if (SUCCEEDED(enc_->GetAttributes(&attrs)) && attrs) {
+      auto str = [&](const GUID& key) -> std::string {
+        WCHAR* w = nullptr;
+        UINT32 cch = 0;
+        std::string out = "?";
+        if (SUCCEEDED(attrs->GetAllocatedString(key, &w, &cch)) && w) {
+          char buf[256] = {};
+          if (WideCharToMultiByte(CP_UTF8, 0, w, -1, buf, static_cast<int>(sizeof(buf)), nullptr, nullptr) > 1)
+            out = buf;
+        }
+        if (w) CoTaskMemFree(w);
+        return out;
+      };
+      if (identity_.vendorId == "?") identity_.vendorId = str(MFT_ENUM_HARDWARE_VENDOR_ID_Attribute);
+      if (identity_.friendlyName == "?") identity_.friendlyName = str(MFT_FRIENDLY_NAME_Attribute);
+      GUID g{};
+      if (identity_.clsid == "?" && SUCCEEDED(attrs->GetGUID(MFT_TRANSFORM_CLSID_Attribute, &g)))
+        identity_.clsid = guid_to_string(g);
+    }
+  }
+  rcProfile_ = rc_profile_for(identity_);
+}
+
+// The plan for this instance at mean E: the same inputs apply_rate_control reads (so the legacy plan
+// is exactly today's values), handed to the pure policy.
+RcPlan H264Encoder::build_rc_plan(uint32_t meanBps, uint32_t legacyMaxQp) const {
+  RcPlanInputs in;
+  const bool useCbr = env_string_equals_ci("REMOTE60_NATIVE_RATE_CONTROL", "cbr");
+  in.cbr = useCbr;
+  in.peakPercent = env_u32_or("REMOTE60_NATIVE_PEAK_BITRATE_PERCENT", useCbr ? 110u : 200u);
+  in.rcModeOverride = env_u32_or("REMOTE60_NATIVE_RC_MODE_NUM", 0xFFFFFFFFu);
+  const uint32_t meanOverride = env_u32_or("REMOTE60_NATIVE_RC_MEAN_OVERRIDE", 0u);
+  in.meanBps = meanOverride >= 100000u ? meanOverride : meanBps;
+  in.legacyVbvBytes = stableTextTune_ ? stable_text_vbv_bytes(in.meanBps) : low_latency_vbv_bytes(in.meanBps);
+  in.legacyMaxQp = legacyMaxQp;
+  return make_rc_plan(rcProfile_, in);
+}
+
+// Issues the plan's SetValues (all of them, or only the fields whose readback disagreed) and logs one
+// line per stage. Returns whether every issued SetValue was accepted.
+bool H264Encoder::apply_rc_plan(const RcPlan& plan, const char* stage, bool onlyMismatched) {
+  if (!enc_) return false;
+  std::string detail, mismatched;
+  if (onlyMismatched) (void)read_back_rc_plan(plan, &detail, &mismatched);
+  auto wants = [&](const char* field) {
+    return !onlyMismatched || mismatched.find(field) != std::string::npos;
+  };
+  bool ok = true;
+  int issued = 0;
+  // Per field (r3 S1): the field's LAST Set outcome is what counts, so a bounded retry that succeeds
+  // replaces the first refusal rather than being AND-ed with it.
+  auto issue = [&](RcFieldStatus& f, const GUID& key, uint32_t value) {
+    f.setOk = set_codecapi_u32(enc_.Get(), key, value);
+    ok = ok && f.setOk;
+    ++issued;
+  };
+  if (!onlyMismatched) rc_fields_reset(plan);
+  if (wants("mode")) issue(rcFieldMode_, CODECAPI_AVEncCommonRateControlMode, plan.rcMode);
+  if (wants("mean")) issue(rcFieldMean_, CODECAPI_AVEncCommonMeanBitRate, plan.meanBps);
+  if (wants("peak")) issue(rcFieldPeak_, CODECAPI_AVEncCommonMaxBitRate, plan.peakBps);
+  if (wants("vbv")) issue(rcFieldVbv_, CODECAPI_AVEncCommonBufferSize, plan.vbvBytes);
+  if (plan.maxQpSet && wants("maxQp")) issue(rcFieldMaxQp_, CODECAPI_AVEncVideoMaxQP, plan.maxQp);
+  std::cout << "[native-video-host] h264 rc-plan stage=" << stage << " instance=" << (codecInstanceId_ + 1)
+            << " profile=" << rc_profile_name(rcProfile_) << " backend=" << backendName_
+            << " vendor=" << identity_.vendorId << " mode=" << plan.rcMode << " mean=" << plan.meanBps
+            << " peak=" << plan.peakBps << " vbvBytes=" << plan.vbvBytes
+            << " maxQp=" << (plan.maxQpSet ? static_cast<long long>(plan.maxQp) : -1LL)
+            << " maxQpSet=" << (plan.maxQpSet ? 1 : 0) << " issued=" << issued << " setOk=" << (ok ? 1 : 0) << "\n";
+  return ok;
+}
+
+// Reads the five values back and compares them with the plan. -1 = the MFT would not report that
+// field (unknown, which is not a mismatch).
+RcPlanState H264Encoder::read_back_rc_plan(const RcPlan& plan, std::string* outDetail, std::string* outMismatched) {
+  if (!enc_) return RcPlanState::Unknown;
+  auto readback = [this](const GUID& key) -> long long {
+    uint32_t v = 0;
+    return get_codecapi_u32(enc_.Get(), key, &v) ? static_cast<long long>(v) : -1LL;
+  };
+  struct Field { const char* name; RcFieldStatus* status; long long got; long long want; bool checked; };
+  Field fields[] = {
+      {"mode", &rcFieldMode_, readback(CODECAPI_AVEncCommonRateControlMode), plan.rcMode, true},
+      {"mean", &rcFieldMean_, readback(CODECAPI_AVEncCommonMeanBitRate), plan.meanBps, true},
+      {"peak", &rcFieldPeak_, readback(CODECAPI_AVEncCommonMaxBitRate), plan.peakBps, true},
+      {"vbv", &rcFieldVbv_, readback(CODECAPI_AVEncCommonBufferSize), plan.vbvBytes, true},
+      {"maxQp", &rcFieldMaxQp_, readback(CODECAPI_AVEncVideoMaxQP), plan.maxQp, plan.maxQpSet},
+  };
+  std::string detail, mismatched;
+  bool anyMismatch = false, allAccepted = true;
+  for (Field& f : fields) {
+    detail += std::string(" readback") + f.name + "=" + std::to_string(f.got);
+    if (f.status->requested) f.status->readback = f.got;  // r3 S1: the field keeps its own readback
+    if (!f.checked) continue;
+    if (f.got < 0) { allAccepted = false; continue; }
+    if (f.got != f.want) {
+      anyMismatch = true;
+      allAccepted = false;
+      mismatched += (mismatched.empty() ? "" : ",") + std::string(f.name);
+    }
+  }
+  if (outDetail) *outDetail = detail;
+  if (outMismatched) *outMismatched = mismatched;
+  if (anyMismatch) return RcPlanState::Mismatch;
+  return allAccepted ? RcPlanState::Accepted : RcPlanState::Unknown;
+}
+
+bool H264Encoder::initialize(uint32_t width, uint32_t height, uint32_t fps, uint32_t bitrate, uint32_t keyint) {
+  shutdown();
+  codec_debug_log("encoder initialize: start");
+  width_ = width;
+  height_ = height;
+  fps_ = std::max<uint32_t>(1, fps);
+  bitrate_ = std::max<uint32_t>(100000, bitrate);
+  keyint_ = std::max<uint32_t>(1, keyint);
+  // A new legacy encoder starts from the ceiling the host asked for (set_initial_max_qp: the governor's
+  // current one), else the configured one. This replaces restoring the governor's ceiling with a late
+  // post-type SetValue after every rebuild (C4).
+  maxQpOverride_ = initialMaxQp_;
+  rcPlan_ = RcPlan{};
+  rcSetAccepted_ = false;
+  rcPlanState_ = RcPlanState::Unknown;
+  rc_fields_reset(RcPlan{});
+  stableTextTune_ = env_string_equals_ci("REMOTE60_NATIVE_ENCODER_TUNE_MODE", "stable_text");
+  sampleDurationHns_ = std::max<int64_t>(1, 10000000LL / static_cast<int64_t>(fps_));
+
+  if (testTransform_) {
+    // Test seam only (set_transform_for_test): adopt the caller's transform and skip the
+    // enumeration. Everything after this point runs exactly as it does for an enumerated one.
+    enc_ = testTransform_;
+    usingHardware_ = false;
+    backendName_ = "test_transform";
+    codec_debug_log("encoder initialize: using the injected test transform");
+  } else {
+    IMFTransform* encRaw = nullptr;
+    codec_debug_log("encoder initialize: create transform");
+    if (!create_h264_encoder_transform(&encRaw, &usingHardware_, &backendName_) || !encRaw) return false;
+    codec_debug_log("encoder initialize: transform created");
+    enc_.Attach(encRaw);
+  }
+  (void)set_mf_attr_u32(enc_.Get(), MF_TRANSFORM_ASYNC_UNLOCK, 1);
+  if (d3dManager_) {
+    codec_debug_log("encoder initialize: set d3d manager");
+    (void)enc_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
+                               reinterpret_cast<ULONG_PTR>(d3dManager_.Get()));
+  }
+  asyncTransform_ = false;
+  eventGenerator_.Reset();
+  {
+    Microsoft::WRL::ComPtr<IMFAttributes> attrs;
+    if (SUCCEEDED(enc_->GetAttributes(&attrs)) && attrs) {
+      UINT32 asyncFlag = 0;
+      if (SUCCEEDED(attrs->GetUINT32(MF_TRANSFORM_ASYNC, &asyncFlag)) && asyncFlag != 0) {
+        asyncTransform_ = true;
+      }
+    }
+    if (asyncTransform_) {
+      (void)enc_->QueryInterface(IID_PPV_ARGS(&eventGenerator_));
+      codec_debug_log("encoder initialize: async transform detected");
+    }
+  }
+
+  // encoder-rc-budget C2: who this instance is decides its rate-control plan and when it is set.
+  adopt_identity();
+  rcPlan_ = build_rc_plan(bitrate_, maxQpOverride_ != 0 ? maxQpOverride_ : configured_max_qp());
+  std::cout << "[native-video-host] h264 rc-identity instance=" << (codecInstanceId_ + 1)
+            << " friendlyName=\"" << identity_.friendlyName << "\" clsid=" << identity_.clsid
+            << " vendorId=" << identity_.vendorId << " profile=" << rc_profile_name(rcProfile_) << "\n";
+  if (rcProfile_ == RcProfile::NvidiaPreTypes) {
+    // Before the media types: on this MFT that is the only point at which mode/peak/VBV/MaxQP are
+    // applied (Home PC probe v2, 2026-10-11). Set once; not re-issued after the types.
+    (void)apply_rc_plan(rcPlan_, "pre-types", /*onlyMismatched=*/false);  // per-field outcomes recorded inside
+    rc_fields_derive();
+  } else if (env_string_equals_ci("REMOTE60_NATIVE_RC_BEFORE_TYPES", "1")) {
+    // quality r6 diagnostic switch (legacy profile only): the rate control also before the media types.
+    (void)apply_rate_control("pre_types");
+  }
+  codec_debug_log("encoder initialize: configure types");
+  if (!configure_types()) {
+    shutdown();
+    return false;
+  }
+  codec_debug_log("encoder initialize: types configured");
+  apply_low_latency_codec_api();
+  {
+    // What the instance holds after the types, against the plan -- read BEFORE the stream is started,
+    // so no GetValue touches an async MFT that may already be producing (r2: the post-start readback
+    // was the one new call on the output path of a running instance; the epoch hold test is where
+    // that would show). On the NVIDIA profile a mismatch gets ONE post-type re-set of the disagreeing
+    // fields and one more readback -- bounded to this initialize, never a loop, never a reason to
+    // rebuild (b: a readback that is not supported is Unknown, not a mismatch). The legacy profile is
+    // classified from the same readback; apply_rate_control logged its own values already.
+    std::string detail, mismatched;
+    (void)read_back_rc_plan(rcPlan_, &detail, &mismatched);
+    rc_fields_derive();
+    int retried = 0;
+    if (rcProfile_ == RcProfile::NvidiaPreTypes && rcPlanState_ == RcPlanState::Mismatch) {
+      // One bounded re-set of the disagreeing fields; each field's LAST outcome is what the summaries
+      // are derived from (r3 S1: a first refusal that this retry fixes is fixed, a field that stays
+      // Unknown is not promoted).
+      (void)apply_rc_plan(rcPlan_, "post-type-retry", /*onlyMismatched=*/true);
+      retried = 1;
+      (void)read_back_rc_plan(rcPlan_, &detail, &mismatched);
+      rc_fields_derive();
+    }
+    std::cout << "[native-video-host] h264 rc-plan stage=post-types instance=" << (codecInstanceId_ + 1)
+              << " profile=" << rc_profile_name(rcProfile_) << " mean=" << rcPlan_.meanBps
+              << " maxQp=" << (rcPlan_.maxQpSet ? static_cast<long long>(rcPlan_.maxQp) : -1LL) << detail
+              << " setAccepted=" << (rcSetAccepted_ ? 1 : 0)
+              << " state=" << (rcPlanState_ == RcPlanState::Accepted ? "accepted"
+                               : rcPlanState_ == RcPlanState::Mismatch ? "mismatch" : "unknown")
+              << " effective=" << (rc_plan_effective() ? 1 : 0)
+              << (mismatched.empty() ? "" : " mismatched=" + mismatched) << " retried=" << retried << "\n";
+  }
+  (void)enc_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+  (void)enc_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+  codec_debug_log("encoder initialize: stream started");
+  started_ = true;
+  sampleTimeOutputTimestampTotalSamples_ = 0;
+  sampleTimeOutputTimestampFallbackCount_ = 0;
+  pendingInputs_.Reset();  // a fresh MFT holds nothing: provenance is trustworthy again (A06)
+  acceptedInputCounter_ = 0;  // r4 G: ordinals restart per codec instance (detector re-baselines too)
+  ++codecInstanceId_;         // r4 G1: a new codec instance -- the clamp detector resets on this change
+  frameIndex_ = 0;
+  sequenceHeaderAnnexb_.clear();
+
+  Microsoft::WRL::ComPtr<IMFMediaType> outType;
+  if (SUCCEEDED(enc_->GetOutputCurrentType(0, &outType)) && outType) {
+    UINT32 blobSize = 0;
+    if (SUCCEEDED(outType->GetBlobSize(MF_MT_MPEG_SEQUENCE_HEADER, &blobSize)) && blobSize > 0) {
+      std::vector<uint8_t> blob(blobSize);
+      if (SUCCEEDED(outType->GetBlob(MF_MT_MPEG_SEQUENCE_HEADER, blob.data(), blobSize, &blobSize))) {
+        std::vector<uint8_t> annexb;
+        if (h264_config_avcc_to_annexb(blob.data(), blob.size(), &annexb)) {
+          sequenceHeaderAnnexb_ = std::move(annexb);
+        }
+      }
+    }
+  }
+
+  spsProfileReported_ = false;
+  report_sps_profile_once(sequenceHeaderAnnexb_.data(), sequenceHeaderAnnexb_.size());
+
+  MFT_OUTPUT_STREAM_INFO osi{};
+  if (SUCCEEDED(enc_->GetOutputStreamInfo(0, &osi))) {
+    outBufferBytes_ = (osi.cbSize > 0) ? static_cast<uint32_t>(osi.cbSize) : (1u << 20);
+  } else {
+    outBufferBytes_ = 1u << 20;
+  }
+  return true;
+}
+
+// The requested High profile is only a hint; a vendor MFT may silently downgrade it. Read
+// profile_idc/level_idc back off the first SPS actually emitted so the log states the truth.
+void H264Encoder::report_sps_profile_once(const uint8_t* data, size_t size) {
+  if (spsProfileReported_ || !data || size < 8) return;
+  for (size_t i = 0; i + 6 < size; ++i) {
+    if (data[i] != 0 || data[i + 1] != 0 || data[i + 2] != 1) continue;
+    if ((data[i + 3] & 0x1Fu) != 7u) continue;  // SPS
+    const unsigned profileIdc = data[i + 4];
+    const unsigned levelIdc = data[i + 6];
+    const char* profileName = (profileIdc == 100)  ? "high"
+                              : (profileIdc == 77) ? "main"
+                              : (profileIdc == 66) ? "baseline"
+                                                   : "other";
+    std::cout << "[native-video-host] h264 sps profile_idc=" << profileIdc << " (" << profileName
+              << ") level_idc=" << levelIdc << " colorimetry=bt709/limited\n";
+    spsProfileReported_ = true;
+    return;
+  }
+}
+
+uint32_t H264Encoder::configured_max_qp() { return env_u32_or("REMOTE60_NATIVE_MAX_QP", 32u); }
+
+RcRuntimeResult H264Encoder::set_max_qp(uint32_t maxQp) {
+  if (!enc_) return RcRuntimeResult::Failed;
+  const uint32_t effective = maxQp != 0 ? maxQp : configured_max_qp();
+  // C3: the same ceiling on the same instance is nothing to do -- no SetValue, no log. Judged on the
+  // CEILING'S OWN field (r4 Q1b): accepted and not contradicted by its readback, and the same value.
+  // Another field's mismatch (a stuck mean) is that field's business and must not turn every ceiling
+  // call into a whole-plan rewrite -- that was a per-tick loop the failure budget never saw.
+  if (rcPlan_.maxQpSet == (effective > 0 && effective <= 51) && (!rcPlan_.maxQpSet || rcPlan_.maxQp == effective) &&
+      (!rcPlan_.maxQpSet || rcFieldMaxQp_.applied())) {
+    return RcRuntimeResult::Unchanged;
+  }
+  if (!runtime_max_qp_live()) {
+    // The ceiling is static for this instance's life (MaxQP is a pre-start property on this MFT; a
+    // runtime SetValue returned S_OK and changed nothing observable). Not issued, not applied.
+    return RcRuntimeResult::Unproven;
+  }
+  maxQpOverride_ = maxQp;
+  (void)apply_rate_control("governor");
+  // Applied only if the ceiling's own field was accepted AND its readback does not contradict it (r3
+  // S1: an S_OK with the readback stuck at the old value is not applied). A refused MaxQP is Failed
+  // even when the mean/peak/VBV re-issued alongside were fine.
+  return rcFieldMaxQp_.applied() ? RcRuntimeResult::Applied : RcRuntimeResult::Failed;
+}
+
+RcRuntimeResult H264Encoder::reconfigure_bitrate(uint32_t bitrate) {
+  if (!enc_) return RcRuntimeResult::Failed;
+  const uint32_t mean = std::max<uint32_t>(100000, bitrate);
+  // C3 no-op on the MEAN PATH'S OWN fields (r4 Q1b): mode/mean/peak/VBV accepted and not contradicted,
+  // same mean. The mode belongs to this path (a mean under a refused mode is not the mean that was
+  // asked for); a refused or stuck CEILING does not make a confirmed mean "not in force".
+  if (rcPlan_.meanBps == mean && rcFieldMode_.applied() && rcFieldMean_.applied() && rcFieldPeak_.applied() &&
+      rcFieldVbv_.applied()) {
+    return RcRuntimeResult::Unchanged;
+  }
+  if (!runtime_mean_live()) {
+    // A new mean on this profile is a new instance: the host takes its re-initialisation path with
+    // the new E. bitrate_ is left as the running instance's value so configured_bitrate() tells the
+    // truth about what the MFT was told.
+    return RcRuntimeResult::Unproven;
+  }
+  bitrate_ = mean;
+  (void)apply_rate_control("reconfigure");
+  // Applied if the mean/peak/VBV fields were accepted and none is contradicted by its readback (r3
+  // S1); a ceiling the MFT refuses or holds is the ceiling path's business (set_max_qp), not a reason
+  // to rebuild on every mean change. A Failed here takes the host's existing bounded rebuild path.
+  return (rcFieldMean_.applied() && rcFieldPeak_.applied() && rcFieldVbv_.applied()) ? RcRuntimeResult::Applied
+                                                                                     : RcRuntimeResult::Failed;
+}
+
+bool H264Encoder::encode_frame(const std::vector<uint8_t>& nv12, bool forceKeyFrame, int64_t inputSampleTimeHns,
+                               std::vector<H264AccessUnit>* outUnits, H264EncodeFrameStats* encodeStats) {
+  if (!enc_ || !started_ || !outUnits) return false;
+  H264EncodeFrameStats localStats{};
+  if (!encodeStats) {
+    encodeStats = &localStats;
+  }
+  *encodeStats = H264EncodeFrameStats();
+  encodeStats->asyncEnabled = asyncTransform_ ? 1 : 0;
+  outUnits->clear();
+  const uint64_t encodeCallStartUs = clock_us();
+  const auto finish_call = [&](bool ok) -> bool {
+    const uint64_t encodeCallEndUs = qpc_now_us();
+    encodeStats->encodeCallUs = (encodeCallEndUs >= encodeCallStartUs) ? (encodeCallEndUs - encodeCallStartUs) : 0;
+    return ok;
+  };
+  Microsoft::WRL::ComPtr<IMFSample> sample;
+  IMFSample* inputSample = nullptr;
+  const int64_t sampleTime = (inputSampleTimeHns > 0)
+                                 ? inputSampleTimeHns
+                                 : (static_cast<int64_t>(frameIndex_) * sampleDurationHns_);
+  const uint64_t sampleCreateStartUs = qpc_now_us();
+  if (!create_input_sample(nv12, sampleTime,
+                           sampleDurationHns_, &inputSample)) {
+    return finish_call(false);
+  }
+  const uint64_t sampleCreateEndUs = qpc_now_us();
+  encodeStats->sampleCreateUs = (sampleCreateEndUs >= sampleCreateStartUs) ? (sampleCreateEndUs - sampleCreateStartUs) : 0;
+  sample.Attach(inputSample);
+
+  return encode_sample_common(sample.Get(), sampleTime, forceKeyFrame, outUnits, encodeStats,
+                              encodeCallStartUs);
+}
+
+bool H264Encoder::encode_frame_bgra(const uint8_t* bgra, uint32_t width, uint32_t height,
+                                    uint32_t bgraStride, bool forceKeyFrame,
+                                    int64_t inputSampleTimeHns,
+                                    std::vector<H264AccessUnit>* outUnits,
+                                    H264EncodeFrameStats* encodeStats) {
+  if (!enc_ || !started_ || !outUnits || !bgra || width != width_ || height != height_) {
+    return false;
+  }
+  H264EncodeFrameStats localStats{};
+  if (!encodeStats) encodeStats = &localStats;
+  *encodeStats = H264EncodeFrameStats();
+  encodeStats->asyncEnabled = asyncTransform_ ? 1 : 0;
+  outUnits->clear();
+  const uint64_t encodeCallStartUs = clock_us();
+  const auto finish_call = [&](bool ok) -> bool {
+    const uint64_t endUs = qpc_now_us();
+    encodeStats->encodeCallUs = (endUs >= encodeCallStartUs) ? (endUs - encodeCallStartUs) : 0;
+    return ok;
+  };
+  const int64_t sampleTime = (inputSampleTimeHns > 0)
+                                 ? inputSampleTimeHns
+                                 : (static_cast<int64_t>(frameIndex_) * sampleDurationHns_);
+  const size_t nv12Size = static_cast<size_t>(width) * height * 3 / 2;
+  if (nv12Size > std::numeric_limits<DWORD>::max()) return finish_call(false);
+
+  const uint64_t sampleCreateStartUs = qpc_now_us();
+  Microsoft::WRL::ComPtr<IMFSample> sample;
+  Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+  if (FAILED(MFCreateSample(&sample)) || !sample ||
+      FAILED(MFCreateMemoryBuffer(static_cast<DWORD>(nv12Size), &buffer)) || !buffer) {
+    return finish_call(false);
+  }
+  BYTE* dst = nullptr;
+  DWORD maxLen = 0;
+  DWORD curLen = 0;
+  if (FAILED(buffer->Lock(&dst, &maxLen, &curLen)) || !dst || maxLen < nv12Size) {
+    return finish_call(false);
+  }
+  const uint64_t convertStartUs = qpc_now_us();
+  const bool converted = bgra_to_nv12_buffer(bgra, width, height, bgraStride, dst, maxLen);
+  const uint64_t convertEndUs = qpc_now_us();
+  encodeStats->colorConvertUs =
+      (convertEndUs >= convertStartUs) ? (convertEndUs - convertStartUs) : 0;
+  buffer->Unlock();
+  if (!converted || FAILED(buffer->SetCurrentLength(static_cast<DWORD>(nv12Size))) ||
+      FAILED(sample->AddBuffer(buffer.Get()))) {
+    return finish_call(false);
+  }
+  (void)sample->SetSampleTime(sampleTime);
+  (void)sample->SetSampleDuration(sampleDurationHns_);
+  const uint64_t sampleCreateEndUs = qpc_now_us();
+  encodeStats->sampleCreateUs =
+      (sampleCreateEndUs >= sampleCreateStartUs) ? (sampleCreateEndUs - sampleCreateStartUs) : 0;
+  return encode_sample_common(sample.Get(), sampleTime, forceKeyFrame, outUnits, encodeStats,
+                              encodeCallStartUs);
+}
+
+bool H264Encoder::encode_frame_surface(ID3D11Texture2D* texture, bool forceKeyFrame,
+                                       int64_t inputSampleTimeHns,
+                                       std::vector<H264AccessUnit>* outUnits,
+                                       H264EncodeFrameStats* encodeStats) {
+  if (!enc_ || !started_ || !outUnits || !texture) return false;
+  H264EncodeFrameStats localStats{};
+  if (!encodeStats) {
+    encodeStats = &localStats;
+  }
+  *encodeStats = H264EncodeFrameStats();
+  encodeStats->asyncEnabled = asyncTransform_ ? 1 : 0;
+  outUnits->clear();
+  const uint64_t encodeCallStartUs = clock_us();
+  const int64_t sampleTime = (inputSampleTimeHns > 0)
+                                 ? inputSampleTimeHns
+                                 : (static_cast<int64_t>(frameIndex_) * sampleDurationHns_);
+
+  // The sample wraps the caller's texture; no pixel is copied. The caller must not write
+  // that texture again until the MFT has released it -- the host tracks in-flight surfaces
+  // against the encoder's output count and falls back to the CPU path when unsure.
+  const uint64_t sampleCreateStartUs = qpc_now_us();
+  Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
+  if (FAILED(MFCreateDXGISurfaceBuffer(__uuidof(ID3D11Texture2D), texture, 0, FALSE, &buffer)) ||
+      !buffer) {
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IMF2DBuffer> buffer2d;
+  DWORD contiguousLength = 0;
+  if (SUCCEEDED(buffer.As(&buffer2d)) && buffer2d &&
+      SUCCEEDED(buffer2d->GetContiguousLength(&contiguousLength)) && contiguousLength > 0) {
+    (void)buffer->SetCurrentLength(contiguousLength);
+  }
+  Microsoft::WRL::ComPtr<IMFSample> sample;
+  if (FAILED(MFCreateSample(&sample)) || !sample) return false;
+  if (FAILED(sample->AddBuffer(buffer.Get()))) return false;
+  (void)sample->SetSampleTime(sampleTime);
+  (void)sample->SetSampleDuration(sampleDurationHns_);
+  const uint64_t sampleCreateEndUs = qpc_now_us();
+  encodeStats->sampleCreateUs =
+      (sampleCreateEndUs >= sampleCreateStartUs) ? (sampleCreateEndUs - sampleCreateStartUs) : 0;
+
+  return encode_sample_common(sample.Get(), sampleTime, forceKeyFrame, outUnits, encodeStats,
+                              encodeCallStartUs);
+}
+
+bool H264Encoder::encode_sample_common(IMFSample* sampleRaw, int64_t sampleTime,
+                                       bool forceKeyFrame,
+                                       std::vector<H264AccessUnit>* outUnits,
+                                       H264EncodeFrameStats* encodeStats,
+                                       uint64_t encodeCallStartUs) {
+  Microsoft::WRL::ComPtr<IMFSample> sample = sampleRaw;
+  const auto finish_call = [&](bool ok) -> bool {
+    const uint64_t encodeCallEndUs = qpc_now_us();
+    encodeStats->encodeCallUs = (encodeCallEndUs >= encodeCallStartUs) ? (encodeCallEndUs - encodeCallStartUs) : 0;
+    // Stamp the held-input FIFO depth at the TRUE end of the call. drain_outputs() pops produced
+    // frames from the accepted-input FIFO, so stamping before the poll/drain would overstate the
+    // depth on healthy calls and mislead the starvation diagnosis (depth is a decisive field).
+    // pendingInputOverflowTotal_ is object-lifetime cumulative.
+    encodeStats->pendingInputDepth = static_cast<uint32_t>(pendingInputs_.size());
+    encodeStats->pendingInputOverflowTotal = pendingInputOverflowTotal_;
+    encodeStats->provenanceInvalid = pendingInputs_.provenance_invalid() ? 1u : 0u;
+    return ok;
+  };
+  constexpr int64_t kEncoderOutputTsSkewHns = 50000LL * 10LL;
+
+  if (forceKeyFrame) {
+    // stutter-keyframe r1 (recovery-1): keep the setter HRESULT instead of discarding it. A rejected
+    // force means the MFT never armed the key for the next input, which the recovery timeline must be
+    // able to see; S_OK only means "armed", not "the IDR this call returns is that key" (async MFT
+    // output can still be an earlier input).
+    const HRESULT forceHr = set_codecapi_u32_hr(enc_.Get(), CODECAPI_AVEncVideoForceKeyFrame, 1);
+    encodeStats->forceKeyRequested = 1;
+    encodeStats->forceKeySetHr = static_cast<int32_t>(forceHr);
+    if (FAILED(forceHr)) {
+      codec_debug_log("encode_sample_common: ForceKeyFrame SetValue REJECTED (key not armed)");
+    }
+  }
+
+  auto drain_outputs = [&]() -> bool {
+    const uint64_t drainStartUs = qpc_now_us();
+    ++encodeStats->processOutputDrainLoops;
+    while (true) {
+      MFT_OUTPUT_STREAM_INFO osi{};
+      if (FAILED(enc_->GetOutputStreamInfo(0, &osi))) return false;
+
+      Microsoft::WRL::ComPtr<IMFMediaBuffer> outBuffer;
+      Microsoft::WRL::ComPtr<IMFSample> outSample;
+      MFT_OUTPUT_DATA_BUFFER odb{};
+      odb.dwStreamID = 0;
+      if ((osi.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0) {
+        const uint32_t cb = (osi.cbSize > 0) ? static_cast<uint32_t>(osi.cbSize) : outBufferBytes_;
+        if (FAILED(MFCreateMemoryBuffer(cb, &outBuffer)) || !outBuffer) return false;
+        if (FAILED(MFCreateSample(&outSample)) || !outSample) return false;
+        if (FAILED(outSample->AddBuffer(outBuffer.Get()))) return false;
+        odb.pSample = outSample.Get();
+      }
+      DWORD status = 0;
+      const HRESULT po = enc_->ProcessOutput(0, 1, &odb, &status);
+      if (po == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+        if (odb.pEvents) odb.pEvents->Release();
+        ++encodeStats->processOutputNeedMoreInputCount;
+        break;
+      }
+      if (po == MF_E_TRANSFORM_STREAM_CHANGE) {
+        if (odb.pEvents) odb.pEvents->Release();
+        ++encodeStats->processOutputStreamChangeCount;
+        // r2 F3: a mid-stream re-type, not the initial configure -- the pre-type GOP log says so, so a
+        // field reader does not mistake a renegotiation probe for the first init.
+        if (!configure_types("retype")) return false;
+        continue;
+      }
+      if (FAILED(po)) {
+        if (asyncTransform_ && po == E_UNEXPECTED) {
+          if (odb.pEvents) odb.pEvents->Release();
+          break;
+        }
+        if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
+          std::string line = "encoder ProcessOutput failed hr=" + hr_to_hex(po);
+          codec_debug_log(line.c_str());
+        }
+        if (odb.pEvents) odb.pEvents->Release();
+        ++encodeStats->processOutputErrorCount;
+        return false;
+      }
+
+      // If the MFT provided its own sample (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES),
+      // odb.pSample has an outstanding reference we must release.
+      Microsoft::WRL::ComPtr<IMFSample> mftProvidedSample;
+      if (odb.pSample && odb.pSample != outSample.Get()) {
+        mftProvidedSample.Attach(odb.pSample);  // take ownership without AddRef
+      }
+      IMFSample* produced = odb.pSample ? odb.pSample : outSample.Get();
+      std::vector<uint8_t> bytes;
+      const bool haveBytes = produced && sample_to_bytes(produced, &bytes) && !bytes.empty();
+      if (!haveBytes && produced) {
+        // The MFT consumed an input to produce this output even though nothing usable came
+        // back. Leaving its entry in the queue would offset every later access unit by a frame,
+        // permanently -- the client paces playout off those timestamps, and the emit gate judges
+        // the epoch that rides with them (the pre-A02 code popped the timestamp and the synthetic
+        // flag here but not the epoch, so every later AU carried the previous input's epoch: the
+        // IDR forced by a flush was then judged old and dropped).
+        pendingInputs_.PopForEmptyOutput();
+        ++sampleTimeOutputTimestampFallbackCount_;
+      }
+      if (haveBytes) {
+        if (!h264_has_start_code(bytes.data(), bytes.size())) {
+          std::vector<uint8_t> annexb;
+          if (h264_avcc_to_annexb(bytes, &annexb) && !annexb.empty()) {
+            bytes.swap(annexb);
+          }
+        }
+        UINT32 cleanPoint = 0;
+        const bool sampleKey = SUCCEEDED(produced->GetUINT32(MFSampleExtension_CleanPoint, &cleanPoint)) &&
+                               cleanPoint != 0;
+        H264AccessUnit au{};
+        const bool rawNal5 = annexb_contains_idr(bytes.data(), bytes.size());  // r4 G: a real IDR slice
+        const bool maybeKey = sampleKey || rawNal5;
+        au.keyFrame = maybeKey;
+        au.rawIdr = rawNal5;
+        int64_t outSampleTimeHns = 0;
+        const bool hasOutputSampleTime =
+            SUCCEEDED(produced->GetSampleTime(&outSampleTimeHns)) && outSampleTimeHns > 0;
+        if (hasOutputSampleTime) ++sampleTimeOutputTimestampTotalSamples_;
+
+        // Do not align an older async output to `sampleTime`, which belongs to this call's
+        // newest input. That collapsed multiple frames onto one timestamp and produced the
+        // visible burst/pause cadence at 30 fps. MFT output order follows accepted input
+        // order, so the accepted-input FIFO is the stable source of truth even for vendor
+        // encoders that rewrite output timestamps to a private zero-based timeline.
+        int64_t normalizedAuSampleTimeHns = sampleTime;
+        bool auSynthetic = nextInputSynthetic_;  // FIFO empty -> this call's input (old behaviour)
+        // No FIFO entry = no provenance. The epoch is NOT dressed up as this call's: the emit
+        // gate treats 0 as unknown and fails closed (host_epoch_gate.hpp), so an output the
+        // FIFO lost track of (overflow, a desynchronised encoder) can never open the gate.
+        uint64_t auEpoch = 0;
+        uint64_t auOrdinal = 0;    // r4 G: 0 = no provenance (FIFO empty/overflow) -> not a valid sample
+        uint64_t auAcceptedAtUs = 0;
+        bool auForcedKey = false;
+        PendingInput provenance{};
+        if (pendingInputs_.Pop(&provenance)) {
+          normalizedAuSampleTimeHns = provenance.tsHns;
+          auSynthetic = provenance.synthetic;
+          auEpoch = provenance.epoch;
+          auOrdinal = provenance.acceptedOrdinal;
+          auAcceptedAtUs = provenance.acceptedAtUs;
+          auForcedKey = provenance.forcedKey;
+        } else {
+          ++sampleTimeOutputTimestampFallbackCount_;
+        }
+        // A06: after an overflow the queue no longer describes what the MFT holds, so no output
+        // may claim an epoch until the encoder is rebuilt -- 0 is "unknown" and the gate refuses it.
+        if (pendingInputs_.provenance_invalid()) auEpoch = 0;
+        const bool sampleTimeFromOutput =
+            hasOutputSampleTime &&
+            std::llabs(outSampleTimeHns - normalizedAuSampleTimeHns) <=
+                kEncoderOutputTsSkewHns;
+        au.sampleTimeHns = normalizedAuSampleTimeHns;
+        au.sampleTimeFromOutput = sampleTimeFromOutput;
+        au.synthetic = auSynthetic;
+        au.inputEpoch = auEpoch;
+        au.acceptedInputOrdinal = auOrdinal;    // r4 G: 0 when provenance was lost (not a valid sample)
+        au.inputAcceptedAtUs = auAcceptedAtUs;
+        au.inputWasForcedKey = auForcedKey;
+        if (maybeKey && !sequenceHeaderAnnexb_.empty() &&
+            !annexb_contains_idr(sequenceHeaderAnnexb_.data(), sequenceHeaderAnnexb_.size())) {
+          // Keep existing behavior if sequence blob is malformed.
+        }
+        if (maybeKey && !sequenceHeaderAnnexb_.empty()) {
+          std::vector<uint8_t> prefixed;
+          prefixed.reserve(sequenceHeaderAnnexb_.size() + bytes.size());
+          prefixed.insert(prefixed.end(), sequenceHeaderAnnexb_.begin(), sequenceHeaderAnnexb_.end());
+          prefixed.insert(prefixed.end(), bytes.begin(), bytes.end());
+          au.bytes = std::move(prefixed);
+        } else {
+          au.bytes = std::move(bytes);
+        }
+        report_sps_profile_once(au.bytes.data(), au.bytes.size());
+        ++encodeStats->processOutputSamples;
+        encodeStats->processOutputBytes += static_cast<uint64_t>(au.bytes.size());
+        outUnits->push_back(std::move(au));
+      }
+      if (odb.pEvents) odb.pEvents->Release();
+    }
+    const uint64_t drainEndUs = qpc_now_us();
+    encodeStats->processOutputDrainUs += (drainEndUs >= drainStartUs) ? (drainEndUs - drainStartUs) : 0;
+    return true;
+  };
+
+  const uint64_t processInputStartUs = qpc_now_us();
+  HRESULT inHr = enc_->ProcessInput(0, sample.Get(), 0);
+  const uint64_t processInputDoneUs = qpc_now_us();
+  encodeStats->processInputStartUs = processInputStartUs;
+  encodeStats->processInputEndUs = processInputDoneUs;
+  // encoder-output-poll r1 trace: the post-input poll's events in read order (encoder clock offsets)
+  size_t evPos = 0;
+  const uint64_t evBaseUs = clock_us();
+  const auto note_event = [&](char kind) {
+    if (evPos + 12 >= sizeof(encodeStats->postInputEvents)) return;
+    const uint64_t now = clock_us();
+    const unsigned long long dt = now >= evBaseUs ? now - evBaseUs : 0;
+    const int n = std::snprintf(encodeStats->postInputEvents + evPos, sizeof(encodeStats->postInputEvents) - evPos,
+                                "%s%c%llu", evPos ? "," : "", kind, dt);
+    if (n > 0) evPos += static_cast<size_t>(n);
+  };
+  encodeStats->processInputUs += (processInputDoneUs >= processInputStartUs) ? (processInputDoneUs - processInputStartUs) : 0;
+  if (inHr == MF_E_NOTACCEPTING) {
+    // Some hardware/async encoders require draining queued output before accepting new input.
+    ++encodeStats->processInputNotAcceptingCount;
+    if (!drain_outputs()) return finish_call(false);
+    inHr = enc_->ProcessInput(0, sample.Get(), 0);
+    const uint64_t processInputRetryDoneUs = qpc_now_us();
+    encodeStats->processInputUs +=
+        (processInputRetryDoneUs >= processInputDoneUs) ? (processInputRetryDoneUs - processInputDoneUs) : 0;
+  }
+  if (FAILED(inHr)) {
+    if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
+      std::string line = "encoder ProcessInput failed hr=" + hr_to_hex(inHr);
+      codec_debug_log(line.c_str());
+    }
+    return finish_call(false);
+  }
+  const bool overflowedBefore = pendingInputs_.provenance_invalid();
+  pendingInputs_.Push(
+      PendingInput{sampleTime, nextInputSynthetic_, nextInputEpoch_, ++acceptedInputCounter_, forceKeyFrame, clock_us()});
+  if (pendingInputs_.provenance_invalid() && !overflowedBefore) {
+    // A06: 64 accepted inputs with no output. The FIFO has latched itself invalid and emptied;
+    // from here every AU is tagged epoch 0 until the stage rebuilds this encoder.
+    ++sampleTimeOutputTimestampFallbackCount_;
+    ++pendingInputOverflowTotal_;
+    codec_debug_log("encoder pending input FIFO overflowed: provenance invalid until rebuild");
+  }
+  ++frameIndex_;
+
+  if (asyncTransform_ && eventGenerator_) {
+    bool sawEvent = false;
+    bool sawHaveOutput = false;
+    // Budget several events per call. Hardware MFTs post roughly one METransformNeedInput and
+    // one METransformHaveOutput per frame; draining only one event per encode let the queue
+    // ratchet up and then release two or three access units at once, which downstream is a
+    // burst the depth-2 sender queue treats as congestion.
+    //
+    // Draining is real work, though, and it happens inline: spending the whole budget at 60fps
+    // stretched the encode call past half the 16.7ms frame period and cost throughput, while a
+    // smaller fixed budget left frames sitting in the MFT and pushed 30fps latency back up.
+    // Bound the loop by a fraction of the frame period instead, so each rate gets the drain it
+    // can afford.
+    const uint32_t asyncPollMax = env_u32_local("REMOTE60_NATIVE_H264_ASYNC_POLL_MAX", 4);
+    const uint64_t framePeriodUs = 1000000ULL / std::max<uint32_t>(1, fps_);
+    const uint32_t asyncPollBudgetPercent =
+        env_u32_local("REMOTE60_NATIVE_H264_ASYNC_POLL_BUDGET_PCT", 40);
+    const uint64_t asyncPollDeadlineUs =
+        encodeCallStartUs + (framePeriodUs * std::min<uint32_t>(100, asyncPollBudgetPercent)) / 100ULL;
+    const uint32_t asyncPollSleepUs = env_u32_local("REMOTE60_NATIVE_H264_ASYNC_POLL_SLEEP_US", 0);
+    // encoder-output-poll r1: the budget bounds only retries after an empty poll. A read that returned an
+    // event is always followed by another read (still at most asyncPollMax in all): on AMD the first
+    // GetEvent after ProcessInput can take ~10 ms to return its NeedInput -- past the 40% budget at
+    // 60 fps -- and stopping there left the HaveOutput posted right behind it for the next call.
+    bool lastPollHadEvent = false;
+    // r13 (S1): only MF_E_NO_EVENTS_AVAILABLE is "nothing yet". Any other GetEvent failure, a success with
+    // no event and a failed GetType fail the call with their original HRESULT (the stage's existing
+    // output-loss path), never an empty poll or a successful event.
+    const auto event_failure = [&](uint8_t kind, HRESULT hr) {
+      encodeStats->asyncEventFailure = kind;
+      encodeStats->asyncEventFailHr = static_cast<int32_t>(hr);
+      note_event('E');
+      return finish_call(false);
+    };
+    for (uint32_t poll = 0; poll < std::max<uint32_t>(1, asyncPollMax); ++poll) {
+      // Always take the first poll; after an empty one, stop once this call has used its share of the
+      // frame period so a slow drain cannot eat the capture cadence.
+      if (poll > 0 && !lastPollHadEvent && clock_us() >= asyncPollDeadlineUs) break;
+      lastPollHadEvent = false;
+      Microsoft::WRL::ComPtr<IMFMediaEvent> ev;
+      ++encodeStats->asyncPollCount;
+      const HRESULT ehr = eventGenerator_->GetEvent(MF_EVENT_FLAG_NO_WAIT, &ev);
+      if (ehr == MF_E_NO_EVENTS_AVAILABLE) {
+        note_event('-');
+        ++encodeStats->asyncPollNoEventCount;
+        if (asyncPollSleepUs > 0) {
+          Sleep(static_cast<DWORD>(asyncPollSleepUs));
+        } else if (poll + 1 < std::max<uint32_t>(1, asyncPollMax)) {
+          continue;
+        } else {
+          break;
+        }
+        continue;
+      }
+      if (FAILED(ehr)) return event_failure(1, ehr);
+      if (!ev) return event_failure(2, ehr);
+      sawEvent = true;
+      lastPollHadEvent = true;
+      MediaEventType et = MEUnknown;
+      const HRESULT thr = ev->GetType(&et);
+      if (FAILED(thr)) return event_failure(3, thr);
+      note_event(et == METransformHaveOutput ? 'H' : et == METransformNeedInput ? 'N' : 'O');
+      if (et == METransformHaveOutput) {
+        ++encodeStats->asyncPollHaveOutputCount;
+        sawHaveOutput = true;
+        if (!drain_outputs()) return finish_call(false);
+      } else if (et == METransformNeedInput) {
+        ++encodeStats->asyncPollNeedInputCount;
+        // Keep polling: a NeedInput only says the MFT will accept another frame, and
+        // abandoning the loop here would leave an already-posted HaveOutput queued.
+        continue;
+      }
+    }
+    if (!sawEvent) {
+      if (!drain_outputs()) return finish_call(false);
+    }
+    // Diagnostic only: this call saw MFT events but none were METransformHaveOutput. Repeated across
+    // calls while input keeps being accepted is the fingerprint of the async output-starvation wedge
+    // (video frozen, encode loop still spinning). We deliberately do NOT call ProcessOutput here:
+    // the async MFT contract only permits it in response to METransformHaveOutput (otherwise
+    // E_UNEXPECTED), so a forced drain would be a per-call spec violation on the healthy path. A
+    // spec-compliant, starvation-gated wakeup (MFT_MESSAGE_COMMAND_MARKER) / recovery is a separate
+    // follow-up commit.
+    if (encodeStats) encodeStats->asyncNeedInputOnlyCall = (sawEvent && !sawHaveOutput) ? 1u : 0u;
+    // Async MFTs may legitimately delay output; empty outUnits is not an error.
+    return finish_call(true);
+  }
+
+  if (!drain_outputs()) return finish_call(false);
+
+  return finish_call(true);
+}
+
+void H264Encoder::shutdown() {
+  if (enc_) {
+    (void)enc_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+    (void)enc_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+    enc_.Reset();
+  }
+  started_ = false;
+  sampleTimeOutputTimestampTotalSamples_ = 0;
+  sampleTimeOutputTimestampFallbackCount_ = 0;
+  pendingInputs_.Clear();  // the latch (A06) survives: only a successful initialize() clears it
+  frameIndex_ = 0;
+  sequenceHeaderAnnexb_.clear();
+  asyncTransform_ = false;
+  eventGenerator_.Reset();
+  usingHardware_ = false;
+  backendName_ = "unknown";
+  d3dManager_.Reset();
+  d3dManagerResetToken_ = 0;
+}
+
+H264Decoder::~H264Decoder() {
+  shutdown();
+}
+
+bool H264Decoder::set_d3d11_device(ID3D11Device* device) {
+  d3dManager_.Reset();
+  d3dManagerResetToken_ = 0;
+  if (!device) return false;
+
+  UINT token = 0;
+  Microsoft::WRL::ComPtr<IMFDXGIDeviceManager> manager;
+  if (FAILED(MFCreateDXGIDeviceManager(&token, &manager)) || !manager) return false;
+  if (FAILED(manager->ResetDevice(device, token))) return false;
+  d3dManager_ = manager;
+  d3dManagerResetToken_ = token;
+  return true;
+}
+
+bool H264Decoder::configure_input_type() {
+  if (!dec_) return false;
+  auto try_subtype = [&](const GUID& subtype, const char* subtypeName) -> bool {
+    Microsoft::WRL::ComPtr<IMFMediaType> inType;
+    if (FAILED(MFCreateMediaType(&inType)) || !inType) return false;
+    (void)inType->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
+    (void)inType->SetGUID(MF_MT_SUBTYPE, subtype);
+    (void)MFSetAttributeSize(inType.Get(), MF_MT_FRAME_SIZE, width_, height_);
+    (void)MFSetAttributeRatio(inType.Get(), MF_MT_FRAME_RATE, fps_, 1);
+    (void)MFSetAttributeRatio(inType.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
+    (void)inType->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    const HRESULT hr = dec_->SetInputType(0, inType.Get(), 0);
+    if (FAILED(hr) && env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
+      std::string line = "decoder configure input failed subtype=" + std::string(subtypeName) +
+                         " hr=" + hr_to_hex(hr);
+      codec_debug_log(line.c_str());
+    }
+    return SUCCEEDED(hr);
+  };
+
+  if (std::strcmp(backendName_, "amf_mft_h264dec") == 0) {
+    if (try_subtype(MFVideoFormat_H264, "H264")) return true;
+    for (DWORD i = 0; i < 16; ++i) {
+      IMFMediaType* inTypeRaw = nullptr;
+      const HRESULT hr = dec_->GetInputAvailableType(0, i, &inTypeRaw);
+      if (hr == MF_E_NO_MORE_TYPES) break;
+      if (FAILED(hr) || !inTypeRaw) continue;
+      Microsoft::WRL::ComPtr<IMFMediaType> inType;
+      inType.Attach(inTypeRaw);
+      GUID st{};
+      if (SUCCEEDED(inType->GetGUID(MF_MT_SUBTYPE, &st)) && env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
+        std::string line = "decoder amf: try input subtype=" + guid_to_string(st);
+        codec_debug_log(line.c_str());
+      }
+      if (SUCCEEDED(dec_->SetInputType(0, inType.Get(), 0))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  return try_subtype(MFVideoFormat_H264, "H264");
+}
+
+bool H264Decoder::configure_output_type() {
+  if (!dec_) return false;
+  for (DWORD i = 0;; ++i) {
+    IMFMediaType* outTypeRaw = nullptr;
+    const HRESULT hr = dec_->GetOutputAvailableType(0, i, &outTypeRaw);
+    if (hr == MF_E_NO_MORE_TYPES) return false;
+    if (FAILED(hr) || !outTypeRaw) continue;
+    Microsoft::WRL::ComPtr<IMFMediaType> outType;
+    outType.Attach(outTypeRaw);
+    GUID st{};
+    if (FAILED(outType->GetGUID(MF_MT_SUBTYPE, &st)) || st != MFVideoFormat_NV12) continue;
+    if (SUCCEEDED(dec_->SetOutputType(0, outType.Get(), 0))) {
+      outputConfigured_ = true;
+      (void)configure_surface_allocator(outType.Get());
+      return true;
+    }
+  }
+}
+
+bool H264Decoder::configure_surface_allocator(IMFMediaType* outputType) {
+  if (videoAllocator_) {
+    (void)videoAllocator_->UninitializeSampleAllocator();
+    videoAllocator_.Reset();
+  }
+  if (!d3dManager_ || !outputType ||
+      !env_truthy_local("REMOTE60_NATIVE_DXGI_DECODE_SURFACE") ||
+      env_truthy_local("REMOTE60_NATIVE_DISABLE_DXGI_DECODE_SURFACE")) {
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IMFVideoSampleAllocatorEx> allocator;
+  HRESULT hr = MFCreateVideoSampleAllocatorEx(IID_PPV_ARGS(&allocator));
+  if (FAILED(hr) || !allocator) {
+    codec_debug_log(("decoder surface allocator create failed hr=" + hr_to_hex(hr)).c_str());
+    return false;
+  }
+  hr = allocator->SetDirectXManager(d3dManager_.Get());
+  if (FAILED(hr)) {
+    codec_debug_log(("decoder surface allocator set manager failed hr=" + hr_to_hex(hr)).c_str());
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IMFAttributes> attrs;
+  if (FAILED(MFCreateAttributes(&attrs, 2)) || !attrs) return false;
+  (void)attrs->SetUINT32(MF_SA_D3D11_USAGE, D3D11_USAGE_DEFAULT);
+  (void)attrs->SetUINT32(MF_SA_D3D11_BINDFLAGS, D3D11_BIND_SHADER_RESOURCE);
+  // A small pool lets decode, queued paint, and the currently presented frame overlap
+  // without allocating in steady state. The decoder can grow it during a brief UI stall.
+  hr = allocator->InitializeSampleAllocatorEx(3, 8, attrs.Get(), outputType);
+  if (FAILED(hr)) {
+    codec_debug_log(("decoder surface allocator initialize failed hr=" + hr_to_hex(hr)).c_str());
+    return false;
+  }
+  codec_debug_log("decoder surface allocator ready");
+  videoAllocator_ = std::move(allocator);
+  return true;
+}
+
+bool H264Decoder::query_output_size(uint32_t* outWidth, uint32_t* outHeight) const {
+  if (!dec_ || !outWidth || !outHeight) return false;
+  Microsoft::WRL::ComPtr<IMFMediaType> outType;
+  if (FAILED(dec_->GetOutputCurrentType(0, &outType)) || !outType) return false;
+  UINT32 w = 0;
+  UINT32 h = 0;
+  if (FAILED(MFGetAttributeSize(outType.Get(), MF_MT_FRAME_SIZE, &w, &h))) return false;
+  *outWidth = w;
+  *outHeight = h;
+  return true;
+}
+
+bool H264Decoder::query_output_geometry(uint32_t* codedWidth, uint32_t* codedHeight,
+                                        uint32_t* visibleLeft, uint32_t* visibleTop,
+                                        uint32_t* visibleWidth, uint32_t* visibleHeight) const {
+  if (!dec_ || !codedWidth || !codedHeight || !visibleLeft || !visibleTop || !visibleWidth ||
+      !visibleHeight) {
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IMFMediaType> outType;
+  if (FAILED(dec_->GetOutputCurrentType(0, &outType)) || !outType) return false;
+  UINT32 w = 0;
+  UINT32 h = 0;
+  if (FAILED(MFGetAttributeSize(outType.Get(), MF_MT_FRAME_SIZE, &w, &h)) || w == 0 || h == 0) {
+    return false;
+  }
+  *codedWidth = w;
+  *codedHeight = h;
+
+  // MF_MT_FRAME_SIZE is the coded plane; the picture the encoder was fed lives in the display
+  // aperture. Preference order per Media Foundation: minimum display, then geometric.
+  uint32_t left = 0;
+  uint32_t top = 0;
+  uint32_t visW = w;
+  uint32_t visH = h;
+  MFVideoArea area{};
+  UINT32 blobSize = 0;
+  bool haveArea =
+      SUCCEEDED(outType->GetBlob(MF_MT_MINIMUM_DISPLAY_APERTURE,
+                                 reinterpret_cast<UINT8*>(&area), sizeof(area), &blobSize)) &&
+      blobSize == sizeof(area);
+  if (!haveArea) {
+    blobSize = 0;
+    haveArea = SUCCEEDED(outType->GetBlob(MF_MT_GEOMETRIC_APERTURE,
+                                          reinterpret_cast<UINT8*>(&area), sizeof(area),
+                                          &blobSize)) &&
+               blobSize == sizeof(area);
+  }
+  if (haveArea) {
+    const int32_t offsetX = area.OffsetX.value;
+    const int32_t offsetY = area.OffsetY.value;
+    const int32_t areaW = area.Area.cx;
+    const int32_t areaH = area.Area.cy;
+    // Only accept an aperture that stays inside the coded plane; a decoder reporting
+    // nonsense must not shrink or shift the picture.
+    if (offsetX >= 0 && offsetY >= 0 && areaW > 0 && areaH > 0 &&
+        offsetX + areaW <= static_cast<int32_t>(w) && offsetY + areaH <= static_cast<int32_t>(h)) {
+      left = static_cast<uint32_t>(offsetX);
+      top = static_cast<uint32_t>(offsetY);
+      visW = static_cast<uint32_t>(areaW);
+      visH = static_cast<uint32_t>(areaH);
+    }
+  }
+
+  // NV12 chroma is 2x2 subsampled, so everything must stay even or the UV plane splits a
+  // sample pair. Rounding an odd aperture down loses at most one row/column of padding.
+  left &= ~1u;
+  top &= ~1u;
+  visW &= ~1u;
+  visH &= ~1u;
+  if (visW == 0 || visH == 0) {
+    left = 0;
+    top = 0;
+    visW = w;
+    visH = h;
+  }
+  *visibleLeft = left;
+  *visibleTop = top;
+  *visibleWidth = visW;
+  *visibleHeight = visH;
+  return true;
+}
+
+bool H264Decoder::initialize(uint32_t width, uint32_t height, uint32_t fps) {
+  auto retainedD3dManager = d3dManager_;
+  const uint32_t retainedD3dToken = d3dManagerResetToken_;
+  shutdown();
+  d3dManager_ = std::move(retainedD3dManager);
+  d3dManagerResetToken_ = retainedD3dToken;
+  codec_debug_log("decoder initialize: start");
+  width_ = width;
+  height_ = height;
+  fps_ = std::max<uint32_t>(1, fps);
+  sampleDurationHns_ = std::max<int64_t>(1, 10000000LL / static_cast<int64_t>(fps_));
+
+  IMFTransform* decRaw = nullptr;
+  codec_debug_log("decoder initialize: create transform");
+  if (!create_h264_decoder_transform(&decRaw, &usingHardware_, &backendName_) || !decRaw) return false;
+  codec_debug_log("decoder initialize: transform created");
+  dec_.Attach(decRaw);
+  (void)set_mf_attr_u32(dec_.Get(), MF_TRANSFORM_ASYNC_UNLOCK, 1);
+  if (d3dManager_) {
+    codec_debug_log("decoder initialize: set d3d manager");
+    (void)dec_->ProcessMessage(MFT_MESSAGE_SET_D3D_MANAGER,
+                               reinterpret_cast<ULONG_PTR>(d3dManager_.Get()));
+    Microsoft::WRL::ComPtr<IMFAttributes> outputAttrs;
+    if (SUCCEEDED(dec_->GetOutputStreamAttributes(0, &outputAttrs)) && outputAttrs) {
+      // Ask the decoder's surface allocator for textures that the renderer can sample.
+      // Decoders may ignore the hint and fall back to a CPU buffer, which remains supported.
+      (void)outputAttrs->SetUINT32(MF_SA_D3D11_BINDFLAGS, D3D11_BIND_SHADER_RESOURCE);
+    }
+  }
+  (void)set_mf_attr_u32(dec_.Get(), MF_LOW_LATENCY, 1);
+  (void)set_codecapi_bool(dec_.Get(), CODECAPI_AVLowLatencyMode, true);
+
+  const bool isAmfDecoder = (std::strcmp(backendName_, "amf_mft_h264dec") == 0);
+  if (isAmfDecoder) {
+    codec_debug_log("decoder initialize(amf): configure output first");
+    outputConfigured_ = configure_output_type();
+    codec_debug_log("decoder initialize(amf): configure input");
+    if (!configure_input_type()) {
+      codec_debug_log("decoder initialize(amf): configure input failed");
+      shutdown();
+      return false;
+    }
+    if (!outputConfigured_) {
+      codec_debug_log("decoder initialize(amf): reconfigure output");
+      outputConfigured_ = configure_output_type();
+    }
+  } else {
+    codec_debug_log("decoder initialize: configure input");
+    if (!configure_input_type()) {
+      codec_debug_log("decoder initialize: configure input failed");
+      shutdown();
+      return false;
+    }
+    codec_debug_log("decoder initialize: configure output");
+    outputConfigured_ = configure_output_type();
+    if (!outputConfigured_) {
+      codec_debug_log("decoder initialize: configure output pending/failed");
+    }
+  }
+
+  (void)dec_->ProcessMessage(MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+  (void)dec_->ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+  codec_debug_log("decoder initialize: stream started");
+  started_ = true;
+  sampleIndex_ = 0;
+  missingOutputTimestampCount_ = 0;
+  pendingInputSampleTimesHns_.clear();
+  pendingInputSynthetic_.clear();
+  return true;
+}
+
+bool H264Decoder::decode_access_unit(const std::vector<uint8_t>& annexb, bool keyFrame,
+                                     int64_t inputSampleTimeHns,
+                                     std::vector<DecodedFrameNv12>* outFrames,
+                                     bool* outPendingTimestampOverflow) {
+  if (!dec_ || !started_ || !outFrames) return false;
+  if (outPendingTimestampOverflow) *outPendingTimestampOverflow = false;
+  outFrames->clear();
+
+  Microsoft::WRL::ComPtr<IMFSample> sample;
+  IMFSample* inputSample = nullptr;
+  const int64_t sampleTime = (inputSampleTimeHns > 0)
+                                 ? inputSampleTimeHns
+                                 : (static_cast<int64_t>(sampleIndex_) * sampleDurationHns_);
+  if (!create_input_sample(annexb, sampleTime, sampleDurationHns_, &inputSample)) {
+    return false;
+  }
+  sample.Attach(inputSample);
+  if (keyFrame) (void)sample->SetUINT32(MFSampleExtension_CleanPoint, 1);
+
+  auto drain_outputs = [&]() -> bool {
+    while (true) {
+      if (!outputConfigured_) {
+        outputConfigured_ = configure_output_type();
+        if (!outputConfigured_) return true;
+      }
+
+      MFT_OUTPUT_STREAM_INFO osi{};
+      if (FAILED(dec_->GetOutputStreamInfo(0, &osi))) return false;
+
+      Microsoft::WRL::ComPtr<IMFSample> outSample;
+      Microsoft::WRL::ComPtr<IMFMediaBuffer> outBuffer;
+      MFT_OUTPUT_DATA_BUFFER odb{};
+      odb.dwStreamID = 0;
+
+      if ((osi.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES) == 0) {
+        if (videoAllocator_) {
+          if (FAILED(videoAllocator_->AllocateSample(&outSample)) || !outSample) return false;
+        } else {
+          const uint32_t cb = (osi.cbSize > 0) ? static_cast<uint32_t>(osi.cbSize) : (4u << 20);
+          if (FAILED(MFCreateSample(&outSample)) || !outSample) return false;
+          if (FAILED(MFCreateMemoryBuffer(cb, &outBuffer)) || !outBuffer) return false;
+          if (FAILED(outSample->AddBuffer(outBuffer.Get()))) return false;
+        }
+        odb.pSample = outSample.Get();
+      }
+
+      DWORD status = 0;
+      const HRESULT po = dec_->ProcessOutput(0, 1, &odb, &status);
+      if (po == MF_E_TRANSFORM_NEED_MORE_INPUT) {
+        if (odb.pEvents) odb.pEvents->Release();
+        break;
+      }
+      if (po == MF_E_TRANSFORM_STREAM_CHANGE) {
+        if (odb.pEvents) odb.pEvents->Release();
+        outputConfigured_ = configure_output_type();
+        continue;
+      }
+      if (FAILED(po)) {
+        if (odb.pEvents) odb.pEvents->Release();
+        return false;
+      }
+
+      // If the MFT provided its own sample (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES),
+      // odb.pSample has an outstanding reference we must release.
+      Microsoft::WRL::ComPtr<IMFSample> mftProvidedSample;
+      if (odb.pSample && odb.pSample != outSample.Get()) {
+        mftProvidedSample.Attach(odb.pSample);  // take ownership without AddRef
+      }
+      IMFSample* produced = odb.pSample ? odb.pSample : outSample.Get();
+      if (produced) {
+        uint32_t outW = width_;
+        uint32_t outH = height_;
+        uint32_t visLeft = 0;
+        uint32_t visTop = 0;
+        uint32_t visW = 0;
+        uint32_t visH = 0;
+        if (!query_output_geometry(&outW, &outH, &visLeft, &visTop, &visW, &visH)) {
+          (void)query_output_size(&outW, &outH);
+          visW = outW;
+          visH = outH;
+        }
+        int64_t mappedInputSampleTimeHns = 0;
+        bool mappedSynthetic = nextInputSynthetic_;  // FIFO empty -> this call's input
+        if (!pendingInputSampleTimesHns_.empty()) {
+          mappedInputSampleTimeHns = pendingInputSampleTimesHns_.front();
+          if (!pendingInputSynthetic_.empty()) mappedSynthetic = pendingInputSynthetic_.front();
+          pendingInputSampleTimesHns_.pop_front();
+          if (!pendingInputSynthetic_.empty()) pendingInputSynthetic_.pop_front();
+        }
+
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> surfaceTexture;
+        uint32_t surfaceSubresource = 0;
+        const bool hasSurface = d3dManager_ &&
+            env_truthy_local("REMOTE60_NATIVE_DXGI_DECODE_SURFACE") &&
+            !env_truthy_local("REMOTE60_NATIVE_DISABLE_DXGI_DECODE_SURFACE") &&
+            sample_to_dxgi_texture(produced, &surfaceTexture, &surfaceSubresource);
+        std::vector<uint8_t> bytes;
+        if (!hasSurface) {
+          if (!sample_to_bytes(produced, &bytes) || bytes.empty()) {
+            (void)sample_to_nv12_bytes_from_2d_buffer(produced, outW, outH, &bytes);
+          }
+        }
+        if (hasSurface || !bytes.empty()) {
+          DecodedFrameNv12 frame{};
+          frame.synthetic = mappedSynthetic;
+          frame.width = outW;
+          frame.height = outH;
+          frame.visibleLeft = visLeft;
+          frame.visibleTop = visTop;
+          frame.visibleWidth = (visW > 0) ? visW : outW;
+          frame.visibleHeight = (visH > 0) ? visH : outH;
+
+          int64_t outSampleTimeHns = 0;
+          if (SUCCEEDED(produced->GetSampleTime(&outSampleTimeHns)) && outSampleTimeHns > 0) {
+            frame.sampleTimeHns = outSampleTimeHns;
+            frame.sampleTimeFromOutput = true;
+          } else {
+            frame.sampleTimeHns = mappedInputSampleTimeHns;
+            frame.sampleTimeFromOutput = false;
+            if (frame.sampleTimeHns > 0) {
+              ++missingOutputTimestampCount_;
+              if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC") &&
+                  (missingOutputTimestampCount_ % 120ULL) == 1ULL) {
+                std::string line = "decoder output sample_time missing, fallback count=" +
+                                   std::to_string(missingOutputTimestampCount_);
+                codec_debug_log(line.c_str());
+              }
+            }
+          }
+          frame.bytes = std::move(bytes);
+          if (hasSurface) {
+            frame.surfaceSample = produced;
+            frame.surfaceTexture = std::move(surfaceTexture);
+            frame.surfaceSubresource = surfaceSubresource;
+          }
+          outFrames->push_back(std::move(frame));
+        }
+      }
+      if (odb.pEvents) odb.pEvents->Release();
+    }
+    return true;
+  };
+
+  HRESULT inHr = dec_->ProcessInput(0, sample.Get(), 0);
+  if (inHr == MF_E_NOTACCEPTING) {
+    // Decoder queue is full: drain first so latest input can be accepted.
+    if (!drain_outputs()) return false;
+    inHr = dec_->ProcessInput(0, sample.Get(), 0);
+  }
+  if (FAILED(inHr)) return false;
+  ++sampleIndex_;
+  pendingInputSampleTimesHns_.push_back(sampleTime);
+  pendingInputSynthetic_.push_back(nextInputSynthetic_);
+  constexpr size_t kPendingInputTimestampMax = 512;
+  if (pendingInputSampleTimesHns_.size() > kPendingInputTimestampMax) {
+    pendingInputSampleTimesHns_.pop_front();
+    if (!pendingInputSynthetic_.empty()) pendingInputSynthetic_.pop_front();
+    if (outPendingTimestampOverflow) *outPendingTimestampOverflow = true;
+    if (env_truthy_local("REMOTE60_NATIVE_DEBUG_CODEC")) {
+      codec_debug_log("decoder pending input timestamp queue overflowed; caller must recover");
+    }
+    return true;
+  }
+
+  return drain_outputs();
+}
+
+void H264Decoder::reset() {
+  if (!dec_) return;
+  (void)dec_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+  sampleIndex_ = 0;
+  pendingInputSampleTimesHns_.clear();
+  pendingInputSynthetic_.clear();
+}
+
+void H264Decoder::shutdown() {
+  if (videoAllocator_) {
+    (void)videoAllocator_->UninitializeSampleAllocator();
+    videoAllocator_.Reset();
+  }
+  if (dec_) {
+    (void)dec_->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+    (void)dec_->ProcessMessage(MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
+    dec_.Reset();
+  }
+  started_ = false;
+  outputConfigured_ = false;
+  sampleIndex_ = 0;
+  usingHardware_ = false;
+  backendName_ = "unknown";
+  missingOutputTimestampCount_ = 0;
+  pendingInputSampleTimesHns_.clear();
+  pendingInputSynthetic_.clear();
+  d3dManager_.Reset();
+  d3dManagerResetToken_ = 0;
+}
+
+}  // namespace remote60::native_poc

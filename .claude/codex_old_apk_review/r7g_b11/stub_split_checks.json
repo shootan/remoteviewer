@@ -1,0 +1,29 @@
+{
+  "scope": "exact new test block and real watch/snapshot functions; no process/adb/device",
+  "hashes": {
+    "oa_pick_test_fixed.py": "de8fbf819af2664bdef0d96e7da9927b1e777230e0e648b9d4dc9a9fae4fec1f",
+    "stub_watch_split_approved.patch": "09e8f26ad6d7fdf0b38551128823800a733b3f81f43173a49ab249f70a5acbc4"
+  },
+  "results": [
+    {
+      "name": "NEGATIVE 3w: the baseline app snapshot fails -> FAIL before the watch, no input",
+      "pass": true,
+      "detail": "no current snapshot / pick marker / video out baseline; nothing judged as progressing"
+    },
+    {
+      "name": "NEGATIVE 3w: the app log pull fails AFTER a good baseline and initial gate -> FAIL in the loop, no input",
+      "pass": true,
+      "detail": "reads=[True, True, False, False] injected=1 held 2.0 s; video out 55 -> 55; no app snapshot: app log not read (RuntimeError: fixture pull failed)"
+    },
+    {
+      "name": "NEGATIVE 3w: the host log shrinks AFTER a good baseline and initial gate -> FAIL in the loop, no input",
+      "pass": true,
+      "detail": "reads=[True, True, True, True] injected=1 held 2.0 s; video out 55 -> 56; the host log shrank (9 < 18 at the pick): cannot tell"
+    }
+  ],
+  "virtual_elapsed": {
+    "watch-baseline-pullfail": 0,
+    "watch-pullfail": 2.0,
+    "watch-hostshrink": 2.0
+  }
+}

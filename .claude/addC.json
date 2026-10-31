@@ -1,0 +1,10 @@
+{
+  "repo_path": "D:/remote/remote",
+  "files": [
+    "automation/gnlink_deploy.sh",
+    "automation/gnlink_deploy_test.sh",
+    "apps/native_poc/tools/verify_release_manifest.cpp",
+    "apps/native_poc/CMakeLists.txt",
+    "docs/history.md"
+  ]
+}

@@ -1,0 +1,544 @@
+// Host startup 4/5: WinRT / WGC / Media Foundation / D3D bring-up, capture target (window criteria,
+// monitor, capture item, size), encode geometry + ABR / M9 ladders, H.264 encoder init.
+//
+// Host split refactor Phase 2-12: moved verbatim out of main() (native_video_host_main.cpp); see
+// host_startup.hpp for the call order and HostContext (host_main_loop.hpp) for the shared state.
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <mfapi.h>
+#include <windows.graphics.capture.interop.h>
+#include <windows.graphics.directx.direct3d11.interop.h>
+#include <wrl/client.h>
+
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Capture.h>
+#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#include <winrt/base.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cctype>
+#include <cstdio>
+#include <condition_variable>
+#include <cstdint>
+#include <deque>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+#include <cwctype>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <optional>
+#include <string>
+#include <thread>
+#include <unordered_set>
+#include <vector>
+
+#include "host_winrt_seam.hpp"
+#include "capture_adapter_identity.hpp"
+#include "mt_ab_test_seam.hpp"
+#include "mf_h264_codec.hpp"
+#include "bind_port_candidates.hpp"
+#include "capture_cadence_gate.hpp"
+#include "d3d_capture_readback.hpp"
+#include "directory_client.hpp"
+#include "encode_resolution_ladder.hpp"
+#include "gdi_capture_process.hpp"
+#include "json_profile.hpp"
+#include "native_video_transport.hpp"
+#include "poc_protocol.hpp"
+#include "secure_input_broker.hpp"
+#include "time_utils.hpp"
+#include "host_pinned_select_seam.hpp"
+#include "udp_control_channel.hpp"
+#include "capture_backend_dxgi.hpp"
+#include "host_string_util.hpp"
+#include "host_log.hpp"
+#include "host_args.hpp"
+#include "host_bgra_scale.hpp"
+#include "host_bottleneck.hpp"
+#include "host_frame_state.hpp"
+#include "host_gpu_scaler.hpp"
+#include "host_window_enum.hpp"
+#include "host_capture_device.hpp"
+#include "host_net_io.hpp"
+#include "host_input_inject.hpp"
+#include "host_frame_gate.hpp"
+#include "host_abr.hpp"
+#include "host_kick.hpp"
+#include "host_client_metrics.hpp"
+#include "host_backend_policy.hpp"
+#include "host_watchdog.hpp"
+#include "host_input_router.hpp"
+#include "host_encoded_sender.hpp"
+#include "host_session.hpp"
+#include "host_encoder_manager.hpp"
+#include "host_key_period_policy.hpp"
+#include "host_stats.hpp"
+#include "host_capture_session.hpp"
+#include "host_control_session.hpp"
+#include "host_main_loop.hpp"
+#include "host_startup.hpp"
+
+#ifndef REMOTE60_NATIVE_ENCODED_EXPERIMENT
+#define REMOTE60_NATIVE_ENCODED_EXPERIMENT 0
+#endif
+
+using namespace winrt::Windows::Graphics::Capture;
+using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
+using remote60::host::DesktopCaptureBackend;
+using remote60::host::DxgiDesktopCaptureConfig;
+using remote60::host::DxgiDesktopCaptureSession;
+
+namespace remote60::native_poc {
+
+int startup_init_graphics(HostContext& hx) {
+  auto& useH264 = hx.useH264;
+  auto& clientSession = hx.clientSession;
+  auto& encoder = hx.encoder;
+  auto& capture = hx.capture;
+  auto& res = hx.res;
+  winrt::init_apartment(winrt::apartment_type::multi_threaded);
+  if (hx.args.preloginMode) {
+    // prelogin-field D2 (Codex codex_prelogin_field_d3.md): the pre-login worker captures the logon desktop with
+    // DXGI only -- any WGC request there ends it (PreloginStopServing, exit 15) -- so it does not ask about WGC.
+    // The 0.2.160 worker exited 49 right after each viewer connect; this WinRT call is one candidate (not proven).
+    std::cout << "[native-video-host][prelogin] WGC not probed (the logon desktop is DXGI only)\n";
+  } else {
+    // An IsSupported that throws (its activation failed) is the same answer as false: WGC is not there. Said
+    // with the HRESULT, and the existing "not supported" exit -- never taken as supported.
+    bool wgcSupported = false;
+    try {
+      HostWinrtTrap("GraphicsCaptureSession::IsSupported");
+      wgcSupported = HostWgcIsSupported();
+    } catch (const winrt::hresult_error& e) {
+      std::cerr << "[native-video-host] WGC not supported (IsSupported threw hr=" << hr_hex(e.code()) << ")\n";
+      return 6;
+    }
+    if (!wgcSupported) {
+      std::cerr << "[native-video-host] WGC not supported\n";
+      return 6;
+    }
+  }
+
+  if (useH264) {
+    const HRESULT hr = MFStartup(MF_VERSION);
+    if (FAILED(hr)) {
+      std::cerr << "[native-video-host] MFStartup failed hr=0x" << std::hex << static_cast<unsigned long>(hr)
+                << std::dec << "\n";
+      return 12;
+    }
+    encoder.mfStarted = true;
+  }
+
+  HRESULT hr = create_d3d11_device_for_primary_monitor(&res.d3d, &res.ctx, &res.fl);
+  if (FAILED(hr)) {
+    std::cerr << "[native-video-host] D3D11CreateDevice failed\n";
+    return 7;
+  }
+#ifdef REMOTE60_MT_AB_TEST_SEAM
+  // TEST BUILD ONLY (dxgi-wedge-fix r1, Codex B1): the A/B arm, before anything else touches the device.
+  std::cout << "[native-video-host][mt-ab] where=startup\n";
+  std::cout << mt_ab_apply(res.ctx.Get());
+#endif
+  std::cout << d3d_multithread_log_line("device-created", res.d3d.Get(), res.ctx.Get());
+  // dxgi-wedge-fix r1: the adapter this device -- and so any DXGI duplication of it -- sits on. The
+  // supervisor reads this line to know WHICH adapter a later exit 44 wedged (capture_adapter_identity.hpp).
+  std::cout << capture_adapter_log_line(identify_device_adapter(res.d3d.Get()));
+  if (useH264) {
+    (void)encoder.codec.set_d3d11_device(res.d3d.Get());
+    std::cout << d3d_multithread_log_line("mf-device-set", res.d3d.Get(), res.ctx.Get());
+  }
+  if (capture.gpuScalerRequested) {
+    capture.gpuScalerHealthy = res.gpuScaler.initialize(res.d3d.Get(), res.ctx.Get(), &res.d3dContextMu);
+    std::cout << "[native-video-host] gpuScalerRequested=1 gpuScalerReady="
+              << (capture.gpuScalerHealthy ? 1 : 0) << "\n";
+  }
+  return 0;
+}
+
+int startup_select_capture_target(HostContext& hx) {
+  auto& args = hx.args;
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+  if (pinned_select_seam_no_capture()) {
+    // r3 (parkclip): no capture target is chosen and no capture ever starts; the control threads serve on.
+    std::cout << "[pinned-select-test] no-capture: no capture is started; serving control only for "
+              << args.seconds << " s\n";
+    std::cout.flush();
+    const auto end = std::chrono::steady_clock::now() + std::chrono::seconds(args.seconds > 0 ? args.seconds : 60);
+    while (!hx.stop.load() && std::chrono::steady_clock::now() < end) Sleep(100);
+    std::cout << "[pinned-select-test] no-capture: done\n";
+    std::cout.flush();
+    std::fflush(stdout);
+    TerminateProcess(GetCurrentProcess(), 0);
+  }
+#endif
+  auto& item = hx.item;
+  auto& backend = hx.backend;
+  auto& inputRouter = hx.inputRouter;
+  auto& clientSession = hx.clientSession;
+  auto& encoder = hx.encoder;
+  auto& capture = hx.capture;
+  capture.windowCriteria.pid = args.captureWindowPid;
+  for (const auto& name : parse_csv_lower(args.captureWindowProcess)) {
+    capture.windowCriteria.processNamesLower.insert(name);
+  }
+  capture.windowCriteria.titleNeedleLower = wide_lower(utf8_to_wide(trim_ascii(args.captureWindowTitle)));
+  capture.selectionLockedByConfig = capture.windowCriteria.enabled() || inputRouter.targetCriteria.enabled();
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+  // TEST BUILD ONLY (r2 K6): the pinned window is (re)selected through the product's transaction; the
+  // control session admits no other target (host_control_session.cpp).
+  capture.windowSelectionLocked.store(false, std::memory_order_release);
+#else
+  capture.windowSelectionLocked.store(capture.selectionLockedByConfig, std::memory_order_release);
+#endif
+  capture.windowTargetConfigured = capture.windowCriteria.enabled();
+  backend.requested = desktop_capture_backend_from_env();
+  backend.startupRequested = backend.requested;  // capture-lifecycle r1 (UA-2): what a new session starts from
+  // dxgi-wedge-fix r1 (Codex B4/B5): the supervisor's quarantine is a separate signal from what was
+  // requested. The pre-login worker serves Winlogon through DXGI only and ends rather than falls back
+  // (r10 T2), so a quarantine never applies to it -- whatever its environment says.
+  {
+    const std::string quarantine = dxgi_quarantine_from_env();
+    if (!quarantine.empty() && !capture.preloginServingDesktop.empty()) {
+      std::cout << "[native-video-host][capture-quarantine] ignored reason=" << quarantine
+                << " (pre-login worker: dxgi only)\n";
+    } else if (!quarantine.empty()) {
+      backend.dxgiQuarantined = true;
+      backend.dxgiQuarantineReason = quarantine;
+    }
+  }
+  backend.active = backend.EffectiveRequested();
+  std::cout << "[native-video-host][capture-quarantine] startup requested="
+            << desktop_capture_backend_name(backend.requested)
+            << " effective=" << desktop_capture_backend_name(backend.active)
+            << " dxgiQuarantined=" << (backend.dxgiQuarantined ? 1 : 0)
+            << " reason=" << (backend.dxgiQuarantined ? backend.dxgiQuarantineReason : std::string("none"))
+            << "\n";
+  // A demotion away from the requested backend is temporary until proven otherwise; these pace
+  // the attempts to get back to it. First retry is quick because the usual causes -- a UAC prompt
+  // being answered, RDP disconnecting -- clear in seconds; the ceiling keeps a machine that
+  // genuinely cannot use the requested backend from restarting capture forever.
+  backend.retryDelayUs = kDesktopBackendRetryMinUs;
+  // P2 secure-desktop stable gate. A demotion to WGC (UAC prompt, lock screen, RDP) used to be
+  // climbed back on a bare 3s timer, so every retry deadline that fired while the secure desktop
+  // was still up spent a restart_capture_session (pipeline flush + forced IDR) that failed at once
+  // -- E_ACCESSDENIED churn. Now the promotion is additionally gated on the interactive DEFAULT
+  // desktop having been up continuously for kDesktopDefaultStableUs, probed uncached at a bounded
+  // cadence, with one final uncached check the instant before the restart to close the
+  // probe->restart TOCTOU window. A genuine promotion failure (e.g. RDP: default desktop stable but
+  // primary duplication still unavailable) is NOT deferred here -- it falls through to the existing
+  // exponential backoff, which is the right owner for a backend that truly cannot start.
+  capture.windowClientOnlyActive = args.captureWindowClientOnly;
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+  // r3 R3: the target is the window pinned at start, by its owner check -- not a new search. The product's
+  // search also wants a visible window, which no window of a private window station's desktop ever is
+  // (parkclip): there it found nothing and fell back to the screen. The criteria still have to match it.
+  bool seamTarget = false;
+  if (!pinned_select_seam_probe_ungated()) {
+    HWND pinned = pinned_select_seam_pinned_hwnd();
+    CaptureWindowInfo info{};
+    info.hwnd = pinned;
+    uint32_t pid = 0;
+    info.processName = get_window_process_name(pinned, &pid);
+    info.pid = pid;
+    info.title = get_window_title(pinned);
+    const bool processOk = capture.windowCriteria.processNamesLower.empty() ||
+                           capture.windowCriteria.processNamesLower.count(info.processName) != 0;
+    seamTarget = pinned_select_seam_target_ok(pinned) && processOk;
+    if (seamTarget) capture.windowInfo = info;
+  }
+  if (capture.windowTargetConfigured && (seamTarget || (pinned_select_seam_probe_ungated() &&
+                                                        find_capture_window(capture.windowCriteria, &capture.windowInfo)))) {
+#else
+  if (capture.windowTargetConfigured && find_capture_window(capture.windowCriteria, &capture.windowInfo)) {
+#endif
+    capture.windowModeActive = true;
+    std::cout << "[native-video-host] capture-window target hwnd=0x" << std::hex
+              << reinterpret_cast<uintptr_t>(capture.windowInfo.hwnd) << std::dec
+              << " pid=" << capture.windowInfo.pid
+              << " process=" << (capture.windowInfo.processName.empty() ? "unknown" : capture.windowInfo.processName)
+              << " title=" << (capture.windowInfo.title.empty() ? "<empty>" : wide_to_utf8(capture.windowInfo.title))
+              << " clientOnly=" << (args.captureWindowClientOnly ? 1 : 0)
+              << "\n";
+  } else if (capture.windowTargetConfigured) {
+#ifdef REMOTE60_PINNED_SELECT_TEST_SEAM
+    // r3 R3: this test build never falls back to a screen -- the pinned window or no host.
+    if (!pinned_select_seam_probe_ungated()) pinned_select_seam_refuse("startup: the pinned window was not found");
+#endif
+    std::cout << "[native-video-host] capture-window target not found; fallback=monitor"
+              << " pidFilter=" << args.captureWindowPid
+              << " processFilter=" << trim_ascii(args.captureWindowProcess)
+              << " titleFilter=" << trim_ascii(args.captureWindowTitle)
+              << "\n";
+  }
+  capture.selectedWindowId.store(capture.windowModeActive ? hwnd_to_id(capture.windowInfo.hwnd) : 0u,
+                              std::memory_order_release);
+  capture.targetFlags.store((capture.windowModeActive ? 0x1u : 0x0u) |
+                                   ((capture.windowModeActive && capture.windowClientOnlyActive) ? 0x2u : 0x0u),
+                               std::memory_order_relaxed);
+  capture.targetPid.store(capture.windowModeActive ? capture.windowInfo.pid : 0u, std::memory_order_relaxed);
+  capture.targetHwnd.store(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(
+                                  capture.windowModeActive ? capture.windowInfo.hwnd : nullptr)),
+                              std::memory_order_relaxed);
+  {
+    std::lock_guard<std::mutex> lk(capture.metaMu);
+    capture.targetProcess =
+        (capture.windowModeActive && !capture.windowInfo.processName.empty()) ? capture.windowInfo.processName : "monitor";
+    capture.targetTitle =
+        (capture.windowModeActive && !capture.windowInfo.title.empty()) ? wide_to_utf8(capture.windowInfo.title)
+                                                                       : std::string{};
+  }
+
+  capture.monitorInfo = primary_monitor_info();
+  if (!capture.monitorInfo.has_value()) {
+    std::cerr << "[native-video-host] primary monitor query failed\n";
+    return 8;
+  }
+  if (!capture.windowModeActive && backend.requested == DesktopCaptureBackend::Dxgi &&
+      capture.monitorInfo->width < capture.monitorInfo->height) {
+    backend.active = DesktopCaptureBackend::Wgc;
+    std::cout << "[native-video-host] rotation_unsupported fallback_reason=rotation_unsupported\n";
+  }
+  // Tell the SYSTEM agent where the captured pixels live. Without it the agent can only assume,
+  // and its old assumption -- the primary monitor -- put every click on the wrong screen when the
+  // prompt opened somewhere else. This is only the FIRST value: it is re-derived after every
+  // capture restart (P9) -- a host started over RDP saw the RDP display here and kept it for the
+  // console session it later served, scaling every UAC click by 2236/1920 x 1232/1080.
+  sync_input_target_rect(capture, inputRouter, "startup");
+
+  if (capture.windowModeActive || backend.active == DesktopCaptureBackend::Wgc) {
+    item = capture.windowModeActive
+               ? CreateItemForPrimaryMonitor(capture.windowInfo.hwnd, "CreateForWindow(target-window)")
+               : CreateItemForPrimaryMonitor();
+    if (!item) {
+      std::cerr << "[native-video-host] capture item create failed\n";
+      return 8;
+    }
+    capture.size = item.Size();
+    capture.width = static_cast<uint32_t>(capture.size.Width);
+    capture.height = static_cast<uint32_t>(capture.size.Height);
+  } else {
+    capture.width = capture.monitorInfo->width;
+    capture.height = capture.monitorInfo->height;
+    capture.size.Width = static_cast<int32_t>(capture.width);
+    capture.size.Height = static_cast<int32_t>(capture.height);
+  }
+  if (capture.width < 2 || capture.height < 2) {
+    std::cerr << "[native-video-host] invalid capture size\n";
+    return 9;
+  }
+  std::cout << "[native-video-host] desktop_backend="
+            << (capture.windowModeActive ? "wgc_window" : desktop_capture_backend_name(backend.active))
+            << " capture=" << capture.width << "x" << capture.height << "\n";
+  return 0;
+}
+
+void startup_configure_encode_geometry(HostContext& hx) {
+  auto& args = hx.args;
+  auto& useH264 = hx.useH264;
+  auto& frameGating = hx.frameGating;
+  auto& rate = hx.rate;
+  auto& inputRouter = hx.inputRouter;
+  auto& encoder = hx.encoder;
+  auto& capture = hx.capture;
+  encoder.encodeW = capture.width;
+  encoder.encodeH = capture.height;
+  if (useH264) {
+    // Window capture is known from the arguments at this point; the selection path re-derives
+    // the priority from capture.windowModeActive later.
+    const bool windowArgs = !args.captureWindowTitle.empty() || args.captureWindowPid != 0 ||
+                            !args.captureWindowProcess.empty();
+    choose_h264_encode_size(args, capture.width, capture.height, &encoder.encodeW, &encoder.encodeH,
+                            &rate.autoFallback720, rate.PriorityFor(windowArgs));
+    encoder.boxPriority = rate.PriorityFor(windowArgs);
+    encoder.manualEncodeBox = args.encodeWidth > 0 && args.encodeHeight > 0;
+  }
+
+  // Whether the ladder, rather than the source size, is currently deciding the resolution. Held
+  // across runtime changes so the band between the two thresholds can return the previous answer.
+  rate.encodeLadderReduced = rate.autoFallback720;
+  rate.abrHighW = encoder.encodeW;
+  rate.abrHighH = encoder.encodeH;
+  rate.abrMidW = rate.abrHighW;
+  rate.abrMidH = rate.abrHighH;
+  rate.abrLowW = rate.abrHighW;
+  rate.abrLowH = rate.abrHighH;
+  if (useH264) {
+    choose_abr_720_size(rate.abrHighW, rate.abrHighH, &rate.abrLowW, &rate.abrLowH);
+  }
+  rate.abrHasLowerResolution = (rate.abrLowW < rate.abrHighW || rate.abrLowH < rate.abrHighH);
+  rate.abrHighBitrate = args.bitrate;
+  rate.abrMidBitrate = std::min<uint32_t>(
+      rate.abrHighBitrate, std::max<uint32_t>(2000000u, (rate.abrHighBitrate * 75u) / 100u));
+  rate.abrLowBitrate = std::min<uint32_t>(
+      rate.abrHighBitrate, std::max<uint32_t>(1500000u, (rate.abrHighBitrate * 55u) / 100u));
+  rate.abrHasMidProfile = (rate.abrMidBitrate < rate.abrHighBitrate);
+  rate.abrHasLowProfile = rate.abrHasLowerResolution || (rate.abrLowBitrate < rate.abrMidBitrate);
+  rate.m9BitrateLevel0 = rate.abrHighBitrate;
+  rate.m9BitrateLevel1 = std::min<uint32_t>(
+      rate.m9BitrateLevel0, std::max<uint32_t>(1500000u, (rate.m9BitrateLevel0 * 80u) / 100u));
+  rate.m9BitrateLevel2 = std::min<uint32_t>(
+      rate.m9BitrateLevel1, std::max<uint32_t>(1200000u, (rate.m9BitrateLevel0 * 65u) / 100u));
+  rate.m9BitrateLevel3 = std::min<uint32_t>(
+      rate.m9BitrateLevel2, std::max<uint32_t>(900000u, (rate.m9BitrateLevel0 * 50u) / 100u));
+  rate.m9FpsLevel0 = args.fps;
+  rate.m9FpsLevel1 = args.fps;
+  rate.m9FpsLevel2 = std::max<uint32_t>(20u, (args.fps * 80u) / 100u);
+  rate.m9FpsLevel3 = std::max<uint32_t>(15u, (args.fps * 67u) / 100u);
+  rate.m9WidthLevel0 = rate.abrHighW;
+  rate.m9HeightLevel0 = rate.abrHighH;
+  rate.m9WidthLevel1 = rate.abrHighW;
+  rate.m9HeightLevel1 = rate.abrHighH;
+  rate.m9WidthLevel2 = rate.abrHighW;
+  rate.m9HeightLevel2 = rate.abrHighH;
+  rate.m9WidthLevel3 = rate.abrLowW;
+  rate.m9HeightLevel3 = rate.abrLowH;
+  encoder.activeEncodeW = rate.abrHighW;
+  encoder.activeEncodeH = rate.abrHighH;
+  // Nominal (pre-aspect-fit) encode box of the current quality level, and the source size
+  // the active encode dimensions were fitted against.
+  encoder.nominalEncodeW = rate.abrHighW;
+  encoder.nominalEncodeH = rate.abrHighH;
+  encoder.encodeSourceW = capture.width;
+  encoder.encodeSourceH = capture.height;
+  // Refit debounce: candidate geometry and how long it has been stable.
+  encoder.activeFps = args.fps;
+  // What the user asked for, as distinct from whatever the encoder is running at this
+  // moment: overview mode lowers the active values on purpose, and restoring focus from
+  // "whatever is active" would restore the lowered ones. Only an explicit runtime tune of
+  // the same field moves a ceiling -- a bitrate-only tune falls back to active values for
+  // its fps/keyint arguments, and those must not leak in here.
+  rate.userFpsCeiling = args.fps;
+  rate.userKeyintCeiling = args.keyint;
+  encoder.activeBitrate = rate.abrHighBitrate;  // R: the user's wire budget
+  // encoder-rc-budget C1: the first instance is told E for that R, like every later one (ApplyTarget).
+  encoder.desiredEncoderBps = encoder.EncoderBudgetFor(encoder.activeBitrate, encoder.activeFps);
+  // Field A/B override for the keyframe interval (0 = off). Every ~1s a 120-160KB IDR was
+  // measured holding the previous frame an extra tick on 75% of key presents (the user's
+  // "periodically shows the previous frame"); this pins keyint (e.g. 120) without touching the
+  // client, winning over both the CLI default and runtime tunes.
+  encoder.keyintOverride = env_u32_clamped("REMOTE60_NATIVE_KEYINT_OVERRIDE", 0, 0, 600);
+  // The same key-period policy ApplyTarget applies to every later target (the >=10 s floor, an explicit
+  // override winning verbatim), applied to the FIRST instance too (encoder-rc-budget r4, Codex). Before
+  // this the first instance ran at args.keyint and the first runtime tune -- whatever it asked for --
+  // rebuilt the encoder because its effective keyint differed from the active one. That rebuild was not
+  // an RC effect and must not be measured as one; now a tune that changes nothing changes nothing.
+  // This can lower the initial periodic-IDR rate on a host whose args.keyint was below the floor.
+  encoder.activeKeyint = compute_effective_keyint({args.keyint, args.fps, encoder.keyintOverride});
+  encoder.activeFrameIntervalUs =
+      std::max<uint64_t>(1, 1000000ULL / static_cast<uint64_t>(std::max<uint32_t>(1, encoder.activeFps)));
+  encoder.activePacingFrameIntervalUs = encoder.activeFrameIntervalUs;
+  capture.submitMinIntervalUs = encoder.activeFrameIntervalUs;
+  // Picks which offered frames reach the encoder, and how evenly. Guarded by its own mutex
+  // because capture callbacks can arrive on more than one thread across backends.
+  frameGating.staticIntervalUs =
+      std::max<uint64_t>(encoder.activeFrameIntervalUs, std::max<uint64_t>(1, 1000000ULL / frameGating.staticFps));
+  inputRouter.domainW.store(encoder.activeEncodeW, std::memory_order_release);
+  inputRouter.domainH.store(encoder.activeEncodeH, std::memory_order_release);
+  // Submit latch for encoder.forceKeyNext. The async MFT can hold the key output for a few inputs, and
+  // forcing EVERY input in the meantime produced trains of 4-5 consecutive 40-160KB IDRs per
+  // request (measured at 17:24:26/32/52 in the field log). One forced input per request: stamped
+  // on submit, cleared when a key is accepted into the send path (on UDP that is the send-queue
+  // enqueue, not the wire; a failed send re-forces via barrier recovery), and timing out (300ms)
+  // so a lost key retries.
+  encoder.RefreshFrameIntervals(capture, frameGating);
+  // Declared before every lambda that references them. FrameState precedes the pipeline so
+  // the worker's publish callback never outlives what it writes into.
+  // Asynchronous readback ring: the capture callback only submits a GPU copy; a worker maps
+  // finished copies and publishes them. The publish function is assigned below, before the
+  // first create_staging call.
+  // Encoder OUTPUT-liveness heartbeat. The main-loop liveness watchdog only tracks loop iteration
+  // progress (watchdog.mainLoopProgressUs), which keeps advancing even when the async hardware MFT accepts
+  // input every call but emits no output access unit -- an output-starvation wedge that freezes the
+  // video while the loop still spins and the watchdog stays green. These track real encoder output
+  // progress so that stall is observable (and, later, recoverable). Diagnostic-only in this commit.
+                                               // a from-startup encoder that never emits one AU)
+  // Async-event counters accumulated ACROSS the current no-output streak (reset when output
+  // resumes) so one anomaly line can tell a host event-driving bug (NeedInput accrues, HaveOutput
+  // stays 0) from a genuine vendor/hardware stall, rather than showing only the last call's counts.
+  // Clears the CURRENT starvation episode (not the lifetime totals). Must run whenever the encoder
+  // is shut down + reinitialized or the stream (re)activates, otherwise a no-output streak left over
+  // from the previous encoder -- or a long stream-inactive gap -- would inflate noOutputAgeUs and
+  // fire a false starvation log on the fresh encoder's first inputs.
+}
+
+int startup_init_encoder(HostContext& hx) {
+  auto& useH264 = hx.useH264;
+  auto& rate = hx.rate;
+  auto& backend = hx.backend;
+  auto& clientSession = hx.clientSession;
+  auto& encoder = hx.encoder;
+  auto& capture = hx.capture;
+  auto& res = hx.res;
+  if (useH264) {
+    if (!encoder.codec.initialize(encoder.activeEncodeW, encoder.activeEncodeH, encoder.activeFps,
+                                  encoder.encoder_bitrate_for_init(), encoder.activeKeyint)) {
+      std::cerr << "[native-video-host] H264 encoder initialize failed\n";
+      return 13;
+    }
+    encoder.encoderRetarget.NoteReinit(qpc_now_us());
+    {
+      const EncoderBudgetBreakdown b =
+          encoder_budget_for(encoder.activeBitrate, encoder.WireGeometryNow(), EncoderState::BudgetPolicy(), encoder.activeFps);
+      std::cout << "[native-video-host] encoder-budget requestedWire=" << encoder.activeBitrate
+                << " effectiveWire=" << hx.sender.wireCapBps.load(std::memory_order_relaxed)
+                << " desiredEncoder=" << encoder.desiredEncoderBps << " appliedEncoder=" << encoder.applied_encoder_bps()
+                << " rcEffective=" << (encoder.codec.rc_plan_effective() ? 1 : 0) << " payloadBudget=" << b.payloadWireBps
+                << " action=startup profile=" << rc_profile_name(encoder.codec.rc_profile())
+                << " fecX1000=" << b.fecFactorX1000 << " headerX1000=" << b.headerFactorX1000
+                << " auBytes=" << b.auBytesAtFps << " wireAtFpsBps=" << b.wireAtFpsBps
+                << " nackReservePct=" << EncoderState::BudgetPolicy().nackReservePercent
+                << " overshootPct=" << EncoderState::BudgetPolicy().encoderOvershootPercent << "\n";
+    }
+    encoder.ResetTimelineAnchors(capture);
+    const std::string requestedEncoderBackend = env_string_or_empty("REMOTE60_NATIVE_ENCODER_BACKEND");
+    const std::string requestedEncoderBackendPrint =
+        requestedEncoderBackend.empty() ? "default(mft_auto)" : requestedEncoderBackend;
+    const std::string backendFallbackReason =
+        backend_fallback_reason(requestedEncoderBackend, encoder.codec.backend_name());
+    std::cout << "[native-video-host] H264 encoder backend=" << encoder.codec.backend_name()
+              << " backendRequested=" << requestedEncoderBackendPrint
+              << " backendResolved=" << encoder.codec.backend_name()
+              << " backendFallbackReason=" << backendFallbackReason
+              << " hw=" << (encoder.codec.using_hardware() ? 1 : 0)
+              << " captureSize=" << capture.width << "x" << capture.height
+              << " encodeSize=" << encoder.activeEncodeW << "x" << encoder.activeEncodeH
+              << " auto720=" << (rate.autoFallback720 ? 1 : 0)
+              << " abrMidProfile=" << rate.abrMidW << "x" << rate.abrMidH
+              << " abrMidBitrate=" << rate.abrMidBitrate
+              << " abrLowProfile=" << rate.abrLowW << "x" << rate.abrLowH
+              << " abrLowBitrate=" << rate.abrLowBitrate
+              << "\n";
+  }
+
+  if (hx.args.preloginMode) {
+    // prelogin-field D2: the WinRT wrapper of the capture device is for the WGC frame pool, which the pre-login
+    // worker never builds (DXGI only). Not created here; the native device, readback and encoder are unchanged.
+    std::cout << "[native-video-host][prelogin] WinRT D3D wrapper not created (no WGC on the logon desktop)\n";
+    return 0;
+  }
+  Microsoft::WRL::ComPtr<IDXGIDevice> dxgi;
+  res.d3d.As(&dxgi);
+  HostWinrtTrap("CreateDirect3D11DeviceFromDXGIDevice");
+  winrt::check_hresult(CreateDirect3D11DeviceFromDXGIDevice(dxgi.Get(), res.inspectable.put()));
+  res.d3dDevice = res.inspectable.as<IDirect3DDevice>();
+  std::cout << d3d_multithread_log_line("winrt-wrapper", res.d3d.Get(), res.ctx.Get());
+  return 0;
+}
+
+}  // namespace remote60::native_poc

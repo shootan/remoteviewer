@@ -1,0 +1,392 @@
+﻿PASS  an isolated host is started (loopback, no input injection)
+remote60_host_monitor_fallback_e2e_test.exe : [native-video-client-session] video receive nack=1 holdUs=120000 nonblock
+ing=1
+At D:\remote\remote\.claude\caplife\apk_runs.ps1:34 char:70
++ ...  @a > "$out\$name.txt" 2>&1 } else { & $exe > "$out\$name.txt" 2>&1 }
++                                          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([native-video-c...0 nonblocking=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+[native-video-client-session] udp recv drop sock=384 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=21 stop=0
+this PC has 1 screen(s); the test build adds one more, listed as id=1
+
+--- 1. the screen pick is answered once applied: A -> B -> A, each with its own generation ---
+PASS  viewer 1 connects; the host advertises monitors and the transaction  connected window_list_received count=10 selected=desktop / 
+PASS  0x8 seen on this connection
+PASS  the host lists the real screens plus the added one  count=2 selectedId=0 status=window_list_received count=10
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  video flows before any pick
+PASS  pick the added screen (B): answered ok, then the first IDR of THAT generation -> ready  answered=1 applied=1 ackGen=2 ready=1 readyGen=2 fail= ignored=0 rekeys=0
+PASS  the host logged it applied as a monitor select, answered with the target id it was asked
+PASS  the panel: selectedMonitorId = B, status window_selected  count=2 selectedId=1 status=window_selected: GNLINKTEST2
+PASS  the host's own list agrees (selectedId = B)  count=2 selectedId=1 status=window_selected: GNLINKTEST2
+PASS  back to the primary (A): answered with a NEWER generation, ready on it  answered=1 applied=1 ackGen=3 ready=1 readyGen=3 fail= ignored=0 rekeys=0
+PASS  and B again  answered=1 applied=1 ackGen=4 ready=1 readyGen=4 fail= ignored=0 rekeys=0
+[native-video-client-session] udp recv drop sock=384 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=9 sinceDatagramMs=27 stop=0
+PASS  frames keep flowing on B's generation
+
+--- 2. a pick that cannot be applied is answered as such, and nothing moves ---
+PASS  screen 5 (never listed): a failure answer (monitor_not_listed), gate not opened, no ready  answered=1 applied=0 ackGen=4 ready=0 readyGen=4 fail=monitor_not_listed ignored=0 rekeys=0
+PASS  the host's selection did not move (still B)  count=2 selectedId=1 status=window_select_failed: monitor_not_listed
+      (the added screen goes between the list and the pick)
+PASS  picking it now: a failure answer (monitor_gone) -- the id is not re-read as another screen  answered=1 applied=0 ackGen=4 ready=0 readyGen=4 fail=monitor_gone ignored=0 rekeys=0
+PASS  the host logged the refusal, not an applied select
+PASS  rolled back: still B, the rect still known  count=2 selectedId=1 status=window_select_failed: monitor_gone rect=(0,0)/1920x1080
+      (every capture restart fails while the pick is applied -- the test build's seam)
+PASS  picking A while the restart fails: a failure answer (capture_restart_failed), no ready  answered=1 applied=0 ackGen=4 ready=0 readyGen=4 fail=capture_restart_failed ignored=0 rekeys=0
+PASS  rolled back: the host still has B selected  count=2 selectedId=1 status=window_select_failed: capture_restart_failed
+[native-video-client-session] udp recv drop sock=384 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=30 sinceDatagramMs=34 stop=0
+PASS  once restarts work again the capture comes back on B's own generation (4), not the failed pick's  lastGen=4
+PASS  the rect is known again  rect=(0,0)/1920x1080
+
+--- 3. a late answer to an earlier pick does not open a later pick's gate ---
+PASS  pick A queued under selection 7
+PASS  A is taken and held at the host
+PASS  the host applied A
+PASS  A's answer reached the sink and was IGNORED (it is not selection 8's)  ignored=1 applied=3
+PASS  no ready for B from A's frames
+PASS  pick B queued under selection 8
+PASS  B's own answer opens B's gate, ready on B's generation  ackGen=4 readyGen=4
+PASS  viewer 1 leaves; the host detaches the idle capture
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=432 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=19 stop=0
+
+--- 4. transient: nothing enumerated (a reconfiguration in progress) -- no fallback, the retry stays ---
+PASS  viewer 2 connects  connected window_list_received count=10 selected=desktop / 
+PASS  the reattach retries (the existing backoff) while absence is not established  retries=2
+PASS  and does NOT fall back
+PASS  the monitor list keeps the picked id while nothing is listed  count=0 selectedId=1 status=window_list_received count=10
+[native-video-client-session] udp recv drop sock=432 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=27 sinceDatagramMs=30 stop=0
+      (the second screen comes back)
+PASS  the screen comes back: the retry reattaches to the SAME screen
+PASS  and the list still names the added screen, no fallback taken  count=2 selectedId=1 status=window_list_received count=10
+PASS  viewer 2 leaves; the host detaches the idle capture
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+
+--- 5. the picked screen is unplugged while nobody watches; a viewer comes back ---
+PASS  viewer 3 connects  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] udp recv drop sock=452 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=19 stop=0
+PASS  the monitor list says the real screens, selectedId=0 (the one that will be shown)  count=1 selectedId=0 status=window_list_received count=10
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  the viewer gets a PICTURE (the primary)  frames=1
+[native-video-client-session] udp recv drop sock=452 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=13 sinceDatagramMs=20 stop=0
+[native-video-client-session] udp recv drop sock=452 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=27 sinceDatagramMs=22 stop=0
+[native-video-client-session] udp recv drop sock=452 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=31 sinceDatagramMs=23 stop=0
+[native-video-client-session] udp recv drop sock=452 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=38 sinceDatagramMs=21 stop=0
+[native-video-client-session] udp recv drop sock=452 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=51 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=452 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=57 sinceDatagramMs=30 stop=0
+PASS  the host logged the fallback once  fallbacks=1
+PASS  no endless retry: not one 'capture reattach failed' after the unplug  retries=0
+PASS  the secure-input target rect stays known for the fallback screen  rect=(0,0)/1920x1080
+PASS  and 'monitor query failed' does not follow the fallback
+PASS  monitor-list after the fallback: selectedId=0  count=1 selectedId=0 status=window_list_received count=10
+      (the old screen is plugged back in)
+PASS  not reverted: the added screen listed again, still selectedId=0  count=2 selectedId=0 status=window_list_received count=10
+PASS  the user picks it again (answered, ready) -- for phase 6  answered=1 applied=1 ackGen=7 ready=1 readyGen=7 fail= ignored=0 rekeys=0
+PASS  viewer 3 leaves; the host detaches the idle capture
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=32 stop=0
+
+--- 6. an unplug seen in two steps: nothing enumerated, then the picked screen missing ---
+PASS  viewer 4 connects  connected window_list_received count=10 selected=desktop / 
+PASS  while nothing is enumerated: retrying, and the secure-input rect is unknown (0x0)  rect=(0,0)/0x0
+PASS  then the screens are listed without the picked one: the next retry falls back
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  the viewer gets a picture  frames=3
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=24 sinceDatagramMs=22 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=35 sinceDatagramMs=28 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=46 sinceDatagramMs=23 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=47 sinceDatagramMs=22 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=58 sinceDatagramMs=25 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=68 sinceDatagramMs=24 stop=0
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=73 sinceDatagramMs=24 stop=0
+PASS  the secure-input rect is SET AGAIN for the fallback screen (reason=capture-restart, not 0x0)  secure-input target rect=(0,0)/1920x1080 source=capture-monitor reason=capture-restart
+
+PASS  no 'monitor query failed' and no reattach failure after the fallback
+PASS  monitor-list: selectedId=0  count=1 selectedId=0 status=window_list_received count=10
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=456 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=26 stop=0
+
+--- 7. the fallback under an ANSWERED selection: the gate, the list and the picture stay consistent ---
+PASS  viewer 5 connects  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  the added screen picked: answered, ready  answered=1 applied=1 ackGen=8 ready=1 readyGen=8 fail= ignored=0 rekeys=0
+[native-video-client-session] udp recv drop sock=456 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=21 sinceDatagramMs=215 stop=0
+[native-video-client-session] udp recv drop sock=456 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=51 sinceDatagramMs=189 stop=0
+[native-video-client-session] udp recv drop sock=456 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=81 sinceDatagramMs=189 stop=0
+[native-video-client-session] udp recv drop sock=456 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=112 sinceDatagramMs=186 stop=0
+[native-video-client-session] udp recv drop sock=456 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=142 sinceDatagramMs=156 stop=0
+PASS  the stream is turned off and the capture detaches while the viewer stays
+PASS  no capture restart ran (no fallback logged yet)
+PASS  the reply already names the screen that will be shown: selectedId=0, not the stale id  count=1 selectedId=0 status=window_selected: GNLINKTEST2
+PASS  streaming again: the restart falls back
+PASS  and the gate still admits the picture: the fallback keeps the answered generation (8)  admitted=0 dropped=1
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=496 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=26 stop=0
+
+--- 8. (r3 M2) a late answer to an earlier pick does not move the pick now in progress ---
+PASS  viewer 6 connects  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  video flows
+      (round 1: A's late answer is a success)
+PASS  round 1: pick A queued
+PASS  A is taken and held at the host
+PASS  the user picks B meanwhile (queued behind A)
+[native-video-client-session] select answer seq=1 ok=1 for selection 11: a later selection is requested, not shown
+PASS  A's answer arrives and the gate ignores it  answers=0
+PASS  ... and the panel token is still B's 'requested' (monitor_select_requested), not A's result  atAnswer=monitor_select_requested seq 0->0
+PASS  B then completes: answered, ready on its generation  monitor_select_requested ready=0
+      (round 2: A's late answer is a FAILURE)
+PASS  round 2: pick A queued
+PASS  A is taken and held at the host
+PASS  the user picks B meanwhile (queued behind A)
+[native-video-client-session] select answer seq=3 ok=0 for selection 13: a later selection is requested, not shown
+PASS  A's answer arrives and the gate ignores it  answers=0
+PASS  ... and the panel token is still B's 'requested' (monitor_select_requested), not A's result  atAnswer=monitor_select_requested seq 2->2
+[native-video-client-session] udp recv drop sock=496 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=25 sinceDatagramMs=438 stop=0
+[native-video-client-session] udp recv drop sock=496 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=41 sinceDatagramMs=27 stop=0
+PASS  B then completes: answered, ready on its generation  monitor_select_requested ready=12
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=508 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=34 stop=0
+
+--- 9. (r3 M3) the picked screen goes DURING the restart: the previous target comes back ---
+PASS  viewer 7 connects  connected window_list_received count=10 selected=desktop / 
+PASS  three listed screens (real + 2)  count=3 selectedId=0 status=window_list_received count=10
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  round 1: on C (GNLINKTEST2), answered and ready  answered=1 applied=1 ackGen=12 ready=1 readyGen=12 fail= ignored=0 rekeys=0
+PASS  pick B (GNLINKTEST3) queued
+PASS  B passed the presence check and is held just before the restart
+PASS  the answer is a failure (monitor_gone), no ready for B  fail=
+PASS  the host rolled the pick back
+PASS  C still attached: the host is back on C (selectedId = C), not the primary  count=2 selectedId=1 status=window_select_failed: monitor_gone
+PASS  the picture continues on C's generation (12), not a new one  lastGen=12
+PASS  the secure-input rect is known  rect=(0,0)/1920x1080
+PASS  round 2: on C (GNLINKTEST2), answered and ready  answered=1 applied=1 ackGen=13 ready=1 readyGen=13 fail=monitor_gone ignored=0 rekeys=0
+PASS  pick B (GNLINKTEST3) queued
+[native-video-client-session] udp recv drop sock=508 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=13 sinceDatagramMs=24 stop=0
+PASS  B passed the presence check and is held just before the restart
+PASS  the answer is a failure (monitor_gone), no ready for B  fail=monitor_gone
+PASS  the host rolled the pick back
+PASS  C is gone too: the confirmed fallback, the primary (selectedId 0)  count=1 selectedId=0 status=window_select_failed: monitor_gone
+PASS  the picture continues on C's generation (13), not a new one  lastGen=13
+PASS  the secure-input rect is known  rect=(0,0)/1920x1080
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=404 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=25 stop=0
+
+--- 10. (r3 M4) the APK's own refresh brings a changed screen list, and an old list's index is refused ---
+PASS  viewer 8 connects  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  on the added screen  answered=1 applied=1 ackGen=14 ready=1 readyGen=14 fail= ignored=0 rekeys=0
+[native-video-client-session] udp recv drop sock=404 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=24 sinceDatagramMs=28 stop=0
+[native-video-client-session] udp recv drop sock=404 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=55 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=404 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=85 sinceDatagramMs=29 stop=0
+[native-video-client-session] udp recv drop sock=404 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=115 sinceDatagramMs=31 stop=0
+[native-video-client-session] udp recv drop sock=404 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=145 sinceDatagramMs=30 stop=0
+PASS  RequestWindowList (what the APK's refresh calls) also refreshes the screens: real count, selectedId 0  count=2 selectedId=1 status=window_selected: GNLINKTEST2
+PASS  ... as a new list revision
+PASS  and back: the added screen listed again by the same refresh, and it is again the one shown  count=1 selectedId=0 status=window_list_received count=10
+PASS  a pick made from the replaced list (revision 2) is refused at once  window_list_received count=10
+PASS  refresh and pick both queued
+PASS  the list changed under the queued pick: it is not sent, and says so (window_select_failed: monitor_list_changed)  monitor_select_requested
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=512 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=25 stop=0
+
+--- 11. (r3 M5 / r4 M5-A) a pick whose session is gone is not applied to the next session ---
+      (round 1: held at take)
+PASS  viewer A connects  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  A starts on the primary  answered=1 applied=1 ackGen=15 ready=1 readyGen=15 fail= ignored=0 rekeys=0
+PASS  A picks the added screen
+PASS  the pick is pending at the host
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+PASS  viewer B (a new session) connects  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] udp recv drop sock=412 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=32 stop=0
+[native-video-client-session] udp recv drop sock=412 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=13 sinceDatagramMs=30 stop=0
+PASS  A's pick was NOT applied to B's session
+PASS  the host said why: withdrawn (asker gone
+PASS  B sees the screen A had, unchanged  count=2 selectedId=0 status=window_list_received count=10
+PASS  and its picture flows (the capture is consistent)
+PASS  the secure-input rect is known  rect=(0,0)/1920x1080
+PASS  B's own pick completes  answered=1 applied=1 ackGen=16 ready=1 readyGen=16 fail= ignored=0 rekeys=0
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=532 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=25 stop=0
+      (round 2: held at apply)
+PASS  viewer A connects  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  A starts on the primary  answered=1 applied=1 ackGen=17 ready=1 readyGen=17 fail= ignored=0 rekeys=0
+PASS  A picks the added screen
+PASS  held there
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+PASS  viewer B (a new session) connects  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] udp recv drop sock=508 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=26 stop=0
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] udp recv drop sock=508 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=13 sinceDatagramMs=29 stop=0
+PASS  A's pick was NOT applied to B's session
+PASS  the host said why: reason=stale_session
+PASS  B sees the screen A had, unchanged  count=2 selectedId=0 status=window_list_received count=10
+PASS  and its picture flows (the capture is consistent)
+PASS  the secure-input rect is known  rect=(0,0)/1920x1080
+[native-video-client-session] udp recv drop sock=508 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=22 sinceDatagramMs=29 stop=0
+PASS  B's own pick completes  answered=1 applied=1 ackGen=18 ready=1 readyGen=18 fail= ignored=0 rekeys=0
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=432 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=25 stop=0
+      (round 3: held at restart)
+PASS  viewer A connects  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  A starts on the primary  answered=1 applied=1 ackGen=19 ready=1 readyGen=19 fail= ignored=0 rekeys=0
+PASS  A picks the added screen
+PASS  held there
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=512 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=26 stop=0
+PASS  viewer B (a new session) connects  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] udp recv drop sock=512 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=16 sinceDatagramMs=29 stop=0
+PASS  A's pick was NOT applied to B's session
+PASS  the host said why: session changed before the restart
+PASS  B sees the screen A had, unchanged  count=2 selectedId=0 status=window_list_received count=10
+PASS  and its picture flows (the capture is consistent)
+PASS  the secure-input rect is known  rect=(0,0)/1920x1080
+[native-video-client-session] udp recv drop sock=512 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=27 sinceDatagramMs=21 stop=0
+PASS  B's own pick completes  answered=1 applied=1 ackGen=20 ready=1 readyGen=20 fail= ignored=0 rekeys=0
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=424 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=26 stop=0
+      (round 4: held at restarted)
+PASS  viewer A connects  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  A starts on the primary  answered=1 applied=1 ackGen=21 ready=1 readyGen=21 fail= ignored=0 rekeys=0
+PASS  A picks the added screen
+PASS  held there
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=364 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=26 stop=0
+PASS  viewer B (a new session) connects  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+[native-video-client-session] udp recv drop sock=364 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=15 sinceDatagramMs=24 stop=0
+PASS  A's pick was NOT applied to B's session
+PASS  the host said why: rolled back (stale_session)
+PASS  B sees the screen A had, unchanged  count=2 selectedId=0 status=window_list_received count=10
+PASS  and its picture flows (the capture is consistent)
+PASS  the secure-input rect is known  rect=(0,0)/1920x1080
+[native-video-client-session] udp recv drop sock=364 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=29 sinceDatagramMs=24 stop=0
+PASS  B's own pick completes  answered=1 applied=1 ackGen=22 ready=1 readyGen=22 fail= ignored=0 rekeys=0
+
+--- 12. (r3 M1) the answered generation's lone IDR came first and was dropped: a fresh IDR is asked for with no further video, even past the limiter ---
+PASS  the proxy is up
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=476 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=31 stop=0
+PASS  viewer 9 connects through the proxy  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  on the primary  answered=1 applied=1 ackGen=23 ready=1 readyGen=23 fail= ignored=0 rekeys=0
+PASS  attempt 1: pick a screen
+PASS  its answer is held, and its generation's IDR arrives first and is dropped  held=0 gen=0
+[native-video-client-session] udp recv drop sock=476 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=13 sinceDatagramMs=31 stop=0
+[native-video-client-session] keyframe owed to selection 1: asked (1)
+PASS  [premise] the answer's own IDR request reached the client limiter within its 120 ms of the fill's (both stamped just before the session calls the limiter; the refusal itself is not observed here)  gap 106 ms
+PASS  with the video cut, the host receives BOTH requests -- the answer's own, held past the client limiter  requests=2 framesWhileCut=0
+PASS  video back: B recovers by itself -- an IDR of its generation arrives and makes it ready  ready=33 readyGen=23
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+[native-video-client-session] udp recv drop sock=520 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=25 stop=0
+
+--- 12b. (r4 M1-A) the answer's IDR request is REFUSED by the host's limiter: the selection still gets its IDR, with no help from outside ---
+PASS  viewer 10 connects  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  on the primary  answered=1 applied=1 ackGen=25 ready=1 readyGen=25 fail= ignored=0 rekeys=0
+PASS  pick the added screen
+[native-video-client-session] udp recv drop sock=520 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=10 sinceDatagramMs=22 stop=0
+PASS  its answer is held, and its generation's IDR arrives first and is dropped
+[native-video-client-session] keyframe owed to selection 1: asked (1)
+PASS  the request made for the answered selection reaches the host and is refused
+PASS  ... and right then no IDR has been admitted, the selection is still owed one
+[native-video-client-session] udp recv drop sock=520 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=24 sinceDatagramMs=29 stop=0
+[native-video-client-session] keyframe owed to selection 1: asked (2)
+PASS  the session asks again by itself and the host takes it (no request from this test)  accepted=1
+PASS  an IDR of B's generation arrives and is admitted: B ready, nothing owed  ready=36 readyGen=26 keys=1
+[native-video-client-session] video receive nack=1 holdUs=120000 nonblocking=1
+
+--- 13. (r4 M2-A) B is picked while A's answer is being handled, before it reaches the panel ---
+PASS  viewer 11 connects  connected window_list_received count=10 selected=desktop / 
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  on the primary  answered=1 applied=1 ackGen=27 ready=1 readyGen=27 fail= ignored=0 rekeys=0
+      (round 1: A's answer is a success)
+PASS  round 1: pick A
+[native-video-client-session] udp recv drop sock=520 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=24 stop=0
+[native-video-client-session] select answer seq=2 ok=1 for selection 38: a later selection is requested, not shown
+PASS  A's answer arrives, and B is queued inside its handling
+PASS  B's answer arrives
+PASS  until then the panel showed nothing of A: still B's 'requested', lastSelectSeq unchanged  status=monitor_select_requested seq 1->1
+PASS  B completes: its own answer shown, ready on its generation  window_selected: \\.\DISPLAY22
+      (round 2: A's answer is a FAILURE)
+PASS  round 2: pick A
+[native-video-client-session] select answer seq=4 ok=0 for selection 40: a later selection is requested, not shown
+PASS  A's answer arrives, and B is queued inside its handling
+[native-video-client-session] udp recv drop sock=520 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=24 sinceDatagramMs=33 stop=0
+PASS  B's answer arrives
+PASS  until then the panel showed nothing of A: still B's 'requested', lastSelectSeq unchanged  status=monitor_select_requested seq 3->3
+PASS  B completes: its own answer shown, ready on its generation  window_selected: GNLINKTEST2
+[native-video-client-session] udp recv drop sock=520 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=35 sinceDatagramMs=34 stop=0
+
+(setup: 0 connect(s) needed their retry; 0 phase-12 set-up(s) redone for the timing premise)
+
+(host log 213727 bytes: 6 fallback, 3 reattach failed, 5 reattached)
+
+RESULT: ALL PASS  (173 checks, 0 failed)

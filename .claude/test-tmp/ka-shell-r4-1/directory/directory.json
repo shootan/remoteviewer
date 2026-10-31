@@ -1,0 +1,147 @@
+{
+  "accounts": {
+    "tester": {
+      "id": "tester",
+      "salt": "a5eb3b5fa67dc6a10e79096c623573a4",
+      "hash": "40cdfc8586e95619983c53ad01df944f8b80a4e007df68dad63e04b1b1dc79bf",
+      "status": "active",
+      "createdAt": 1793142912947,
+      "updatedAt": 1793142912947,
+      "approvedAt": 1793142912947,
+      "memo": "",
+      "lastLoginAt": 1793143034513
+    }
+  },
+  "hosts": {
+    "3308ab36077dd637": {
+      "hostId": "3308ab36077dd637",
+      "accountId": "tester",
+      "machineId": "ka-shell-e2e-KA-A",
+      "hostName": "KA-A",
+      "tokenHash": "8ae1e0fb8b3fd11c3538a448d7d379d2944055a03981e45fac4d27c13bb496e9",
+      "lastSeen": 1793143030194,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 57935,
+      "wireIp": "127.0.0.1",
+      "wirePort": 57935,
+      "localIps": [
+        "192.168.0.76",
+        "172.22.224.1"
+      ],
+      "localUdpPort": 57935,
+      "alternateUdpPort": 0
+    },
+    "12f2b2a104b7f8e7": {
+      "hostId": "12f2b2a104b7f8e7",
+      "accountId": "tester",
+      "machineId": "ka-shell-e2e-KA-B",
+      "hostName": "KA-B",
+      "tokenHash": "e17db542df87a73583482a50a9f7f95c9859e37e77d59a3a66eea2e971a16a2d",
+      "lastSeen": 1793143023989,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 57936,
+      "wireIp": "127.0.0.1",
+      "wirePort": 57936,
+      "localIps": [
+        "192.168.0.76",
+        "172.22.224.1"
+      ],
+      "localUdpPort": 57936,
+      "alternateUdpPort": 0
+    },
+    "0e0e4a3b6d06b214": {
+      "hostId": "0e0e4a3b6d06b214",
+      "accountId": "tester",
+      "machineId": "ka-shell-e2e-KA-C",
+      "hostName": "KA-C",
+      "tokenHash": "49d9f44aa5275819d58fb4f190f7388b9cf94517f14a53cfdf23a2ef1732a9f0",
+      "lastSeen": 1793142952773,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 57937,
+      "wireIp": "127.0.0.1",
+      "wirePort": 57937,
+      "localIps": [
+        "192.168.0.76",
+        "172.22.224.1"
+      ],
+      "localUdpPort": 57937,
+      "alternateUdpPort": 0
+    },
+    "a51e47469d14236a": {
+      "hostId": "a51e47469d14236a",
+      "accountId": "tester",
+      "machineId": "ka-shell-e2e-KA-D",
+      "hostName": "KA-D",
+      "tokenHash": "928996657d085a15e0d02d00764115b6c69651f77e512820756107de37ed67a3",
+      "lastSeen": 1793143006054,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 57938,
+      "wireIp": "127.0.0.1",
+      "wirePort": 57938,
+      "localIps": [
+        "192.168.0.76",
+        "172.22.224.1"
+      ],
+      "localUdpPort": 57938,
+      "alternateUdpPort": 0
+    },
+    "b72e839613cf445a": {
+      "hostId": "b72e839613cf445a",
+      "accountId": "tester",
+      "machineId": "ka-shell-e2e-KA-E",
+      "hostName": "KA-E",
+      "tokenHash": "50561e70f975fcbc2a897449275d35033393e364fda3d96c7b556ea29f034969",
+      "lastSeen": 1793143019516,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 57939,
+      "wireIp": "127.0.0.1",
+      "wirePort": 57939,
+      "localIps": [
+        "192.168.0.76",
+        "172.22.224.1"
+      ],
+      "localUdpPort": 57939,
+      "alternateUdpPort": 0
+    }
+  },
+  "devices": {
+    "f7753419d213e41ae40a252d4077704b": {
+      "deviceId": "f7753419d213e41ae40a252d4077704b",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "SHOTAN",
+      "credHash": "6ac944b52ae36f938e4c94fa556ce352282ff1505b7c7002c14b2c69de8199fc",
+      "prevCredHash": "",
+      "prevValidUntil": 0,
+      "prevUsesLeft": 0,
+      "issued": [
+        "6ac944b52ae36f938e4c94fa556ce352282ff1505b7c7002c14b2c69de8199fc"
+      ],
+      "revokeHash": "024d95d68f7b591eb82a50ceb869f44f7b8e4fdc4404786f5cc59abd58ff2cf1",
+      "createdAt": 1793142915978,
+      "lastUsedAt": 1793142915978,
+      "expiresAt": 1800918915978,
+      "revokedAt": 1793143030293,
+      "revokedWhy": "signed out"
+    },
+    "c10ce00e4c8bba2ade33eeb2a76c8eb0": {
+      "deviceId": "c10ce00e4c8bba2ade33eeb2a76c8eb0",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "SHOTAN",
+      "credHash": "4d05ef681cd9a558e3b9e7514ee00cb45e111da12c4c0df5a8d25b642430a8f8",
+      "prevCredHash": "",
+      "prevValidUntil": 0,
+      "prevUsesLeft": 0,
+      "issued": [
+        "4d05ef681cd9a558e3b9e7514ee00cb45e111da12c4c0df5a8d25b642430a8f8"
+      ],
+      "revokeHash": "b846b1d43d86f402a2af1da9e124be02a149dae05110e0406a76b7227e6f1a00",
+      "createdAt": 1793143034513,
+      "lastUsedAt": 1793143034513,
+      "expiresAt": 1800919034513,
+      "revokedAt": 0,
+      "revokedWhy": ""
+    }
+  }
+}

@@ -1,0 +1,968 @@
+--- storage failure and authentication recovery ---
+PASS disk failure returns503, preserves disk and previously issued token
+PASS failed signup is rolled back and retry succeeds after storage recovery
+PASS login backoff also applies to host registration
+PASS server health remains responsive during authentication backoff
+PASS corrupt store refuses startup and preserves original bytes
+recovery_fault_test: ALL PASS
+--- device credentials: the rules ---
+PASS  a family keeps hashes and none of the three secrets
+PASS  every sign-in starts a family of its own
+PASS  the current credential is current, and rotating replaces it
+PASS  the rotated-away credential is accepted once more, for a minute
+PASS  ...and a second later it is a reuse
+PASS  a grace use is spent by being used
+PASS  the grace window and its use count are in the record, not in memory
+PASS  a credential the family was issued long ago is a reuse
+PASS  A VALUE NOBODY ISSUED IS UNKNOWN, NOT A REUSE
+PASS  another family's credential is unknown here
+PASS  the revoke token is not a credential
+PASS  the list of issued hashes is bounded
+PASS  no device at all is unknown
+PASS  ninety days, sliding: a use pushes the end out
+PASS  a revoked family is dead whatever is presented
+PASS  revoking twice keeps the first time and the first reason
+PASS  the revoke token survives every rotation
+PASS  an old family's revoke token does nothing to a new one
+PASS  no device in the request means none is wanted
+PASS  a device request is refused rather than repaired
+PASS  a label is bounded and carries no control characters
+PASS  a list shows an account its own devices, and no hash
+PASS  an account's families are bounded, and the least recently used goes first
+PASS  ...without touching another account's
+PASS  an ended family is remembered for a while, then forgotten
+PASS  a store from before device credentials is given an empty set
+PASS  a store whose devices are not an object is refused
+device_credentials_unit_test: ALL PASS (27 checks)
+--- device credentials: the server ---
+
+== a sign-in that asks for no device is answered as it always was
+PASS  it is accepted
+PASS  the answer has a session, its expiry, where to observe -- and nothing else  ["sessionToken","expiresAt","observe"]
+PASS  no family was started for it
+PASS  its session works
+
+== a sign-in that asks for a device starts a family
+PASS  it is given a device id, a credential, a revoke token and an expiry
+PASS  the family is on disk by the time the client hears of it
+PASS  ...as hashes: the store holds none of what the client was handed
+PASS  a device of a kind the server does not know is refused, not repaired  400
+PASS  a wrong password starts no family
+
+== the credential exchanges for a session, and for the next credential
+PASS  a refresh is accepted  {"sessionToken":"8ed55cba22d5b8e588e852b7130109c264420e6bc60756d6551057111d5c26d
+PASS  ...with a new session and a new credential
+PASS  ...and no new revoke token: that one is fixed for the family
+PASS  the new session works, and so does the one from the sign-in
+PASS  the store still holds no secret
+
+== after a restart the sessions are gone and the credential is not
+PASS  the old sessions are refused
+PASS  THE CREDENTIAL GETS A NEW SESSION WITHOUT A PASSWORD  200
+PASS  ...which works
+
+== an answer that never arrived: the credential before it is good once more
+PASS  the previous credential is accepted, after a restart too  200
+PASS  ...and r2's credential, which was never received, is no longer the current one
+PASS  the family is still alive
+
+== two answers lost in a row: the same credential a third time ends the family
+PASS  it is refused  401
+PASS  ...with the one body every refusal has
+PASS  THE FAMILY IS ENDED: its current credential is refused as well  401
+PASS  ...AND SO IS THE SESSION IT HAD ISSUED
+PASS  the store says revoked
+PASS  ...and still says so after a restart
+
+== a value nobody issued is refused and ends nothing
+PASS  a made-up credential is refused
+PASS  ...with the same body as any other refusal
+PASS  ...and so is a device that does not exist, identically
+PASS  THE FAMILY IS NOT ENDED BY IT
+PASS  guessing is slowed down  answers that were 429: 5
+PASS  THE OWNER IS NOT KEPT OUT BY SOMEBODY ELSE'S GUESSES  200
+PASS  ...and the family is still not ended
+
+== a host token and a device credential are not each other
+PASS  (a host registers)
+PASS  a host token is not a device credential
+PASS  a device credential is not a host token
+PASS  a device credential is not a session
+PASS  a revoke token is not a device credential
+PASS  a revoke token is not a session
+PASS  none of that ended the family
+
+== signing out ends the family and every session it issued
+PASS  (two sessions from one family)
+PASS  it is accepted
+PASS  BOTH SESSIONS ARE REFUSED AFTERWARDS
+PASS  the credential is refused
+PASS  the store says revoked, and why
+PASS  signing out again, with the revoke token this time, is still a success
+
+== a client that signed out while offline finishes later, with the revoke token
+PASS  a wrong revoke token is refused
+PASS  ...and ends nothing
+PASS  AN OLDER FAMILY'S REVOKE TOKEN DOES NOT END THIS ONE
+PASS  the right one ends it, with no session and after a rotation
+PASS  ...sessions and credential alike
+PASS  a plain sign-in, which has no family, signs out too: its session ends  200
+PASS  signing out with nothing at all is refused
+
+== ending one device leaves the others signed in
+PASS  the account sees its devices
+PASS  ...with no secret and no hash in the list
+PASS  one of them is ended from another
+PASS  THAT ONE IS SIGNED OUT
+PASS  THE OTHER IS NOT
+
+== another account cannot see or end it, knowing its id
+PASS  their list has their device and none of ours
+PASS  ending ours is refused
+PASS  ...exactly as a device that does not exist is
+PASS  signing ours out with their session is refused
+PASS  OURS IS STILL SIGNED IN
+PASS  no list without a session
+
+== a store that cannot be written: nothing is half done
+PASS  a sign-in with a device answers 503 and hands out nothing  503
+PASS  a refresh answers 503 and hands out nothing  503
+PASS  a sign-out and a revoke answer 503  503 503
+PASS  THE STORE IS BYTE FOR BYTE WHAT IT WAS
+PASS  THE SESSION THAT WAS TO BE ENDED STILL WORKS
+PASS  a plain sign-in, which writes nothing, still works
+PASS  no family was left behind in memory by the failed sign-in
+PASS  THE CREDENTIAL WAS NOT ROTATED BY THE FAILED REFRESH  200 then 200
+
+== a server from before device credentials, on a store that has them
+PASS  it starts on that store
+PASS  it ignores the device in a sign-in and answers the old way  ["sessionToken","expiresAt","observe"]
+PASS  ...the same shape this server gives a sign-in with no device
+PASS  it has no refresh route: 404
+PASS  (it wrote the store)
+PASS  THE DEVICES ARE STILL IN THE STORE IT WROTE, UNCHANGED
+PASS  back on this server, the credential still gets a session  200
+
+== nothing that was handed out is written anywhere
+PASS  the search had something to search: the server logged device events  7 files, 56 secrets
+PASS  NO CREDENTIAL, REVOKE TOKEN, SESSION, HOST TOKEN OR PASSWORD IS IN ANY FILE
+PASS  a device is named in the log by eight characters of its id, never the whole of it
+PASS  the log does not claim to know a theft from a lost answer
+
+Private fixture retained at C:\work\gnlink-wt\ka-r3\.claude\test-tmp\device-credential-2wXUym
+device_credential_test: ALL PASS (83 checks)
+--- accounts: states and the admin API ---
+
+== a store written before account states: every account is active, nothing breaks
+PASS  --add-account makes an active account
+PASS  an account with no status signs in  200
+PASS  ...and registers a PC
+PASS  a host token from before still works after the update  200
+
+== the admin listener
+PASS  no port and no key: nothing listens
+PASS  the service port has no /admin path  404
+PASS  ...for writes either  404
+PASS  a port without a key: nothing listens
+PASS  a key without a port: nothing listens
+PASS  the service port as the admin port: refused, and the service port has no /admin
+PASS  with both: it listens
+PASS  ...on 127.0.0.1 only: not on 169.254.83.107
+PASS  no key: 401 unauthorized  {"error":"unauthorized","code":"unauthorized"}
+PASS  a wrong key: 401 unauthorized  {"error":"unauthorized","code":"unauthorized"}
+PASS  ...and a wrong key changes nothing
+PASS  ...nor does it tell which paths exist
+PASS  health  {"ok":true,"service":"gnlink","version":"0.1.0","counts":{"pending":0,"active":1,"disabled":0}}
+PASS  the old account is listed as active, with the contract fields  {"id":"veteran","status":"active","createdAt":1700000000000,"updatedAt":1700000000000,"approvedAt":null,"memo":"","lastLoginAt":null,"hostCount":1}
+
+== creating an account: always pending
+PASS  201 with the account, pending  {"ok":true,"account":{"id":"alice","status":"pending","createdAt":1793023540293,"updatedAt":1793023540293,"approvedAt":null,"memo":"from themain server","lastLoginAt":null,"hostCount":0}}
+PASS  the memo lost its control characters  "from themain server"
+PASS  no hash, no salt in the answer
+PASS  a memo is cut to 200
+PASS  the same id again: 409 taken  {"error":"that id is already taken","code":"taken"}
+PASS  id "AB": 400 id  {"error":"id must match ^[a-z0-9._-]{3,32}$","code":"id"}
+PASS  id "Upper": 400 id  {"error":"id must match ^[a-z0-9._-]{3,32}$","code":"id"}
+PASS  id "aaaaaaaaaaa: 400 id  {"error":"id must match ^[a-z0-9._-]{3,32}$","code":"id"}
+PASS  id "sp ace": 400 id  {"error":"id must match ^[a-z0-9._-]{3,32}$","code":"id"}
+PASS  id "": 400 id  {"error":"id must match ^[a-z0-9._-]{3,32}$","code":"id"}
+PASS  id "x/y": 400 id  {"error":"id must match ^[a-z0-9._-]{3,32}$","code":"id"}
+PASS  pw of 5: 400 pw  {"error":"pw must be 8-128 characters","code":"pw"}
+PASS  pw of 129: 400 pw  {"error":"pw must be 8-128 characters","code":"pw"}
+PASS  pw of 8: 400 pw  {"error":"pw must be 8-128 characters","code":"pw"}
+PASS  pw of none: 400 pw  {"error":"pw must be 8-128 characters","code":"pw"}
+PASS  a pw of exactly 128 is accepted  {"ok":true,"account":{"id":"edge-pw","status":"pending","createdAt":1793023540382,"updatedAt":1793023540382,"approvedAt":null,"memo":"","lastLoginAt":null,"hostCount":0}}
+PASS  a body that is not JSON: 400 bad_request  {"error":"the body is not JSON","code":"bad_request"}
+PASS  a body over 16KB: 400 bad_request  {"error":"the body is larger than 16KB","code":"bad_request"}
+PASS  a fourth pending account under a limit of 4: accepted  {"ok":true,"account":{"id":"one-too-many","status":"pending","createdAt":1793023540425,"updatedAt":1793023540425,"approvedAt":null,"memo":"","lastLoginAt":null,"hostCount":0}}
+PASS  past the pending limit: 429 too_many_pending  {"error":"too many accounts are waiting for approval","code":"too_many_pending"}
+PASS  ?status=pending lists only those  {"accounts":[{"id":"alice","status":"pending","createdAt":1793023540293,"updatedAt":1793023540293,"approvedAt":null,"memo":"from themain server","lastLoginAt":null,"hostCount":0},{"id":"alice-long","s
+PASS  an unknown status filter: 400
+PASS  an account that does not exist: 404 not_found  {"error":"no such account","code":"not_found"}
+
+== a pending account: the right password gets the sentence, nothing else
+PASS  login: 403 pending with the contract sentence  {"error":"승인 대기 중입니다. 관리자 승인 후 사용할 수 있습니다.","code":"pending"}
+PASS  ...and no device family is started
+PASS  host registration: 403 pending  {"error":"승인 대기 중입니다. 관리자 승인 후 사용할 수 있습니다.","code":"pending"}
+PASS  ...and no host was stored
+PASS  a wrong password: 401, the same answer as an account that does not exist  {"error":"invalid id or password","code":"invalid_credentials"} vs {"error":"invalid id or password","code":"invalid_credentials"}
+PASS  403 is not counted as a failed attempt  401,401,401
+PASS  ...while wrong passwords still are (the fifth is held back)  429
+
+== approve
+PASS  pending -> active, approvedAt set (by this request: = updatedAt, after the last change)  before.updatedAt=1793023540293 approvedAt=1793023542052 updatedAt=1793023542052
+PASS  approving again: 200, the same account  approvedAt=1793023542052 first=1793023542052
+PASS  enabling an active account: 409 state  {"error":"the account is active, not disabled","code":"state"}
+PASS  the approved account signs in  {"sessionToken":"020d9f81d50719f60be779282c5f5dba301b363098be0d83b20455adc3f75d7
+PASS  lastLoginAt is recorded, after the approval (both server times)  lastLoginAt=1793023542090 approvedAt=1793023542052
+PASS  ...and registers a PC
+PASS  both work
+PASS  ...the update manifest too (404: nothing published here, past the token check)  {"error":"no manifest published for windows","code":"not_found"}
+
+== disable: everything stops at once, nothing is thrown away
+PASS  -> disabled  {"ok":true,"account":{"id":"alice","status":"disabled","createdAt":1793023540293,"updatedAt":1793023542137,"approvedAt":1793023542052,"memo":"from themain server","lastLoginAt":1793023542090,"hostCount":1}}
+PASS  the session it had: 401
+PASS  its host token: 401  {"error":"unknown session or host token","code":"account_inactive"}
+PASS  ...on heartbeat too (401, so the host shows it must sign in again)  {"error":"unknown host token","code":"account_inactive"}
+PASS  ...and on the update manifest  401 {"error":"unknown session or host token","code":"account_inactive"}
+PASS  its device credential: 401, not rotated  {"error":"invalid device credential","code":"account_inactive"}
+PASS  the right password: 403 disabled with the contract sentence  {"error":"사용이 정지된 계정입니다.","code":"disabled"}
+PASS  registering a PC: 403 disabled
+PASS  a wrong password: still 401
+PASS  the host and the device family are still in the store
+PASS  another account does not see the disabled one's PC
+PASS  ...nor can it be a connect target  404
+PASS  approving a disabled account: 409 state
+
+== enable: back without registering again
+PASS  -> active
+PASS  the host token works again, not re-registered  {"ok":true,"bytes":5}
+PASS  the device credential works again  {"sessionToken":"2d360db0ab587c80758be454743cf5362892bc8260448160fffce936e54a76b
+PASS  the session the disable ended stays ended
+
+== password: every standing sign-in ends
+PASS  a password against the rule: 400 pw, nothing changed
+PASS  a body that is not JSON: 400 bad_request
+PASS  changed  {"ok":true,"account":{"id":"alice","status":"active","createdAt":1793023540293,"updatedAt":1793023542419,"approvedAt":1793023542052,"memo":"from themain server","lastLoginAt":1793023542381,"hostCount":1}}
+PASS  the old password: 401
+PASS  the new one: 200
+PASS  the session from before: 401
+PASS  the host token from before: 401  {"error":"unknown session or host token","code":"unknown_host_token"}
+PASS  the device credential from before: 401, and the family is ended  {"error":"invalid device credential","code":"unauthorized"}
+PASS  the PC signs in again with the new password, as the same host
+
+== delete: the account and what belongs to it
+PASS  200  {"ok":true}
+PASS  no account, no host, no device family left for it in the store
+PASS  its session: 401
+PASS  its host token: 401
+PASS  its device credential: 401
+PASS  its password: 401, like any id that does not exist
+PASS  deleting it again: 404 not_found
+PASS  the other account is untouched
+
+== a store write that fails changes nothing
+PASS  disable: 503  {"error":"directory storage unavailable","code":"unavailable"}
+PASS  ...and the account is still usable
+PASS  create: 503, not made  {"error":"directory storage unavailable","code":"unavailable"}
+
+== signup makes a pending account; states survive a restart
+PASS  signup: 200  {"ok":true,"id":"selfmade"}
+PASS  ...and the account waits
+PASS  after a restart: disabled is disabled, pending is pending  {"veteran":"disabled","alice-long":"pending","edge-pw":"pending","one-too-many":"pending","selfmade":"pending"}
+PASS  ...and enable brings the host back with its old token
+
+== a request that was allowed when it arrived, and is not by the time it acts
+PASS  connect: the session ended while the body was on its way -> 401, nothing minted  401 {"error":"login required","code":"unauthorized"}
+PASS  device revoke: the account was stopped meanwhile -> 401, the device is not changed  401 {"error":"login required","code":"unauthorized"}
+PASS  logs: the host token ended while the body was on its way -> 401, nothing written  401 {"error":"unknown session or host token","code":"unauthorized"} written=false
+PASS  login: the account was deleted while its password was hashed -> 401, nothing issued  401 {"error":"invalid id or password","code":"invalid_credentials"}
+PASS  login: deleted and made again under the same id, same password -> 401, nothing attached to the new one  401 {"error":"invalid id or password","code":"invalid_credentials"}
+PASS  host register: the password changed while it was hashed -> 401, no host  401 {"error":"invalid id or password","code":"invalid_credentials"}
+PASS  ...and the new password works
+PASS  admin password: the account was deleted and made again meanwhile -> 404, the new one untouched  404 {"error":"no such account","code":"not_found"}
+
+== the log says what was done, and nothing secret
+PASS  the create is in the log
+PASS  the approve is in the log
+PASS  the disable is in the log
+PASS  the enable is in the log
+PASS  the password is in the log
+PASS  the delete is in the log
+PASS  no password and not the key
+PASS  the store holds no password
+
+account_admin_test: ALL PASS (113 passed, 0 failed)
+--- wake aim ---
+PASS  a hairpinned host is woken on its own lan address  192.168.0.76
+PASS  ...on the port it listens on  43000
+PASS  ...and never at the router again
+PASS  ...reported as a lan aim  lan
+PASS  a host beyond our nat is aimed exactly where it was before  211.218.222.1:43000
+PASS  ...even though it publishes an address that looks like ours  wire
+PASS  ...and is never redirected onto our own lan  211.218.222.1
+PASS  with no published addresses the old aim is kept  192.168.0.1
+PASS  ...and says so  wire
+PASS  published addresses on other networks are not used  192.168.0.1
+PASS  a host that publishes none at all does not crash the wake
+PASS  a host with no published port falls back to the wire port
+PASS  every aim carries a via
+PASS  a record with no wire tuple falls back to the public one  203.0.113.7:29181
+PASS  an empty record yields an empty aim rather than an exception
+PASS  non-string entries are skipped, not dereferenced
+PASS  a relay session binds the hairpinned host to its lan address  192.168.0.76:43000
+PASS  ...not to the router, which relays to nobody
+PASS  a relay session for a host beyond our nat is unchanged  211.218.222.1:43000
+PASS  re-keying before the published addresses are stored would pick the router  the ordering the heartbeat must not use
+PASS  re-keying after them picks the host
+PASS  with nothing published the relay binding keeps the wire tuple
+PASS  the previous export name still works
+
+wake_target_test: PASS
+--- version comparison contract ---
+PASS  "0.2.103" vs "0.2.104"  expected -1 got -1
+PASS  "0.2.103" vs "0.2.104" (antisymmetric)  expected 1 got 1
+PASS  "0.2.104" vs "0.2.103"  expected 1 got 1
+PASS  "0.2.104" vs "0.2.103" (antisymmetric)  expected -1 got -1
+PASS  "0.2.104" vs "0.2.104"  expected 0 got 0
+PASS  "0.2.104" vs "0.2.104" (antisymmetric)  expected 0 got 0
+PASS  "1.0.0" vs "0.9.9"  expected 1 got 1
+PASS  "1.0.0" vs "0.9.9" (antisymmetric)  expected -1 got -1
+PASS  "0.9.9" vs "1.0.0"  expected -1 got -1
+PASS  "0.9.9" vs "1.0.0" (antisymmetric)  expected 1 got 1
+PASS  "0.2.9" vs "0.2.10"  expected -1 got -1
+PASS  "0.2.9" vs "0.2.10" (antisymmetric)  expected 1 got 1
+PASS  "0.2.10" vs "0.2.9"  expected 1 got 1
+PASS  "0.2.10" vs "0.2.9" (antisymmetric)  expected -1 got -1
+PASS  "0.9" vs "0.10"  expected -1 got -1
+PASS  "0.9" vs "0.10" (antisymmetric)  expected 1 got 1
+PASS  "1.2" vs "1.10"  expected -1 got -1
+PASS  "1.2" vs "1.10" (antisymmetric)  expected 1 got 1
+PASS  "9" vs "10"  expected -1 got -1
+PASS  "9" vs "10" (antisymmetric)  expected 1 got 1
+PASS  "0.1" vs "0.1.0"  expected 0 got 0
+PASS  "0.1" vs "0.1.0" (antisymmetric)  expected 0 got 0
+PASS  "0.1.0" vs "0.1"  expected 0 got 0
+PASS  "0.1.0" vs "0.1" (antisymmetric)  expected 0 got 0
+PASS  "1" vs "1.0.0.0"  expected 0 got 0
+PASS  "1" vs "1.0.0.0" (antisymmetric)  expected 0 got 0
+PASS  "1.0.0.0" vs "1"  expected 0 got 0
+PASS  "1.0.0.0" vs "1" (antisymmetric)  expected 0 got 0
+PASS  "0.2" vs "0.2.0.0.0"  expected 0 got 0
+PASS  "0.2" vs "0.2.0.0.0" (antisymmetric)  expected 0 got 0
+PASS  "1" vs "1.0.1"  expected -1 got -1
+PASS  "1" vs "1.0.1" (antisymmetric)  expected 1 got 1
+PASS  "1.0.1" vs "1"  expected 1 got 1
+PASS  "1.0.1" vs "1" (antisymmetric)  expected -1 got -1
+PASS  "01" vs "1"  expected 0 got 0
+PASS  "01" vs "1" (antisymmetric)  expected 0 got 0
+PASS  "1" vs "01"  expected 0 got 0
+PASS  "1" vs "01" (antisymmetric)  expected 0 got 0
+PASS  "0.02.0104" vs "0.2.104"  expected 0 got 0
+PASS  "0.02.0104" vs "0.2.104" (antisymmetric)  expected 0 got 0
+PASS  "1.007" vs "1.7"  expected 0 got 0
+PASS  "1.007" vs "1.7" (antisymmetric)  expected 0 got 0
+PASS  "0.0.0" vs "0"  expected 0 got 0
+PASS  "0.0.0" vs "0" (antisymmetric)  expected 0 got 0
+PASS  "1.2" vs "1.2-beta"  expected 0 got 0
+PASS  "1.2" vs "1.2-beta" (antisymmetric)  expected 0 got 0
+PASS  "1.2-beta" vs "1.2"  expected 0 got 0
+PASS  "1.2-beta" vs "1.2" (antisymmetric)  expected 0 got 0
+PASS  "0.2.104" vs "0.2.104-rc1"  expected 0 got 0
+PASS  "0.2.104" vs "0.2.104-rc1" (antisymmetric)  expected 0 got 0
+PASS  "1.2-zzz" vs "1.2-aaa"  expected 0 got 0
+PASS  "1.2-zzz" vs "1.2-aaa" (antisymmetric)  expected 0 got 0
+PASS  "1.2.3+build9" vs "1.2.3+build1"  expected 0 got 0
+PASS  "1.2.3+build9" vs "1.2.3+build1" (antisymmetric)  expected 0 got 0
+PASS  "1.2-beta" vs "1.3"  expected -1 got -1
+PASS  "1.2-beta" vs "1.3" (antisymmetric)  expected 1 got 1
+PASS  "1.3" vs "1.2-beta"  expected 1 got 1
+PASS  "1.3" vs "1.2-beta" (antisymmetric)  expected -1 got -1
+PASS  "0.2.104rc" vs "0.2.105"  expected -1 got -1
+PASS  "0.2.104rc" vs "0.2.105" (antisymmetric)  expected 1 got 1
+PASS  "v1.2" vs "v1.2"  expected 0 got 0
+PASS  "v1.2" vs "v1.2" (antisymmetric)  expected 0 got 0
+PASS  "v2" vs "v1"  expected 0 got 0
+PASS  "v2" vs "v1" (antisymmetric)  expected 0 got 0
+PASS  "" vs "1.0"  expected -1 got -1
+PASS  "" vs "1.0" (antisymmetric)  expected 1 got 1
+PASS  "1.0" vs ""  expected 1 got 1
+PASS  "1.0" vs "" (antisymmetric)  expected -1 got -1
+PASS  "" vs ""  expected 0 got 0
+PASS  "" vs "" (antisymmetric)  expected 0 got 0
+PASS  "" vs "("  expected 0 got 0
+PASS  "" vs "(" (antisymmetric)  expected 0 got 0
+PASS  "2147483647" vs "2147483647"  expected 0 got 0
+PASS  "2147483647" vs "2147483647" (antisymmetric)  expected 0 got 0
+PASS  "2147483648" vs "2147483647"  expected 0 got 0
+PASS  "2147483648" vs "2147483647" (antisymmetric)  expected 0 got 0
+PASS  "9999999999" vs "2147483647"  expected 0 got 0
+PASS  "9999999999" vs "2147483647" (antisymmetric)  expected 0 got 0
+PASS  "99999999999999999999" vs "2147483647"  expected 0 got 0
+PASS  "99999999999999999999" vs "2147483647" (antisymmetric)  expected 0 got 0
+PASS  "2147483647" vs "2147483646"  expected 1 got 1
+PASS  "2147483647" vs "2147483646" (antisymmetric)  expected -1 got -1
+PASS  "2147483646" vs "2147483648"  expected -1 got -1
+PASS  "2147483646" vs "2147483648" (antisymmetric)  expected 1 got 1
+PASS  "1..2" vs "1.0.2"  expected 0 got 0
+PASS  "1..2" vs "1.0.2" (antisymmetric)  expected 0 got 0
+PASS  "1." vs "1"  expected 0 got 0
+PASS  "1." vs "1" (antisymmetric)  expected 0 got 0
+PASS  ".1" vs "0.1"  expected 0 got 0
+PASS  ".1" vs "0.1" (antisymmetric)  expected 0 got 0
+PASS  "0.2.104" vs "0.2.104."  expected 0 got 0
+PASS  "0.2.104" vs "0.2.104." (antisymmetric)  expected 0 got 0
+PASS  vectors file was not empty  46 vectors
+PASS  undefined compares older than a version
+PASS  null compares equal to empty
+
+RESULT: ALL PASS  (95 checks, 0 failed, 46 vectors from C:\work\gnlink-wt\ka-r3\apps\shared\version_compare_vectors.txt)
+
+--- update manifest (shared vectors) ---
+PASS  signature is 128 hex characters  128
+PASS  public key is 128 hex characters  128
+PASS  the genuine signature verifies
+PASS  a tampered document is rejected
+PASS  a tampered signature is rejected
+PASS  the wrong key is rejected
+PASS  a short signature is rejected
+PASS  a short key is rejected
+PASS  non-hex is rejected
+PASS  empty is rejected
+PASS  a signature from another key does not pass under our key
+PASS  ...though it does verify under its own key (so the test is meaningful)
+PASS  good signature -> Ok  Ok 
+PASS  fields present only on Ok
+PASS  version  0.2.105
+PASS  releaseId  r-0.2.105-test
+PASS  arch  x64
+PASS  three artifacts  3
+PASS  the Setup is a member
+PASS  sizes differ
+PASS  every URL is https
+PASS  newer than 0.2.104
+PASS  not newer than itself
+PASS  newer than 0.2.99 (numeric, not lexicographic)
+PASS  malformed AND badly signed -> SignatureInvalid  SignatureInvalid
+PASS  nothing parsed from it
+PASS  a manifest this module built reads back as Ok  Ok 
+PASS  round trip keeps the version
+PASS  editing the size after signing breaks it
+PASS  the builder emits schema first  schema=2
+PASS  the builder emits both artifacts in order
+PASS  parse: missing schema  missing schema
+PASS  parse: line without '='  line without '='
+PASS  parse: non-numeric schema  schema is not a number
+PASS  parse: a short artifact line  artifact line needs name|size|sha256|url
+PASS  parse: non-numeric artifact size  artifact size is not a number
+PASS  parse: unknown key is ignored, not rejected
+PASS  platform mismatch -> WrongPlatform  WrongPlatform
+PASS  platform mismatch exposes no fields
+PASS  artifact rule: a well formed manifest  Ok 
+PASS  artifact rule: no artifacts  Malformed no artifacts listed
+PASS  artifact rule: no artifacts -> no fields
+PASS  artifact rule: zero size  Malformed artifact 0 size out of range
+PASS  artifact rule: zero size -> no fields
+PASS  artifact rule: uppercase sha256  Malformed artifact 0 sha256 is not 64 lowercase hex
+PASS  artifact rule: uppercase sha256 -> no fields
+PASS  artifact rule: http url  Malformed artifact 0 url must be https and carry no credentials
+PASS  artifact rule: http url -> no fields
+PASS  artifact rule: url with credentials  Malformed artifact 0 url must be https and carry no credentials
+PASS  artifact rule: url with credentials -> no fields
+PASS  artifact rule: over the per-file limit  Malformed artifact 0 size out of range
+PASS  artifact rule: over the per-file limit -> no fields
+PASS  a different arch -> WrongPlatform  WrongPlatform
+PASS  schema 1 -> UnsupportedSchema  UnsupportedSchema
+
+RESULT: ALL PASS  (54 checks, 0 failed, vectors from C:\work\gnlink-wt\ka-r3\apps\shared\update_manifest)
+
+--- update publish contract (server output vs shared vectors) ---
+PASS  the server emits exactly the keys the shared vector carries  vector=[arch,artifact,platform,releaseId,schema,version] published=[arch,artifact,platform,releaseId,schema,version]
+PASS  published documents carry schema  arch,artifact,platform,releaseId,schema,version
+PASS  published documents carry releaseId  arch,artifact,platform,releaseId,schema,version
+PASS  published documents carry platform  arch,artifact,platform,releaseId,schema,version
+PASS  published documents carry arch  arch,artifact,platform,releaseId,schema,version
+PASS  published documents carry version  arch,artifact,platform,releaseId,schema,version
+PASS  published documents carry artifact  arch,artifact,platform,releaseId,schema,version
+PASS  the schema published is the one the clients support  schema=2
+PASS  the server can parse its own output
+PASS  releaseId survives the round trip  r-0.2.105-test
+PASS  platform survives  windows
+PASS  arch survives  x64
+PASS  version survives  0.2.105
+PASS  all three artifacts survive, in the order given  GNLinkHost.exe,ui\shell.html,GNLinkSetup.exe
+PASS  each artifact keeps its four parts  {"name":"GNLinkHost.exe","size":24,"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","url":"https://u.example/h"}
+PASS  a name with a separator is not mangled  ui\shell.html
+PASS  an android release carries versionCode  12
+PASS  versionCode is readable even though it follows the artifact lines  versionCode comes after artifact
+PASS  a windows release has no versionCode line  schema=2 | releaseId=r-0.2.105-test | platform=windows | arch=x64 | version=0.2.105 | artifact=GNLinkHost.exe|24|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|https://u.example/h | artifact=ui\shell.html|18|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb|https://u.example/s | artifact=GNLinkSetup.exe|48|cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc|https://u.example/x | 
+PASS  the two platforms list different files  windows=[GNLinkHost.exe,ui\shell.html,GNLinkSetup.exe] android=[GNLink-0.2.13.apk]
+PASS  and each says which platform it is for
+PASS  a signed windows document loads as windows  Ok 
+PASS  a signed android document loads as android  Ok 
+PASS  an android document is refused for BEING android, not for its signature  WrongPlatform
+PASS  and a windows document for being windows  WrongPlatform
+PASS  the two releases name different architectures
+PASS  an unsigned document is refused by the server loader too  SignatureInvalid
+
+RESULT: ALL PASS  (27 checks, 0 failed)
+
+--- observe endpoint contract (server output vs shared vectors) ---
+PASS  the shared vectors are readable from here
+PASS  healthz advertises the endpoint  {"port":29181,"host":"obs.example"}
+PASS  ...with the host it was given  obs.example
+PASS  ...nested where the clients look, not at the top level  {"ok":true,"observe":{"port":29181,"host":"obs.example"}}
+PASS  login carries the same endpoint  {"port":29181,"host":"obs.example"}
+PASS  host registration carries it too  {"port":29181,"host":"obs.example"}
+PASS  the port is a whole number, not a string  {"ok":true,"observe":{"port":29181,"host":"obs.example"}}
+PASS  an out-of-range port is left out entirely  {"ok":true}
+PASS  ...so a client reads it as absence, not as a port
+PASS  a nonsense port is left out entirely  {"ok":true}
+PASS  by default the server advertises the port it listens on  {"port":18291}
+
+all observe contract checks passed
+
+--- proxy contamination (own server, own proxy) ---
+PASS  healthz answers through the proxy  status=200
+PASS  signup works through the proxy  status=200
+PASS  login works through the proxy  status=200
+PASS  host registration works through the proxy  status=200
+PASS  a heartbeat without an observation is refused  status=409
+PASS  ...and says which state is missing  error=observation_required
+PASS  ...and it is not 401, which would make the host sign in again  status=409
+PASS  the host is not marked seen by a refused heartbeat  lastSeen=0
+PASS  a heartbeat with an observation is accepted  status=200
+PASS  the published port is the observed one  published=59820 observed=59820
+PASS  ...and not a port the proxy connected on  published=59820 proxyPorts=63117
+PASS  ...and not the port the body claimed  published=59820
+PASS  an accepted heartbeat does mark the host seen  lastSeen=1793023545792
+PASS  a connect without an observation is refused  status=409
+PASS  ...for the same stated reason  error=observation_required
+PASS  the refused connect left no punch behind  pendingPunch=[]
+PASS  a connect with an observation is accepted  status=200
+PASS  the punch carries the client port that was observed  punch=59822 observed=59822
+PASS  ...and not a port belonging to the proxy  punch=59822
+PASS  an expired observation is refused  status=409
+PASS  ...and named as expired, not as missing  error=observation_expired
+PASS  connect says the same about an expired observation  status=409 error=observation_expired
+PASS  a token that was never observed is missing, not expired  status=409 error=observation_required
+PASS  the host survived every refusal  entry={"hostId":"818ea09228d05996","hostName":"Proxied PC","online":true,"lastSeen":1793023545801}
+
+all proxy checks passed
+PASS  signup creates an account  status=200
+PASS  the new account waits for approval  status=403 code=pending
+PASS  signup refuses a wrong key  status=403
+PASS  signup refuses an id already taken  status=409
+PASS  the original password is still the one (403 pending, not 401)  status=403
+PASS  the password the second signup tried is not  status=401
+PASS  signup refuses a weak password  status=400
+PASS  wrong password rejected  status=401
+PASS  login succeeds  status=200
+PASS  host list empty before registration
+PASS  bad session rejected  status=401
+PASS  host registers  status=200
+PASS  re-register keeps one host  hostId=c7f36aa3ea2c3b8b
+PASS  re-register issues a new token
+PASS  previous token stops working  status=401
+PASS  udp observation returns the socket port  seen=127.0.0.1:63437 local=63437
+PASS  heartbeat accepted  status=200
+PASS  heartbeat reports observed port  observed=63437
+PASS  host now listed and online  [{"hostId":"c7f36aa3ea2c3b8b","hostName":"Office PC","online":true,"lastSeen":1793023549504}]
+PASS  connect returns host address  port=63437 token=d1969f02
+PASS  host receives the pending punch  [{"ip":"127.0.0.1","port":63438,"punchToken":"d1969f02e3230125d482cdb73aed078f"}]
+PASS  connect returns a candidate list  [{"ip":"192.168.0.76","port":43000,"kind":"private"},{"ip":"127.0.0.1","port":63437,"kind":"public"},{"ip":"127.0.0.1","port":3478,"kind":"public-alt"}]
+PASS  the LAN candidate comes first, so traffic can stay off the router  {"ip":"192.168.0.76","port":43000,"kind":"private"}
+PASS  the observed public address is offered  [{"ip":"192.168.0.76","port":43000,"kind":"private"},{"ip":"127.0.0.1","port":63437,"kind":"public"},{"ip":"127.0.0.1","port":3478,"kind":"public-alt"}]
+PASS  the alternate port is offered for networks that filter the first  [{"ip":"192.168.0.76","port":43000,"kind":"private"},{"ip":"127.0.0.1","port":63437,"kind":"public"},{"ip":"127.0.0.1","port":3478,"kind":"public-alt"}]
+PASS  loopback, link-local, malformed and duplicate addresses are dropped from what the host reported  [{"ip":"192.168.0.76","port":43000,"kind":"private"}]
+PASS  older clients still get the single address they understand  port=63437
+PASS  the candidate connect queued its own punch  [{"ip":"127.0.0.1","port":63439,"punchToken":"cedf8f62da707453db24bdeff4c1e05f"}]
+PASS  punch is delivered once only
+PASS  unknown host rejected  status=404
+PASS  a connect wakes the host with no flags set at all  received=1
+PASS  the wake comes from the observe socket, the only address the host can answer  src=18081 expected=18081
+
+RESULT: ALL PASS
+
+--- restart survival ---
+PASS  the restored token is recognised (and still needs an observation)  status=409 error=observation_required
+PASS  host token survives a server restart  status=200
+PASS  store keeps only the token hashes
+PASS  a client session does not survive a server restart (in-memory by contract)  status=401
+PASS  unknown session still rejected  status=401
+PASS  unknown token still rejected  status=401
+PASS  re-registration retires the old token  status=401
+
+--- nat diagnostics (opt-in) ---
+PASS  login for diagnostics run  status=200
+PASS  host registers  status=200
+PASS  connect succeeds with diagnostics on  status=200
+PASS  exactly one diagnostic candidate is offered  [{"ip":"192.168.20.50","port":62299,"kind":"private"},{"ip":"127.0.0.1","port":62299,"kind":"public"},{"ip":"127.0.0.1","port":3478,"kind":"public-alt"},{"ip":"127.0.0.1","port":18443,"kind":"diag-silent"}]
+PASS  diagnostic candidate uses the configured probe port  port=18443 expected=18443
+PASS  diagnostic candidate is last, never first  first=private last=diag-silent
+PASS  the real candidates are still present and unchanged  ["private","public","public-alt","diag-silent"]
+PASS  the probe never answers, so it can never win the candidate race  silent
+PASS  repeat connect still offers exactly one diagnostic candidate  count=1
+
+RESULT: ALL PASS
+
+--- relay (opt-in) ---
+PASS  login  status=200
+PASS  host registers  status=200
+PASS  host is online at its observed port  observed=62303 local=62303
+PASS  a relay connect wakes the host immediately  hostReceived=2
+PASS  the wake comes from the observe socket, which the host can answer  src=18081 expected=18081
+PASS  connect succeeds  status=200
+PASS  exactly one relay candidate is offered  [{"ip":"192.168.20.50","port":62303,"kind":"private"},{"ip":"127.0.0.1","port":62303,"kind":"public"},{"ip":"127.0.0.1","port":18443,"kind":"relay"}]
+PASS  the relay candidate is last, never first  first=private last=relay
+PASS  the direct candidates are untouched  ["private","public","relay"]
+PASS  the host still receives its own punch capability  [{"ip":"127.0.0.1","port":62304,"punchToken":"c5fb24aee30bb0f44df56cfcd388c955"}]
+PASS  an account outside the allowlist is offered no relay  status=200 kinds=["public"]
+PASS  the relay stays silent while a direct path could still answer  replies=0
+PASS  the relay answers once the grace has passed  replies=2
+PASS  a Hello with an unknown capability is not forwarded  hostReceived=0
+PASS  a Hello with a valid capability reaches the host  hostReceived=2
+PASS  the Hello arrives byte for byte as the client sent it
+PASS  the Hello comes from the observe socket, the one address the host can answer  src=127.0.0.1:18081 expected=18081
+PASS  the host's HelloAck comes back to the client  clientReceived=1
+PASS  the Ack still carries the directory-auth bit the client checks for
+PASS  the Ack appears to come from the relay, as the client expects  src=18443 expected=18443
+PASS  client media reaches the host unchanged  hostReceived=1
+PASS  host media reaches the client unchanged  clientReceived=1
+PASS  a restarted app gets a fresh capability  status=200
+PASS  the new capability takes the host from the abandoned session  hostReceived=3
+PASS  the restarted app receives the Ack  received=1
+PASS  the superseded capability cannot reclaim the host  hostReceived=0
+PASS  media from the superseded session is dropped  hostReceived=1
+PASS  the current session still carries host media  received=1
+PASS  the host can still observe while relaying  127.0.0.1:62303
+
+RESULT: ALL PASS
+
+--- relay standby leases (keepalive-r2 (a)) ---
+PASS  login  status=200
+PASS  host registers  status=200
+PASS  two standby connects are reserved, each offered the relay  b=reserved c=reserved
+PASS  the heartbeat lists the clients AND one relay-facing entry per standby lease, under tokens no client holds  ["127.0.0.1:61207","127.0.0.1:61209","127.0.0.1:61208","127.0.0.1:61210"]
+PASS  both StandbyHellos reach the host, from two DIFFERENT relay ports -- neither the observe socket  b=61209 c=61210 observe=18081
+PASS  ...and they are the ports the heartbeat told the host to punch
+PASS  ...at the host-NAT socket the lease pinned (not the heartbeat tuple)  nat=2 media=0
+PASS  each client gets ITS Ack back (entries differ)
+PASS  pings: each client gets only its own pongs  b=3 c=3
+PASS  B activates over the SAME lease (no new connect): its HelloAck comes back to B
+PASS  session packets: B's arrive from B's lease port only, C's from C's -- the host's address gate can tell them apart  b=4 c=4
+PASS  host -> client: what the host sends to B's lease reaches B only, C's lease C only
+PASS  a datagram to B's host-facing port from another port (not the pinned host tuple) reaches nobody
+PASS  after another heartbeat, B's lease still goes to the tuple it pinned (the NAT socket), not the heartbeat's  nat=1 media=0
+PASS  a legacy connect is offered the relay as before (no standbyRelay field)
+PASS  the legacy Hello reaches the host from the OBSERVE socket, and its HelloAck comes back  src=18081
+PASS  ...and the standby leases were not dropped by it (both still pong)
+PASS  a second legacy connect still takes over the legacy lease (newest wins): L's packets are no longer carried
+PASS  ...the standby leases stay through that takeover too
+PASS  a standby capability in a LEGACY Hello opens nothing (no takeover with it)  host=0 nat=0 x=0
+PASS  a legacy capability in a StandbyHello opens nothing  host=0 nat=0 y=0
+PASS  four more standby connects fill the host to eight (3 standby + 1 legacy + 4), the fifth is refused host-full  ["reserved","reserved","reserved","reserved","host-full"]
+PASS  ...and a refused standby connect is offered no relay candidate (the direct ones as always)
+PASS  the host is full: B's second standby connect is refused too
+
+RESULT: ALL PASS  (0 failed)
+PASS  login
+PASS  the host list says, without side effects, that this directory knows standby connects and runs a relay  {"supported":true,"relay":true}
+PASS  a standby connect the relay is not for is answered standbyRelay=not-eligible, with no relay candidate  {"s":200,"r":"not-eligible"}
+PASS  N1: a standby connect is reserved  "reserved"
+PASS  N1: the heartbeat hands the HOST a hostProof for the lease (32 hex), not the client token
+PASS  N1: a stranger first on the host IP (no proof, a wrong proof, a fake StandbyAck) pins nothing: the client gets nothing back, and its StandbyHello does not reach the stranger  client=0 strangerHello=0
+PASS  N1: the host's punch with the proof pins the lease: the StandbyHello reaches the host, its Ack the client
+PASS  N1: after the pin, the stranger's datagram reaches nobody
+PASS  N1: ANOTHER lease's proof pins nothing (lease 2 stays unpinned; its client gets nothing)
+PASS  N1: ...its own proof pins it
+PASS  N1: a moved host gets a FRESH proof for each lease with that heartbeat  [61231,61234]
+PASS  N1: after the move the OLD proof, replayed, pins nothing (the client's ping is not answered via the old tuple)
+PASS  N1: the fresh proof from the host's new socket pins it again: the ping is answered
+PASS  N3: eight standby leases fill a host, all bound  ["reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved"]
+PASS  N3: a NEW legacy Hello beside eight standby leases is refused: it never reaches the host, no HelloAck
+PASS  N3: ...and the refusal dropped nothing: all eight standby leases still carry their pings  8
+PASS  N3: the legacy lease is up
+PASS  N3: legacy 1 + standby 7 = eight; an eighth standby is host-full  ["reserved","reserved","reserved","reserved","reserved","reserved","reserved"] host-full
+PASS  N3: REPLACING the legacy lease is allowed (still eight)
+PASS  N3: ...and the host stays at eight (a standby connect is still host-full)  host-full
+
+RESULT: ALL PASS  (0 failed)
+PASS  a non-number bound falls back and says so (MAX_PER_ACCOUNT=abc -> 24)
+PASS  a fraction falls back (MAX_PER_WIRE_IP=2.5 -> 24)
+PASS  a negative falls back (MAX_SOCKETS=-3 -> 256)
+PASS  ...and the server still starts
+
+RESULT: ALL PASS  (0 failed)
+
+--- observe correction (own lan) ---
+PASS  a peer on the server's own lan is reported as the server's public address  ip=203.0.113.9 expected=203.0.113.9
+PASS  the observed port survives the substitution  port=61617 sent-from=61617
+PASS  loopback is left alone, so the rest of the suite still measures the real source  ip=127.0.0.1
+
+observe_correction_test: PASS
+
+--- log collection ---
+PASS  an upload without a token is refused  status=401
+PASS  a session token stores the batch  status=200
+PASS  the lines land under account/device/stream  C:\Users\shota\AppData\Local\Temp\remote60-directory-logs-34440\tester\dev1\viewer.log
+PASS  a second batch appends
+PASS  a traversing device name is flattened, not followed  C:\Users\shota\AppData\Local\etc
+PASS  a device that floods is rate limited rather than served  429s=9/12
+PASS  another device is unaffected by that budget  status=200
+PASS  a host registers for an upload token  status=200
+PASS  a host token stores the batch  status=200
+PASS  host lines land under the host's account  C:\Users\shota\AppData\Local\Temp\remote60-directory-logs-34440\tester\pc1\host.log
+PASS  re-registration issues a different token
+PASS  the retired host token is refused for uploads  status=401
+PASS  the rotated host token is accepted  status=200
+PASS  an unknown session token is refused  status=401
+
+logs_test: PASS
+
+--- update manifest endpoint ---
+PASS  server is reachable  HTTP 200
+PASS  anonymous is refused  HTTP 401
+PASS  and nothing leaks in the body  HTTP 401 {"error":"unknown session or host token","code":"unknown_hos
+PASS  logged in for the remaining cases
+PASS  a published manifest is returned  HTTP 200 {"manifest":"# GNLink update manifest -- TEST DATA, signed with a throwaway key.
+PASS  it carries the document
+PASS  and the artifact list is intact  3
+PASS  and its signature  128
+PASS  the document ends with a newline, as signed
+PASS  a platform with nothing published is 404, not an error  HTTP 404
+PASS  platform "" is rejected  HTTP 400
+PASS  platform "linux" is rejected  HTTP 400
+PASS  platform "../../etc/passwd" is rejected  HTTP 400
+PASS  platform "windows/../android" is rejected  HTTP 400
+PASS  platform "WINDOWS" is rejected  HTTP 400
+PASS  a missing platform is rejected  HTTP 400
+PASS  a near-miss path is 404  HTTP 404
+PASS  a bad session token is refused  HTTP 401
+
+RESULT: ALL PASS  (18 checks, 0 failed)
+
+--- same-lan host (advertised vs wire) ---
+PASS  login  status=200
+PASS  host registers  status=200
+PASS  a host on the server's lan is told the public address, not its own  reported=203.0.113.9:61619 expected=203.0.113.9:61619
+PASS  connect succeeds  status=200
+PASS  the public candidate a remote client gets is the advertised address  203.0.113.9:61619
+PASS  the wake reaches the host over the wire tuple, not the advertised one  hostReceived=3
+PASS  ...from the observe socket  src=169.254.83.107:18081
+PASS  the relayed Hello reaches the host on its wire tuple  hostReceived=1
+PASS  ...from the observe socket  src=169.254.83.107:18081
+PASS  the host's HelloAck comes back to the client (h2c > 0)  clientReceived=1
+PASS  after the host moves, client media follows it to the new tuple  old=0 new=1
+PASS  ...and host media from the new tuple still reaches the client  clientReceived=1
+PASS  a later wake goes to the moved tuple  old=0 new=3
+PASS  the hairpin fixture registers  status=200
+PASS  the hairpin case has an address the server will store  192.168.0.76
+PASS  the hairpin heartbeat is accepted  status=200
+PASS  the hairpin fixture accepts a connect  status=200
+PASS  the wake goes where the host says it is, not where its observe came from  published=3 wire=0
+PASS  the relayed Hello goes to the published tuple too  published=1 wire=0
+PASS  ...so the HelloAck reaches the client instead of h2c staying at zero  clientReceived=1
+PASS  a heartbeat does not move the session back onto the wire tuple  published=1 wire=0
+PASS  the moved heartbeat is accepted  status=200
+PASS  a session follows the port the host has just published  moved=1 previous=0
+
+same_lan_test: PASS
+
+--- relay refusal diagnostics: limits ---
+PASS  ten thousand distinct sources track at most maxKeys entries  size=256
+PASS  ...and print at most linesPerWindow lines, timer or no timer  lines=24
+PASS  ...with zero time elapsed, so no sweep could have helped  lines=24
+PASS  sources past the cap allocate nothing  size=4
+PASS  ...and print nothing of their own  lines=4
+PASS  when the window rolls, the untracked refusals are one line, counted per reason  [relay] diag untracked sources (over 4 keys) refused=punch-ignored:50,hello-unknown-token:7
+PASS  ...and that line names the cap
+PASS  one source gets linesPerKey lines in a window  lines=3
+PASS  ...and the next window opens with how many it dropped  [relay] punch-ignored:203.0.113.5 suppressed=17 inLastMs=10000
+PASS  ...followed by the new line itself
+PASS  forty sources, one line each allowed, five lines printed  lines=5
+PASS  per-key summaries draw from the same budget as lines  printed=5
+PASS  what the budget dropped is said once, as a number  [relay] diag suppressed=35 lines inLastMs=10000
+PASS  quiet keys are swept after two windows; a live one stays  size=1
+PASS  ...so the cap is spent on live sources, not dead ones  size=2
+PASS  defaults: 10 s window, 3 per key, 256 keys, 24 lines per window  {"windowMs":10000,"linesPerKey":3,"maxKeys":256,"linesPerWindow":24}
+
+relay_diag_test: PASS
+
+--- relay wire address: lan viewer, remote host (fixed + 3 mutants) ---
+mode=fixed lan=192.168.0.76 advertised=203.0.113.9 scratch=.claude\test-tmp\relay-wire-3NSglI
+PASS  the server is still running after start-up
+PASS  login  status=200
+PASS  host registers  status=200
+PASS  the host's advertised and wire addresses agree (public==wire regression kept)  reported=127.0.0.1:53701
+PASS  host heartbeat accepted  status=200
+PASS  the viewer's wire address differs from its advertised one (the field shape)  advertised=203.0.113.9:53702 wire=192.168.0.76
+PASS  an account outside the allowlist is offered no relay, whatever its address  status=200 kinds=public
+PASS  ...and its punch from the LAN wire address is not answered  viewerReceived=0
+PASS  ...which the log says, naming the source and the reason
+PASS  an allowed account from an address outside the allowlist is offered no relay  status=200 kinds=public
+PASS  ...and its punch is not answered  received=0
+PASS  connect succeeds for the LAN viewer and offers the relay (policy judged the advertised address)  status=200 kinds=public,relay
+PASS  the eligible line names both addresses
+PASS  the host is woken (pendingPunch still carries the advertised address)  hostReceived=3
+PASS  the relay answers the punch sent from the LAN wire address  replies=3
+PASS  ...the reply reaches the socket the punch came from (raw tuple, not the advertised one)  from=192.168.0.76:18473
+PASS  the token Hello from the LAN wire address reaches the host  hostReceived=1
+PASS  ...from the observe socket  src=127.0.0.1:18391
+PASS  the session is bound to the raw wire tuple, not the advertised address
+PASS  the host's HelloAck comes back to the viewer  viewerReceived=1
+PASS  ...from the relay, as the client expects  from=192.168.0.76:18473
+PASS  the session is active in the log
+PASS  viewer media reaches the host unchanged  hostReceived=2
+PASS  host media reaches the viewer unchanged  viewerReceived=1
+PASS  a Hello with no token, a wrong token, or junk from the LAN opens nothing and reaches the host 0 times  hostReceived=0
+PASS  ...the wrong token is logged as unknown, without printing it
+PASS  a valid token presented from a different wire address is refused (host reached 0 times)  hostReceived=0
+PASS  ...logged as wire-mismatch with the expected wire and the advertised address, not the token
+PASS  the refusals did not move the lease: host media still reaches the original viewer  viewerReceived=1
+PASS  a second connect from the same wire address (new port) is accepted
+PASS  a valid Hello from the same wire address on another port is accepted (NAT contract kept)  hostReceived=3
+PASS  ...bound to its own raw tuple
+PASS  the superseded token cannot reclaim the host (host reached 0 times)  hostReceived=0
+PASS  ...and is logged as a refused token from the viewer's tuple
+PASS  media from the superseded session is dropped
+PASS  a token minted for one observed port can be presented from another port of the same wire address
+PASS  ...the Hello reaches the host  hostReceived=3
+PASS  ...and the session is bound to the presenting port, not the observed one
+PASS  ...the HelloAck returns to the presenting socket, not the observing one  presenter=1 observer=0
+PASS  ...and media flows both ways on the presenting port  host=2 presenter=1 observer=0
+PASS  two LAN clients (one advertised address) each get a relay capability for their own host
+PASS  both LAN clients get their punches answered  A=3 B=3
+PASS  each client's Hello reaches ITS host and only that one  host1=2 host2=2
+PASS  ...each bound to its own raw tuple
+PASS  client media does not cross between the two sessions  host1=1 host2=1
+PASS  host media does not cross between the two sessions  A=1 B=1
+PASS  twenty ineligible punches from one address produce at most three log lines  lines=3
+PASS  hundreds of distinct sources add a bounded number of diagnostic lines (global budget 24 per window)  sources=299 linesAdded=21
+PASS  ...and an established session still forwards while diagnostics are being suppressed  host2=2
+PASS  no session was opened by any unauthenticated datagram  bound=5
+PASS  no capability token appears in the log
+PASS  a capability is minted for the expiry check
+PASS  an unbound token presented after its TTL opens nothing (no Hello forwarded, no session)  hostReceived=1 hellos=0
+PASS  ...and is logged as unknown-or-expired from the presenting tuple
+
+relay_wire_test(fixed): PASS
+mode=punch-only lan=192.168.0.76 advertised=203.0.113.9 scratch=.claude\test-tmp\relay-wire-m290Lo
+PASS  the server is still running after start-up
+PASS  login  status=200
+PASS  host registers  status=200
+PASS  the host's advertised and wire addresses agree (public==wire regression kept)  reported=127.0.0.1:53648
+PASS  host heartbeat accepted  status=200
+PASS  the viewer's wire address differs from its advertised one (the field shape)  advertised=203.0.113.9:53649 wire=192.168.0.76
+PASS  connect succeeds for the LAN viewer and offers the relay (policy judged the advertised address)  status=200 kinds=public,relay
+PASS  the eligible line names both addresses
+PASS  the host is woken (pendingPunch still carries the advertised address)  hostReceived=2
+PASS  the relay answers the punch sent from the LAN wire address  replies=3
+PASS  ...the reply reaches the socket the punch came from (raw tuple, not the advertised one)  from=192.168.0.76:18473
+PASS  punch-only mutant: the Hello from the LAN wire address is refused  hostReceived=0
+PASS  punch-only mutant: the log names the mismatch
+
+relay_wire_test(punch-only): PASS
+mode=hello-only lan=192.168.0.76 advertised=203.0.113.9 scratch=.claude\test-tmp\relay-wire-zDDYgY
+PASS  the server is still running after start-up
+PASS  login  status=200
+PASS  host registers  status=200
+PASS  the host's advertised and wire addresses agree (public==wire regression kept)  reported=127.0.0.1:53162
+PASS  host heartbeat accepted  status=200
+PASS  the viewer's wire address differs from its advertised one (the field shape)  advertised=203.0.113.9:53163 wire=192.168.0.76
+PASS  connect succeeds for the LAN viewer and offers the relay (policy judged the advertised address)  status=200 kinds=public,relay
+PASS  the eligible line names both addresses
+PASS  the host is woken (pendingPunch still carries the advertised address)  hostReceived=3
+PASS  hello-only mutant: the punch from the LAN wire address goes unanswered, so the relay candidate is never selected  replies=0
+PASS  hello-only mutant: the log says the punch found no eligibility
+
+relay_wire_test(hello-only): PASS
+mode=wire-missing lan=192.168.0.76 advertised=203.0.113.9 scratch=.claude\test-tmp\relay-wire-hAKCW6
+PASS  the server is still running after start-up
+PASS  login  status=200
+PASS  host registers  status=200
+PASS  the host's advertised and wire addresses agree (public==wire regression kept)  reported=127.0.0.1:53164
+PASS  host heartbeat accepted  status=200
+PASS  the viewer's wire address differs from its advertised one (the field shape)  advertised=203.0.113.9:53165 wire=192.168.0.76
+PASS  wire-missing: a relay-eligible connect without a wire address is refused with 409 observation_required  status=409 body={"error":"observation_required","code":"conflict"}
+PASS  wire-missing: ...and the log says why
+PASS  wire-missing: no capability was minted  minted=0
+PASS  wire-missing: no relay capability was issued
+PASS  wire-missing: the host was not woken  hostReceived=0
+PASS  wire-missing: the host's next heartbeat collects nothing (pendingPunch unchanged)  status=200 pending=[]
+
+relay_wire_test(wire-missing): PASS
+
+--- connect diagnostics ---
+PASS  login  status=200
+PASS  host registers  status=200
+PASS  an observe arrival is logged for any peer, not only one on our lan  1 lines
+PASS  ...without the token itself  the token is a lookup key a stranger could reuse
+PASS  heartbeat accepted  status=200
+PASS  a heartbeat arrival is logged  1 lines
+PASS  ...saying where our datagrams will go  [host-hb] host=2c1b8617 wire=127.0.0.1:53166 public=127.0.0.1:53166 aim=127.0.0.1:53166 via=wire localIps=0 sinceLastMs=-1 moved-from=-:0
+PASS  a repeat heartbeat inside the interval is not logged again  1 lines
+PASS  a moved tuple is logged even inside the interval  2 lines
+PASS  ...and says where it moved from  [host-hb] host=2c1b8617 wire=127.0.0.1:59956 public=127.0.0.1:59956 aim=127.0.0.1:59956 via=wire localIps=0 sinceLastMs=158 moved-from=127.0.0.1:53166
+PASS  connect succeeds  status=200
+PASS  the capability mint is logged against a connect  [capability] connect=36e5ea75 minted host=2c1b8617 queued=1 ttlMs=30000
+PASS  ...with an id the other lines can be joined on  36e5ea75
+PASS  every wake datagram reports leaving the socket  3 of 3
+PASS  ...each tagged with the connect that caused it  [wake] connect=36e5ea75 tx[0] sent 127.0.0.1:59956 via=wire queuedMs=0
+PASS  ...and with which of the three it was  [wake] connect=36e5ea75 tx[0] sent 127.0.0.1:59956 via=wire queuedMs=0 | [wake] connect=36e5ea75 tx[100] sent 127.0.0.1:59956 via=wire queuedMs=0 | [wake] connect=36e5ea75 tx[300] sent 127.0.0.1:59956 via=wire queuedMs=0
+PASS  the moment the host collects the capability is logged  [capability] collected host=2c1b8617 count=1 waited=36e5ea75:706ms meaning=handed-to-response
+PASS  ...naming the connect it belonged to  [capability] collected host=2c1b8617 count=1 waited=36e5ea75:706ms meaning=handed-to-response
+PASS  ...and how long it waited  [capability] collected host=2c1b8617 count=1 waited=36e5ea75:706ms meaning=handed-to-response
+PASS  a wake suppressed by the rate limit says so  [wake] connect=7aeb36ae skipped reason=rate sinceLastMs=864 limitMs=1000
+PASS  a connect for the relay leg succeeds  status=200
+PASS  the first hop towards the host is logged  1 lines
+PASS  ...saying it was the handshake and not media  [relay] connect=5396e071 first c2h -> 127.0.0.1:53166 kind=300 afterBindMs=0
+PASS  the relayed hello reaches the host fixture  hostReceived=2
+PASS  the first answer from the host is logged  1 lines
+PASS  ...with the gap that separates "never reached" from "reached and refused"  [relay] connect=5396e071 first h2c <- 127.0.0.1:53166 afterBindMs=408 afterFirstC2HMs=408
+PASS  a bound session whose host never answers says so while it is open  1 lines
+PASS  ...naming where it was aimed  [relay] connect=06c50c8e host silent h2c=0 c2h=1 host=127.0.0.1:53166 afterBindMs=7891
+PASS  no capability appears anywhere in the log  a capability in a log is a capability anyone reading logs can replay
+PASS  no host token appears either
+PASS  no session token appears either
+
+connect_diag_test: PASS
+
+--- wake resend ---
+PASS  login  status=200
+PASS  host registers  status=200
+PASS  connect succeeds  status=200
+PASS  a host that never collects still gets more than the burst  13 datagrams in 12606ms
+PASS  ...and never more than the burst plus the resend allowance  13 of at most 13
+PASS  ...spread one a second, not bunched  0 gaps under 750ms of 10
+PASS  the resend says it stopped, and why  [wake] connect=616ddb95 resend stopped after 10 reason=budget
+PASS  ...on its budget, since nothing collected the capability  [wake] connect=616ddb95 resend stopped after 10 reason=budget
+PASS  a second connect succeeds  status=200
+PASS  the heartbeat carries the capability  2 pending
+PASS  nothing more is sent once the capability has been handed over  0 datagrams in 3000ms after collecting
+PASS  ...and the log says that is why it stopped  [wake] connect=7133bb36 resend stopped after 1 reason=collected
+PASS  the collected line says what collected means  [capability] collected host=6a5e0e18 count=2 waited=616ddb95:14017ms,7133bb36:1409ms meaning=handed-to-response
+PASS  three connects to one host arm one resend each, replacing rather than adding  3 armed lines
+PASS  ...and the datagrams stay on one host allowance, not three  13 of at most 13
+PASS  ...with one stop, not three  1 stop lines
+PASS  ...and each replacement says so, naming the connect it replaced  2 replaced lines: [wake] connect=f2d31800 resend replaced connect=f81d5e71 after 0
+PASS  a connect arriving during a resend gets its own burst at once  3 datagrams in the 450 ms after it
+PASS  ...and is not refused as a rate
+PASS  a resend whose capability expired stops, and says so  [wake] connect=8d1371a8 resend stopped after 1 reason=no-capability
+PASS  a connect to a host last heard 80 s ago is still accepted  status=200
+PASS  a resend to a host gone stale stops, and says so  [wake] connect=79f47420 resend stopped after 0 reason=stale-host
+PASS  a tick that throws ends the resend with reason=tick-error  [wake] connect=da54f97a resend stopped after 1 reason=tick-error
+PASS  ...and the server is still answering  status=200
+PASS  a host punching the server arms no resend  0 armed lines
+PASS  ...and produces no wake at all  0 wake lines
+PASS  ...and no datagram comes back to it  0 datagrams
+PASS  a connect after all that still arms  1 armed lines
+PASS  ...with one timer, not a pile left behind  [wake] connect=e5da83c5 resend armed every 1000ms max=10 timers=1
+PASS  sixty-four more hosts are registered for the ceiling  64
+PASS  sixty-five connects inside one resend lifetime  35ms
+PASS  the first sixty-four each get a resend  64 armed
+PASS  ...and the sixty-fifth is refused one, saying why  [wake] connect=2b3eabe4 resend skipped reason=timer-cap timers=64 limit=64
+
+wake_resend_test: PASS
+
+RESULT: ALL PASS

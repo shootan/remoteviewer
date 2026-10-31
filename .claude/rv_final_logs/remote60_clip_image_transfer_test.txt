@@ -1,0 +1,79 @@
+PASS  disabled host: Disabled
+PASS  transferId 0: BadRequest
+PASS  no PNG in the formats: BadRequest
+PASS  text flag without text units: BadRequest
+PASS  text units without the text flag: BadRequest
+PASS  an unknown format bit: BadRequest
+PASS  pngBytes under a PNG signature: BadRequest
+PASS  zero width: BadDims
+PASS  8193 x 1: TooLarge
+PASS  8192 x 2049 (decoded over 64 MiB): TooLarge
+PASS  8192 x 4096 highly compressed: refused on its decoded size, not its bytes
+PASS  PNG 16 MiB + 1: TooLarge
+PASS  text over 512 Ki units: TooLarge
+PASS  nothing was accepted by any refusal
+PASS  8192 x 2048, PNG 16 MiB: Accept (receiver peak 98 MiB <= 100)
+PASS  epochTag = process random << 32 | session epoch
+PASS  a bulk generation was issued (never 0 in its low bits)
+PASS  the declared total, and only that, is allocated
+PASS  one transfer per session: a second offer is Busy
+PASS  the pull window keeps 2 outstanding
+PASS  opening pulls carry no trigger
+PASS  pulls are 16 KiB each, in order
+PASS  dropped, and nothing changes: another transferId
+PASS  dropped, and nothing changes: an old epochTag (host restarted)
+PASS  dropped, and nothing changes: an old session epoch
+PASS  dropped, and nothing changes: an old bulk generation
+PASS  dropped, and nothing changes: a range nobody asked for
+PASS  dropped, and nothing changes: a shifted offset
+PASS  dropped, and nothing changes: a shorter length than asked
+PASS  dropped, and nothing changes: data shorter than its header says
+PASS  dropped, and nothing changes: zero length
+PASS  the good chunk is accepted
+PASS  the same chunk twice is dropped (answered once)
+PASS  a completed chunk releases one pull, naming it as the trigger
+PASS  status reports progress for the current id
+PASS  status for another id is Unknown
+PASS  a cancel naming another id answers Unknown and leaves the transfer alone
+PASS  a cancel with a stale epochTag does not cancel
+PASS  the last pull asks for exactly the remainder
+PASS  the last chunk completes the package
+PASS  nothing more is pulled once complete
+PASS  chunks after completion are dropped
+PASS  cancel while verifying marks it
+PASS  ...and a failure then reads as the cancel
+PASS  a new offer is accepted once the old one ended
+PASS  a publish that already happened is reported as published
+PASS  29.9 s without a chunk is not yet a stall
+PASS  30 s without a chunk: failed(stalled)
+PASS  budget = bits / 128 kbps + 30 s
+PASS  progress at 20 s
+PASS  not over before the budget
+PASS  the wall-clock budget ends it even while chunks arrive
+PASS  the budget is capped at 20 min
+PASS  a session end cancels and frees at once
+PASS  a refusal drops the package
+PASS  an accept starts serving
+PASS  pull not answered: old epochTag
+PASS  pull not answered: old generation
+PASS  pull not answered: another transfer
+PASS  pull not answered: past the end
+PASS  pull not answered: offset + len overflowing 32 bits
+PASS  pull not answered: a chunk larger than any sender answers
+PASS  a good pull is answered with exactly the bytes asked
+PASS  a pull triggered by a chunk this side sent is that chunk's round trip
+PASS  the same trigger does not count twice
+PASS  the first refill only starts the clock
+PASS  tokens accrue at rate / 8 per second
+PASS  a long idle saves at most the fixed burst
+PASS  the burst is fixed (agreed): four datagrams at 64 kbps and at 16 Mbps alike
+PASS  a pause empties the bucket
+PASS  the wait for 1200 bytes at 64 kbps is 150 ms
+PASS  acknowledgements may run the bucket into debt
+PASS  the pacer holds 2 Mbps (achieved 2000373 bps over 0.901 s, within 10%)
+PASS  no 15.6 ms timer quanta: the largest gap is 5029 us (one datagram = 4528 us)
+PASS  paused: data waits, but the acknowledgement goes out at once
+PASS  a retry of a still-queued datagram is coalesced, not queued twice
+PASS  a resend of a datagram that already left counts as loss
+
+RESULT: PASSED  (77 checks, 0 failed)

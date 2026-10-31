@@ -1,0 +1,9 @@
+PASS  both binaries were read
+PASS  positive control: the test build carries the seam's variable (UTF-16)
+PASS  positive control: the test build carries its banner
+PASS  the shipped host does not carry the seam's variable (UTF-16)
+PASS  the shipped host does not carry the seam's variable (ASCII)
+PASS  the shipped host does not carry the seam's banner
+PASS  the shipped host does carry the product's clip-image log tag
+
+RESULT: PASSED  (7 checks, 0 failed)

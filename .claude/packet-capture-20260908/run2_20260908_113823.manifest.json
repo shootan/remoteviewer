@@ -1,0 +1,31 @@
+﻿{
+    "run":  "run2_20260908_113823",
+    "startedAt":  "2026-09-08T11:38:23.1407520+09:00",
+    "endedAt":  "2026-09-08T11:38:23.2116253+09:00",
+    "exitCode":  3,
+    "endReason":  "not elevated",
+    "filterName":  "GNLinkUDP-20260908_113823",
+    "filterCommand":  "pktmon filter add GNLinkUDP-20260908_113823 -t UDP -p 43000",
+    "startCommand":  "pktmon start --capture --comp nics --pkt-size 192 --file-name D:\\remote\\remote\\.claude\\packet-capture-20260908\\gnlink_host2_20260908_113823.etl --file-size 512 --log-mode circular",
+    "params":  {
+                   "comp":  "nics",
+                   "pktSize":  192,
+                   "fileSizeMB":  512,
+                   "logMode":  "circular",
+                   "port":  43000,
+                   "ipFilter":  "none",
+                   "durationSec":  600
+               },
+    "etl":  "D:\\remote\\remote\\.claude\\packet-capture-20260908\\gnlink_host2_20260908_113823.etl",
+    "pcapng":  null,
+    "preExistingFilters":  null,
+    "filtersRemovedAtEnd":  null,
+    "statusBefore":  null,
+    "statusAfterStart":  null,
+    "statusBeforeStop":  null,
+    "stopOutput":  null,
+    "etl2pcapOutput":  null,
+    "notes":  [
+
+              ]
+}

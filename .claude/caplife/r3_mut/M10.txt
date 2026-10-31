@@ -1,0 +1,9 @@
+﻿FAIL N3: the look taken before the publish is not applied (NotYetApplied)
+PASS N3: the next look is applied WITH the new status (wgc), never the old one
+PASS N3: applied always comes with the status it was handled with
+PASS N3: a question while this session's change waits -> NotYetApplied
+PASS N3: ...and applied, with the new status, once it is handled
+PASS N3: a new session's first question before its own publish: not known (0), NotYetApplied -- not the old WGC
+PASS N3: once published for it, its own status (dxgi), applied
+PASS N3: the change count moves only when the status changes
+[host-backend-status-board-test] FAIL failures=1

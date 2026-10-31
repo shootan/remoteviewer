@@ -1,0 +1,15 @@
+﻿under RDP the desktop lives on a different adapter than the D3D device
+  ok   picked adapter 1 (Microsoft Remote Display Adapter), device rebuild required
+a zero-sized virtual output is not a candidate, even as a fallback
+  ok   skipped the virtual adapter, chose \\.\DISPLAY1 1920x1080
+an output not attached to the desktop is not a candidate
+  ok   chose the attached output
+the requested monitor is preferred over enumeration order
+  ok   matched the requested monitor
+a portrait-only machine is reported, not silently accepted
+  ok   rejected for rotation, accepted when landscape is not required
+no outputs and no usable outputs are different answers
+  ok   no_outputs and no_usable_output are reported separately
+the ordinary single-GPU case does not rebuild the device
+  ok   device kept
+dxgi_output_selection_test: PASS

@@ -1,0 +1,13 @@
+﻿challenge message round-trips through raw bytes
+  ok   byte round-trip is identical
+  ok   key binding fields survive
+host and client derive an identical context/AAD from the challenge
+  ok   AAD identical on both sides
+  ok   KDF info identical on both sides
+  ok   binding fields carried into the context
+  ok   different challenge id -> different AAD
+FillChallengeFromContext and ContextFromChallenge agree
+  ok   context -> challenge -> context preserves bound fields
+  ok   type set
+  ok   salt carried onto the wire
+unlock_protocol_test: PASS

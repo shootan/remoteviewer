@@ -1,0 +1,28 @@
+﻿PASS N2: B's request is not taken under owner A
+PASS N2: B's WGC applied after B became the owner (not wiped by B's reset)
+PASS N2: marked under B's own epoch and seq
+PASS N2: the same owner keeps its choice on later ticks
+PASS N2: A's late request does not touch B's backend
+PASS N2: and is not marked under B's key
+PASS N2: counted as dropped
+PASS N2: A's request handled under A
+PASS N2: the new owner B starts from the host default
+PASS N2: A's mark is never re-labelled as B's
+PASS N2: the same session (resume/pause) keeps its choice
+PASS N2: the real end puts the choice back to the default (before any new session)
+PASS N2: an end is applied once (and changes nothing again)
+FAIL N2 end: A post -> A end -> consume: default kept, nothing applied
+FAIL N2 end: ...and stays the default on the next tick
+FAIL N2 end: A end -> late A post: default kept, nothing applied
+PASS N2 end: B's request waits for B to become the owner
+PASS N2 end: ...then B's request is applied as B's
+PASS N2 end: a LATER Serve of the same epoch is live (its request applied)
+PASS N2: a late end of the earlier owner leaves B's choice alone
+PASS classify: unstamped -> handle
+PASS classify: own epoch -> handle
+PASS classify: older -> drop
+PASS classify: newer -> leave
+FAIL classify: the ended Serve's -> drop
+PASS classify: a later Serve's -> handle
+PASS key: unstamped uses the owner
+[host-backend-owner-test] FAIL failures=4

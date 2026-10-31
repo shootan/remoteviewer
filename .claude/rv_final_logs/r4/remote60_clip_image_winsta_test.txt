@@ -1,0 +1,11 @@
+PASS  a private window station was created
+PASS  a second unnamed station is the SAME station (named after the logon session): one clipboard
+PASS  a writer and then a reader ran on the private station
+  station A: set=1 read=alpha-station seqBefore=4421 seqAfter=4426
+  station B: set=1 read=alpha-station seqBefore=4426 seqAfter=4426
+PASS  the writer set its clipboard and read it back
+PASS  a later process on the second unnamed station reads the first one's text (one clipboard)
+PASS  the interactive clipboard (WinSta0) did not move: sequence 4473 -> 4473
+PASS  the staging directory is removed
+
+RESULT: PASSED  (7 checks, 0 failed)

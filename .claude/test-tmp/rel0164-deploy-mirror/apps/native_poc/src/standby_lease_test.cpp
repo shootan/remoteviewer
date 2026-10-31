@@ -1,0 +1,748 @@
+// keepalive-r2 ② r3 (Codex codex_keepalive_r2_scope2.md N1, N2): a StandbyLease and the StandbyRunner against a fake
+// host on loopback (a UDP socket this test answers from) -- the activation's HelloAck test, and every lifetime
+// counterexample Codex names: the arguments outliving a ReleaseAll, a Release during the handshake wait, an early
+// SessionOver, a late SessionOver / Abandon after a new lease under the same key, and the pump leaving the socket alone
+// while handed off. Loopback only (127.0.0.1); no product process, no host, nothing outside this process.
+
+#include <atomic>
+#include <chrono>
+#include <cstdio>
+#include <cstring>
+#include <functional>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "standby_runner.hpp"
+
+namespace n = remote60::native_poc;
+using State = n::StandbyLease::State;
+
+namespace {
+int gChecks = 0, gFailures = 0;
+void check(const char* what, bool ok, const std::string& detail = {}) {
+  ++gChecks;
+  if (!ok) ++gFailures;
+  std::printf("%s  %s%s%s\n", ok ? "PASS" : "FAIL", what, detail.empty() ? "" : "  ", detail.c_str());
+  std::fflush(stdout);
+}
+
+uint64_t mono_ms() {
+  return static_cast<uint64_t>(
+      std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+bool wait_until(const std::function<bool()>& f, int ms) {
+  const uint64_t until = mono_ms() + ms;
+  while (mono_ms() < until) {
+    if (f()) return true;
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+  }
+  return f();
+}
+
+struct MemStore : n::StandbyGenerationStore {
+  std::array<uint8_t, 16> id{};
+  uint32_t last = 0;
+  bool have = false;
+  bool Load(std::array<uint8_t, 16>* d, uint32_t* l) override {
+    if (!have) return false;
+    *d = id;
+    *l = last;
+    return true;
+  }
+  bool Save(const std::array<uint8_t, 16>& d, uint32_t l) override {
+    id = d;
+    last = l;
+    have = true;
+    return true;
+  }
+};
+bool rnd(uint8_t* b, size_t len) {
+  for (size_t i = 0; i < len; ++i) b[i] = static_cast<uint8_t>(0xB0 + i);
+  return true;
+}
+
+constexpr uint32_t kGoodAck = n::kUdpFeatureVideoFec | n::kUdpFeatureDirectoryAuth | n::kUdpFeatureVideoFecInterleaved;
+
+// A host on 127.0.0.1 that admits (Ack Ok), answers Pings and records Activates / Releases. Activates are answered
+// only by the test (Pong / HelloAck datagrams it sends at will).
+class FakeHost {
+ public:
+  ~FakeHost() { Stop(); }
+  bool Start() {
+    std::string error;
+    if (!n::initialize_sockets(&error)) return false;
+    s_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    if (bind(s_, reinterpret_cast<const sockaddr*>(&a), sizeof(a)) != 0) return false;
+    socklen_t l = sizeof(a);
+    getsockname(s_, reinterpret_cast<sockaddr*>(&a), &l);
+    port = ntohs(a.sin_port);
+    thread_ = std::thread([this] { Loop(); });
+    return true;
+  }
+  void Stop() {
+    stop_ = true;
+    if (thread_.joinable()) thread_.join();
+    n::close_socket(&s_);
+  }
+  n::StandbyLease::CapabilityFn capability() {
+    return [this](n::SocketHandle, n::StandbyCapability* out) {
+      out->token = "cap-test";
+      out->ip = "127.0.0.1";
+      out->port = port;
+      return true;
+    };
+  }
+  // to the client that sent the last datagram
+  void SendRaw(const void* p, int len) {
+    std::lock_guard<std::mutex> l(mu_);
+    sendto(s_, static_cast<const char*>(p), len, 0, reinterpret_cast<const sockaddr*>(&peer_), sizeof(peer_));
+  }
+  void Pong(uint32_t gen, bool granted) {
+    n::UdpStandbyPacket p{};
+    p.size = sizeof(p);
+    p.kind = static_cast<uint16_t>(n::UdpPacketKind::StandbyPong);
+    p.entryId = 77;
+    p.clientGen = gen;
+    p.features = granted ? n::kUdpStandbyPongActivationGranted : 0;
+    SendRaw(&p, sizeof(p));
+  }
+  void HelloAck(uint32_t features, uint32_t version = n::kUdpProtocolVersion, uint16_t declared = sizeof(n::UdpHelloPacket),
+                int len = sizeof(n::UdpHelloPacket)) {
+    n::UdpHelloPacket a{};
+    a.kind = static_cast<uint16_t>(n::UdpPacketKind::HelloAck);
+    a.version = version;
+    a.size = declared;
+    a.features = features;
+    SendRaw(&a, len);
+  }
+  std::atomic<int> pings{0}, releases{0}, activates{0};
+  std::atomic<uint32_t> lastActivateGen{0};
+  uint16_t port = 0;
+
+ private:
+  void Loop() {
+    while (!stop_) {
+      fd_set rd;
+      FD_ZERO(&rd);
+      FD_SET(s_, &rd);
+      timeval tv{0, 20000};
+      if (select(static_cast<int>(s_) + 1, &rd, nullptr, nullptr, &tv) <= 0) continue;
+      n::UdpStandbyPacket p{};
+      sockaddr_in from{};
+      socklen_t fl = sizeof(from);
+      const int got = static_cast<int>(recvfrom(s_, reinterpret_cast<char*>(&p), sizeof(p), 0, reinterpret_cast<sockaddr*>(&from), &fl));
+      if (got != static_cast<int>(sizeof(p)) || p.magic != n::kMagic) continue;
+      {
+        std::lock_guard<std::mutex> l(mu_);
+        peer_ = from;
+      }
+      switch (static_cast<n::UdpPacketKind>(p.kind)) {
+        case n::UdpPacketKind::StandbyHello: {
+          n::UdpStandbyPacket a{};
+          a.size = sizeof(a);
+          a.kind = static_cast<uint16_t>(n::UdpPacketKind::StandbyAck);
+          a.clientGen = p.clientGen;
+          a.entryId = 77;
+          for (int i = 0; i < 16; ++i) a.entrySecret[i] = static_cast<uint8_t>(i + 1);
+          a.leaseMs = 30000;
+          SendRaw(&a, sizeof(a));
+          break;
+        }
+        case n::UdpPacketKind::StandbyPing:
+          ++pings;
+          Pong(0, false);
+          break;
+        case n::UdpPacketKind::StandbyActivate:
+          ++activates;
+          lastActivateGen = p.clientGen;
+          break;
+        case n::UdpPacketKind::StandbyRelease:
+          ++releases;
+          break;
+        default:
+          break;
+      }
+    }
+  }
+  n::SocketHandle s_ = n::kInvalidSocket;
+  std::thread thread_;
+  std::atomic<bool> stop_{false};
+  std::mutex mu_;
+  sockaddr_in peer_{};
+};
+
+bool park(n::StandbyLease& lease);
+
+// A UDP endpoint on loopback that answers every datagram with itself (a directory's observe port, for ObserveFrom).
+class Echo {
+ public:
+  ~Echo() { Stop(); }
+  bool Start() {
+    s_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
+    if (bind(s_, reinterpret_cast<const sockaddr*>(&a), sizeof(a)) != 0) return false;
+    socklen_t l = sizeof(a);
+    getsockname(s_, reinterpret_cast<sockaddr*>(&a), &l);
+    port = ntohs(a.sin_port);
+    t_ = std::thread([this] {
+      while (!stop_) {
+        fd_set rd;
+        FD_ZERO(&rd);
+        FD_SET(s_, &rd);
+        timeval tv{0, 20000};
+        if (select(static_cast<int>(s_) + 1, &rd, nullptr, nullptr, &tv) <= 0) continue;
+        char buf[256];
+        sockaddr_in from{};
+        socklen_t fl = sizeof(from);
+        const int n = static_cast<int>(recvfrom(s_, buf, sizeof(buf), 0, reinterpret_cast<sockaddr*>(&from), &fl));
+        if (n > 0) {
+          ++seen;
+          sendto(s_, buf, n, 0, reinterpret_cast<const sockaddr*>(&from), sizeof(from));
+        }
+      }
+    });
+    return true;
+  }
+  void Stop() {
+    stop_ = true;
+    if (t_.joinable()) t_.join();
+    n::close_socket(&s_);
+  }
+  uint16_t port = 0;
+  std::atomic<int> seen{0};
+
+ private:
+  n::SocketHandle s_ = n::kInvalidSocket;
+  std::thread t_;
+  std::atomic<bool> stop_{false};
+};
+
+// ② e (AVD ke_r3): the session connect()s the duplicate it got; the lease's socket must not stay tied to that peer.
+void shared_socket_test(FakeHost& host) {
+  std::printf("\n--- ② e: the activation's socket is shared; the session's connect() does not stay on the lease ---\n");
+  MemStore store;
+  n::GenerationAllocator gens(store, rnd);
+  n::StandbyLease lease(gens, n::kUdpFeatureVideoFec, host.capability(), mono_ms);
+  Echo directory;
+  check("parked at the fake host; an observe endpoint up", park(lease) && directory.Start());
+  n::ClientSessionConnectArgs args;
+  uint64_t op = 0;
+  check("activation arguments say the socket is shared (the session never shuts it down)",
+        lease.ActivationArgs(&args, nullptr, &op) && args.preparedSocketShared);
+  // what ClientSessionController::ConnectUdpVideo does with a prepared socket: connect() it to the peer
+  sockaddr_in peer{};
+  peer.sin_family = AF_INET;
+  peer.sin_port = htons(host.port);
+  inet_pton(AF_INET, "127.0.0.1", &peer.sin_addr);
+  const bool connected = connect(args.preparedUdpSocket, reinterpret_cast<const sockaddr*>(&peer), sizeof(peer)) == 0;
+  n::close_socket(&args.preparedUdpSocket);  // the session ended (its descriptor closed, not shut down)
+  check("the session's connect() on its duplicate; its descriptor closed; SessionOver", connected && lease.SessionOver(op));
+  const int seen0 = directory.seen;
+  check("...an observe to ANOTHER address from the lease works (a fresh socket: the tied one keeps its endpoint)",
+        lease.ObserveFrom("127.0.0.1", directory.port, "obs-shared") && directory.seen > seen0,
+        "seen=" + std::to_string(directory.seen - seen0));
+  const int pings = host.pings;
+  const uint64_t until = mono_ms() + 7000;
+  while (mono_ms() < until && host.pings == pings) lease.Pump(50);
+  check("...and the lease pings its own target again", host.pings > pings && lease.state() == State::Parked);
+}
+
+// r2 (Codex codex_ka_e_src_r1.md N2, its probe): a SYNCHRONOUS capability source (a PC's directory calls, in the
+// CapabilityFn) observes from the socket it is given. After a session tied that socket to its peer, a fresh capability
+// (a restart: Lost / re-admission) must still be able to observe -- before r2 it observed from the tied socket and failed.
+void sync_capability_test(FakeHost& host) {
+  std::printf("\n--- r2 N2: a synchronous capability after a session observes from a fresh socket ---\n");
+  Echo directory;
+  check("an observe endpoint up", directory.Start());
+  std::atomic<int> calls{0}, observed{0};
+  auto capability = [&](n::SocketHandle s, n::StandbyCapability* out) {
+    ++calls;
+    if (!n::standby_observe_on(s, "127.0.0.1", directory.port, "obs-sync")) return false;
+    ++observed;
+    out->token = "cap-test";
+    out->ip = "127.0.0.1";
+    out->port = host.port;
+    return true;
+  };
+  MemStore store;
+  n::GenerationAllocator gens(store, rnd);
+  n::StandbyLease lease(gens, n::kUdpFeatureVideoFec, capability, mono_ms);
+  check("parked by a synchronous capability (its first observe answered)", park(lease) && calls == 1 && observed == 1);
+  n::ClientSessionConnectArgs args;
+  uint64_t op = 0;
+  sockaddr_in peer{};
+  peer.sin_family = AF_INET;
+  peer.sin_port = htons(host.port);
+  inet_pton(AF_INET, "127.0.0.1", &peer.sin_addr);
+  const bool session = lease.ActivationArgs(&args, nullptr, &op) &&
+                       connect(args.preparedUdpSocket, reinterpret_cast<const sockaddr*>(&peer), sizeof(peer)) == 0;
+  n::close_socket(&args.preparedUdpSocket);
+  check("a session tied the shared socket to its peer; SessionOver", session && lease.SessionOver(op));
+  lease.Start();  // a fresh capability (what a Lost / a re-admission does)
+  const bool reparked = [&] {
+    const uint64_t until = mono_ms() + 3000;
+    while (mono_ms() < until && lease.state() != State::Parked) lease.Pump(20);
+    return lease.state() == State::Parked;
+  }();
+  check("...the fresh capability's observe is answered (a fresh socket), and the lease parks again",
+        calls == 2 && observed == 2 && reparked, "calls=" + std::to_string(calls.load()) + " observed=" +
+        std::to_string(observed.load()));
+  // the same while the pump reads: the reopen waits for the read in flight (no descriptor closed under a read)
+  std::atomic<bool> stopPump{false};
+  std::thread pump([&] {
+    while (!stopPump) lease.Pump(30);
+  });
+  n::ClientSessionConnectArgs args2;
+  uint64_t op2 = 0;
+  bool session2 = false;
+  {
+    // the pump is running: take the socket as a session would, tie it, give it back
+    session2 = wait_until([&] { return lease.ActivationArgs(&args2, nullptr, &op2); }, 3000) &&
+               connect(args2.preparedUdpSocket, reinterpret_cast<const sockaddr*>(&peer), sizeof(peer)) == 0;
+    n::close_socket(&args2.preparedUdpSocket);
+    session2 = session2 && lease.SessionOver(op2);
+  }
+  const int before = observed;
+  lease.Start();  // from this thread while the pump may be reading
+  const bool again = wait_until([&] { return observed == before + 1 && lease.state() == State::Parked; }, 7000);
+  stopPump = true;
+  pump.join();
+  check("...and while the pump reads: deferred to its next turn, observed from a fresh socket, parked",
+        session2 && again, "calls=" + std::to_string(calls.load()) + " observed=" + std::to_string(observed.load()) + " events: " +
+            [&] { std::string e; for (const auto& x : lease.events()) e += x + " | "; return e; }());
+}
+
+// r2 (Codex D1): the old session's tail is OBSERVED -- what the host still sends to the socket after SessionOver.
+void tail_test(FakeHost& host) {
+  std::printf("\n--- r2 D1: the old session's tail is observed, not assumed ---\n");
+  MemStore store;
+  n::GenerationAllocator gens(store, rnd);
+  n::StandbyLease lease(gens, n::kUdpFeatureVideoFec, host.capability(), mono_ms);
+  check("parked; no tail before any session", park(lease) && !lease.snapshot().tailActive && lease.snapshot().strays == 0);
+  n::ClientSessionConnectArgs args;
+  uint64_t op = 0;
+  check("a session over", lease.ActivationArgs(&args, nullptr, &op) && [&] {
+    n::close_socket(&args.preparedUdpSocket);
+    return lease.SessionOver(op);
+  }());
+  uint8_t video[600];
+  std::memset(video, 0x5A, sizeof(video));  // not a standby datagram: what a still-running session would send
+  for (int i = 0; i < 10; ++i) {
+    host.SendRaw(video, sizeof(video));
+    lease.Pump(20);
+  }
+  const auto during = lease.snapshot();
+  check("the host still sends the old session's datagrams: tail active, counted", during.tailActive && during.strays >= 5,
+        "strays=" + std::to_string(during.strays));
+  const uint64_t until = mono_ms() + 2500;
+  while (mono_ms() < until) lease.Pump(50);
+  const auto after = lease.snapshot();
+  check("...it stops: no tail any more (an observation, not a proof the grant ended), the count kept",
+        !after.tailActive && after.strays == during.strays && lease.state() == State::Parked);
+
+  // r3 (Codex codex_ka_e_src_r2.md D1, its tail_punch_probe: one Punch made strays=1 tail=1 with no session ever): a
+  // Punch is counted on its own, never as a stray, and makes no tail
+  std::printf("\n--- r3 D1: the host's Punches are not a tail ---\n");
+  n::StandbyLease fresh(gens, n::kUdpFeatureVideoFec, host.capability(), mono_ms);
+  check("a new lease parks, no session ever", park(fresh) && fresh.snapshot().strays == 0 && fresh.snapshot().punches == 0);
+  n::UdpHelloPacket punch{};
+  punch.magic = n::kMagic;
+  punch.kind = static_cast<uint16_t>(n::UdpPacketKind::Punch);
+  punch.size = static_cast<uint16_t>(sizeof(punch));
+  for (int i = 0; i < 5; ++i) {
+    host.SendRaw(&punch, sizeof(punch));
+    fresh.Pump(20);
+  }
+  const auto pp = fresh.snapshot();
+  check("5 Punches: punches 5, strays 0, no tail", pp.punches == 5 && pp.strays == 0 && !pp.tailActive,
+        "punches=" + std::to_string(pp.punches) + " strays=" + std::to_string(pp.strays) +
+            " tail=" + std::to_string(pp.tailActive));
+}
+
+// The connect thread of a session: runs the handshake of `args` as ClientSessionController::Connect would.
+struct Handshaking {
+  std::atomic<bool> stop{false}, done{false};
+  bool ok = false;
+  uint32_t features = 0xFFFFFFFFu;
+  std::string error;
+  std::thread t;
+  using Fn = decltype(n::ClientSessionConnectArgs::udpHandshake);
+  explicit Handshaking(Fn fn, n::SocketHandle s) {
+    t = std::thread([this, fn = std::move(fn), s] {
+      ok = fn(s, stop, &error, &features);
+      done = true;
+    });
+  }
+  ~Handshaking() {
+    stop = true;
+    if (t.joinable()) t.join();
+  }
+};
+
+bool park(n::StandbyLease& lease) {
+  std::string error;
+  if (!lease.Open(&error)) return false;
+  lease.Start();
+  const uint64_t until = mono_ms() + 3000;
+  while (mono_ms() < until && lease.state() != State::Parked) lease.Pump(20);
+  return lease.state() == State::Parked;
+}
+
+void hello_ack_test(FakeHost& host) {
+  std::printf("\n--- N1: the activation's HelloAck passes the ordinary test, or it is nothing ---\n");
+  MemStore store;
+  n::GenerationAllocator gens(store, rnd);
+  n::StandbyLease lease(gens, n::kUdpFeatureVideoFec, host.capability(), mono_ms);
+  check("parked at the fake host", park(lease));
+  n::ClientSessionConnectArgs args;
+  uint64_t op = 0;
+  auto keep = std::make_shared<int>(1);
+  check("activation arguments, an operation number, and the handshake holds the owner",
+        lease.ActivationArgs(&args, keep, &op) && op != 0 && keep.use_count() == 2);
+  {
+    const int before = host.activates.load();
+    Handshaking h(args.udpHandshake, args.preparedUdpSocket);
+    check("the handshake sends this activation's StandbyActivate", wait_until([&] { return host.activates > before; }, 2000));
+    const uint32_t gen = host.lastActivateGen;
+    host.HelloAck(kGoodAck, n::kUdpProtocolVersion + 1);                    // another protocol version
+    host.HelloAck(n::kUdpFeatureVideoFec);                                    // no DirectoryAuth
+    host.HelloAck(n::kUdpFeatureDirectoryAuth);                               // no VideoFec
+    host.HelloAck(kGoodAck, n::kUdpProtocolVersion, sizeof(n::UdpHelloPacket) - 4);  // a declared size that is not its own
+    host.HelloAck(kGoodAck, n::kUdpProtocolVersion, sizeof(n::UdpHelloPacket), sizeof(n::UdpHelloPacket) - 4);  // short
+    host.Pong(gen, true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    check("invalid HelloAcks + the granted Pong: NOT activated (no invalid one counted)", !h.done && lease.state() == State::Activating,
+          "state=" + std::to_string(static_cast<int>(lease.state())));
+    check("...early SessionOver during the handshake: refused, still handed off", !lease.SessionOver(op) && lease.handedOff());
+    check("...Abandon during the handshake: refused (the session's handle stays open)",
+          !lease.Abandon(op, nullptr) && args.preparedUdpSocket != n::kInvalidSocket);
+    host.HelloAck(kGoodAck | 0x40000000u);
+    check("a valid HelloAck: activated, with ITS features", wait_until([&] { return h.done.load(); }, 2000) && h.ok &&
+          h.features == (kGoodAck | 0x40000000u) && lease.state() == State::Active, h.error);
+  }
+  n::close_socket(&args.preparedUdpSocket);  // the session's handle (the session closes it)
+  check("SessionOver of another operation: nothing", !lease.SessionOver(op + 1000) && lease.handedOff());
+  check("SessionOver of its own: the lease has its socket again", lease.SessionOver(op) && !lease.handedOff());
+  args = n::ClientSessionConnectArgs{};
+  check("the arguments gone: the owner is held no more", keep.use_count() == 1);
+
+  std::printf("\n--- N1: A cancelled, then B; A's late answers; B's own Pong completes B ---\n");
+  const uint64_t until = mono_ms() + 7000;
+  while (mono_ms() < until && lease.state() != State::Parked) lease.Pump(20);
+  n::ClientSessionConnectArgs argsA;
+  uint64_t opA = 0;
+  check("A: activation arguments", lease.ActivationArgs(&argsA, nullptr, &opA));
+  uint32_t genA = 0;
+  {
+    const int before = host.activates.load();
+    Handshaking h(argsA.udpHandshake, argsA.preparedUdpSocket);
+    wait_until([&] { return host.activates > before; }, 2000);
+    genA = host.lastActivateGen;
+    h.stop = true;  // the user gave up (Disconnect during Connect)
+    check("A cancelled: the handshake returns false, the entry is parked", wait_until([&] { return h.done.load(); }, 2000) &&
+          !h.ok && lease.state() == State::Parked);
+  }
+  n::close_socket(&argsA.preparedUdpSocket);
+  check("...A's session over (Connect failed)", lease.SessionOver(opA));
+  n::ClientSessionConnectArgs argsB;
+  uint64_t opB = 0;
+  check("B: a new operation", lease.ActivationArgs(&argsB, nullptr, &opB) && opB != opA);
+  {
+    const int before = host.activates.load();
+    Handshaking h(argsB.udpHandshake, argsB.preparedUdpSocket);
+    wait_until([&] { return host.activates > before; }, 2000);
+    const uint32_t genB = host.lastActivateGen;
+    host.Pong(genA, true);         // A's late grant
+    host.HelloAck(kGoodAck | 0x10);  // the late HelloAck (untagged: the host's session-admission answer)
+    std::this_thread::sleep_for(std::chrono::milliseconds(400));
+    check("A's late Pong + a late HelloAck: B is NOT activated (only B's own Pong grants)", genB > genA && !h.done &&
+          lease.state() == State::Activating);
+    host.Pong(genB, true);
+    check("B's own Pong: B active, with the HelloAck's features (validated)", wait_until([&] { return h.done.load(); }, 2000) &&
+          h.ok && h.features == (kGoodAck | 0x10) && lease.state() == State::Active, h.error);
+  }
+  n::close_socket(&argsB.preparedUdpSocket);
+  lease.SessionOver(opB);
+
+  std::printf("\n--- events are bounded ---\n");
+  n::StandbyLease none(gens, 0, [](n::SocketHandle, n::StandbyCapability*) { return false; }, mono_ms);
+  std::string error;
+  none.Open(&error);
+  for (int i = 0; i < 200; ++i) none.Start();
+  check("200 notes: at most 32 kept", none.events().size() <= 32, std::to_string(none.events().size()));
+}
+
+// r3 N2-a (Codex codex_keepalive_r2_src_r3.md, reproduced there): a Release that finished while the handshake waited
+// wins -- the answer that completes the activation, arriving after it, is not adopted (no true, no features). Both
+// orders, several times (the wait the Release lands in is the scheduler's; every round must hold).
+void cancel_then_answer_test(FakeHost& host) {
+  std::printf("\n--- N2-a: Release finished, then the completing answer: not adopted ---\n");
+  MemStore store;
+  n::GenerationAllocator gens(store, rnd);
+  n::StandbyLease lease(gens, n::kUdpFeatureVideoFec, host.capability(), mono_ms);
+  check("parked at the fake host", park(lease));
+  for (int order = 0; order < 2; ++order) {
+    int adopted = 0, rounds = 0, stillActive = 0;
+    for (int round = 0; round < 6; ++round) {
+      const uint64_t until = mono_ms() + 7000;
+      while (mono_ms() < until && lease.state() != State::Parked) lease.Pump(20);
+      n::ClientSessionConnectArgs args;
+      uint64_t op = 0;
+      if (!lease.ActivationArgs(&args, nullptr, &op)) break;
+      ++rounds;
+      {
+        const int before = host.activates.load();
+        Handshaking h(args.udpHandshake, args.preparedUdpSocket);
+        wait_until([&] { return host.activates > before; }, 2000);
+        const uint32_t gen = host.lastActivateGen;
+        if (order == 0) host.HelloAck(kGoodAck); else host.Pong(gen, true);  // the first half of the grant
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));          // it is in, the handshake waits again
+        lease.Release();                                                     // finished before the second half
+        if (order == 0) host.Pong(gen, true); else host.HelloAck(kGoodAck);
+        wait_until([&] { return h.done.load(); }, 3000);
+        if (h.ok || h.features != 0xFFFFFFFFu) ++adopted;
+        if (lease.state() == State::Active) ++stillActive;
+      }
+      n::close_socket(&args.preparedUdpSocket);
+      lease.SessionOver(op);  // its Connect failed: the lease reads its socket again
+      // the answer that came after the Release is still queued: the pump reads it away (a stale HelloAck left there
+      // would complete the NEXT round's activation with that round's own Pong -- the untagged-Ack contract, not this case)
+      lease.Pump(150);
+    }
+    check(order == 0 ? "HelloAck, Release, then the current Pong: never adopted (6 rounds)"
+                     : "Pong, Release, then a valid HelloAck: never adopted (6 rounds)",
+          rounds == 6 && adopted == 0 && stillActive == 0,
+          "rounds=" + std::to_string(rounds) + " adopted=" + std::to_string(adopted) + " active=" + std::to_string(stillActive));
+  }
+  const uint64_t until = mono_ms() + 7000;
+  while (mono_ms() < until && lease.state() != State::Parked) lease.Pump(20);
+  check("...the lease is parked again and activates normally afterwards", lease.state() == State::Parked && [&] {
+    n::ClientSessionConnectArgs args;
+    uint64_t op = 0;
+    if (!lease.ActivationArgs(&args, nullptr, &op)) return false;
+    bool ok = false;
+    {
+      const int before = host.activates.load();
+      Handshaking h(args.udpHandshake, args.preparedUdpSocket);
+      wait_until([&] { return host.activates > before; }, 2000);
+      host.Pong(host.lastActivateGen, true);
+      host.HelloAck(kGoodAck);
+      ok = wait_until([&] { return h.done.load(); }, 3000) && h.ok && h.features == kGoodAck;
+    }
+    n::close_socket(&args.preparedUdpSocket);
+    lease.SessionOver(op);
+    return ok;
+  }());
+}
+
+// r3 N2-b: a handoff (or an observation) registered while a pump read is in flight is served by the end of THAT read
+// -- the pump starts no new one while it is pending. Deterministic: the pump's own read-end hook registers it.
+void handoff_priority_test(FakeHost& host) {
+  std::printf("\n--- N2-b: a pending handoff / observation stops the next pump read ---\n");
+  MemStore store;
+  n::GenerationAllocator gens(store, rnd);
+  n::StandbyLease lease(gens, n::kUdpFeatureVideoFec, host.capability(), mono_ms);
+  check("parked at the fake host", park(lease));
+  for (int kind = 0; kind < 2; ++kind) {  // 0: ActivationArgs, 1: ObserveFrom
+    std::atomic<bool> armed{true}, waiterRunning{false}, stopPump{false};
+    std::atomic<int> readsWhilePending{0}, readsSeen{0};
+    std::thread waiter;
+    std::atomic<bool> waiterResult{false};
+    n::ClientSessionConnectArgs args;
+    uint64_t op = 0;
+    lease.testHook = [&](int point, int intents) {
+      if (point == n::StandbyLease::kTestReadStart) {
+        ++readsSeen;
+        if (intents > 0) ++readsWhilePending;  // a read begun while a handoff / observation waits or runs
+        return;
+      }
+      if (point != n::StandbyLease::kTestReadDone || !armed.exchange(false)) return;
+      // the read is still "in flight" (reading_ set): the waiter registers and sleeps on it
+      waiterRunning = true;
+      waiter = std::thread([&] {
+        bool ok = false;
+        if (kind == 0) ok = lease.ActivationArgs(&args, nullptr, &op);
+        else ok = lease.ObserveFrom("127.0.0.1", host.port, "obs-test");  // the fake host never answers: false, ~2 s
+        waiterResult = ok;
+        waiterRunning = false;
+      });
+      while (lease.pendingIntentsForTest() == 0) std::this_thread::yield();
+    };
+    std::thread pump([&] {
+      while (!stopPump) lease.Pump(30);
+    });
+    const bool served = wait_until([&] { return !armed && !waiterRunning; }, 6000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    stopPump = true;
+    pump.join();
+    if (waiter.joinable()) waiter.join();
+    lease.testHook = nullptr;
+    if (kind == 0) {
+      check("handoff registered during a read: served at that read's end, no new read began meanwhile",
+            served && waiterResult && lease.handedOff() && readsWhilePending == 0,
+            "reads begun while pending=" + std::to_string(readsWhilePending.load()));
+      n::close_socket(&args.preparedUdpSocket);
+      check("...the arguments abandoned: the pump reads again", lease.Abandon(op, nullptr) && !lease.handedOff());
+    } else {
+      check("observation registered during a read: no pump read until it ended (it gets the socket alone)",
+            served && readsWhilePending == 0, "reads begun while pending=" + std::to_string(readsWhilePending.load()));
+    }
+  }
+  const int pings = host.pings;
+  const uint64_t until = mono_ms() + 7000;
+  while (mono_ms() < until && host.pings == pings) lease.Pump(50);
+  check("...and the lease goes on by Ping", host.pings > pings && lease.state() == State::Parked);
+}
+
+void runner_test(FakeHost& host) {
+  MemStore store;
+  n::GenerationAllocator gens(store, rnd);
+  n::StandbyRunner runner(gens, n::kUdpFeatureVideoFec, [&](const std::string&) { return host.capability(); }, mono_ms);
+  auto parked = [&](const std::string& k) {
+    return wait_until([&] { const auto s = runner.StatusOf(k); return s.state == State::Parked && !s.handedOff; }, 7000);
+  };
+
+  std::printf("\n--- N2: the arguments outlive ReleaseAll ---\n");
+  const int slots0 = n::StandbyRunner::liveSlots();
+  check("a lease parks", runner.Start("k1") && parked("k1"));
+  n::ClientSessionConnectArgs args;
+  uint64_t op = 0;
+  check("TakeActivation", runner.TakeActivation("k1", &args, &op));
+  check("...a second one while handed off is refused", [&] {
+    n::ClientSessionConnectArgs again;
+    return !runner.TakeActivation("k1", &again);
+  }());
+  const int releases0 = host.releases;
+  runner.ReleaseAll();
+  check("ReleaseAll: gone from the runner, but the slot lives on in the arguments", runner.size() == 0 &&
+        n::StandbyRunner::liveSlots() == slots0 + 1);
+  {
+    std::atomic<bool> stop{false};
+    std::string error;
+    uint32_t f = 0;
+    const int a0 = host.activates;
+    const bool ok = args.udpHandshake(args.preparedUdpSocket, stop, &error, &f);
+    check("...its handshake run now: false (cancelled), nothing sent, no use after free", !ok && host.activates == a0, error);
+  }
+  check("...nothing was released at the host (handed off: the grant, if any, ends with its session)", host.releases == releases0);
+  n::close_socket(&args.preparedUdpSocket);
+  args = n::ClientSessionConnectArgs{};
+  check("the arguments gone: the slot goes", n::StandbyRunner::liveSlots() == slots0);
+
+  std::printf("\n--- N2: a Release during the handshake wait; an early SessionOver ---\n");
+  check("a lease parks", runner.Start("k2") && parked("k2"));
+  uint64_t op2 = 0;
+  check("TakeActivation", runner.TakeActivation("k2", &args, &op2));
+  {
+    const int before = host.activates.load();
+    Handshaking h(args.udpHandshake, args.preparedUdpSocket);
+    check("the handshake waits for the host (it never answers)", wait_until([&] { return host.activates > before; }, 2000));
+    check("...early SessionOver: refused, still handed off (the pump stays off the socket)",
+          !runner.SessionOver("k2", op2) && runner.StatusOf("k2").handedOff);
+    check("...early Abandon: refused", !runner.Abandon("k2", op2, nullptr));
+    const uint64_t t0 = mono_ms();
+    runner.Release("k2");
+    const bool returned = wait_until([&] { return h.done.load(); }, 1500);
+    check("Release: the handshake in flight returns false at once", returned && !h.ok,
+          "after " + std::to_string(mono_ms() - t0) + " ms: " + (returned ? h.error : std::string("still running")));
+  }
+  n::close_socket(&args.preparedUdpSocket);
+  args = n::ClientSessionConnectArgs{};
+  check("...and its slot is gone with the arguments", n::StandbyRunner::liveSlots() == slots0);
+
+  std::printf("\n--- N2: a late SessionOver / Abandon after a new lease under the same key ---\n");
+  check("a lease parks", runner.Start("k3") && parked("k3"));
+  uint64_t oldOp = 0;
+  check("TakeActivation (the old one)", runner.TakeActivation("k3", &args, &oldOp));
+  runner.Release("k3");  // the screen was left mid-activation
+  n::close_socket(&args.preparedUdpSocket);
+  args = n::ClientSessionConnectArgs{};
+  check("a NEW lease under the same key parks", runner.Start("k3") && parked("k3"));
+  check("the late SessionOver of the old operation: nothing", !runner.SessionOver("k3", oldOp) && runner.StatusOf("k3").state ==
+        State::Parked);
+  uint64_t newOp = 0;
+  check("TakeActivation (the new one)", runner.TakeActivation("k3", &args, &newOp) && newOp != oldOp);
+  check("...a late SessionOver / Abandon of the old operation: refused, still handed off",
+        !runner.SessionOver("k3", oldOp) && !runner.Abandon("k3", oldOp, nullptr) && runner.StatusOf("k3").handedOff);
+  check("...its session handle still open", args.preparedUdpSocket != n::kInvalidSocket);
+
+  std::printf("\n--- N2: handed off, the pump leaves the socket alone; Abandon gives it back ---\n");
+  // a Ping the pump sent just before the hand-off may still be in flight: let it land before counting
+  std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  const int pings0 = host.pings;
+  std::this_thread::sleep_for(std::chrono::milliseconds(6000));
+  check("6 s handed off: no Ping from the pump (the session's reader alone may read)", host.pings == pings0,
+        std::to_string(host.pings - pings0) + " pings");
+  auto stale = args.udpHandshake;  // a copy of the arguments' handshake, kept past an Abandon
+  check("Abandon of its own operation: the session handle closed, the lease has its socket again",
+        runner.Abandon("k3", newOp, &args) && args.preparedUdpSocket == n::kInvalidSocket && !runner.StatusOf("k3").handedOff);
+  {
+    std::atomic<bool> stop{false};
+    std::string error;
+    uint32_t f = 0;
+    const int a0 = host.activates;
+    // a real socket (the abandoned handle is closed): anything the stale handshake sent would reach the host
+    n::SocketHandle s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    const uint64_t t0 = mono_ms();
+    const bool ran = stale(s, stop, &error, &f);
+    const uint64_t took = mono_ms() - t0;
+    n::close_socket(&s);
+    check("a stale copy of the abandoned handshake: false at once, nothing sent, the lease still parked (not activating)",
+          !ran && took < 500 && host.activates == a0 && runner.StatusOf("k3").state == State::Parked,
+          error + " after " + std::to_string(took) + " ms");
+  }
+  stale = nullptr;
+  check("...the lease pings again on its own", wait_until([&] { return host.pings > pings0; }, 7000) && parked("k3"));
+  runner.ReleaseAll();
+  check("ReleaseAll: every slot gone", runner.size() == 0 && n::StandbyRunner::liveSlots() == slots0);
+
+  // r3 (Codex codex_ka_e_src_r2.md R2): two app screens share this process's runner; the old one's late cleanup takes
+  // its own leases only -- the new screen's lease (even of the same PC) stays, and the old ones are reclaimed, not leaked
+  std::printf("\n--- r3 R2: one owner's cleanup takes its own leases only ---\n");
+  check("old owner o1: two leases park", runner.Start("o1|pcA") && runner.Start("o1|pcB") && parked("o1|pcA") &&
+        parked("o1|pcB"));
+  check("new owner o2: a lease of the same PC parks beside them", runner.Start("o2|pcA") && parked("o2|pcA"));
+  check("prefix \"o1\" alone would also match \"o10|..\": a lease of owner o10 parks too",
+        runner.Start("o10|pcC") && parked("o10|pcC"));
+  const int rel0 = host.releases;
+  const size_t gone = runner.ReleaseWhere("o1|");
+  check("ReleaseWhere(\"o1|\"): its two leases go (released at the host), o2's and o10's stay parked",
+        gone == 2 && runner.size() == 2 && !runner.StatusOf("o1|pcA").exists && !runner.StatusOf("o1|pcB").exists &&
+            parked("o2|pcA") && parked("o10|pcC") &&
+            wait_until([&] { return host.releases >= rel0 + 2; }, 3000),
+        "gone=" + std::to_string(gone) + " size=" + std::to_string(runner.size()) +
+            " releases=" + std::to_string(host.releases - rel0));
+  check("...a late Provide / status of the old owner's key touches nothing",
+        !runner.Provide("o1|pcA", n::StandbyCapability{}) && !runner.StatusOf("o1|pcA").exists && parked("o2|pcA"));
+  check("ReleaseWhere(\"\") releases nothing", runner.ReleaseWhere("") == 0 && runner.size() == 2);
+  runner.ReleaseAll();
+  check("...ReleaseAll (the runner's end): every slot gone", runner.size() == 0 && n::StandbyRunner::liveSlots() == slots0);
+}
+}  // namespace
+
+int main() {
+  FakeHost host;
+  if (!host.Start()) {
+    std::printf("FAIL  the fake host could not bind 127.0.0.1\n");
+    return 1;
+  }
+  hello_ack_test(host);
+  cancel_then_answer_test(host);
+  handoff_priority_test(host);
+  shared_socket_test(host);
+  sync_capability_test(host);
+  tail_test(host);
+  runner_test(host);
+  host.Stop();
+  std::printf("\n%d checks, %d failures\n", gChecks, gFailures);
+  std::printf(gFailures == 0 ? "RESULT PASS\n" : "RESULT FAIL\n");
+  return gFailures == 0 ? 0 : 1;
+}

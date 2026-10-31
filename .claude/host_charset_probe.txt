@@ -1,0 +1,7 @@
+'새'                          utf16 c8c0                         at -1
+'업데이트'                       utf16 c5c570b374c7b8d2             at -1
+'지금'                         utf16 c0c908ae                     at -1
+'GNLink'                     utf16 47004e004c0069006e006b00     at 483024
+'새'                          MISREAD fdff49ae                   at -1  ('�깉')
+'업데이트'                       MISREAD fdffbdbffdff32b7fdff20c5fdffc3b4 at -1  ('�뾽�뜲�씠�듃')
+'지금'                         MISREAD def9fdff726efdff           at -1  ('吏�湲�')

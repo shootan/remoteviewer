@@ -1,0 +1,42 @@
+﻿ECDH agreement + AES-GCM seal/open round trip
+  ok   both keypairs generate
+  ok   export both public points
+  ok   salt generated
+  ok   client derives key from host public
+  ok   host derives key from client public
+  ok   both sides derived the SAME key
+  ok   pack password
+  ok   nonce generated
+  ok   client seals
+  ok   host opens with correct key/aad/tag
+  ok   opened plaintext matches
+  ok   unpacked password matches (incl. Hangul unit)
+tampered ciphertext / wrong AAD / wrong key are rejected
+  ok   flipped ciphertext byte -> reject
+  ok   flipped tag byte -> reject
+  ok   AAD from a different challenge -> reject
+  ok   different salt -> different key
+  ok   wrong key -> reject
+a malformed peer public key is rejected
+  ok   not-on-curve public point -> derive fails
+password packing validates length
+  ok   over-length password -> pack fails
+  ok   max-length password -> pack ok
+  ok   unpack max-length ok
+  ok   bogus length field -> unpack fails
+HKDF-SHA256 matches RFC 5869 test vector 1
+  ok   HKDF derives
+  ok   HKDF output equals RFC 5869 OKM[0:32]
+challenge/replay state machine
+  ok   unknown before Issue
+  ok   valid within window
+  ok   wrong session cookie -> unknown
+  ok   wrong lock generation -> unknown
+  ok   past expiry -> expired
+  ok   different id -> unknown
+  ok   after consume -> already consumed
+  ok   new challenge valid
+  ok   the just-consumed id is still remembered as consumed (same context)
+  ok   consumed id under a different cookie is NOT treated as consumed
+  ok   cleared outstanding -> unknown
+sealed_unlock_test: PASS

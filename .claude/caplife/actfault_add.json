@@ -1,0 +1,1 @@
+{"repo_path": "C:/work/gnlink-wt/feat-apk-0233", "files": ["apps/native_poc/CMakeLists.txt", "apps/native_poc/src/host_pinned_select_seam.hpp", "apps/native_poc/src/host_control_session.cpp", "apps/native_poc/src/host_standby_wire.hpp", "apps/native_poc/src/host_standby_activation_fault_test.cpp", "automation/gnlink_check_fixed_server.py"]}

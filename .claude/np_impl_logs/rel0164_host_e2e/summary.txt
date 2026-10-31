@@ -1,0 +1,4 @@
+﻿slot taken 20:38:38
+host_standby_admission_e2e     rc=97 secs=900 PASS=5 FAIL=20 | job_run: child_exit=97 residual=0 forced=1 ended_confirmed=1 | last:   -- bounds --
+STOP: host_standby_admission_e2e rc=97 -- remaining runs skipped
+slot released 20:53:39

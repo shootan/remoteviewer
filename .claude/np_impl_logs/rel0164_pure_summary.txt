@@ -1,0 +1,17 @@
+﻿directory_retry_test               rc=0       PASS=177  FAIL=0   last: all retry checks passed  (177 checks, 0 failed)
+directory_session_client_test      rc=0       PASS=147  FAIL=0   last: directory_session_client_test: PASS
+e2e_guard_runtime_test             rc=0       PASS=36   FAIL=0   last: RESULT PASS
+e2e_injection_guard_test           rc=0       PASS=20   FAIL=0   last: RESULT PASS
+host_agent_punch_test              rc=0       PASS=9    FAIL=0   last: RESULT PASS
+host_power_policy_record_test      rc=0       PASS=27   FAIL=0   last: RESULT PASS
+host_standby_table_test            rc=0       PASS=56   FAIL=0   last: RESULT: ALL PASS  (56 checks, 0 failed)
+ka_pc_e2e_child_test               rc=0       PASS=34   FAIL=9   last: ka_pc_e2e_child_test: ALL PASS
+ka_pc_fence_test                   rc=0       PASS=29   FAIL=0   last: ka_pc_fence_test: ALL PASS
+ka_pc_ipc_close_race_test          rc=0       PASS=9    FAIL=0   last: ka_pc_ipc_close_race_test: ALL PASS
+ka_pc_shell_logic_test             rc=0       PASS=5    FAIL=0   last: ka_pc_shell_logic_test: ALL PASS
+ka_pc_units_test                   rc=0       PASS=23   FAIL=0   last: ka_pc_units_test: ALL PASS
+os_input_record_match_test         rc=0       PASS=9    FAIL=0   last: RESULT PASS
+punch_any_test                     rc=0       PASS=0    FAIL=0   last: punch_any_test: PASS
+standby_entry_client_test          rc=0       PASS=72   FAIL=0   last: RESULT: ALL PASS  (72 checks, 0 failed)
+standby_lease_test                 rc=0       PASS=75   FAIL=0   last: RESULT PASS
+standby_legacy_host_test           rc=0       PASS=13   FAIL=0   last: RESULT PASS

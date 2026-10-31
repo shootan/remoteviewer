@@ -1,0 +1,15 @@
+﻿PASS readback ring initialised (WARP)
+PASS the live attachment cookie starts at 1 -- 1
+[native-video-host] capture-switch first-callback streamGen=1 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> callbackUs=336849551103 captureUs=336849551103
+PASS [A] a frame stamped with the live cookie reaches the frame state -- version=1 pixel=1
+PASS [A] no stale drop so far
+[native-video-host] readback publish dropped reason=stale-attachment frameCookie=1 liveCookie=2 drops=1
+PASS [B] the old attachment's frame published after the detach was DROPPED (old publish 0) -- version=1 pixel=1
+PASS [B] the drop was counted as stale-attachment -- drops=1
+PASS [B] the ring slot was freed (nothing left pending)
+[native-video-host][capture-timing] hostCaptureUs=336849983355 hostCallbackUs=336849983355 hostPublishUs=336849998089 sourceIntervalUs=432252 callbackIntervalUs=432252 attachment=2
+PASS [B-neg] negative control: the same old frame stamped with the LIVE cookie (pre-r13 behaviour) walks past the guard -- version=2
+PASS [C] the new attachment's frame is published under its cookie -- version=3
+PASS [C] no further stale drops
+PASS [D] cookie 0 (no identity) is not guarded
+capture_attachment_test: 11 PASS, 0 FAIL (NV12 lease path not exercised: WARP has no video processor)

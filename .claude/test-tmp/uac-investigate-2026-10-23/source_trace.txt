@@ -1,0 +1,98 @@
+source_ref=a1c551c8020932df22c6f610fcb80b4c8b83f4b1
+
+apps/native_poc/src/prelogin_supervisor_state.hpp
+58: struct SupervisorInputs {
+59:   bool featureEnabled = false;        // machine record: prelogin remote access explicitly enabled
+60:   bool machineCredentialValid = false;// a usable machine credential is provisioned
+61:   bool consoleSessionValid = false;   // WTSGetActiveConsoleSessionId() != 0xFFFFFFFF
+62:   UserTokenObservation userToken = UserTokenObservation::QueryTransientError;
+63:   UserPrivilege privilege = UserPrivilege::PrivilegeQueryError;  // meaningful only when userToken == HasUser
+64:   bool userHostReady = false;         // the user Host reported ready AND owns the single lease
+65:   uint32_t transientRetries = 0;      // consecutive ambiguous observations so far
+66:   uint32_t maxTransientRetries = 10;  // bound on Transition before Fault
+67: };
+97:       // Ambiguous: never treat as prelogin, never tear down a healthy child. Bounded.
+98:       if (in.transientRetries >= in.maxTransientRetries) return {SupervisorState::Fault, SupervisorAction::EnterFault};
+99:       return {SupervisorState::Transition, SupervisorAction::RetryTransient};
+100: 
+101:     case UserTokenObservation::NoInteractiveUser:
+102:       return {SupervisorState::Prelogin, SupervisorAction::RunPreloginWorker};
+103: 
+104:     case UserTokenObservation::HasUser:
+105:       switch (in.privilege) {
+106:         case UserPrivilege::PrivilegeQueryError:
+107:           if (in.transientRetries >= in.maxTransientRetries) return {SupervisorState::Fault, SupervisorAction::EnterFault};
+108:           return {SupervisorState::Transition, SupervisorAction::RetryTransient};
+109:         case UserPrivilege::Unsupported:
+110:           return {SupervisorState::UnsupportedUser, SupervisorAction::EnterUnsupportedUser};
+111:         case UserPrivilege::AdminFull:
+112:           return in.userHostReady ? SupervisorDecision{SupervisorState::UserActive, SupervisorAction::None}
+113:                                   : SupervisorDecision{SupervisorState::UserStarting, SupervisorAction::StartUserHostFull};
+114:         case UserPrivilege::AdminLimitedLinked:
+115:           return in.userHostReady ? SupervisorDecision{SupervisorState::UserActive, SupervisorAction::None}
+116:                                   : SupervisorDecision{SupervisorState::UserStarting, SupervisorAction::StartUserHostLinkedFull};
+117:         case UserPrivilege::AdminDefaultEffective:
+118:           return in.userHostReady ? SupervisorDecision{SupervisorState::UserActive, SupervisorAction::None}
+119:                                   : SupervisorDecision{SupervisorState::UserStarting, SupervisorAction::StartUserHostDefault};
+120:       }
+
+apps/native_poc/src/secure_input_service_main.cpp
+1538:         if (gPreloginWorker && GetTickCount64() - gLogonSeenMs >= kWorkerAfterLogonMs) {
+1539:           diag("prelogin: logged on %llus without a handoff: the pre-login worker is stopped",
+1540:                static_cast<unsigned long long>(kWorkerAfterLogonMs / 1000));
+1541:           stop_child(&gPreloginWorker);
+1542:         }
+1543:         break;
+1544:       case SupervisorAction::None:
+1545:         if (out.handoff == HandoffAction::CompleteHandoff) stop_child(&gPreloginWorker);
+1546:         break;
+
+apps/native_poc/src/host_stage_backend.cpp
+245:   // prompt" report.
+246:   //
+247:   // Both causes are temporary by nature. The secure desktop goes away when the prompt is
+248:   // answered, and the desktop returns to the physical adapter when RDP disconnects, so simply
+249:   // trying again is what was missing.
+250:   // dxgi-wedge-fix r1: "back to what was requested" means back to EffectiveRequested() -- while DXGI
+251:   // is quarantined a WGC that was asked for as DXGI is not a demotion, and must not be climbed out of.
+252:   if (backend.active != backend.EffectiveRequested() &&
+253:       !capture.windowModeActive.load(std::memory_order_acquire) &&
+254:       clientSession.streamControlActive.load(std::memory_order_acquire)) {
+255:     const uint64_t nowUs = qpc_now_us();
+256:     backend.NoteDemotionEpisode(nowUs);
+257:     // Probe the interactive-desktop state at a bounded cadence (OpenInputDesktop is a syscall).
+258:     // A secure desktop resets the stability clock; the default desktop starts or continues it.
+259:     // The uncached query is deliberate: the shared cached one is refreshed by input/pong callers
+
+apps/native_poc/src/host_capture_session.cpp
+180:   // create_d3d11_device_for_primary_monitor falls back to another adapter (or default hardware) when
+181:   // the primary is unresolved, so the target is "primary-or-fallback", not guaranteed primary.
+182:   std::cout << "[native-video-host] device-recreate(" << reason
+183:             << ") committed target=primary-or-fallback nativeKnown=" << (nativeKnown ? 1 : 0)
+184:             << " winrtKnown=" << (winrtKnown ? 1 : 0)
+185:             << " nativeLuid=" << nativeLuid.HighPart << ":" << static_cast<long>(nativeLuid.LowPart)
+186:             << " winrtLuid=" << winrtLuid.HighPart << ":" << static_cast<long>(winrtLuid.LowPart)
+187:             << " luidMatch=" << (luidMatch ? 1 : 0) << " newAdapterState=" << newStateStr << "\n";
+188:   return true;
+189: }
+190: }  // namespace
+191: 
+192: bool CaptureState::CreateStaging(CaptureResources& res, EncoderState& encoder, bool useH264, uint32_t srcW, uint32_t srcH) {
+193:   CaptureState& capture = *this;
+194:   auto& d3d = res.d3d;
+195:   auto& ctx = res.ctx;
+196:   auto& d3dContextMu = res.d3dContextMu;
+197:   auto& fl = res.fl;
+198:   auto& gpuScaler = res.gpuScaler;
+199:   auto& captureReadback = res.captureReadback;
+200:   auto& capturePublishFn = res.capturePublishFn;
+201:   captureReadback.Shutdown();
+202:   if (!captureReadback.Initialize(d3d.Get(), ctx.Get(), &d3dContextMu, srcW, srcH,
+203:                                   capture.stagingSlotCount, capturePublishFn)) {
+204:     std::cerr << "[native-video-host] recreating D3D device after readback init failure size="
+205:               << srcW << "x" << srcH << "\n";
+206:     // Codex review #357 (field blocker): recreate via the single device transaction so the WinRT
+207:     // wrapper (res.d3dDevice) is rebuilt in lockstep with the native device. The old native-only
+208:     // recreate here left res.d3dDevice on the previous adapter, reopening the same cross-device
+209:     // split-brain the early transaction closes -- but on the readback-init failure path. d3d/ctx are
+210:     // references into res, so they reflect the committed new device after the helper returns.

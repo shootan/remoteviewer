@@ -1,0 +1,229 @@
+﻿diff --git a/automation/old_apk_lane/oa_avd.py b/automation/old_apk_lane/oa_avd.py
+index 56bdff8..0a67baf 100644
+--- a/automation/old_apk_lane/oa_avd.py
++++ b/automation/old_apk_lane/oa_avd.py
+@@ -150,10 +150,34 @@ def ime_state():
+     return 'unknown', []
+ 
+ 
++PICK_MARK = []  # [app log cursor, host log length, pinned id] at the last successful pick
++
++
++def same_viewer():
++    """r8 (Codex codex_old_apk_lane_ime_status_r8.md): still the viewer and the connection of the last pick -- since the
++    pick the app logged no scene other than VIEWER, no `[status]` that is not connected, no new select_request; the
++    host logged no `udp control session ended` / new `client connected`. -> (ok, detail)."""
++    if not PICK_MARK:
++        return False, 'no pick to compare with'
++    app = since(PICK_MARK[0])
++    hl = host_log()[PICK_MARK[1]:]
++    scenes = re.findall(r'\[scene\] (\S+)', app)
++    status = [st for st in re.findall(r'\[status\] ([^\n]*)', app) if not st.startswith('connected')]
++    picks = re.findall(r'\[select_request\][^\n]*', app)
++    ended = re.findall(r'udp control session ended[^\n]*', hl)
++    connected = re.findall(r'client connected[^\n]*', hl)
++    ok = all(sc == 'VIEWER' for sc in scenes) and not status and not picks and not ended and not connected
++    return ok, (f'since the pick: scenes={scenes[:3]} status={[x[:30] for x in status[:2]]} picks={len(picks)} '
++                f'host ended={[x[:60] for x in ended[:1]]} host new clients={len(connected)}')
++
++
+ def viewer_tap_point():
+     """r7d: where a tap on the picture may land -- the centre of the video view (videoTextureView, b554e76
+     activity_main.xml) as the UI dump shows it, and only with no soft keyboard up (the r7c run: the sign-in keyboard
+     covered the lower 2/3 and the fixed 1200,540 went into it). -> ((x, y), detail) or (None, why): no tap then."""
++    same, swhy = same_viewer()
++    if not same:
++        return None, f'not the same viewer / connection: {swhy}'
+     st, why = ime_state()
+     if st != 'hidden':
+         return None, f'soft keyboard {st} {why}'
+@@ -372,6 +396,7 @@ def pick_pinned(tag):
+     time.sleep(0.5)
+     digest = shot(tag.split()[0] + '_window_first_frame')
+     vd = re.findall(r'\[video_debug\][^\n]* out=(\d+)', since(n0))
++    PICK_MARK[:] = [cursor(), len(host_log()), pinned]  # r8: what "the same viewer, the same connection" is measured from
+     verdict(f'{tag}: the pinned window picked (id {pinned}, Windows tab) -> first frame', True,
+             f'{tab_note} {detail[:300]} (wall {time.time() - t0:.1f} s) screenshot={digest[:16]} video_debug out={vd[-1] if vd else "?"}')
+     return digest
+@@ -628,7 +653,9 @@ def main():
+             return 1
+ 
+         # 4: one tap on the window's picture -> its own down/up on the host (injection none: logged, not injected)
+-        input_check()
++        # r8: a FAIL here ends the arm -- no menu wake tap, no 5 / 6 / P-5d (they are NOT RUN)
++        if not input_check():
++            return 1
+ 
+         # 5 + 6
+         if ARM == 'S':
+diff --git a/automation/old_apk_lane/oa_pick_test.py b/automation/old_apk_lane/oa_pick_test.py
+index 90491a0..fdce1cc 100644
+--- a/automation/old_apk_lane/oa_pick_test.py
++++ b/automation/old_apk_lane/oa_pick_test.py
+@@ -14,6 +14,7 @@ Each case runs in its own new folder under <worktree>/.claude/oa_runs (nothing o
+ import importlib.util
+ import json
+ import os
++import subprocess
+ import sys
+ import time
+ 
+@@ -35,7 +36,8 @@ def check(what, ok, detail=''):
+     print(f'{"PASS" if ok else "FAIL"}  {what}' + (f'  {detail}' if detail else ''), flush=True)
+ 
+ 
+-def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novideo=False, back='ime', scene=None):
++def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novideo=False, back='ime', scene=None,
++         avd=None):
+     """A fresh run folder, the fake's state, and oa_avd loaded anew against it. -> (module, paths)"""
+     run_id = f'{tag}-{time.strftime("%Y%m%d%H%M%S")}-{os.getpid()}'
+     root = os.path.join(RUNS, run_id)
+@@ -47,6 +49,12 @@ def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novide
+         f.write(CAPTURE + f'10-30 00:00:00.000 [native-video-host][control] window-list seq=1 count=1 selectedId={listed_id}\n')
+     with open(os.path.join(root, 'a', 'directoryhost_ready.txt'), 'w', encoding='ascii') as f:
+         f.write(f'ready run={run_id}-a harness_pid=1 host_pid=2 host_log={host_log}\n')
++    # r7e: what oa_avd.main reads before it starts (a fixture, an APK the fake hands back as the installed one)
++    with open(os.path.join(root, 'fixture_ready.txt'), 'w', encoding='ascii') as f:
++        f.write(f'ready run={run_id} hosts=a standby=none controlPort=0 relay=10.0.2.2\n')
++    apk = os.path.join(root, 'none.apk')
++    with open(apk, 'wb') as f:
++        f.write(b'PK fake apk for ' + run_id.encode())
+     applog = os.path.join(root, 'app.log')
+     with open(applog, 'w', encoding='utf-8') as f:
+         f.write('2026-10-30 00:00:00.000 [targets_ready] origin=connect ms=1 items=1\n')
+@@ -56,12 +64,13 @@ def case(tag, variant, listed_id=PINNED, input_mode='pair', ime='hidden', novide
+     open(calls, 'w').close()
+     os.environ.update({'OA_FAKE_ADB_LOG': calls, 'OA_FAKE_UI_STATE': st, 'OA_FAKE_APPLOG': applog,
+                        'OA_FAKE_HOSTLOG': host_log, 'OA_FAKE_UI_VARIANT': variant, 'OA_FAKE_INPUT': input_mode,
+-                       'OA_FAKE_IME': ime, 'OA_FAKE_NOVIDEO': '1' if novideo else '0', 'OA_FAKE_BACK': back})
++                       'OA_FAKE_IME': ime, 'OA_FAKE_NOVIDEO': '1' if novideo else '0', 'OA_FAKE_BACK': back,
++                       'OA_FAKE_ADB_APK': apk})
+     sys.argv = ['oa_avd.py', root, 'S', os.path.join(root, 'none.apk'), os.path.join(root, 'avd')]
+-    spec = importlib.util.spec_from_file_location(f'oa_avd_{tag.replace("-", "_")}', os.path.join(E, 'oa_avd.py'))
++    spec = importlib.util.spec_from_file_location(f'oa_avd_{tag.replace("-", "_")}', avd or os.path.join(E, 'oa_avd.py'))
+     m = importlib.util.module_from_spec(spec)
+     spec.loader.exec_module(m)
+-    return m, {'calls': calls, 'host': host_log, 'app': applog, 'out': os.path.join(root, 'avd')}
++    return m, {'calls': calls, 'host': host_log, 'app': applog, 'out': os.path.join(root, 'avd'), 'root': root}
+ 
+ 
+ def taps(paths):
+@@ -174,6 +183,53 @@ def main():
+     check('NEGATIVE menu r7d: a keyboard up -> no wake tap on the picture (the menu is not reached; nothing typed)',
+           raised and len(taps(p)) == n_taps and not keys(p), f'taps={len(taps(p)) - n_taps} keys={keys(p)}')
+ 
++    # r8: the tap only in the SAME viewer and connection as the pick
++    for what, app_line, host_line in (('the app left the viewer (scene HOSTS, status error)',
++                                       '2026-10-30 00:00:01.000 [scene] HOSTS\n2026-10-30 00:00:01.001 [status] error\n', ''),
++                                      ('the host ended the session',
++                                       '', '10-30 00:00:01.000 [native-video-host][control] udp control session ended epoch=1 resumed=0 reason=none\n')):
++        m, p = case('input-not-same', 'ok')
++        m.pick_pinned('3 the pinned window picked')
++        if app_line:
++            open(p['app'], 'a', encoding='utf-8').write(app_line)
++        if host_line:
++            open(p['host'], 'a', encoding='utf-8').write(host_line)
++        n_taps = len(taps(p))
++        ok4 = m.input_check()
++        r = last(m)
++        check(f'NEGATIVE 4 r8: {what} after the pick -> FAIL with NO tap', not ok4 and r[1] is False and
++              'not the same viewer' in r[2] and len(taps(p)) == n_taps, r[2][:200])
++    src = open(os.path.join(E, 'oa_avd.py'), encoding='utf-8').read()
++    check('r8 (source): a 4 FAIL ends the arm before the menu / 5 / 6 / P-5d',
++          'if not input_check():\n            return 1' in src.replace('\r\n', '\n'))
++    # r7e: arm S driven from the install to 4 (the fake's login -> PC list -> pick); 4 FAILs (no input events). The
++    # arm must end there: no tap of any kind after 4's, and 5 / 6 / 7 NOT RUN in result.json. The contrast: the same
++    # flow against c468c27's oa_avd.py (it threw 4's answer away and went on into the menu).
++    def run_flow(tag, avd=None):
++        m, p = case(tag, 'ok', input_mode='none', scene='login', avd=avd)
++        try:
++            rc = m.main()
++        except RuntimeError as e:  # c468c27 went on into the menu and raised there (its result.json is still written)
++            rc = f'raised {e}'
++        res = json.load(open(os.path.join(p['out'], 'result.json'), encoding='utf-8'))
++        all_taps = taps(p)
++        # 4's tap: the FIRST at the video view's centre (a later wake tap of the menu lands there too)
++        i4 = min([i for i, t in enumerate(all_taps) if t == ['540', '1268']], default=-1)
++        after = all_taps[i4 + 1:] if i4 >= 0 else all_taps
++        four = [r for r in res['results'] if r[0].startswith('4 ')]
++        nr = sorted({n for n, _ in res['not_run']})
++        return rc, four, nr, i4, after
++    rc, four, nr, i4, after = run_flow('flow-4fail')
++    check('r7e: arm S, 4 FAILs -> the arm ends there: no tap after 4 (no menu wake / menu), 5 6 7 NOT RUN',
++          rc != 0 and four and four[-1][1] is False and i4 >= 0 and not after and all(c in nr for c in '567'),
++          f'rc={rc} 4={[f[1] for f in four]} taps after 4={after} not run={nr}')
++    old = os.path.join(RUNS, f'oa_avd_c468c27-{os.getpid()}.py')
++    with open(old, 'wb') as f:
++        f.write(subprocess.run(['git', '-C', WT, 'show', 'c468c27:automation/old_apk_lane/oa_avd.py'], capture_output=True,
++                               check=True).stdout)
++    rc, four, nr, i4, after = run_flow('flow-4fail-c468c27', avd=old)
++    check('r7e contrast: c468c27 (4 answer thrown away) on the same flow went on tapping after 4 -- the check sees it',
++          i4 >= 0 and len(after) > 0, f'taps after 4={len(after)} first={after[:2]} not run={nr}')
+     m, p = case('hosts-ime-hide', 'ok', ime='shown', scene='hosts')
+     ok = m.hide_ime_on_hosts('1b the sign-in keyboard')
+     check('control 1b r7d: on the PC list a keyboard up is put away with BACK (it takes it); the list stays, no dialog',
+diff --git a/automation/old_apk_lane/stubs/fake_ui_adb.py b/automation/old_apk_lane/stubs/fake_ui_adb.py
+index 1c6b7d5..9489f8f 100644
+--- a/automation/old_apk_lane/stubs/fake_ui_adb.py
++++ b/automation/old_apk_lane/stubs/fake_ui_adb.py
+@@ -21,6 +21,9 @@ the PinnedSelectTest host log when a card / the picture is tapped. Every call is
+        OA_FAKE_BACK       what BACK does on the PC list with the keyboard up: ime (the keyboard takes it and hides) |
+                           leak (the app takes it: the exit question, android:id/button1; the keyboard stays)
+   The ui state's "scene": "hosts" (the PC list: hostCardName oa-pc-a), "targets" (default) or "viewer" (set by a pick).
++  r7e: "login" too (loginIdInput / loginPasswordInput / loginButton; Sign-in -> the PC list, the card -> the targets), and
++  what oa_avd.main asks before the app starts (install, pm clear, pm path, dumpsys package, pull of base.apk =
++  OA_FAKE_ADB_APK) -- so the stub can drive arm S from the install to 4 and see what it does after.
+ """
+ import json
+ import os
+@@ -62,7 +65,13 @@ def card_text():
+     return 'Notepad' if variant == 'nopinned' else 'remote60 mobile abr…'
+ 
+ 
++LOGIN = {'loginIdInput': (40, 480, 1040, 560, 'ID'), 'loginPasswordInput': (40, 630, 1040, 720, 'Password'),
++         'loginButton': (40, 800, 1040, 900, 'Sign In')}
++
++
+ def nodes():
++    if state.get('scene') == 'login':
++        return [(k, v[:4], v[4]) for k, v in LOGIN.items()]
+     if state.get('scene') == 'hosts':
+         out = [('hostCardName', HOSTCARD, 'oa-pc-a')]
+         if state.get('dialog'):
+@@ -109,7 +118,15 @@ elif cmd.startswith('shell input tap'):
+     x, y = int(args[3]), int(args[4])
+     hit = [n for n in nodes() if n[1][0] <= x <= n[1][2] and n[1][1] <= y <= n[1][3]]
+     rid = hit[0][0] if hit else ''
+-    if rid == 'listWindowsButton':
++    if rid == 'loginButton':
++        state['scene'] = 'hosts'
++        app('[login_attempt] server=http://10.0.2.2:18410 id=oatest')
++    elif rid == 'hostCardName':
++        state['scene'] = 'targets'
++        app('[directory_chosen] 10.0.2.2:18443|relay')
++        app('[targets_ready] origin=connect ms=1 items=1 gen=1')
++        host('client connected transport=udp', tag=' ')
++    elif rid == 'listWindowsButton':
+         state['tab'] = 'windows'
+         app('[tab_switch] tab=windows')
+         host(f'window-list seq=2 count=1 selectedId={PINNED}')
+@@ -157,7 +174,18 @@ elif cmd == 'shell input keyevent 4':
+         state['dialog'] = True
+     json.dump(state, open(state_path, 'w', encoding='utf-8'))
+ elif args[:1] == ['pull']:
+-    shutil.copyfile(os.environ['OA_FAKE_APPLOG'], args[2])
++    if args[1].endswith('base.apk'):
++        shutil.copyfile(os.environ['OA_FAKE_ADB_APK'], args[2])
++    else:
++        shutil.copyfile(os.environ['OA_FAKE_APPLOG'], args[2])
++elif args[:1] == ['install']:
++    print('Performing Streamed Install\nSuccess')
++elif cmd.startswith('shell pm clear'):
++    print('Success')
++elif cmd.startswith('shell pm path'):
++    print('package:/data/app/~~fake/com.remote60.androiddirect-1/base.apk')
++elif cmd.startswith('shell dumpsys package'):
++    print('    versionCode=31 minSdk=28 targetSdk=34\n    versionName=0.2.32')
+ elif cmd.startswith('exec-out screencap'):
+     sys.stdout.buffer.write(b'\x89PNG fake')
+ sys.exit(0)

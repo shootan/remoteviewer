@@ -1,0 +1,21 @@
+PASS  login
+PASS  N1: a standby connect is reserved  "reserved"
+PASS  N1: the heartbeat hands the HOST a hostProof for the lease (32 hex), not the client token
+PASS  N1: a stranger first on the host IP (no proof, a wrong proof, a fake StandbyAck) pins nothing: the client gets nothing back, and its StandbyHello does not reach the stranger  client=0 strangerHello=0
+PASS  N1: the host's punch with the proof pins the lease: the StandbyHello reaches the host, its Ack the client
+PASS  N1: after the pin, the stranger's datagram reaches nobody
+PASS  N1: ANOTHER lease's proof pins nothing (lease 2 stays unpinned; its client gets nothing)
+PASS  N1: ...its own proof pins it
+PASS  N1: a moved host gets a FRESH proof for each lease with that heartbeat  [63172,63175]
+PASS  N1: after the move the OLD proof, replayed, pins nothing (the client's ping is not answered via the old tuple)
+PASS  N1: the fresh proof from the host's new socket pins it again: the ping is answered
+PASS  N3: eight standby leases fill a host, all bound  ["reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved"]
+FAIL  N3: a NEW legacy Hello beside eight standby leases is refused: it never reaches the host, no HelloAck
+PASS  N3: ...and the refusal dropped nothing: all eight standby leases still carry their pings  8
+PASS  N3: the legacy lease is up
+PASS  N3: legacy 1 + standby 7 = eight; an eighth standby is host-full  ["reserved","reserved","reserved","reserved","reserved","reserved","reserved"] host-full
+PASS  N3: REPLACING the legacy lease is allowed (still eight)
+PASS  N3: ...and the host stays at eight (a standby connect is still host-full)  host-full
+
+RESULT: FAILED  (1 failed)
+runner: test exit 1; server log D:\remote\remote\.claude\caplife\ka_r4_mut$m.log

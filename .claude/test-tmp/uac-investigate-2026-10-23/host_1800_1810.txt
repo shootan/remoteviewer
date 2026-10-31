@@ -1,0 +1,41 @@
+10-23 18:00:26.167  encodedFrames=21 sentFrames=21 callbackFrames=30 captureRestarts=42 lastPublishAgeUs=25774 desktopSecureProbeFalse=6 secureInputAttempts=26 secureInputDelivered=26 inputEvents=27821
+10-23 18:00:56.161  encodedFrames=22 sentFrames=22 callbackFrames=30 captureRestarts=42 lastPublishAgeUs=20415 desktopSecureProbeFalse=6 secureInputAttempts=26 secureInputDelivered=26 inputEvents=27821
+10-23 18:01:26.169  encodedFrames=21 sentFrames=21 callbackFrames=30 captureRestarts=42 lastPublishAgeUs=28966 desktopSecureProbeFalse=6 secureInputAttempts=26 secureInputDelivered=26 inputEvents=27821
+10-23 18:01:56.170  encodedFrames=20 sentFrames=20 callbackFrames=30 captureRestarts=42 lastPublishAgeUs=29845 desktopSecureProbeFalse=6 secureInputAttempts=26 secureInputDelivered=26 inputEvents=27821
+10-23 18:02:26.168  encodedFrames=20 sentFrames=20 callbackFrames=30 captureRestarts=42 lastPublishAgeUs=28732 desktopSecureProbeFalse=6 secureInputAttempts=26 secureInputDelivered=26 inputEvents=27821
+10-23 18:02:56.166  encodedFrames=20 sentFrames=20 callbackFrames=30 captureRestarts=42 lastPublishAgeUs=25902 desktopSecureProbeFalse=6 secureInputAttempts=26 secureInputDelivered=26 inputEvents=27821
+10-23 18:03:26.170  encodedFrames=20 sentFrames=20 callbackFrames=30 captureRestarts=42 lastPublishAgeUs=29879 desktopSecureProbeFalse=6 secureInputAttempts=26 secureInputDelivered=26 inputEvents=27821
+10-23 18:03:56.170  encodedFrames=20 sentFrames=20 callbackFrames=30 captureRestarts=42 lastPublishAgeUs=30221 desktopSecureProbeFalse=6 secureInputAttempts=26 secureInputDelivered=26 inputEvents=27821
+10-23 18:04:26.167  encodedFrames=20 sentFrames=20 callbackFrames=30 captureRestarts=42 lastPublishAgeUs=28561 desktopSecureProbeFalse=6 secureInputAttempts=26 secureInputDelivered=26 inputEvents=27821
+10-23 18:04:56.167  encodedFrames=22 sentFrames=22 callbackFrames=30 captureRestarts=42 lastPublishAgeUs=28780 desktopSecureProbeFalse=6 secureInputAttempts=26 secureInputDelivered=26 inputEvents=27821
+10-23 18:05:26.169  encodedFrames=21 sentFrames=21 callbackFrames=30 captureRestarts=42 lastPublishAgeUs=29320 desktopSecureProbeFalse=6 secureInputAttempts=26 secureInputDelivered=26 inputEvents=27821
+10-23 18:05:56.166  encodedFrames=21 sentFrames=21 callbackFrames=30 captureRestarts=42 lastPublishAgeUs=28094 desktopSecureProbeFalse=6 secureInputAttempts=26 secureInputDelivered=26 inputEvents=27821
+10-23 18:06:26.166  encodedFrames=20 sentFrames=20 callbackFrames=30 captureRestarts=42 lastPublishAgeUs=28614 desktopSecureProbeFalse=6 secureInputAttempts=26 secureInputDelivered=26 inputEvents=27873
+10-23 18:06:56.162  encodedFrames=9 sentFrames=9 callbackFrames=29 captureRestarts=42 lastPublishAgeUs=34825 desktopSecureProbeFalse=6 secureInputAttempts=441 secureInputDelivered=441 inputEvents=28294
+10-23 18:07:05.472 [native-video-host][control] udp control session ended epoch=21 resumed=0 reason=none
+10-23 18:07:05.475 [native-video-host] capture-pipeline-flushed reason=stream-inactive streamGen=19 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=215416
+10-23 18:07:05.475 [native-video-host] stream inactive
+10-23 18:07:10.480 [native-video-host] capture detached (idle)
+10-23 18:07:15.886 [native-video-host][control] session epoch=22 peer=new
+10-23 18:07:15.904 [native-video-host] desktop_backend=wgc capture-started=1
+10-23 18:07:15.904 [native-video-host] capture-pipeline-flushed reason=capture-reattached streamGen=19 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=215417
+10-23 18:07:15.904 [native-video-host] capture reattached backend=wgc
+10-23 18:07:15.905 [native-video-host] stream active; forcing keyframe
+10-23 18:07:16.038 [native-video-host] capture-pipeline-flushed reason=stream-inactive streamGen=19 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=215419
+10-23 18:07:16.038 [native-video-host] stream inactive
+10-23 18:07:17.402 [native-video-host] stream active; forcing keyframe
+10-23 18:07:17.422 [native-video-host] desktop_backend=wgc capture-started=1
+10-23 18:07:17.422 [native-video-host] capture-pipeline-flushed reason=window-select streamGen=20 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=215420
+10-23 18:07:26.168  encodedFrames=19 sentFrames=19 callbackFrames=20 captureRestarts=44 lastPublishAgeUs=20968 desktopSecureProbeFalse=6 secureInputAttempts=454 secureInputDelivered=454 inputEvents=28307
+10-23 18:07:33.418 [native-video-host][control] session epoch=23 peer=new
+10-23 18:07:33.418 [native-video-host][control] udp control session ended epoch=22 resumed=0 reason=session-rollover
+10-23 18:07:33.620 [native-video-host] capture-pipeline-flushed reason=stream-inactive streamGen=20 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=215585
+10-23 18:07:33.620 [native-video-host] stream inactive
+10-23 18:07:34.248 [native-video-host] stream active; forcing keyframe
+10-23 18:07:34.271 [native-video-host] desktop_backend=wgc capture-started=1
+10-23 18:07:34.271 [native-video-host] capture-pipeline-flushed reason=window-select streamGen=21 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=215586
+10-23 18:07:56.162  encodedFrames=15 sentFrames=15 callbackFrames=29 captureRestarts=45 lastPublishAgeUs=34751 desktopSecureProbeFalse=6 secureInputAttempts=454 secureInputDelivered=454 inputEvents=28341
+10-23 18:08:26.164  encodedFrames=13 sentFrames=13 callbackFrames=30 captureRestarts=45 lastPublishAgeUs=19815 desktopSecureProbeFalse=6 secureInputAttempts=454 secureInputDelivered=454 inputEvents=28341
+10-23 18:08:56.163  encodedFrames=14 sentFrames=14 callbackFrames=29 captureRestarts=45 lastPublishAgeUs=52638 desktopSecureProbeFalse=6 secureInputAttempts=454 secureInputDelivered=454 inputEvents=28341
+10-23 18:09:26.163  encodedFrames=13 sentFrames=13 callbackFrames=30 captureRestarts=45 lastPublishAgeUs=19740 desktopSecureProbeFalse=6 secureInputAttempts=454 secureInputDelivered=454 inputEvents=28341
+10-23 18:09:56.176  encodedFrames=12 sentFrames=12 callbackFrames=28 captureRestarts=45 lastPublishAgeUs=15931 desktopSecureProbeFalse=6 secureInputAttempts=454 secureInputDelivered=454 inputEvents=28341

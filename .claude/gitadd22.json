@@ -1,0 +1,9 @@
+{
+  "repo_path": "D:/remote/remote",
+  "files": [
+    "apps/directory/server.js",
+    "apps/native_poc/src/directory_client.cpp",
+    "apps/native_poc/src/directory_client.hpp",
+    "apps/native_poc/src/directory_session_client_test.cpp"
+  ]
+}

@@ -1,0 +1,7 @@
+{
+  "repo_path": "D:/remote/remote",
+  "files": [
+    "apps/native_poc/CMakeLists.txt",
+    "apps/native_poc/src/updater_scenarios_test.cpp"
+  ]
+}

@@ -1,0 +1,66 @@
+--- a/automation/old_apk_lane/oa_avd.py
++++ b/automation/old_apk_lane/oa_avd.py
+@@ -589,17 +589,28 @@
+     sec = float(os.environ.get('OA_OBSERVE_SEC', OBSERVE_SEC))
+     if sec < OBSERVE_SEC and not os.environ.get('OA_TEST_FAKE_ADB'):
+         raise Invalid(f'OA_OBSERVE_SEC={sec:g} is below {OBSERVE_SEC} s: for the stub test only')
+-    outs0 = [int(o) for o in re.findall(r'\[video_debug\][^\n]* out=(\d+)', since(PICK_MARK[0]))] if PICK_MARK else []
+-    out0 = outs0[-1] if outs0 else 0
+-    t0 = time.time()
++    ok0, before = applog_snapshot()
++    outs0 = [int(o) for o in re.findall(r'\[video_debug\][^\n]* out=(\d+)', before)] if ok0 else []
++    if not ok0 or not PICK_MARK or PICK_MARK[0] not in before or not outs0:
++        verdict(f'{tag}: a readable current-pick video counter exists before the watch', False,
++                'no current snapshot / pick marker / video out baseline; nothing judged as progressing')
++        return False
++    out0 = outs0[-1]
++    watch_marker = [l for l in before.splitlines() if l.strip()][-1]
++    t0 = time.monotonic()
+     same, why = same_viewer()
+-    while same and time.time() - t0 < sec:
++    while same and time.monotonic() - t0 < sec:
+         time.sleep(min(2.0, max(0.1, sec / 15)))
+         same, why = same_viewer()
+-    held = time.time() - t0
+-    outs = [int(o) for o in re.findall(r'\[video_debug\][^\n]* out=(\d+)', since(PICK_MARK[0]))] if PICK_MARK else []
+-    out1 = outs[-1] if outs else 0
+-    ok = same and held >= sec and out1 > out0
++    held = time.monotonic() - t0
++    ok1, after = applog_snapshot()
++    marker_at = after.rfind(watch_marker) if ok1 else -1
++    tail = after[marker_at + len(watch_marker):] if marker_at >= 0 else ''
++    outs = [int(o) for o in re.findall(r'\[video_debug\][^\n]* out=(\d+)', tail)]
++    out1 = outs[-1] if outs else out0
++    values = [out0] + outs
++    comparable = all(b >= a for a, b in zip(values, values[1:]))
++    ok = same and held >= sec and ok1 and marker_at >= 0 and bool(outs) and comparable and out1 > out0
+     verdict(f'{tag}: {sec:g} s with no input after the first frame -- the same viewer and connection held, the picture '
+             'went on', ok, f'held {held:.1f} s; video out {out0} -> {out1}; {why}')
+     return ok
+@@ -904,17 +915,21 @@
+                     m.group(0)[:200] if m else ' | '.join(re.findall(r'\[(?:park_[a-z_]+|directory_[a-z_]+)\][^\n]*', since(n0)))[:240])
+             if m is None:  # r7f
+                 return 1
+-            pick_pinned('6b the pinned window again after the park')
++            if not pick_pinned('6b the pinned window again after the park'):
++                return 1
+         else:
+             # r2 (Codex: map 1-7 to what the arm's UI really has; no hidden handler, no fake capability)
+             skip_case('5 PC 목록 (park)', 'the manual UI offers no PC 목록: SessionPark.canPark is false in manual mode '
+                       '(b554e76 SessionPark.kt:78), viewerMenuHostsButton GONE -- P-5d below is 연결 해제, not a park')
+             skip_case('6 the parked PC again (resume)', 'nothing is parked in manual mode -- P-6r below is a NEW manual '
+                       'session, not a resume')
+-            if p_disconnect():
+-                shot('5d_connect_form')
+-                if p_reconnect(control_port):
+-                    pick_pinned('6r (P) the pinned window again')
++            if not p_disconnect():
++                return 1
++            shot('5d_connect_form')
++            if not p_reconnect(control_port):
++                return 1
++            if not pick_pinned('6r (P) the pinned window again'):
++                return 1
+ 
+         # 7
+         if standby:

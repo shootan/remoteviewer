@@ -1,0 +1,4 @@
+{
+ "repo_path": "D:/remote/remote",
+ "message": "docs(release): the candidate APK asks for a permission the deployed one does not\n\n0.2.13 adds android.permission.REQUEST_INSTALL_PACKAGES, which 0.2.12 does\nnot have -- the PackageInstaller path needs it. Intended, but a user sees a\nnew request to allow installing unknown apps, so it belongs in the release\nrecord rather than being left to be discovered at install time.\n\nIt was missing from that record. Writing up the artifacts, I listed\nversions and hashes and did not look at what the build asks the user for.\nThe verifier's check on the artifact caught it.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+}

@@ -1,0 +1,29 @@
+﻿host_capture_lifecycle_ua_e2e_test (capture-lifecycle r1: UA-1 / UA-2)
+PASS  the host (test build) could be staged
+PASS  the launched host is isolated from the user's files, input injection off
+PASS  the host started (desktop capture, startup backend = its default)
+
+--- UA-1 (WGC): the shared session the Android app drives asks for WGC ---
+FAIL  the shared session connects  error
+FAIL  ...and decodes the desktop  0 decoded, 0 failed
+FAIL  it asks for WGC, and the host runs WGC for it
+FAIL  UA-1 WGC #1: the host saw the input desktop go secure (a confirmed change, not one look)
+FAIL  UA-1 WGC #1: ...and THE HOST REBUILT ITS WGC CAPTURE for the secure desktop  attempt=1 ok=1 active=wgc
+FAIL  UA-1 WGC #1: A NEW IDR OF A CAPTURE MADE AFTER THE CHANGE IS DECODED (secure side)  none in 5 s
+FAIL  UA-1 WGC #1: the host saw the input desktop come back to Default
+FAIL  UA-1 WGC #1: ...and THE HOST REBUILT ITS WGC CAPTURE for Default again  attempt=1 ok=1 active=wgc
+FAIL  UA-1 WGC #1: A NEW IDR OF A CAPTURE MADE AFTER THE RETURN IS DECODED  none in 5 s
+FAIL  UA-1 WGC #1: ...and the picture keeps coming (frames in the 2 s after)  0 frames
+FAIL  UA-1 WGC #2: the host saw the input desktop go secure (a confirmed change, not one look)
+FAIL  UA-1 WGC #2: ...and THE HOST REBUILT ITS WGC CAPTURE for the secure desktop  attempt=1 ok=1 active=wgc
+FAIL  UA-1 WGC #2: A NEW IDR OF A CAPTURE MADE AFTER THE CHANGE IS DECODED (secure side)  none in 5 s
+FAIL  UA-1 WGC #2: the host saw the input desktop come back to Default
+FAIL  UA-1 WGC #2: ...and THE HOST REBUILT ITS WGC CAPTURE for Default again  attempt=1 ok=1 active=wgc
+FAIL  UA-1 WGC #2: A NEW IDR OF A CAPTURE MADE AFTER THE RETURN IS DECODED  none in 5 s
+FAIL  UA-1 WGC #2: ...and the picture keeps coming (frames in the 2 s after)  0 frames
+FAIL  UA-1 WGC: SAME CONNECTION throughout -- the session never left Connected, one session at the host  0 session start(s)
+    the shared session ended
+FAIL  the host lived through it all
+PASS  the scratch directory is cleaned up
+
+RESULT: FAILED  (23 checks, 19 failed)

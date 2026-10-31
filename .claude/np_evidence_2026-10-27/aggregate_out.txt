@@ -1,0 +1,143 @@
+# per-connect (relay-eligible, since 2026-10-22 01:28:45 KST)
+ts | id | host | adv port | host NAT port | client grp | client port | bound | viewer/apk outcome | ms
+10-22 01:34:09 | 9fc5493d | officePC | 43000 | pp | 175.209.x | 54405 | - | apk:direct | 477.0
+10-22 01:48:19 | 3e0b0c7c | officePC | 43000 | pp | 175.209.x | 50047 | - | apk:direct | 599.0
+10-22 02:00:08 | 7c6fe8d8 | homePC(.76) | 16016 | rw(3478->16016) | 175.209.x | 60657 | B | apk:relay | 2632.0
+10-22 02:03:59 | da260c86 | officePC | 43000 | pp | 175.209.x | 37885 | - | apk:direct | 616.0
+10-22 02:09:01 | de444dbc | homePC(.76) | 16016 | rw(3478->16016) | 175.209.x | 52291 | B | apk:relay | 2763.0
+10-22 02:11:55 | 32b0a900 | officePC | 43000 | pp | 175.209.x | 57126 | - | apk:direct | 532.0
+10-22 10:07:33 | 579dd962 | homePC(.76) | 16016 | rw(3478->16016) | office | 57138 | B | n/a | 
+10-22 10:24:00 | b7ff846b | homePC(.76) | 16016 | rw(3478->16016) | office | 50982 | B | n/a | 
+10-22 11:12:42 | 736179fd | officePC | 43000 | pp | office | 33536 | B | apk:relay | 2673.0
+10-22 11:45:45 | dc621595 | homePC(.76) | 16016 | rw(3478->16016) | office | 61943 | B | n/a | 
+10-22 12:09:52 | 7977199b | homePC(.76) | 16016 | rw(3478->16016) | office | 55635 | B | n/a | 
+10-22 13:32:26 | c6d350fb | officePC | 43000 | pp | office | 49594 | - | n/a | 
+10-22 14:11:18 | 02cc38a8 | homePC(.76) | 16016 | rw(3478->16016) | office | 49156 | B | n/a | 
+10-22 14:41:55 | 77875bc9 | homePC(.76) | 16016 | rw(3478->16016) | office | 49572 | B | n/a | 
+10-22 15:05:47 | 6eaaf529 | homePC(.76) | 16016 | rw(3478->16016) | office | 52207 | B | n/a | 
+10-22 15:09:52 | 1adfcbf5 | officePC | 43000 | pp | office | 60320 | - | n/a | 
+10-22 15:10:08 | 03e8d6f7 | officePC | 43000 | pp | office | 53405 | - | n/a | 
+10-22 15:12:36 | f41d63fe | homePC(.76) | 29814 | rw(43000->29814) | office | 64683 | B | n/a | 
+10-22 15:15:39 | d68a5cb6 | homePC(.76) | 29814 | rw(43000->29814) | office | 56910 | B | n/a | 
+10-22 15:15:57 | 02b10fa8 | homePC(.76) | 29814 | rw(43000->29814) | office | 56860 | B | n/a | 
+10-22 15:21:52 | 4fce12a9 | homePC(.76) | 29814 | rw(43000->29814) | office | 58513 | B | apk:relay | 2769.0
+10-22 15:24:13 | 3d4f1de8 | homePC(.76) | 29814 | rw(43000->29814) | office | 50538 | B | apk:relay | 2631.0
+10-22 15:32:07 | 9df56760 | homePC(.76) | 29814 | rw(43000->29814) | office | 63683 | B | n/a | 
+10-22 15:58:46 | 1e107953 | officePC | 43000 | pp | office | 34678 | B | apk:relay | 2756.0
+10-22 16:16:56 | 46814c61 | homePC(.76) | 29814 | rw(43000->29814) | office | 61349 | B | n/a | 
+10-22 16:26:40 | 3b65c64b | homePC(.76) | 29814 | rw(43000->29814) | office | 52860 | B | n/a | 
+10-22 16:28:05 | 5c49097b | officePC | 43000 | pp | office | 64192 | - | n/a | 
+10-22 16:33:10 | e5267867 | homePC(.76) | 29814 | rw(43000->29814) | office | 55441 | B | n/a | 
+10-22 16:33:27 | e2e68c92 | homePC(.76) | 29814 | rw(43000->29814) | office | 62795 | B | n/a | 
+10-22 16:33:32 | 0d73a94d | officePC | 43000 | pp | office | 54581 | - | n/a | 
+10-22 16:33:35 | 094532b1 | homePC(.76) | 29814 | rw(43000->29814) | office | 54582 | B | n/a | 
+10-22 16:33:49 | d7977d98 | homePC(.76) | 29814 | rw(43000->29814) | office | 55538 | B | apk:relay | 2722.0
+10-22 16:39:26 | c391d707 | homePC(.76) | 3478 | pp | office | 59676 | - | n/a | 
+10-22 16:50:07 | 7781e460 | homePC(.76) | 3478 | pp | office | 61237 | - | n/a | 
+10-22 16:50:48 | 89f61cf8 | homePC(.76) | 3478 | pp | office | 59051 | - | n/a | 
+10-22 16:52:56 | 562a1464 | homePC(.76) | 3478 | pp | office | 52821 | - | n/a | 
+10-22 17:00:07 | e117a126 | homePC(.76) | 3478 | pp | office | 57317 | - | n/a | 
+10-22 17:51:52 | a09e0f19 | homePC(.76) | 3478 | pp | office | 50457 | - | n/a | 
+10-22 18:00:09 | 4bc8a013 | homePC(.76) | 3478 | pp | office | 56956 | - | n/a | 
+10-22 18:46:14 | 49a89fe9 | homePC(.76) | 3478 | pp | office | 51823 | - | n/a | 
+10-22 18:57:18 | 2c1399e8 | homePC(.76) | 3478 | pp | office | 62904 | - | n/a | 
+10-22 19:16:53 | efae062c | homePC(.76) | 3478 | pp | 118.235.x | 57483 | - | apk:direct | 626.0
+10-22 19:16:55 | 4bb5a900 | officePC | 43000 | pp | 118.235.x | 52359 | - | apk:direct | 448.0
+10-23 09:40:00 | 4e078f8c | officePC | 43000 | pp | office | 35029 | B | apk:relay | 2640.0
+10-23 09:45:44 | 8f3f032f | homePC(.76) | 3478 | pp | office | 34921 | - | apk:direct | 554.0
+10-23 09:45:46 | 53173014 | officePC | 43000 | pp | office | 56932 | B | apk:relay | 2669.0
+10-23 11:27:35 | 9116d508 | homePC(.76) | 3478 | pp | office | 59064 | - | n/a | 
+10-23 13:29:21 | 9a551f0c | homePC(.76) | 3478 | pp | office | 60212 | B | n/a | 
+10-23 13:30:02 | d55af2c7 | officePC | 43000 | pp | office | 64192 | - | n/a | 
+10-23 14:06:09 | 84980edf | officePC | 43000 | pp | office | 54369 | - | n/a | 
+10-23 14:07:28 | 9c272b66 | homePC(.76) | 3478 | pp | office | 51973 | - | n/a | 
+10-23 15:20:43 | 8f642330 | officePC | 43000 | pp | office | 57983 | - | n/a | 
+10-23 15:20:45 | 38fe9c3a | homePC(.76) | 3478 | pp | office | 59207 | - | n/a | 
+10-23 16:12:08 | 37769689 | homePC(.76) | 3478 | pp | office | 63653 | - | n/a | 
+10-23 16:12:12 | 6869c296 | officePC | 43000 | pp | office | 49976 | - | n/a | 
+10-23 16:16:51 | ab9657e2 | homePC(.76) | 3478 | pp | office | 58378 | - | n/a | 
+10-23 16:18:07 | 3333dfb4 | officePC | 43000 | pp | office | 64198 | - | n/a | 
+10-23 16:25:07 | 6b44f46d | homePC(.76) | 3478 | pp | office | 54860 | - | n/a | 
+10-23 16:27:20 | af309447 | officePC | 43000 | pp | office | 59861 | - | n/a | 
+10-23 16:40:35 | c547925f | homePC(.76) | 3478 | pp | office | 58213 | - | n/a | 
+10-23 16:50:01 | 55c4cf42 | officePC | 43000 | pp | office | 54556 | B | apk:relay | 2870.0
+10-23 16:53:49 | bf1fafeb | homePC(.76) | 3478 | pp | office | 56885 | - | n/a | 
+10-23 17:12:44 | de932e72 | officePC | 43000 | pp | office | 53228 | - | n/a | 
+10-23 17:13:15 | 03129187 | officePC | 43000 | pp | office | 56056 | B | apk:relay | 2642.0
+10-23 17:20:59 | b7cc722a | officePC | 43000 | pp | office | 39450 | B | apk:relay | 2581.0
+10-23 17:21:11 | b4d43abb | officePC | 43000 | pp | office | 51353 | B | apk:relay | 2533.0
+10-23 17:21:28 | 71058de8 | officePC | 43000 | pp | office | 56860 | - | n/a | 
+10-23 17:21:43 | f4ff7af4 | officePC | 43000 | pp | office | 52951 | - | n/a | 
+10-23 17:22:14 | a3e6180e | officePC | 63895 | pp | office | 59984 | - | n/a | 
+10-23 17:36:12 | 682f5f30 | homePC(.76) | 3478 | pp | office | 65385 | - | n/a | 
+10-23 17:39:37 | 6d59042a | officePC | 63895 | pp | office | 48410 | B | apk:relay | 2770.0
+10-23 18:07:14 | 153e2cdd | homePC(.76) | 3478 | pp | office | 53783 | - | n/a | 
+10-23 18:07:31 | 25075729 | homePC(.76) | 3478 | pp | office | 50498 | - | n/a | 
+10-23 18:19:04 | 6287063c | homePC(.76) | 3478 | pp | office | 65521 | - | n/a | 
+10-23 18:38:56 | 2308e1b6 | homePC(.76) | 3478 | pp | office | 54348 | - | n/a | 
+10-25 15:18:15 | 93bec5d6 | officePC | 63895 | pp | 175.209.x | 55903 | - | apk:direct | 405.0
+10-25 15:20:06 | 24cf83fa | officePC | 63895 | pp | 175.209.x | 39961 | - | apk:direct | 542.0
+10-25 15:21:49 | 31f85ebc | officePC | 63895 | pp | 175.209.x | 52080 | - | apk:direct | 523.0
+10-25 16:03:17 | 7faf0945 | officePC | 63895 | pp | 175.209.x | 53533 | - | apk:direct | 532.0
+10-25 23:01:52 | f79ab41b | homePC(.76) | 3478 | pp | 175.209.x | 53795 | B | apk:relay | 2551.0
+10-25 23:02:25 | c1258803 | homePC(.76) | 3478 | pp | 175.209.x | 59232 | B | apk:relay | 2595.0
+10-26 10:03:25 | e8f6c930 | homePC(.76) | 3478 | pp | office | 58888 | - | n/a | 
+10-26 10:09:39 | 3918fa43 | homePC(.76) | 3478 | pp | office | 52801 | B | n/a | 
+10-26 10:40:35 | 293c25ef | officePC | 63895 | pp | office | 62152 | - | n/a | 
+10-26 11:15:18 | 8cdeb518 | homePC(.76) | 3478 | pp | office | 61920 | B | viewer:relay | 2502
+10-26 11:37:32 | 654c56e4 | homePC(.76) | 3478 | pp | office | 56860 | - | viewer:direct | 301
+10-26 11:45:01 | ec2e66b6 | homePC(.76) | 3478 | pp | office | 64300 | B | viewer:relay | 2502
+10-26 12:06:56 | a9e8b1ea | homePC(.76) | 3478 | pp | office | 63448 | B | viewer:relay | 2504
+10-26 13:37:12 | b2beff68 | homePC(.76) | 3478 | pp | office | 63641 | B | viewer:relay | 2502
+10-26 14:39:58 | dc96cb80 | homePC(.76) | 3478 | pp | office | 54058 | - | viewer:direct | 357
+10-26 14:44:00 | 9647f6fa | homePC(.76) | 3478 | pp | office | 52076 | - | viewer:direct | 382
+10-26 14:52:48 | 9ec3597b | officePC | 63895 | pp | office | 52691 | - | viewer:direct | 0
+10-26 14:56:59 | 6f51600b | homePC(.76) | 3478 | pp | office | 65147 | - | viewer:direct | 324
+10-26 15:01:34 | 8fe72b6a | homePC(.76) | 3478 | pp | office | 60572 | B | viewer:relay | 2503
+10-26 15:53:27 | 788d0ac0 | homePC(.76) | 3478 | pp | office | 52003 | B | viewer:relay | 2502
+10-26 15:55:04 | 8c4f3807 | homePC(.76) | 3478 | pp | office | 58762 | - | viewer:direct | 338
+10-26 15:58:07 | de7e43f5 | homePC(.76) | 3478 | pp | office | 55275 | - | viewer:direct | 369
+10-26 17:32:06 | 0cb4ae75 | homePC(.76) | 3478 | pp | office | 62385 | - | viewer:direct | 361
+10-26 17:52:42 | 1f612e19 | homePC(.76) | 3478 | pp | office | 60591 | B | viewer:relay | 2502
+10-26 18:09:19 | 5315f772 | homePC(.76) | 3478 | pp | office | 53998 | - | viewer:direct | 415
+10-26 18:18:28 | a9f7847a | homePC(.76) | 3478 | pp | office | 62871 | - | viewer:direct | 281
+10-26 18:42:36 | af2c4015 | homePC(.76) | 3478 | pp | office | 60675 | B | viewer:relay | 2501
+10-27 10:13:30 | cd4e75f4 | officePC | 63895 | pp | office | 53217 | - | viewer:direct | 0
+10-27 11:05:17 | 0066024b | homePC(.76) | 3478 | pp | office | 64192 | B | viewer:relay | 2507
+10-27 12:04:18 | d60f9332 | homePC2(.16) | 5236 | rw(43000->5236) | office | 64479 | B | viewer:relay | 2505
+10-27 12:04:58 | 4ce03385 | homePC2(.16) | 5236 | rw(43000->5236) | office | 52014 | B | viewer:relay | 2502
+
+# summary host x client group x host-NAT-port (bound = relay chosen per server)
+('homePC(.76)', '118.235.x', 'pp') connects=1 bound=0
+('homePC(.76)', '175.209.x', 'pp') connects=2 bound=2
+('homePC(.76)', '175.209.x', 'rw') connects=2 bound=2
+('homePC(.76)', 'office', 'pp') connects=44 bound=11
+('homePC(.76)', 'office', 'rw') connects=19 bound=19
+('homePC2(.16)', 'office', 'rw') connects=2 bound=2
+('officePC', '118.235.x', 'pp') connects=1 bound=0
+('officePC', '175.209.x', 'pp') connects=8 bound=0
+('officePC', 'office', 'pp') connects=27 bound=9
+
+# labelled outcomes (viewer/apk) ms
+('homePC(.76)', '118.235.x', True, 'apk', 'direct') 1 [626]
+('homePC(.76)', '175.209.x', False, 'apk', 'relay') 2 [2632, 2763]
+('homePC(.76)', '175.209.x', True, 'apk', 'relay') 2 [2551, 2595]
+('homePC(.76)', 'office', False, 'apk', 'relay') 3 [2631, 2722, 2769]
+('homePC(.76)', 'office', True, 'apk', 'direct') 1 [554]
+('homePC(.76)', 'office', True, 'viewer', 'direct') 9 [281, 301, 324, 338, 357, 361, 369, 382, 415]
+('homePC(.76)', 'office', True, 'viewer', 'relay') 9 [2501, 2502, 2502, 2502, 2502, 2502, 2503, 2504, 2507]
+('homePC2(.16)', 'office', False, 'viewer', 'relay') 2 [2502, 2505]
+('officePC', '118.235.x', True, 'apk', 'direct') 1 [448]
+('officePC', '175.209.x', True, 'apk', 'direct') 8 [405, 477, 523, 532, 532, 542, 599, 616]
+('officePC', 'office', True, 'apk', 'relay') 9 [2533, 2581, 2640, 2642, 2669, 2673, 2756, 2770, 2870]
+('officePC', 'office', True, 'viewer', 'direct') 2 [0, 0]
+
+# host advertised-port history (changes only)
+officePC 10-22 01:28 wire=211.218.222.1:43000 aim=211.218.222.1:43000 wire
+officePC 10-23 17:21 wire=211.218.222.1:63895 aim=211.218.222.1:63895 wire
+officePC 10-23 17:21 wire=211.218.222.1:43000 aim=211.218.222.1:43000 wire
+officePC 10-23 17:22 wire=211.218.222.1:63895 aim=211.218.222.1:63895 wire
+homePC(.76) 10-22 01:29 wire=192.168.0.1:16016 aim=192.168.0.76:3478 lan
+homePC(.76) 10-22 15:09 wire=192.168.0.1:29814 aim=192.168.0.76:43000 lan
+homePC(.76) 10-22 16:34 wire=192.168.0.1:3478 aim=192.168.0.76:3478 lan
+homePC2(.16) 10-27 11:53 wire=192.168.0.1:5236 aim=192.168.0.16:43000 lan

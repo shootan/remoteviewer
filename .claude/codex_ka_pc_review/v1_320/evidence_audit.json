@@ -1,0 +1,47 @@
+{
+  "source": "320bc3636532aa4bc4d67c88dacdbdbfedd975cf",
+  "report_sha256": "152b4683e41f08dfd32a508f7a51f2ce6f5099551020018af7e8ab7d144dfb78",
+  "log_sha256": "8ef3167fbaff9fdc2dc129c8262054e478bccb0b6347c4bc6f2166b142c66155",
+  "pass": 60,
+  "fail": 0,
+  "job_clean": true,
+  "child_trailers_confirmed_eof_kept": 10,
+  "images": [
+    {
+      "file": "A-round1-picker-client.bmp",
+      "sha256": "4f936b3bce6c2619b3f779cfbe9b551e637b47af0ff95d4e1fd20318720891b7",
+      "size": [
+        1584,
+        860
+      ],
+      "png_pixels_equal": true
+    },
+    {
+      "file": "A-round1-presented.bmp",
+      "sha256": "cd995248b46e04e8e04f5c7616b06e7649ad16d71b4924a0202d6dc0360f5c17",
+      "size": [
+        1586,
+        893
+      ],
+      "png_pixels_equal": true
+    },
+    {
+      "file": "A-round2-picker-client.bmp",
+      "sha256": "4f936b3bce6c2619b3f779cfbe9b551e637b47af0ff95d4e1fd20318720891b7",
+      "size": [
+        1584,
+        860
+      ],
+      "png_pixels_equal": true
+    },
+    {
+      "file": "A-round2-presented.bmp",
+      "sha256": "becb04539634fdb939a426c9572a73ff9e01bd074a5bf1d4ab1f8d7a220b523d",
+      "size": [
+        1586,
+        893
+      ],
+      "png_pixels_equal": true
+    }
+  ]
+}

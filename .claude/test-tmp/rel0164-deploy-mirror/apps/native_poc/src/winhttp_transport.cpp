@@ -1,0 +1,228 @@
+#include "winhttp_transport.hpp"
+
+#include <windows.h>
+#include <winhttp.h>
+
+#include <string>
+#include <vector>
+
+#pragma comment(lib, "winhttp.lib")
+
+namespace remote60::native_poc::net {
+namespace {
+
+/** Closes a WinHTTP handle on the way out, so no early return leaks one. */
+struct Handle {
+  HINTERNET h = nullptr;
+  ~Handle() {
+    if (h) WinHttpCloseHandle(h);
+  }
+};
+
+std::wstring widen(const std::string& text) {
+  if (text.empty()) return {};
+  const int size =
+      MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), nullptr, 0);
+  std::wstring out(size <= 0 ? 0 : static_cast<size_t>(size), L'\0');
+  if (size > 0) {
+    MultiByteToWideChar(CP_UTF8, 0, text.c_str(), static_cast<int>(text.size()), out.data(), size);
+  }
+  return out;
+}
+
+/**
+ * The TLS posture, in one place.
+ *
+ * Written here rather than at each call site so the two callers cannot drift apart on it -- which
+ * is the whole reason the transport is shared. Nothing in this function is conditional on who is
+ * calling: an update artifact and a directory login are both things an attacker would like to sit
+ * in the middle of.
+ */
+void apply_tls_posture(HINTERNET session) {
+  DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+#ifdef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
+  protocols |= WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+#endif
+  WinHttpSetOption(session, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols));
+
+  // A redirect that leaves https is refused by the stack itself. Following one would hand the
+  // next request -- carrying the session token -- to a cleartext hop.
+  DWORD redirectPolicy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
+  WinHttpSetOption(session, WINHTTP_OPTION_REDIRECT_POLICY, &redirectPolicy,
+                   sizeof(redirectPolicy));
+
+  // WINHTTP_OPTION_SECURITY_FLAGS is deliberately never set here, and there is no argument to
+  // this file that would set it. That option is how certificate validation gets switched off, and
+  // the way it ends up switched off is someone adding a parameter for it "for testing".
+}
+
+}  // namespace
+
+void apply_tls_posture_handle(void* session) {
+  if (session) apply_tls_posture(static_cast<HINTERNET>(session));
+}
+
+bool http_exchange(const std::string& host, uint16_t port, bool secure, const char* method,
+                   const std::string& path, const std::string& extraHeaders,
+                   const std::string& body, const char* contentType, uint32_t timeoutMs,
+                   HttpResult* out) {
+  if (!out) return false;
+  *out = HttpResult{};
+  const uint32_t budgetMs = timeoutMs ? timeoutMs : 5000;
+  const uint64_t deadline = GetTickCount64() + budgetMs;
+  if (host.empty() || !method || path.empty()) {
+    out->error = "malformed request";
+    return false;
+  }
+
+  Handle session;
+  session.h = WinHttpOpen(L"GNLink/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+  if (!session.h) {
+    out->error = "WinHttpOpen failed";
+    return false;
+  }
+  if (secure) apply_tls_posture(session.h);
+  WinHttpSetTimeouts(session.h, static_cast<int>(timeoutMs), static_cast<int>(timeoutMs),
+                     static_cast<int>(timeoutMs), static_cast<int>(timeoutMs));
+
+  Handle connect;
+  connect.h = WinHttpConnect(session.h, widen(host).c_str(), port, 0);
+  if (!connect.h) {
+    out->error = "cannot reach the server";
+    return false;
+  }
+
+  Handle request;
+  request.h = WinHttpOpenRequest(connect.h, widen(method).c_str(), widen(path).c_str(), nullptr,
+                                 WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES,
+                                 secure ? WINHTTP_FLAG_SECURE : 0);
+  if (!request.h) {
+    out->error = "cannot open the request";
+    return false;
+  }
+  const auto remaining_timeout = [&]() {
+    const uint64_t now = GetTickCount64();
+    if (now >= deadline) {
+      *out = HttpResult{}; out->error = "HTTP exchange deadline exceeded"; return false;
+    }
+    const int remaining = static_cast<int>((deadline - now) > 0x7fffffffULL ? 0x7fffffffULL : deadline - now);
+    // WinHttpSetTimeouts accepts request handles as well as session handles (Microsoft Learn).
+    // Shrinking the timeout before every read prevents a peer from keeping a body alive by drip-feeding.
+    if (!WinHttpSetTimeouts(request.h, remaining, remaining, remaining, remaining)) {
+      *out = HttpResult{}; out->error = "cannot set HTTP deadline"; return false;
+    }
+    return true;
+  };
+
+  // Nothing is followed. Every request here is to a directory's own API, which answers and does
+  // not redirect -- and the requests carry credentials: a bearer token or x-host-token in the
+  // headers, the host token in a heartbeat's body. WinHTTP follows a redirect by repeating the
+  // request at the new address, headers and (for 307/308) body included, and the posture above
+  // only stops that when the new address is not https. So a 3xx comes back as the status it
+  // is, for the caller to treat like any other answer that is not the one it asked for.
+  //
+  // Checked, not assumed: a request that cannot be told to stay put is not sent.
+  DWORD disabledFeatures = WINHTTP_DISABLE_REDIRECTS;
+  if (!WinHttpSetOption(request.h, WINHTTP_OPTION_DISABLE_FEATURE, &disabledFeatures,
+                        sizeof(disabledFeatures))) {
+    out->error = "cannot disable redirects for this request";
+    return false;
+  }
+
+  std::wstring headers;
+  if (!body.empty() && contentType) {
+    headers += L"Content-Type: ";
+    headers += widen(contentType);
+    headers += L"\r\n";
+  }
+  headers += widen(extraHeaders);
+
+  if (!remaining_timeout()) return false;
+  const bool sent = WinHttpSendRequest(
+      request.h, headers.empty() ? WINHTTP_NO_ADDITIONAL_HEADERS : headers.c_str(),
+      headers.empty() ? 0 : static_cast<DWORD>(-1),
+      body.empty() ? WINHTTP_NO_REQUEST_DATA : const_cast<char*>(body.data()),
+      static_cast<DWORD>(body.size()), static_cast<DWORD>(body.size()), 0) != FALSE;
+  if (!sent) {
+    const DWORD err = GetLastError();
+    // Named, because "could not connect" and "the certificate did not check out" call for
+    // completely different things from whoever reads it.
+    out->error = err == ERROR_WINHTTP_SECURE_FAILURE
+                     ? "TLS certificate validation failed"
+                     : "cannot reach the server (" + std::to_string(err) + ")";
+    return false;
+  }
+  if (!remaining_timeout()) return false;
+  if (!WinHttpReceiveResponse(request.h, nullptr)) {
+    out->error = "no response (" + std::to_string(GetLastError()) + ")";
+    return false;
+  }
+
+  DWORD statusCode = 0;
+  DWORD size = sizeof(statusCode);
+  if (!WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                           WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &size,
+                           WINHTTP_NO_HEADER_INDEX)) {
+    out->error = "could not read the status code";
+    return false;
+  }
+  out->status = statusCode;
+  DWORD expectedBytes = 0;
+  DWORD expectedSize = sizeof(expectedBytes);
+  const bool hasLength = WinHttpQueryHeaders(request.h, WINHTTP_QUERY_CONTENT_LENGTH | WINHTTP_QUERY_FLAG_NUMBER,
+      WINHTTP_HEADER_NAME_BY_INDEX, &expectedBytes, &expectedSize, WINHTTP_NO_HEADER_INDEX) != FALSE;
+  const DWORD lengthError = hasLength ? ERROR_SUCCESS : GetLastError();
+  const bool hasBody = _stricmp(method, "HEAD") != 0 && statusCode != 204 && statusCode != 304;
+  if (hasBody && ((!hasLength && lengthError != ERROR_WINHTTP_HEADER_NOT_FOUND) ||
+                  (hasLength && expectedBytes > kMaxHttpResponseBytes))) {
+    *out = HttpResult{}; out->error = "invalid or excessive HTTP response length"; return false;
+  }
+
+  // The body is read whatever the status: the server's own error text is what the caller shows,
+  // and throwing it away on a non-200 would leave "something went wrong" and nothing else.
+  for (;;) {
+    if (!remaining_timeout()) return false;
+    DWORD available = 0;
+    if (!WinHttpQueryDataAvailable(request.h, &available)) {
+      const DWORD error = GetLastError();
+      *out = HttpResult{};
+      out->error = "response availability failed: " + std::to_string(error);
+      return false;
+    }
+    if (available == 0) break;
+    const size_t remainingCapacity = kMaxHttpResponseBytes + 1 - out->body.size();
+    if (available > remainingCapacity) available = static_cast<DWORD>(remainingCapacity);
+    std::vector<char> chunk(available);
+    DWORD read = 0;
+    if (!remaining_timeout()) return false;
+    if (!WinHttpReadData(request.h, chunk.data(), available, &read)) {
+      const DWORD error = GetLastError();
+      *out = HttpResult{};
+      out->error = "response read failed: " + std::to_string(error);
+      return false;
+    }
+    if (read == 0) break;
+    out->body.append(chunk.data(), read);
+    // A server that never stops talking must not be allowed to grow this without limit -- and a
+    // truncated body handed back as if it were the whole one is worse than no body at all.
+    if (out->body.size() > kMaxHttpResponseBytes) {
+      // The status goes too. A false return means the exchange did not happen as far as the
+      // caller is concerned, and leaving a 200 behind it invites code that checks the status
+      // without checking the return -- the socket path leaves 0 here, so this one does too.
+      const std::string tooBig = "the response is larger than " +
+                                 std::to_string(kMaxHttpResponseBytes) + " bytes";
+      *out = HttpResult{};
+      out->error = tooBig;
+      return false;
+    }
+  }
+
+  if (hasBody && hasLength && out->body.size() != expectedBytes) {
+    *out = HttpResult{}; out->error = "incomplete HTTP response body"; return false;
+  }
+  out->sent = true;
+  return true;
+}
+
+}  // namespace remote60::native_poc::net

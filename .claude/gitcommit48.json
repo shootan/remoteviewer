@@ -1,0 +1,4 @@
+{
+ "repo_path": "D:/remote/remote",
+ "message": "test(update): a failure message is how a credential reaches a log\n\nThe credential never goes to a log directly. The way it would get there is\nan error string that quotes it -- the updater's log is written from exactly\nthese messages. So every failure path in the channel is now checked for the\nfixture token: the mismatch refusal, the deadline, and the receiver's own\nreason.\n\nThis is the mechanism, not the file. Nothing here asserts that a real\nupdater.log is clean; it asserts that the strings it would be written from\ncannot carry the value.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+}

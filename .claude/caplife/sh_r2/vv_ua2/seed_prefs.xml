@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes" ?>
+<map>
+    <int name="desktop_backend" value="2" />
+    <string name="sharpness">strong</string>
+</map>

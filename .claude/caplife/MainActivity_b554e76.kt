@@ -1,0 +1,6052 @@
+﻿package com.remote60.androiddirect
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.res.Configuration
+import android.net.ConnectivityManager
+import android.net.Network
+import android.graphics.Color
+import android.graphics.Matrix
+import android.graphics.SurfaceTexture
+import android.graphics.drawable.ColorDrawable
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
+import android.util.Log
+import android.view.Gravity
+import android.view.KeyCharacterMap
+import android.view.KeyEvent
+import android.view.MotionEvent
+import android.view.ScaleGestureDetector
+import android.view.Surface
+import android.view.TextureView
+import android.view.ViewConfiguration
+import android.view.View
+import android.view.ViewGroup
+import android.view.WindowInsets
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
+import android.view.WindowInsetsController
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.graphics.Bitmap
+import android.widget.AdapterView
+import android.widget.ArrayAdapter
+import android.widget.BaseAdapter
+import android.widget.Button
+import android.widget.EditText
+import android.widget.FrameLayout
+import android.widget.GridView
+import android.widget.ImageView
+import android.widget.LinearLayout
+import android.widget.ListView
+import android.widget.Spinner
+import android.widget.TextView
+import android.widget.Toast
+import org.json.JSONException
+import org.json.JSONObject
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+import java.util.Locale
+import java.util.concurrent.Executors
+import kotlin.math.abs
+import kotlin.math.hypot
+import kotlin.math.roundToInt
+
+class MainActivity : Activity(), TextureView.SurfaceTextureListener {
+    companion object {
+        private const val ZONE_IDLE_ALPHA = 0.85f
+        private const val LOG_TAG = "remote60_android_direct"
+        // Windows promotes a second press to a double-click only inside SM_CXDOUBLECLK (4px)
+        // and GetDoubleClickTime (500ms). Anchor a little more generously than the OS box,
+        // since a thumb lands several pixels off and the remote image may be downscaled.
+        private const val DOUBLE_TAP_ANCHOR_WINDOW_MS = 400L
+        private const val DOUBLE_TAP_ANCHOR_RADIUS_PX = 24
+        private const val INPUT_KIND_MOUSE_MOVE = 1
+        private const val INPUT_KIND_MOUSE_DOWN = 2
+        private const val INPUT_KIND_MOUSE_UP = 3
+        private const val INPUT_KIND_MOUSE_WHEEL = 4
+        private const val INPUT_KIND_KEY_DOWN = 5
+        private const val INPUT_KIND_KEY_UP = 6
+        private const val VK_RETURN = 0x0D
+        // Screens share the target list with windows. Window ids come from HWNDs, which are
+        // pointer-derived and never reach this range, so the two cannot be confused.
+        private const val MONITOR_ID_BASE = 0x7000_0000_0000_0000L
+        private const val INPUT_BUTTON_PRIMARY = 0x1
+        private const val INPUT_BUTTON_SECONDARY = 0x2
+        private const val INPUT_BUTTON_MIDDLE = 0x4
+        private const val INPUT_VK_LBUTTON = 0x01
+        private const val INPUT_VK_RBUTTON = 0x02
+        private const val INPUT_VK_MBUTTON = 0x04
+        private const val INPUT_VK_BACK = 0x08
+
+        /** Held around a wheel event to turn scrolling into zooming, as applications expect. */
+        private const val INPUT_VK_CONTROL = 0x11
+        private const val INPUT_WHEEL_DELTA_STEP = 120
+        // Authored in dp; converted per-device below. As a raw pixel constant one wheel
+        // notch needed 4x more finger travel on a 4x-density phone than on a 1x tablet.
+        private const val SCROLL_GESTURE_STEP_DP = 28f
+
+        /** Matches kWindowThumbnailMaxWidth/Height in the wire protocol. */
+        private const val THUMBNAIL_MAX_EDGE = 320
+
+        private const val MACRO_STATE_IDLE = 0
+        private const val MACRO_STATE_RECORDING = 1
+        private const val MACRO_STATE_PLAYING = 2
+        private const val MACRO_LIST_MAX_ROWS = 300
+        private const val VIEWER_STALL_OVERLAY_US = 3_000_000L
+    }
+
+    private var lastVideoOutputPtsUs = 0L
+    /**
+     * What the letterbox margin does, split by where along it you press.
+     *
+     * The bars beside the picture are dead space -- taps there map to nothing -- so they are free
+     * modifiers. One behaviour for the whole bar wasted that: three zones give right-click,
+     * tablet gestures and the on-screen mouse without stealing any room from the picture.
+     */
+    private enum class MarginZone { TOP, MIDDLE, BOTTOM }
+
+    /** Pointer held in the top zone: the next touch on the picture is a right click. */
+    private var rightClickModifierPointerId = MotionEvent.INVALID_POINTER_ID
+
+    /** Pointer held in the middle zone: touches behave like a tablet (scroll, pinch zoom). */
+    private var tabletModePointerId = MotionEvent.INVALID_POINTER_ID
+    private var rightClickHintShown = false
+    /** User override: keep the phone upright even when the remote screen is landscape. */
+    private var forcePortrait = false
+    private var lastAppliedLandscape: Boolean? = null
+    private var sessionBytesReceived = 0L
+    // apk-ui r1: the menu and the window list are sheets over the viewer, not dialogs. A dialog
+    // took window focus (and with it the soft keyboard and the clipboard read); an overlay view
+    // takes only the touches that land on it, and keeps every one of them away from the PC.
+    private lateinit var viewerMenuOverlay: View
+    private lateinit var viewerMenuSheet: View
+    private lateinit var viewerWindowOverlay: View
+    private lateinit var viewerWindowSheet: View
+    private lateinit var viewerWindowList: ListView
+    private lateinit var viewerWindowStatusText: TextView
+    private lateinit var viewerWindowProgress: View
+    private lateinit var viewerWindowRefreshButton: View
+    private lateinit var viewerWindowsButton: Button
+    private lateinit var viewerDesktopButton: Button
+    private lateinit var viewerQualityLowButton: TextView
+    private lateinit var viewerQualityHighButton: TextView
+    private lateinit var viewerQualityBestButton: TextView
+    private lateinit var viewerFpsSpinner: Spinner
+    private lateinit var viewerQualityStatusText: TextView
+    private lateinit var settingsQualityLowButton: TextView
+    private lateinit var settingsQualityHighButton: TextView
+    private lateinit var settingsQualityBestButton: TextView
+    private lateinit var settingsFpsSpinner: Spinner
+    // sh-filter r1: 선명도 끄기 / 약하게 0.20 / 강하게 0.35, in the viewer menu and in settings.
+    private lateinit var viewerSharpOffButton: TextView
+    private lateinit var viewerSharpWeakButton: TextView
+    private lateinit var viewerSharpStrongButton: TextView
+    private lateinit var settingsSharpOffButton: TextView
+    private lateinit var settingsSharpWeakButton: TextView
+    private lateinit var settingsSharpStrongButton: TextView
+    private lateinit var settingsSharpMethodDefaultButton: TextView
+    private lateinit var settingsSharpMethodDisplayButton: TextView
+    /** What the last quality pick came to: sent, waiting for a connection, or not sent. */
+    private var qualityStatusMessage = ""
+    private val windowSheetItems = mutableListOf<WindowPanelItem>()
+    private lateinit var windowSheetAdapter: WindowSheetAdapter
+    /** The id that carries the check in the window sheet. */
+    private var windowSheetCheckedId = 0L
+    /** The host's selection as of the last moment no switch was in flight. */
+    private var windowSheetConfirmedId = 0L
+    private var windowSheetLocked = false
+    private var windowSheetAwaitingList = false
+    private var windowSheetRequestQueued = false
+    private var windowSheetRequestedAtMs = 0L
+    private var windowSheetState = WindowSheetState.READY
+    /** Set when the switch in flight came from the sheet itself; only then does "ready" close it. */
+    private var closeWindowSheetOnReady = false
+    private var unlockDialog: AlertDialog? = null
+    private lateinit var viewerUnlockBar: View
+    private lateinit var viewerUnlockButton: Button
+    private lateinit var viewerUnlockSettingsButton: Button
+
+    /**
+     * Lay the control rail along the device's short edge. Always safe to call: it only
+     * reflows views and never touches the requested orientation.
+     */
+    private fun applyViewerRailLayout() {
+        if (!::viewerSplit.isInitialized) return
+        val deviceLandscape =
+            resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+        viewerSplit.orientation =
+            if (deviceLandscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+        // apk-keyboard-tabs r3 (K2): in landscape the rail stands beside the picture-tabs-panel
+        // column at full height instead of inside the split above the panel. The panel used to
+        // give up the rail's four buttons' height (and then the tab bar's), which left its rows too
+        // short for two-line key labels. In portrait the rail goes back to the split's bottom.
+        val scene = viewerScene as LinearLayout
+        val column = findViewById<LinearLayout>(R.id.viewerMainColumn)
+        val railHome: ViewGroup = if (deviceLandscape) scene else viewerSplit
+        if (viewerControlsBar.parent !== railHome) {
+            (viewerControlsBar.parent as? ViewGroup)?.removeView(viewerControlsBar)
+            railHome.addView(viewerControlsBar)
+        }
+        scene.orientation = if (deviceLandscape) LinearLayout.HORIZONTAL else LinearLayout.VERTICAL
+        column.layoutParams = if (deviceLandscape) {
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+        } else {
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.MATCH_PARENT)
+        }
+        val lp = viewerControlsBar.layoutParams as LinearLayout.LayoutParams
+        if (deviceLandscape) {
+            lp.width = LinearLayout.LayoutParams.WRAP_CONTENT
+            lp.height = LinearLayout.LayoutParams.MATCH_PARENT
+            viewerControlsBar.orientation = LinearLayout.VERTICAL
+        } else {
+            lp.width = LinearLayout.LayoutParams.MATCH_PARENT
+            lp.height = LinearLayout.LayoutParams.WRAP_CONTENT
+            viewerControlsBar.orientation = LinearLayout.HORIZONTAL
+        }
+        viewerControlsBar.layoutParams = lp
+
+        // Every direct child of the split carries sizes written for one orientation. Left as
+        // they were, a portrait split gave the 34dp-wide, full-height zone strip the entire
+        // column and the video a width of zero: a black screen with no controls and no way
+        // back, which is exactly what the rotate button used to produce.
+        val videoFrame = findViewById<View>(R.id.viewerVideoFrame)
+        videoFrame.layoutParams = if (deviceLandscape) {
+            LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+        } else {
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+        }
+
+        val zoneBar = findViewById<LinearLayout>(R.id.viewerZoneBar)
+        val stripPx = dp(44f)
+        zoneBar.orientation =
+            if (deviceLandscape) LinearLayout.VERTICAL else LinearLayout.HORIZONTAL
+        zoneBar.layoutParams = if (deviceLandscape) {
+            LinearLayout.LayoutParams(stripPx, LinearLayout.LayoutParams.MATCH_PARENT)
+        } else {
+            LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, stripPx)
+        }
+        for (i in 0 until zoneBar.childCount) {
+            val child = zoneBar.getChildAt(i)
+            val divider = child !is TextView
+            child.layoutParams = when {
+                deviceLandscape && divider ->
+                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1f))
+                deviceLandscape ->
+                    LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
+                divider ->
+                    LinearLayout.LayoutParams(dp(1f), LinearLayout.LayoutParams.MATCH_PARENT)
+                else ->
+                    LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.MATCH_PARENT, 1f)
+            }
+        }
+
+        viewerRotateButton.text =
+            getString(if (forcePortrait) R.string.ui_rotate_portrait else R.string.ui_rotate_auto)
+        layoutViewerSheets(deviceLandscape)
+        viewerKeyPanel?.reservedHeightPx = keyPanelReservedHeightPx()
+        fitRailCells()
+    }
+
+    /**
+     * What the key panel leaves to the rest of its column: the tab bar above it. The rail is no
+     * longer above the panel in landscape (it stands beside the column), so it needs nothing here.
+     */
+    private fun keyPanelReservedHeightPx(): Int = viewerKeyboardTabs.layoutParams.height
+
+    /**
+     * Sizes the rail's buttons to the length the bar actually has (apk-ui r3d). With the key panel
+     * up in landscape the bar is shorter than four 56dp buttons, and the top and bottom ones were
+     * cut off. The buttons shrink toward 48dp -- never below -- and tighten their padding so the
+     * icon and label still fit.
+     */
+    private fun fitRailCells() {
+        if (!::viewerControlsBar.isInitialized) return
+        val vertical = viewerControlsBar.orientation == LinearLayout.VERTICAL
+        val count = viewerControlsBar.childCount
+        if (count == 0) return
+        val full = resources.getDimensionPixelSize(R.dimen.ui_rail_cell)
+        val length = if (vertical) viewerControlsBar.height else viewerControlsBar.width
+        val available = length - (if (vertical) viewerControlsBar.paddingTop + viewerControlsBar.paddingBottom
+            else viewerControlsBar.paddingLeft + viewerControlsBar.paddingRight)
+        val cell = if (!vertical || length <= 0) full
+            else (available / count - dp(2f)).coerceIn(dp(48f), full)
+        val compact = cell < full
+        val margin = if (compact) dp(1f) else dp(2f)
+        for (i in 0 until count) {
+            val child = viewerControlsBar.getChildAt(i) as? TextView ?: continue
+            val lp = child.layoutParams as LinearLayout.LayoutParams
+            if (lp.height == cell && lp.width == full && lp.topMargin == margin) continue
+            lp.width = full
+            lp.height = cell
+            lp.setMargins(margin, margin, margin, margin)
+            child.layoutParams = lp
+            child.compoundDrawablePadding = if (compact) 0 else dp(2f)
+            child.setPadding(child.paddingLeft, if (compact) dp(2f) else dp(6f), child.paddingRight, if (compact) dp(1f) else dp(4f))
+        }
+    }
+
+    /**
+     * A side sheet on the right in landscape and a bottom sheet in portrait (Codex 1), so the sheet
+     * never lands on the gesture strip on the left and always leaves some of the picture showing.
+     */
+    private fun layoutViewerSheets(deviceLandscape: Boolean) {
+        if (!::viewerMenuSheet.isInitialized) return
+        val metrics = resources.displayMetrics
+        val sideWidth = resources.getDimensionPixelSize(R.dimen.ui_sheet_side_width)
+            .coerceAtMost((metrics.widthPixels * 0.6f).roundToInt())
+        val bottomHeight = (metrics.heightPixels * 0.72f).roundToInt()
+        for (sheet in listOf(viewerMenuSheet, viewerWindowSheet)) {
+            sheet.layoutParams = if (deviceLandscape) {
+                FrameLayout.LayoutParams(sideWidth, FrameLayout.LayoutParams.MATCH_PARENT, Gravity.END)
+            } else {
+                FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, bottomHeight, Gravity.BOTTOM)
+            }
+            sheet.setBackgroundResource(
+                if (deviceLandscape) R.drawable.ui_sheet_side_background
+                else R.drawable.ui_sheet_bottom_background
+            )
+        }
+    }
+
+    /**
+     * Match the device orientation to the remote screen.
+     *
+     * Only runs once a frame has actually decoded and the viewer is settled. Rotating the
+     * device destroys and recreates the TextureView's SurfaceTexture, which drops the
+     * decoder's output surface; doing that while a selection is still waiting for its first
+     * frame made the handshake time out and bounced the user back to the target list.
+     */
+    private fun applyViewerOrientation() {
+        applyViewerRailLayout()
+        if (currentScene != UiScene.VIEWER) return
+        if (videoWidth <= 0 || videoHeight <= 0) return
+        // Normally applyOrientationForContent already settled this at selection time; this
+        // only corrects the rare case where the listed size disagreed with what decoded.
+        val wantLandscape = videoWidth >= videoHeight && !forcePortrait
+        if (lastAppliedLandscape == wantLandscape) return
+        lastAppliedLandscape = wantLandscape
+        requestedOrientation =
+            if (wantLandscape) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        diagnosticsLog.log(
+            "orientation_corrected",
+            "decoded=${videoWidth}x${videoHeight} landscape=$wantLandscape"
+        )
+    }
+
+    /**
+     * Point the device at the shape of the target before opening the viewer.
+     *
+     * The window list already carries each target's client size, so the orientation is known
+     * at selection time. Committing to it here means the viewer surface is created once, in
+     * its final orientation, and no rotation happens while video is flowing. Desktop targets
+     * have no listed size and monitors are landscape, so they default that way.
+     */
+    private fun applyOrientationForContent(width: Int, height: Int, tab: TargetTab) {
+        val landscapeContent = when {
+            width > 0 && height > 0 -> width >= height
+            tab == TargetTab.DESKTOP -> true
+            else -> return
+        }
+        val wantLandscape = landscapeContent && !forcePortrait
+        lastAppliedLandscape = wantLandscape
+        requestedOrientation =
+            if (wantLandscape) ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            else ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+        diagnosticsLog.log(
+            "orientation_preset",
+            "expected=${width}x${height} tab=$tab landscape=$wantLandscape forcePortrait=$forcePortrait"
+        )
+    }
+
+    /** Let the next viewer entry re-evaluate orientation from scratch. */
+    private fun resetViewerOrientationState() {
+        lastAppliedLandscape = null
+        applySceneOrientation()
+    }
+
+    /**
+     * Outside the viewer the screen goes back to how the lists are held (SceneOrientationPolicy):
+     * upright on a phone, the device's own way on a tablet. Runs on every scene render, so a
+     * disconnect, an error or a lost host releases the viewer's landscape lock as well as Back does.
+     */
+    private fun applySceneOrientation() {
+        val inViewer = currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING
+        val wanted = when (SceneOrientationPolicy.forScene(inViewer, resources.configuration.smallestScreenWidthDp)) {
+            SceneOrientationPolicy.Request.VIEWER_DECIDES -> return
+            SceneOrientationPolicy.Request.PORTRAIT -> ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+            SceneOrientationPolicy.Request.SYSTEM_DECIDES -> ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+        // The next viewer entry decides again from its content.
+        lastAppliedLandscape = null
+        if (requestedOrientation == wanted) return
+        requestedOrientation = wanted
+        diagnosticsLog.log("orientation_released", "scene=$currentScene requested=$wanted")
+    }
+
+    private fun formatMegabytes(bytes: Long): String {
+        val mb = bytes.toDouble() / 1_000_000.0
+        return if (mb >= 100) String.format(Locale.US, "%.0f", mb)
+        else String.format(Locale.US, "%.1f", mb)
+    }
+
+    /**
+     * The unlock offer, shown only while the host says its lock screen is up.
+     *
+     * Gating on that matters for more than tidiness: sent to an unlocked PC, the password would be
+     * typed into whatever window happens to have focus.
+     */
+    private fun renderUnlockBar() {
+        val locked = currentScene == UiScene.VIEWER && NativeSessionBridge.nativeIsHostScreenLocked()
+        viewerUnlockBar.visibility = if (locked) View.VISIBLE else View.GONE
+    }
+
+    private fun renderDataUsage() {
+        sessionBytesReceived = NativeSessionBridge.nativeGetSessionBytesReceived()
+        viewerDataUsageText.text = getString(R.string.viewer_data_usage, formatMegabytes(sessionBytesReceived))
+        viewerPathText.text = when (connectionPathKind) {
+            "" -> ""
+            "private" -> getString(R.string.path_direct_lan)
+            "relay" -> getString(R.string.path_relay)
+            "public", "public-alt" -> getString(R.string.path_direct)
+            else -> getString(R.string.path_unknown)
+        }
+        // Amber for the relay. Not an error -- it is working, and on some networks it is the only
+        // thing that does -- but it is the one path where the counter above costs money.
+        viewerPathText.setTextColor(getColor(if (connectionPathKind == "relay") R.color.ui_warning else R.color.ui_text_secondary))
+    }
+
+    /**
+     * The candidate kind out of "ip:port|kind|note", which is how the bridge reports the winner.
+     * Anything unrecognised is left as-is so a kind added on the server still reaches the log.
+     */
+    private fun parseChosenCandidateKind(chosen: String): String {
+        val parts = chosen.split('|')
+        if (parts.size < 2) return ""
+        return parts[1].substringBefore(' ').trim()
+    }
+
+    // ------------------------------------------------------------ viewer sheets (apk-ui r1)
+
+    private fun isViewerSheetOpen(): Boolean =
+        ::viewerMenuOverlay.isInitialized &&
+            (viewerMenuOverlay.visibility == View.VISIBLE || viewerWindowOverlay.visibility == View.VISIBLE)
+
+    private fun initViewerSheets() {
+        viewerMenuOverlay = findViewById(R.id.viewerMenuOverlay)
+        viewerMenuSheet = findViewById(R.id.viewerMenuSheet)
+        viewerWindowOverlay = findViewById(R.id.viewerWindowOverlay)
+        viewerWindowSheet = findViewById(R.id.viewerWindowSheet)
+        viewerWindowList = findViewById(R.id.viewerWindowList)
+        viewerWindowStatusText = findViewById(R.id.viewerWindowStatusText)
+        viewerWindowProgress = findViewById(R.id.viewerWindowProgress)
+        viewerWindowRefreshButton = findViewById(R.id.viewerWindowRefreshButton)
+        viewerWindowsButton = findViewById(R.id.viewerWindowsButton)
+        viewerDesktopButton = findViewById(R.id.viewerDesktopButton)
+        viewerQualityLowButton = findViewById(R.id.viewerQualityLowButton)
+        viewerQualityHighButton = findViewById(R.id.viewerQualityHighButton)
+        viewerQualityBestButton = findViewById(R.id.viewerQualityBestButton)
+        viewerFpsSpinner = findViewById(R.id.viewerFpsSpinner)
+        viewerQualityStatusText = findViewById(R.id.viewerQualityStatusText)
+        viewerSharpOffButton = findViewById(R.id.viewerSharpOffButton)
+        viewerSharpWeakButton = findViewById(R.id.viewerSharpWeakButton)
+        viewerSharpStrongButton = findViewById(R.id.viewerSharpStrongButton)
+
+        // A tap on the dimmed picture closes the sheet. The sheet swallows its own taps, so they
+        // neither close it nor fall through -- nothing under either overlay reaches the PC.
+        viewerMenuOverlay.setOnClickListener { closeViewerMenu("scrim") }
+        viewerWindowOverlay.setOnClickListener { closeWindowSheet("scrim") }
+        findViewById<View>(R.id.viewerMenuCloseButton).setOnClickListener { closeViewerMenu("close") }
+        findViewById<View>(R.id.viewerWindowCloseButton).setOnClickListener { closeWindowSheet("close") }
+        viewerWindowRefreshButton.setOnClickListener {
+            requestWindowSheetList("refresh")
+            renderStatus()
+        }
+        // apk-ui r3: the PC viewer's 화면전환 / 바탕화면, not target selection -- that is the menu's
+        // 보는 화면 선택 below.
+        viewerWindowsButton.setOnClickListener {
+            sendHostChord(HostKeyChord.SWITCH_WINDOW, "switch-window", R.string.ui_chord_sent_switch)
+        }
+        viewerDesktopButton.setOnClickListener {
+            sendHostChord(HostKeyChord.SHOW_DESKTOP, "show-desktop", R.string.ui_chord_sent_desktop)
+        }
+        findViewById<View>(R.id.viewerMenuTargetsButton).setOnClickListener { openWindowSheet() }
+        viewerViewportChips = findViewById(R.id.viewerViewportChips)
+        viewerPanChip = findViewById(R.id.viewerPanChip)
+        viewerFullViewChip = findViewById(R.id.viewerFullViewChip)
+        viewerShowControlsChip = findViewById(R.id.viewerShowControlsChip)
+        viewerMenuViewButton = findViewById(R.id.viewerMenuViewButton)
+        viewerMenuViewButton.setOnClickListener {
+            closeViewerMenu("view_mode")
+            if (viewerViewport.isLarge) exitLargeView("menu") else enterLargeView("menu")
+        }
+        findViewById<View>(R.id.viewerMenuControlsButton).setOnClickListener {
+            closeViewerMenu("controls_hide")
+            setViewerControlsHidden(true, "menu")
+        }
+        viewerFullViewChip.setOnClickListener { exitLargeView("chip") }
+        viewerPanChip.setOnClickListener {
+            interruptViewerTouch("pan_mode")
+            viewerPanMode = !viewerPanMode
+            diagnosticsLog.log("viewer_view", "pan=$viewerPanMode")
+            renderViewportChips()
+        }
+        viewerShowControlsChip.setOnClickListener { setViewerControlsHidden(false, "chip") }
+        findViewById<View>(R.id.viewerMenuUnlockButton).setOnClickListener {
+            closeViewerMenu("unlock")
+            showUnlockDialog()
+        }
+        findViewById<View>(R.id.viewerMenuDiagnosticsButton).setOnClickListener {
+            closeViewerMenu("diagnostics")
+            toggleViewerLogDialog()
+        }
+        findViewById<View>(R.id.viewerMenuRebootButton).setOnClickListener {
+            closeViewerMenu("reboot")
+            confirmRemoteReboot()
+        }
+
+        windowSheetAdapter = WindowSheetAdapter()
+        viewerWindowList.adapter = windowSheetAdapter
+        viewerWindowList.setOnItemClickListener { _, _, position, _ ->
+            windowSheetItems.getOrNull(position)?.let { onWindowSheetRowTap(it) }
+        }
+
+        viewerQualityLowButton.setOnClickListener { selectQuality(QualityLevel.LOW, requestedRuntimeFps, "menu") }
+        viewerQualityHighButton.setOnClickListener { selectQuality(QualityLevel.HIGH, requestedRuntimeFps, "menu") }
+        viewerQualityBestButton.setOnClickListener { selectQuality(QualityLevel.BEST, requestedRuntimeFps, "menu") }
+        settingsQualityLowButton.setOnClickListener { selectQuality(QualityLevel.LOW, requestedRuntimeFps, "settings") }
+        settingsQualityHighButton.setOnClickListener { selectQuality(QualityLevel.HIGH, requestedRuntimeFps, "settings") }
+        settingsQualityBestButton.setOnClickListener { selectQuality(QualityLevel.BEST, requestedRuntimeFps, "settings") }
+        for ((buttons, origin) in listOf(
+            listOf(viewerSharpOffButton, viewerSharpWeakButton, viewerSharpStrongButton) to "menu",
+            listOf(settingsSharpOffButton, settingsSharpWeakButton, settingsSharpStrongButton) to "settings",
+        )) {
+            for ((button, level) in buttons.zip(SharpnessLevel.values())) {
+                button.setOnClickListener { selectSharpness(level, origin) }
+            }
+        }
+        settingsSharpMethodDefaultButton.setOnClickListener { selectSharpenMethod(SharpenMethod.DEFAULT, "settings") }
+        settingsSharpMethodDisplayButton.setOnClickListener { selectSharpenMethod(SharpenMethod.DISPLAY, "settings") }
+        for ((spinner, origin) in listOf(viewerFpsSpinner to "menu", settingsFpsSpinner to "settings")) {
+            val adapter = ArrayAdapter(
+                this,
+                R.layout.ui_spinner_item,
+                ViewerQualitySettings.FPS_CHOICES.map { getString(R.string.ui_fps_item, it) },
+            )
+            adapter.setDropDownViewResource(R.layout.ui_spinner_dropdown_item)
+            spinner.adapter = adapter
+            spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    val fps = ViewerQualitySettings.FPS_CHOICES.getOrNull(position) ?: return
+                    // Moving the spinner to the stored value from code lands here as well; that is
+                    // not a pick, and selectQuality ignores a choice that changes nothing.
+                    selectQuality(QualityLevel.fromBitrateKbps(requestedRuntimeBitrateKbps), fps, origin)
+                }
+
+                override fun onNothingSelected(parent: AdapterView<*>?) = Unit
+            }
+        }
+    }
+
+    private fun openViewerMenu() {
+        if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING) return
+        closeWindowSheet("menu_open")
+        prepareViewerForSheet()
+        renderQualityControls()
+        renderClipboardButton()
+        renderRebootMenuItem()
+        viewerMenuOverlay.visibility = View.VISIBLE
+        diagnosticsLog.log("viewer_menu", "action=open")
+    }
+
+    private fun closeViewerMenu(reason: String) {
+        if (!::viewerMenuOverlay.isInitialized || viewerMenuOverlay.visibility != View.VISIBLE) return
+        viewerMenuOverlay.visibility = View.GONE
+        diagnosticsLog.log("viewer_menu", "action=close reason=$reason")
+    }
+
+    private fun openWindowSheet() {
+        if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING) return
+        closeViewerMenu("window_sheet_open")
+        prepareViewerForSheet()
+        viewerWindowOverlay.visibility = View.VISIBLE
+        diagnosticsLog.log("window_sheet", "action=open")
+        requestWindowSheetList("open")
+        renderStatus()
+    }
+
+    private fun closeWindowSheet(reason: String) {
+        if (!::viewerWindowOverlay.isInitialized || viewerWindowOverlay.visibility != View.VISIBLE) return
+        viewerWindowOverlay.visibility = View.GONE
+        windowSheetAwaitingList = false
+        closeWindowSheetOnReady = false
+        diagnosticsLog.log("window_sheet", "action=close reason=$reason")
+    }
+
+    private fun closeViewerSheets(reason: String) {
+        closeViewerMenu(reason)
+        closeWindowSheet(reason)
+    }
+
+    /**
+     * Lets go of anything held on the PC before a sheet covers the picture: a finger mid-drag, a
+     * modifier held in the gesture strip, the soft keyboard. Otherwise a button or Ctrl would stay
+     * pressed on the PC for as long as the sheet is open.
+     */
+    private fun prepareViewerForSheet() {
+        cancelActiveViewerTouch("sheet_open")
+        releaseViewerModifiers()
+        hideViewerKeyboard("sheet_open")
+        viewerKeyPanel?.hide()
+        layoutViewerSheets(resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE)
+    }
+
+    private fun requestWindowSheetList(reason: String) {
+        windowSheetRequestQueued = NativeSessionBridge.nativeRequestWindowList()
+        windowSheetAwaitingList = true
+        windowSheetRequestedAtMs = SystemClock.elapsedRealtime()
+        diagnosticsLog.log("window_sheet", "action=list_request reason=$reason queued=$windowSheetRequestQueued")
+    }
+
+    private fun onWindowSheetRowTap(item: WindowPanelItem) {
+        when (windowSheetState) {
+            WindowSheetState.SWITCHING -> {
+                Toast.makeText(this, R.string.ui_switch_busy, Toast.LENGTH_SHORT).show()
+                return
+            }
+            WindowSheetState.LOCKED -> {
+                Toast.makeText(this, R.string.ui_windows_locked, Toast.LENGTH_SHORT).show()
+                return
+            }
+            else -> Unit
+        }
+        if (item.id == windowSheetCheckedId) {
+            closeWindowSheet("same_target")
+            return
+        }
+        val tab = if (item.id == 0L) TargetTab.DESKTOP else TargetTab.WINDOWS
+        diagnosticsLog.log("window_sheet", "action=select targetId=${item.id} tab=$tab")
+        closeWindowSheetOnReady = startSelectionTransition(item.id, item.title, tab, "viewer_sheet")
+        renderStatus()
+    }
+
+    /**
+     * The words for a switch in progress. The internal label for the desktop is "desktop"; that
+     * never reaches the screen (apk-ui r2 (2)).
+     */
+    private fun switchingText(id: Long?, tab: TargetTab, label: String): String = when {
+        tab == TargetTab.DESKTOP && (id ?: 0L) < MONITOR_ID_BASE -> getString(R.string.ui_switching_desktop)
+        tab == TargetTab.DESKTOP -> getString(R.string.ui_switching_screen, label)
+        else -> getString(R.string.ui_switching_window, label.ifBlank { getString(R.string.ui_window_untitled) })
+    }
+
+    private fun requestSummary(): String =
+        getString(R.string.ui_request_summary, qualityLabel(), requestedRuntimeFps)
+
+    /**
+     * Win+D / Alt+Tab on the PC, the way the PC viewer's toolbar sends them (send_host_key_chord):
+     * four key events through the same queue as typing, so a chord cannot overtake the keys around
+     * it. The phone's own OS never sees them.
+     *
+     * If the first event cannot be queued the input channel is off and nothing else is sent. Once
+     * a modifier is down every remaining step is still sent, so a hiccup mid-chord cannot leave
+     * Alt or Win held on the PC.
+     */
+    private fun sendHostChord(steps: List<HostKeyChord.Step>, what: String, sentMessage: Int) {
+        showViewerControls(emphasized = true)
+        if (currentScene != UiScene.VIEWER) {
+            // Keys only go out from a live viewer; while a switch is loading, say that instead.
+            Toast.makeText(this, R.string.ui_switch_busy, Toast.LENGTH_SHORT).show()
+            return
+        }
+        var sent = 0
+        for ((index, step) in steps.withIndex()) {
+            val ok = queueViewerSpecialKey(step.vk, if (step.down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP)
+            if (ok) sent++
+            if (!ok && index == 0) break
+        }
+        diagnosticsLog.log("host_chord", "what=$what sent=$sent/${steps.size}")
+        val message = when {
+            sent == 0 -> R.string.ui_chord_input_off
+            // Sharing one window, the host posts keys to that window; the shell and the task
+            // switcher do not read posted keys, so the chord may do nothing (as on the PC viewer).
+            windowSheetConfirmedId != 0L -> R.string.ui_chord_window_only
+            else -> sentMessage
+        }
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+    }
+
+    /** Runs on every viewer tick; draws the window sheet only while it is open. */
+    private fun renderViewerSheets(panelSnapshot: WindowPanelUiSnapshot) {
+        val switching = selectionStage != SelectionStage.IDLE
+        if (!switching) windowSheetConfirmedId = panelSnapshot.selectedId
+        windowSheetLocked = panelSnapshot.selectionLocked
+        if (viewerWindowOverlay.visibility != View.VISIBLE) return
+
+        // The session marks the request pending until the host answers; anything else in the
+        // status line means the answer (or something newer) has arrived.
+        if (windowSheetAwaitingList && !panelSnapshot.status.startsWith("window_list_request")) {
+            windowSheetAwaitingList = false
+        }
+        val waitedMs =
+            if (windowSheetRequestQueued) SystemClock.elapsedRealtime() - windowSheetRequestedAtMs
+            else ViewerWindowSheetModel.LIST_TIMEOUT_MS
+        val state = ViewerWindowSheetModel.resolve(
+            switching = switching,
+            selectionLocked = panelSnapshot.selectionLocked,
+            awaitingList = windowSheetAwaitingList,
+            waitedMs = waitedMs,
+            itemCount = panelSnapshot.items.size,
+        )
+        val checkedId = ViewerWindowSheetModel.checkedId(switching, panelSnapshot.selectedId, windowSheetConfirmedId)
+        val desktopName = getString(R.string.ui_windows_desktop_name)
+        val rows = buildList {
+            add(WindowPanelItem(0L, desktopName, 0, 0, false))
+            panelSnapshot.items.forEach { add(it.copy(thumbVersion = 0L)) }
+        }
+        // The poll runs four times a second; only a real change touches the list, so a scroll or
+        // a finger on a row is not reset under the user.
+        if (rows != windowSheetItems || checkedId != windowSheetCheckedId || state != windowSheetState) {
+            windowSheetItems.clear()
+            windowSheetItems.addAll(rows)
+            windowSheetCheckedId = checkedId
+            windowSheetState = state
+            windowSheetAdapter.notifyDataSetChanged()
+        }
+
+        val currentTitle = if (checkedId == 0L) desktopName else panelSnapshot.selectedTitle
+        val status = when (state) {
+            WindowSheetState.SWITCHING ->
+                switchingText(pendingSelectionId, pendingSelectionTab, pendingSelectionLabel.ifBlank { currentTitle })
+            WindowSheetState.LOCKED -> getString(R.string.ui_windows_locked)
+            WindowSheetState.LOADING -> getString(R.string.ui_windows_loading)
+            WindowSheetState.ERROR -> getString(R.string.ui_windows_error)
+            WindowSheetState.EMPTY -> getString(R.string.ui_windows_empty)
+            WindowSheetState.READY -> getString(R.string.ui_windows_current, currentTitle)
+        }
+        // A live region announces every change, so the same words are not set again each tick.
+        if (viewerWindowStatusText.text.toString() != status) viewerWindowStatusText.text = status
+        val busy = state == WindowSheetState.SWITCHING ||
+            (windowSheetAwaitingList && state != WindowSheetState.ERROR)
+        viewerWindowProgress.visibility = if (busy) View.VISIBLE else View.GONE
+        viewerWindowRefreshButton.isEnabled = state != WindowSheetState.SWITCHING
+        viewerWindowRefreshButton.alpha = if (viewerWindowRefreshButton.isEnabled) 1.0f else 0.4f
+    }
+
+    private inner class WindowSheetAdapter : BaseAdapter() {
+        override fun getCount(): Int = windowSheetItems.size
+        override fun getItem(position: Int): Any = windowSheetItems[position]
+        override fun getItemId(position: Int): Long = windowSheetItems[position].id
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val row = convertView ?: layoutInflater.inflate(R.layout.viewer_window_row, parent, false)
+            val item = windowSheetItems[position]
+            val desktop = item.id == 0L
+            val checked = item.id == windowSheetCheckedId
+            row.findViewById<ImageView>(R.id.viewerWindowRowIcon).setImageResource(
+                if (desktop) R.drawable.ic_ui_desktop else R.drawable.ic_ui_windows
+            )
+            val title = item.title.ifBlank { getString(R.string.ui_window_untitled) }
+            row.findViewById<TextView>(R.id.viewerWindowRowTitle).text = title
+            val detail = row.findViewById<TextView>(R.id.viewerWindowRowDetail)
+            detail.text = when {
+                desktop -> ""
+                item.minimized -> getString(R.string.ui_window_minimized)
+                item.width > 0 && item.height > 0 -> getString(R.string.ui_window_detail, item.width, item.height)
+                else -> ""
+            }
+            detail.visibility = if (detail.text.isEmpty()) View.GONE else View.VISIBLE
+            row.findViewById<View>(R.id.viewerWindowRowCheck).visibility =
+                if (checked) View.VISIBLE else View.INVISIBLE
+            row.isSelected = checked
+            row.alpha = if (ViewerWindowSheetModel.rowsEnabled(windowSheetState)) 1.0f else 0.5f
+            row.contentDescription =
+                if (checked) getString(R.string.ui_window_current_description, title) else title
+            return row
+        }
+    }
+
+    /**
+     * Types the Windows sign-in password without needing to see the lock screen.
+     *
+     * The lock screen is a curtain over the password box: a keystroke lifts it, the box already
+     * has focus, and Enter submits. So the whole interaction is Enter, the password, Enter -- and
+     * doing it blind is the point, because on a phone the lock screen is fiddly to aim at and the
+     * password box is small.
+     *
+     * The password is never stored and never logged. It is held only for as long as it takes to
+     * send, and note that it crosses the wire in the clear like any other typed text -- the media
+     * channel is not encrypted yet (N4).
+     */
+    private fun savedUnlockPassword(): String? =
+        SessionPersistence.loadUnlockPassword(this, currentUnlockHostKey())
+
+    /**
+     * Which PC the saved password belongs to. One phone reaches several, and typing the wrong
+     * password at a lock screen costs a failed sign-in attempt on that machine.
+     */
+    private fun currentUnlockHostKey(): String {
+        if (directoryHostKey.isNotEmpty()) return directoryHostKey
+        return hostEdit.text.toString().trim()
+    }
+
+    /** The menu's restart item follows the host's capability; a disabled item says why. */
+    private fun renderRebootMenuItem() {
+        val menu = RemoteRebootPolicy.menu(NativeSessionBridge.nativeHostCaptureFlags())
+        val button = findViewById<View>(R.id.viewerMenuRebootButton) ?: return
+        button.isEnabled = menu.enabled
+        button.alpha = if (menu.enabled) 1.0f else 0.5f
+        findViewById<TextView>(R.id.viewerMenuRebootReason)?.apply {
+            text = if (menu.enabled) "" else RemoteRebootPolicy.DISABLED_REASON
+            visibility = if (menu.enabled) View.GONE else View.VISIBLE
+        }
+    }
+
+    /** The confirm popup. "다시 시작" sends one request; "취소" sends nothing. */
+    private fun confirmRemoteReboot() {
+        if (rebootDialog?.isShowing == true) return
+        val menu = RemoteRebootPolicy.menu(NativeSessionBridge.nativeHostCaptureFlags())
+        if (!rebootFlow.onMenu(menu)) {
+            if (!menu.enabled) Toast.makeText(this, RemoteRebootPolicy.DISABLED_REASON, Toast.LENGTH_LONG).show()
+            return
+        }
+        diagnosticsLog.log("remote_reboot", "action=confirm_open warning=${menu.showPreloginWarning}")
+        rebootDialog = AlertDialog.Builder(this)
+            .setTitle(R.string.ui_remote_reboot)
+            .setMessage(RemoteRebootPolicy.confirmMessage(menu))
+            .setPositiveButton(R.string.ui_remote_reboot_confirm) { _, _ ->
+                val sent = rebootFlow.onConfirm()
+                diagnosticsLog.log("remote_reboot", "action=confirm sent=$sent id=${rebootFlow.requestId}")
+                rebootFlow.statusText()?.let { Toast.makeText(this, it, Toast.LENGTH_SHORT).show() }
+            }
+            .setNegativeButton(R.string.ui_cancel) { _, _ -> rebootFlow.onCancel() }
+            .create()
+        rebootDialog?.setOnCancelListener { rebootFlow.onCancel() }
+        rebootDialog?.setOnDismissListener {
+            rebootDialog = null
+            applyImmersiveMode()
+        }
+        rebootDialog?.show()
+    }
+
+    /** The request's answer, polled on the status ticker (the bridge has no native->Java callback). */
+    private fun pollRebootOutcome() {
+        val o = NativeSessionBridge.nativeTakeRebootOutcome() ?: return
+        rebootFlow.onOutcome(o[0].toInt(), o[1].toInt(), o[2])
+        diagnosticsLog.log("remote_reboot", "action=outcome id=${o[0]} outcome=${o[1]} win32=${o[2]} phase=${rebootFlow.phase}")
+        rebootFlow.statusText()?.let { Toast.makeText(this, it, Toast.LENGTH_LONG).show() }
+    }
+
+    /** The phone has no sealed credential entry yet: on the pre-login screen it says so instead. */
+    private fun showPreloginCredentialNote(): Boolean {
+        if (!RemoteRebootPolicy.showCredentialUpdateNote(NativeSessionBridge.nativeHostCaptureFlags())) return false
+        diagnosticsLog.log("prelogin_credential", "action=update_note")
+        AlertDialog.Builder(this)
+            .setTitle(R.string.unlock_title)
+            .setMessage(RemoteRebootPolicy.CREDENTIAL_UPDATE_NOTE)
+            .setPositiveButton(R.string.quick_close, null)
+            .show()
+        return true
+    }
+
+    private fun showUnlockDialog() {
+        if (unlockDialog?.isShowing == true) return
+        if (showPreloginCredentialNote()) return  // never a plaintext entry on the pre-login screen
+        val existing = savedUnlockPassword()
+        val input = EditText(this).apply {
+            inputType = android.text.InputType.TYPE_CLASS_TEXT or
+                android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD
+            hint = getString(R.string.unlock_hint)
+            setSingleLine()
+            if (!existing.isNullOrEmpty()) setText(existing)
+        }
+        val saveBox = android.widget.CheckBox(this).apply {
+            text = getString(R.string.unlock_save_checkbox)
+            isChecked = !existing.isNullOrEmpty()
+        }
+        val note = TextView(this).apply {
+            text = getString(R.string.unlock_saved_note)
+            textSize = 12f
+            alpha = 0.7f
+        }
+        val padding = (24 * resources.displayMetrics.density).toInt()
+        val column = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(padding, padding / 2, padding, 0)
+            addView(input)
+            addView(saveBox)
+            addView(note)
+        }
+        val builder = AlertDialog.Builder(this)
+            .setTitle(R.string.unlock_title)
+            .setMessage(R.string.unlock_message)
+            .setView(column)
+            .setPositiveButton(R.string.unlock_send) { _, _ ->
+                val password = input.text.toString()
+                SessionPersistence.saveUnlockPassword(
+                    this, currentUnlockHostKey(), if (saveBox.isChecked) password else null
+                )
+                sendUnlockSequence(password)
+                input.text.clear()
+            }
+            .setNegativeButton(R.string.quick_close) { _, _ -> input.text.clear() }
+        if (!existing.isNullOrEmpty()) {
+            builder.setNeutralButton(R.string.unlock_clear) { _, _ ->
+                SessionPersistence.saveUnlockPassword(this, currentUnlockHostKey(), null)
+                input.text.clear()
+                Toast.makeText(this, R.string.unlock_cleared, Toast.LENGTH_SHORT).show()
+            }
+        }
+        unlockDialog = builder.create()
+        unlockDialog?.setOnDismissListener { unlockDialog = null }
+        unlockDialog?.show()
+    }
+
+    /**
+     * Enter, wait, password, wait, Enter.
+     *
+     * The waits are not decoration. The first Enter dismisses a curtain that animates away, and
+     * anything typed during that animation lands nowhere; the second gap lets the host finish
+     * delivering the text before the submit arrives, since they travel as separate messages.
+     */
+    private fun sendUnlockSequence(password: String) {
+        if (showPreloginCredentialNote()) return  // a saved password is not typed into the pre-login screen either
+        if (password.isEmpty()) {
+            Toast.makeText(this, R.string.unlock_no_password, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val handler = Handler(Looper.getMainLooper())
+        pressEnter()
+        handler.postDelayed({
+            NativeSessionBridge.nativeQueueInputText(password)
+            handler.postDelayed({ pressEnter() }, 250)
+        }, 600)
+        // Deliberately says nothing about the password itself, only that the attempt happened.
+        diagnosticsLog.log("unlock_sent", "chars=${password.length}")
+        Toast.makeText(this, R.string.unlock_sent, Toast.LENGTH_SHORT).show()
+    }
+
+    private fun pressEnter() {
+        queueRemoteInput(INPUT_KIND_KEY_DOWN, 0, 0, 0, VK_RETURN, 0)
+        queueRemoteInput(INPUT_KIND_KEY_UP, 0, 0, 0, VK_RETURN, 0)
+    }
+
+    private fun qualityLabel(): String = getString(
+        when (QualityLevel.fromBitrateKbps(requestedRuntimeBitrateKbps)) {
+            QualityLevel.BEST -> R.string.ui_quality_best_short
+            QualityLevel.HIGH -> R.string.ui_quality_high_short
+            QualityLevel.LOW -> R.string.ui_quality_low_short
+        }
+    )
+
+    /**
+     * One pick from the menu or the settings screen. Both write the same two values, which is what
+     * SessionPersistence stores, so the two screens can never disagree.
+     */
+    private fun selectQuality(level: QualityLevel, fps: Int, origin: String) {
+        if (level.bitrateKbps == requestedRuntimeBitrateKbps && fps == requestedRuntimeFps) {
+            renderQualityControls()
+            return
+        }
+        requestedRuntimeBitrateKbps = level.bitrateKbps
+        requestedRuntimeFps = fps
+        val connected = NativeSessionBridge.nativeGetStatus().startsWith("connected")
+        val sent = connected &&
+            NativeSessionBridge.nativeRequestRuntimeConfig(requestedRuntimeBitrateKbps * 1000, requestedRuntimeFps)
+        // Not sent is not lost: the connected-sync pass retries until the session takes it.
+        pendingRuntimeConfigSync = !sent
+        qualityStatusMessage = when {
+            sent -> getString(R.string.ui_quality_status_requested, qualityLabel(), requestedRuntimeFps)
+            connected -> getString(R.string.ui_quality_status_failed)
+            else -> getString(R.string.ui_quality_status_pending, qualityLabel(), requestedRuntimeFps)
+        }
+        settingsStatusMessage =
+            requestSummary()
+        settingsAppliedText.text = settingsStatusMessage
+        saveCurrentEndpoint()
+        diagnosticsLog.log(
+            "quality_select",
+            "origin=$origin bitrateKbps=$requestedRuntimeBitrateKbps fps=$requestedRuntimeFps sent=$sent"
+        )
+        renderQualityControls()
+    }
+
+    /** The menu and the settings screen show the same stored pick. */
+    private fun renderQualityControls() {
+        if (!::viewerQualityLowButton.isInitialized) return
+        val level = QualityLevel.fromBitrateKbps(requestedRuntimeBitrateKbps)
+        val fpsIndex = ViewerQualitySettings.FPS_CHOICES
+            .indexOf(ViewerQualitySettings.nearestFps(requestedRuntimeFps)).coerceAtLeast(0)
+        for (row in listOf(
+            listOf(viewerQualityLowButton, viewerQualityHighButton, viewerQualityBestButton),
+            listOf(settingsQualityLowButton, settingsQualityHighButton, settingsQualityBestButton),
+        )) {
+            // quality-6m r1: one button per level, in QualityLevel order -- exactly one selected.
+            for ((button, choice) in row.zip(QualityLevel.values())) button.isSelected = level == choice
+        }
+        for (spinner in listOf(viewerFpsSpinner, settingsFpsSpinner)) {
+            if (spinner.selectedItemPosition != fpsIndex) spinner.setSelection(fpsIndex, false)
+        }
+        if (::viewerSharpOffButton.isInitialized && ::settingsSharpOffButton.isInitialized) {
+            for (row in listOf(
+                listOf(viewerSharpOffButton, viewerSharpWeakButton, viewerSharpStrongButton),
+                listOf(settingsSharpOffButton, settingsSharpWeakButton, settingsSharpStrongButton),
+            )) {
+                // The REQUESTED level stays selected after a fallback: the user's choice is not overwritten.
+                for ((button, choice) in row.zip(SharpnessLevel.values())) button.isSelected = sharpness == choice
+            }
+        }
+        if (::settingsSharpMethodDefaultButton.isInitialized) {
+            settingsSharpMethodDefaultButton.isSelected = sharpenMethod == SharpenMethod.DEFAULT
+            settingsSharpMethodDisplayButton.isSelected = sharpenMethod == SharpenMethod.DISPLAY
+        }
+        viewerQualityStatusText.text = qualityStatusMessage
+        viewerQualityStatusText.visibility = if (qualityStatusMessage.isEmpty()) View.GONE else View.VISIBLE
+    }
+
+    private var lastVideoOutputSeenUs = 0L
+    private var lastVisibilityScene: UiScene? = null
+
+    private val scrollGestureStepPx: Float
+        get() = SCROLL_GESTURE_STEP_DP * resources.displayMetrics.density
+
+    private enum class UiScene {
+        LOGIN,
+        HOSTS,
+        CONNECT,
+        TARGETS,
+        SWITCHING,
+        VIEWER,
+    }
+
+    private enum class TargetTab {
+        WINDOWS,
+        DESKTOP,
+        SETTINGS,
+    }
+
+    private enum class SelectionStage {
+        IDLE,
+        REQUESTING,
+        WAITING_FIRST_FRAME,
+    }
+
+    private enum class ViewerTouchMode {
+        DIRECT,
+        SCROLL,
+    }
+
+    private enum class DesktopCaptureBackendOption(val code: Int, val label: String) {
+        DXGI(1, "DXGI"),
+        WGC(2, "WGC"),
+        GDI(3, "GDI");
+
+        companion object {
+            fun fromCode(code: Int): DesktopCaptureBackendOption =
+                values().firstOrNull { it.code == code } ?: DXGI
+        }
+    }
+
+    private data class WindowPanelItem(
+        val id: Long,
+        val title: String,
+        val width: Int,
+        val height: Int,
+        val minimized: Boolean,
+        val thumbVersion: Long = 0L,
+    )
+
+    /** One attached screen on the host, ordered primary-first so the index is what the UI shows. */
+    private data class MonitorPanelItem(
+        val id: Int,
+        val width: Int,
+        val height: Int,
+        val primary: Boolean,
+    )
+
+    private data class WindowPanelUiSnapshot(
+        val selectedId: Long,
+        val selectedTitle: String,
+        val selectedWidth: Int,
+        val selectedHeight: Int,
+        val selectionLocked: Boolean,
+        val status: String,
+        val lastSelectSeq: Int,
+        val lastSelectOk: Boolean,
+        val lastSelectWindowId: Long,
+        val lastSelectStreamGeneration: Long,
+        val lastSelectHostSendQpcUs: Long,
+        val items: List<WindowPanelItem>,
+        // Empty on a host that predates the monitor messages, which is also what
+        // hostSupportsMonitors reports -- asking such a host would stall the control loop.
+        val hostSupportsMonitors: Boolean = false,
+        // The host selects a screen through the window-select transaction (applied, then
+        // acknowledged with the stream generation the viewer waits for). Without it a screen pick
+        // can never be acknowledged, so it is not attempted (t-970r4zgo).
+        val hostSupportsMonitorSelect: Boolean = false,
+        // Which monitor list `monitors` is; a pick is sent against it (t-970r4zgo r3).
+        val monitorListRevision: Long = 0L,
+        val selectedMonitorId: Int = 0,
+        val monitors: List<MonitorPanelItem> = emptyList(),
+    ) {
+        companion object {
+            val EMPTY = WindowPanelUiSnapshot(
+                selectedId = 0L,
+                selectedTitle = "desktop",
+                selectedWidth = 0,
+                selectedHeight = 0,
+                selectionLocked = false,
+                status = "waiting_control",
+                lastSelectSeq = 0,
+                lastSelectOk = false,
+                lastSelectWindowId = 0L,
+                lastSelectStreamGeneration = 0L,
+                lastSelectHostSendQpcUs = 0L,
+                items = emptyList(),
+            )
+        }
+    }
+
+    private data class ViewerContentRect(
+        val left: Float,
+        val top: Float,
+        val width: Float,
+        val height: Float,
+        val contentWidth: Int,
+        val contentHeight: Int,
+    )
+
+    private lateinit var diagnosticsLog: SessionDiagnosticsLog
+    private lateinit var loginScene: View
+    private lateinit var hostsScene: View
+    private lateinit var connectScene: View
+    private lateinit var targetsScene: View
+    private lateinit var viewerScene: View
+    private lateinit var loginIdInput: EditText
+    private lateinit var loginPasswordInput: EditText
+    private lateinit var loginButton: Button
+    private lateinit var loginErrorText: TextView
+    private lateinit var loginRetryButton: Button
+    private lateinit var loginManualButton: Button
+    private lateinit var hostsTitleText: TextView
+    private lateinit var hostsStatusText: TextView
+    private lateinit var hostsListView: ListView
+    private lateinit var hostsEmptyText: TextView
+    private lateinit var hostsRefreshButton: Button
+    private lateinit var hostsLogoutButton: Button
+    private lateinit var hostEdit: EditText
+    private lateinit var videoPortEdit: EditText
+    private lateinit var controlPortEdit: EditText
+    private lateinit var connectStatusText: TextView
+    private lateinit var connectErrorText: TextView
+    private lateinit var listSelectedText: TextView
+    private lateinit var listStatusText: TextView
+    private lateinit var targetListEmptyText: TextView
+    private lateinit var targetListView: GridView
+    private lateinit var listDisconnectButton: Button
+    // keepalive r1
+    private lateinit var listHostsButton: Button
+    private lateinit var hostsParkBanner: View
+    private lateinit var hostsParkText: TextView
+    private lateinit var hostsParkDisconnectButton: Button
+    private lateinit var viewerMenuHostsButton: View
+    private lateinit var listWindowsButton: Button
+    private lateinit var listDevicesButton: Button
+    private lateinit var listSettingsButton: Button
+    private lateinit var listRefreshButton: Button
+    private lateinit var settingsPanel: View
+    private lateinit var settingsDesktopBackendDxgiButton: Button
+    private lateinit var settingsDesktopBackendWgcButton: Button
+    private lateinit var settingsDesktopBackendGdiButton: Button
+    private lateinit var settingsDesktopBackendStatusText: TextView
+    private lateinit var settingsApplyButton: Button
+    private lateinit var settingsAppliedText: TextView
+    private lateinit var viewerControlsBar: LinearLayout
+    private lateinit var viewerBackButton: Button
+    private lateinit var viewerKeyboardButton: Button
+    private lateinit var viewerOverlayStatusText: TextView
+    private lateinit var viewerSplit: LinearLayout
+    private lateinit var viewerRotateButton: Button
+    private lateinit var viewerClipboardButton: Button
+    private var viewerKeyPanel: ViewerKeyPanel? = null
+    private var imeWasVisible = false
+    private var disconnectDialog: AlertDialog? = null
+    private lateinit var viewerMenuButton: Button
+    private lateinit var viewerDataUsageText: TextView
+    private lateinit var viewerPathText: TextView
+    // The kind of candidate that answered ("private", "public", "relay", ...). Empty until a
+    // directory connect has run; a manual IP session never had candidates to choose between.
+    private var connectionPathKind: String = ""
+    private lateinit var viewerLoadingPanel: View
+    private lateinit var viewerLoadingText: TextView
+    private lateinit var viewerImeCaptureView: ImeCaptureView
+    // apk-keyboard-tabs r1: [휴대폰 자판 | PC 키] above whichever keyboard is up.
+    private lateinit var viewerKeyboardTabs: View
+    private lateinit var viewerKeyboardTabPhone: Button
+    private lateinit var viewerKeyboardTabPcKeys: Button
+    /** The IME's height over the window bottom, from the last insets; 0 while it is down. */
+    private var imeBottomPx = 0
+    /** The phone keyboard was asked for and the IME has not taken its height yet (r3 K1). */
+    private var awaitingIme = false
+    /** How long the tab bar waits for the phone keyboard's IME to take its height. */
+    private val imeWaitMs = 600L
+    private val imeWaitOverRunnable = Runnable {
+        awaitingIme = false
+        renderViewerKeyboardTabs()
+    }
+    private lateinit var viewerInputPreviewText: TextView
+    private lateinit var viewerModeBanner: TextView
+    private lateinit var videoTextureView: TextureView
+    private lateinit var targetListAdapter: TargetCardAdapter
+    private val targetListLabels = mutableListOf<String>()
+    private val targetListIds = mutableListOf<Long>()
+    // The monitorListRevision of the screens currently drawn in the target list.
+    private var targetListMonitorRevision = 0L
+    private var targetListSelectedId = 0L
+    private val thumbnailBitmaps = HashMap<Long, Bitmap>()
+    private val thumbnailVersions = HashMap<Long, Long>()
+
+    /** Card grid adapter: preview image on top, one-line title underneath. */
+    private inner class TargetCardAdapter : BaseAdapter() {
+        override fun getCount(): Int = targetListIds.size
+        override fun getItem(position: Int): Any = targetListLabels[position]
+        override fun getItemId(position: Int): Long = targetListIds[position]
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+            val view = convertView
+                ?: layoutInflater.inflate(R.layout.target_card, parent, false)
+            val id = targetListIds[position]
+            view.findViewById<TextView>(R.id.targetCardTitle).text = targetListLabels[position]
+            val image = view.findViewById<ImageView>(R.id.targetCardThumbnail)
+            val bmp = thumbnailBitmaps[id]
+            if (bmp != null) {
+                image.scaleType = ImageView.ScaleType.FIT_CENTER
+                image.imageTintList = null
+                image.setImageBitmap(bmp)
+            } else {
+                // No preview yet (or none for this target): an icon, not an empty black box.
+                image.scaleType = ImageView.ScaleType.CENTER
+                image.imageTintList = android.content.res.ColorStateList.valueOf(getColor(R.color.ui_text_secondary))
+                image.setImageResource(
+                    if (activeTargetTab == TargetTab.DESKTOP) R.drawable.ic_ui_desktop else R.drawable.ic_ui_windows
+                )
+            }
+            view.isActivated = id == targetListSelectedId
+            return view
+        }
+    }
+
+    /** Pull changed previews across JNI and decode them into reusable bitmaps. */
+    private fun refreshThumbnails(items: List<WindowPanelItem>) {
+        var changed = false
+        val wanted = HashSet<Long>()
+        val entries = ArrayList<Pair<Long, Long>>(items.size + 1)
+        entries.add(0L to 0L)  // desktop preview has no version marker; fetch when absent
+        items.forEach { entries.add(it.id to it.thumbVersion) }
+        for ((id, version) in entries) {
+            wanted.add(id)
+            val known = thumbnailVersions[id]
+            if (known != null && known == version && thumbnailBitmaps.containsKey(id)) continue
+            if (version == 0L && thumbnailBitmaps.containsKey(id)) continue
+            val raw = NativeSessionBridge.nativeGetWindowThumbnail(id) ?: continue
+            if (raw.size < 8) continue
+            val header = ByteBuffer.wrap(raw).order(ByteOrder.LITTLE_ENDIAN)
+            val w = header.int
+            val h = header.int
+            // Long arithmetic, and an upper bound from the protocol: a corrupt header would
+            // otherwise overflow the size check or ask for an absurd allocation.
+            val pixelBytes = w.toLong() * h.toLong() * 4L
+            if (w <= 0 || h <= 0 || w > THUMBNAIL_MAX_EDGE || h > THUMBNAIL_MAX_EDGE) continue
+            if (raw.size < 8L + pixelBytes) continue
+            val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            // Copied into a direct buffer starting at zero rather than handing over the wrapped
+            // array with its position at 8. That form crashed inside the framework's critical
+            // array release, taking the whole app down as soon as a preview arrived.
+            val pixels = ByteBuffer.allocateDirect(pixelBytes.toInt()).order(ByteOrder.LITTLE_ENDIAN)
+            pixels.put(raw, 8, pixelBytes.toInt())
+            pixels.rewind()
+            bmp.copyPixelsFromBuffer(pixels)
+            thumbnailBitmaps[id] = bmp
+            thumbnailVersions[id] = version
+            changed = true
+        }
+        val stale = thumbnailBitmaps.keys.filter { it !in wanted }
+        if (stale.isNotEmpty()) {
+            stale.forEach {
+                thumbnailBitmaps.remove(it)
+                thumbnailVersions.remove(it)
+            }
+            changed = true
+        }
+        if (changed) targetListAdapter.notifyDataSetChanged()
+    }
+    private var currentScene = UiScene.LOGIN
+    private val directoryExecutor = Executors.newSingleThreadExecutor()
+    private var directoryHosts: List<DirectoryClient.Host> = emptyList()
+    private lateinit var hostListAdapter: HostCardAdapter
+    private var directoryBusy = false
+
+    /** What the directory advertised at login, if anything. Absence has its own rule. */
+    private var directoryObserveEndpoint = DirectoryClient.ObserveEndpoint()
+    /** Set while a directory-brokered connection is being established, to keep the UI honest. */
+    private var directoryConnectingName = ""
+    // The host this session reached through the directory, so a saved unlock password belongs to
+    // one PC rather than to the phone. Empty for a manual IP connection.
+    private var directoryHostKey = ""
+    // keepalive r1: the name shown for it, and the one parked connection (SessionPark).
+    private var directoryHostName = ""
+    private var parked: SessionPark.Parked? = null
+    // r2 K4: a tap on the parked PC made while its park was still confirming, kept for that park.
+    private var parkPendingTap: SessionPark.PendingTap? = null
+    // r2 §7: a resume whose clipboard baseline could not be read holds pushes until a real change.
+    private var clipboardResumeHold = false
+    // r2 K2: which directory connect owns the native session (SessionPark.ConnectOwner).
+    // r4 S2-a: numbered by the native connect gate, for the whole process (never reused by a new Activity).
+    private val connectOwner = SessionPark.ConnectOwner { NativeSessionBridge.nativeConnectOpNext() }
+    // r4 S2-b: scheduled intents (a held tap's fallback); every stop ends them for good.
+    private val connectIntents = SessionPark.ConnectIntents(connectOwner)
+    private var parkEpisodeCounter = 0L
+    private var parkConfirmLogged = false
+    private var parkNetwork: Network? = null
+    private var parkNetworkCallback: ConnectivityManager.NetworkCallback? = null
+    private val parkExpiryRunnable = Runnable {
+        parkTick()
+        renderStatus()
+    }
+    // How long a tap took to a usable target list: a fresh connect or a parked reuse (diagnostics).
+    private var targetsReadyWatchStartMs = 0L
+    private var targetsReadyWatchOrigin = ""
+    /**
+     * The user asked to type an address instead of signing in. Remembered so that hanging up
+     * returns them to the manual form rather than to a PC list they chose not to use.
+     */
+    private var manualConnectMode = false
+    private var activeTargetTab = TargetTab.WINDOWS
+    private var connectFlowActive = false
+    private var selectionStage = SelectionStage.IDLE
+    private var selectionGenerationCounter = 0L
+    private var pendingSelectionId: Long? = null
+    private var pendingSelectionLabel = ""
+    private var pendingSelectionTab = TargetTab.WINDOWS
+    private var pendingSelectionGeneration = 0L
+    private var pendingSelectionStartedAtMs = 0L
+    private var pendingSelectionAckLogged = false
+    private var lastLoggedScene = UiScene.CONNECT
+    private var lastLoggedStatus = ""
+    private var lastLoggedPanelStatus = ""
+    private var lastLoggedVideoDebug = ""
+    private var lastViewerOutCount = -1
+    private var lastViewerInCount = -1
+    private var lastViewerOutChangeAtMs = 0L
+    private var lastViewerStallLogAtMs = 0L
+    private var lastViewerRecoveryTargetId = Long.MIN_VALUE
+    private var lastViewerRecoveryAtMs = 0L
+    private var lastViewerRecoveryAttempts = 0
+    private var requestedRuntimeBitrateKbps = ViewerQualitySettings.DEFAULT_QUALITY.bitrateKbps
+    // viewer-sharpness r1 B: where the picture sits -- drawing and input both read it (ViewerViewport).
+    private val viewerViewport = ViewerViewport()
+    // r2 R1: who owns the touch stream on the picture, from its ACTION_DOWN to its final UP / CANCEL.
+    private val viewerTouchRouter = ViewerTouchRouter()
+    private var viewerPanMode = false          // 크게보기: touches move / scale the picture and go nowhere else
+    private var viewerControlsHidden = false   // the zone strip and the rail give their room to the picture
+    private var viewportPanPointerId = MotionEvent.INVALID_POINTER_ID
+    private var viewportPanLastX = 0f
+    private var viewportPanLastY = 0f
+    private lateinit var viewerViewportChips: View
+    private lateinit var viewerPanChip: TextView
+    private lateinit var viewerFullViewChip: TextView
+    private lateinit var viewerShowControlsChip: TextView
+    private lateinit var viewerMenuViewButton: Button
+    private val viewportScaleDetector by lazy {
+        ScaleGestureDetector(this, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+            override fun onScale(detector: ScaleGestureDetector): Boolean {
+                val (cw, ch) = viewerContentSize() ?: return true
+                viewerViewport.zoomBy(detector.scaleFactor, detector.focusX, detector.focusY,
+                    videoTextureView.width.toFloat(), videoTextureView.height.toFloat(), cw, ch)
+                if (!viewerViewport.isLarge) {
+                    exitLargeView("pinch_in")
+                } else {
+                    applyVideoTransform()
+                }
+                return true
+            }
+        })
+    }
+    private var requestedRuntimeFps = ViewerQualitySettings.DEFAULT_FPS
+    // ua2-apk r1: what THIS connection asked for (null = nothing: the host's default). Never stored; a new
+    // connection starts without one (Codex codex_rel_0163_r1.md §1).
+    private var sessionDesktopBackend: DesktopCaptureBackendOption? = null
+    private var desktopBackendQueryAtMs = 0L
+    /** renderStatus's own reading of the session (status "connected"), for the backend controls. */
+    private var sessionConnectedNow = false
+    private var settingsStatusMessage = ""
+    private var pendingRuntimeConfigSync = false
+    private var desiredStreamActive = false
+    private var lastAppliedStreamActive: Boolean? = null
+    private var videoSurface: Surface? = null
+    private var videoWidth = 0
+    private var videoHeight = 0
+    private var expectedContentWidth = 0
+    private var expectedContentHeight = 0
+    private var surfaceBufferWidth = 0
+    private var surfaceBufferHeight = 0
+    private var exitDialog: AlertDialog? = null
+    private var viewerLogDialog: AlertDialog? = null
+    private var viewerLogStatusText: TextView? = null
+    private var viewerLogTextView: TextView? = null
+    private var activeTouchPointerId = MotionEvent.INVALID_POINTER_ID
+    private var activeViewerTouchMode = ViewerTouchMode.DIRECT
+    private var virtualMouse: ViewerVirtualMouse? = null
+    /** Where the on-screen mouse thinks the remote pointer is, in remote pixels. */
+    private var virtualPointerX = -1
+    private var virtualPointerY = -1
+    /** Finger spread at the start of a pinch, for the zoom gesture in tablet mode. */
+    private var pinchStartSpan = 0f
+    private var pinchZoomCarry = 0f
+    private var activeTouchButtons = 0
+    private var activeTouchIsSecondary = false
+    private var lastTouchVideoX = 0
+    private var lastTouchVideoY = 0
+    private var scrollLastTouchY = 0f
+    private var scrollWheelCarryPx = 0f
+
+    // A finger never holds perfectly still. Every pixel of that wobble used to be forwarded as
+    // a cursor move with the button down, which Windows reads as a drag once it passes 4px --
+    // so items got dragged instead of clicked and the second tap of a double-click landed
+    // outside the 4px double-click rectangle. Hold moves back until the gesture clearly is a
+    // drag, and keep a tap anchored to the pixel it started on.
+    private var touchDownViewX = 0f
+    private var touchDownViewY = 0f
+    private var touchDownVideoX = 0
+    private var touchDownVideoY = 0
+    private var touchDragLatched = false
+    private var lastTapVideoX = 0
+    private var lastTapVideoY = 0
+    private var lastTapUpAtMs = 0L
+    // Without this, (0,0) with a zero timestamp reads as a real anchor during the first
+    // moments after launch, and a stale anchor survives a cancel or a session change.
+    private var lastTapAnchorValid = false
+    private var lastTapSecondary = false
+    private val viewerTouchSlopPx: Float by lazy {
+        ViewConfiguration.get(this).scaledTouchSlop.toFloat()
+    }
+
+    // The dedicated left strip. Its finger lives in a different view's event stream than the
+    // picture's, so holding a zone cannot disturb the touch bookkeeping above -- which is also
+    // why these are booleans and not pointer ids.
+    private lateinit var viewerZoneRightClick: TextView
+    private lateinit var viewerZoneTablet: TextView
+    private lateinit var viewerTabletLockButton: TextView
+    private var zoneRightClickHeld = false
+    private var zoneTabletHeld = false
+
+    /** Pinned tablet mode: survives the holding finger lifting, until the lock is tapped off. */
+    private var zoneTabletLocked = false
+    private val viewerControlsDimAlpha = 1.0f  // rail sits beside the video, nothing to uncover
+    private val viewerControlsFadeRunnable = Runnable {
+        if (currentScene == UiScene.VIEWER) {
+            viewerControlsBar.animate().alpha(viewerControlsDimAlpha).setDuration(220L).start()
+        }
+    }
+
+    // Remote reboot (prelogin-ui r1, item 8): one confirm -> one request; its answer and the restart's
+    // disconnect are shown as the request's state, never as an error, and nothing is re-sent by itself.
+    private val rebootFlow = RemoteRebootFlow { NativeSessionBridge.nativeRequestReboot() }
+    private var rebootDialog: AlertDialog? = null
+
+    private val statusHandler = Handler(Looper.getMainLooper())
+    private val statusPollRunnable = object : Runnable {
+        override fun run() {
+            renderStatus()
+            statusHandler.postDelayed(this, statusPollDelayMs())
+        }
+    }
+
+    // --- clipboard text sync (K1) ------------------------------------------------------
+    //
+    // Android is not Windows here, and the difference decides the design. From Android 10 an app
+    // may only read the clipboard while it holds focus, so there is no background watcher: the
+    // clipboard is read when this activity has focus and when the system reports a change while
+    // it does. Writing is likewise a foreground action. The native side never touches the
+    // clipboard -- it only carries text over the control channel -- and its echo guard means text
+    // that just arrived from the PC is not sent straight back.
+
+    private val clipboardManager by lazy {
+        getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+    }
+
+    private val clipboardChangedListener = ClipboardManager.OnPrimaryClipChangedListener {
+        pushLocalClipboardToHost("clip_changed")
+    }
+    private var clipboardListenerRegistered = false
+
+    /** Reads the phone clipboard, if it can, and offers it to the host. */
+    private fun pushLocalClipboardToHost(reason: String) {
+        if (parked != null) return  // keepalive r1: nothing travels from a parked session
+        if (!SessionPark.clipboardPushAllowed(clipboardResumeHold, reason)) return
+        if (reason == "clip_changed") clipboardResumeHold = false
+        if (!NativeSessionBridge.nativeIsClipboardSyncEnabled()) return
+        if (!NativeSessionBridge.nativeHostSupportsClipboard()) return
+        // getPrimaryClip returns null without focus on Android 10+; that is expected, not an error.
+        val text = try {
+            clipboardManager.primaryClip?.takeIf { it.itemCount > 0 }
+                ?.getItemAt(0)?.coerceToText(this)?.toString()
+        } catch (t: Throwable) {
+            null
+        }
+        if (text.isNullOrEmpty()) return
+        // False covers "not worth sending" (echo, duplicate, empty, oversize, not connected), which
+        // is the common case -- the listener fires for our own writes too.
+        if (NativeSessionBridge.nativeQueueClipboardText(text)) {
+            diagnosticsLog.log("clipboard_sent", "reason=$reason units=${text.length}")
+        }
+    }
+
+    /** Applies clipboard text the host sent, if any is waiting. Polled from the status ticker. */
+    private fun drainIncomingClipboard() {
+        if (parked != null) return  // keepalive r1
+        if (!NativeSessionBridge.nativeIsClipboardSyncEnabled()) return
+        val text = NativeSessionBridge.nativeTakeIncomingClipboardText() ?: return
+        if (text.isEmpty()) return
+        try {
+            clipboardManager.setPrimaryClip(ClipData.newPlainText("GNLink", text))
+            diagnosticsLog.log("clipboard_received", "units=${text.length}")
+            Toast.makeText(this, R.string.clipboard_received, Toast.LENGTH_SHORT).show()
+        } catch (t: Throwable) {
+            // Setting the clipboard also needs the foreground; losing one update is not fatal, and
+            // the next host change will offer it again.
+            diagnosticsLog.log("clipboard_apply_failed", "error=${t.javaClass.simpleName}")
+        }
+    }
+
+    private fun toggleClipboardSync() {
+        if (!NativeSessionBridge.nativeHostSupportsClipboard()) {
+            Toast.makeText(this, R.string.clipboard_unsupported, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val next = !NativeSessionBridge.nativeIsClipboardSyncEnabled()
+        NativeSessionBridge.nativeSetClipboardSyncEnabled(next)
+        diagnosticsLog.log("clipboard_toggle", "enabled=$next")
+        Toast.makeText(
+            this,
+            if (next) R.string.clipboard_sync_on else R.string.clipboard_sync_off,
+            Toast.LENGTH_SHORT,
+        ).show()
+        renderClipboardButton()
+        // Turning it on should not wait for the next copy to catch up with what is already there.
+        if (next) pushLocalClipboardToHost("toggle_on")
+    }
+
+    /** Dims the button when the connected host cannot do it, and marks it when sync is off. */
+    private fun renderClipboardButton() {
+        if (!::viewerClipboardButton.isInitialized) return
+        val supported = NativeSessionBridge.nativeHostSupportsClipboard()
+        val enabled = supported && NativeSessionBridge.nativeIsClipboardSyncEnabled()
+        // Said in words rather than dimmed: a faded row fails the contrast floor (Codex 4).
+        val label = getString(
+            when {
+                !supported -> R.string.ui_clipboard_unsupported
+                enabled -> R.string.ui_clipboard_on
+                else -> R.string.ui_clipboard_off
+            }
+        )
+        if (viewerClipboardButton.text.toString() != label) viewerClipboardButton.text = label
+    }
+
+    /**
+     * Poll cadence follows the scene (A1). Anything time-critical -- selection timeout,
+     * switching feedback, stall recovery -- stays at 250ms; idle screens have nothing that
+     * changes faster than once a second.
+     */
+    private fun statusPollDelayMs(): Long {
+        if (selectionStage != SelectionStage.IDLE) return 250L
+        if (parked != null && !parkConfirmLogged) return 250L  // keepalive r1: watching a park confirm
+        return when (currentScene) {
+            UiScene.LOGIN, UiScene.HOSTS -> 1000L
+            UiScene.TARGETS -> 750L
+            UiScene.CONNECT, UiScene.SWITCHING -> 250L
+            UiScene.VIEWER -> 500L
+        }
+    }
+
+    private var macroDialog: AlertDialog? = null
+    private var macroStatusText: TextView? = null
+    private var macroStepListContainer: LinearLayout? = null
+    private var macroRecordButton: Button? = null
+    private var macroPlayButton: Button? = null
+    private var macroPauseButton: Button? = null
+    private lateinit var macroRecordBar: View
+    private lateinit var macroRecordBarText: TextView
+    private lateinit var macroRecordBarPause: Button
+
+    /**
+     * Drives macro playback from the UI thread at a fine cadence.
+     *
+     * A macro's steps are milliseconds apart, so the 250 ms status poll is far too coarse to
+     * dispatch them. Running here rather than on a thread of its own means playback cannot
+     * outlive the screen it belongs to.
+     */
+    private val macroPumpRunnable = object : Runnable {
+        override fun run() {
+            val state = NativeSessionBridge.nativeMacroState()
+            if (state == MACRO_STATE_PLAYING) {
+                NativeSessionBridge.nativeMacroPump()
+            }
+            renderMacroUi()
+            if (state != MACRO_STATE_IDLE) {
+                statusHandler.postDelayed(this, 16L)
+            } else {
+                macroPumpScheduled = false
+            }
+        }
+    }
+    private var macroPumpScheduled = false
+
+    /** What the step list currently shows; rebuilding 16 times a second would jank the pump. */
+    private var macroListRenderedSignature: String? = null
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        setContentView(R.layout.activity_main)
+        applyImmersiveMode()
+
+        diagnosticsLog = SessionDiagnosticsLog(this)
+        SharpenTestSeam.runFixture(this, intent)  // sh-filter r3: test builds only (the shipped seam does nothing)
+        loginScene = findViewById(R.id.loginScene)
+        hostsScene = findViewById(R.id.hostsScene)
+        loginIdInput = findViewById(R.id.loginIdInput)
+        loginPasswordInput = findViewById(R.id.loginPasswordInput)
+        // A password field falls back to monospace for its hint; keep it in the same face as the others.
+        loginPasswordInput.typeface = android.graphics.Typeface.DEFAULT
+        loginButton = findViewById(R.id.loginButton)
+        loginErrorText = findViewById(R.id.loginErrorText)
+        loginRetryButton = findViewById(R.id.loginRetryButton)
+        loginManualButton = findViewById(R.id.loginManualButton)
+        hostsTitleText = findViewById(R.id.hostsTitleText)
+        hostsStatusText = findViewById(R.id.hostsStatusText)
+        hostsListView = findViewById(R.id.hostsListView)
+        hostsEmptyText = findViewById(R.id.hostsEmptyText)
+        hostsRefreshButton = findViewById(R.id.hostsRefreshButton)
+        hostsLogoutButton = findViewById(R.id.hostsLogoutButton)
+        connectScene = findViewById(R.id.connectScene)
+        targetsScene = findViewById(R.id.targetsScene)
+        viewerScene = findViewById(R.id.viewerScene)
+        hostEdit = findViewById(R.id.hostInput)
+        videoPortEdit = findViewById(R.id.videoPortInput)
+        controlPortEdit = findViewById(R.id.controlPortInput)
+        connectStatusText = findViewById(R.id.connectStatusText)
+        connectErrorText = findViewById(R.id.connectErrorText)
+        listSelectedText = findViewById(R.id.listSelectedText)
+        listStatusText = findViewById(R.id.listStatusText)
+        targetListEmptyText = findViewById(R.id.targetListEmptyText)
+        targetListView = findViewById(R.id.targetListView)
+        listDisconnectButton = findViewById(R.id.listDisconnectButton)
+        listHostsButton = findViewById(R.id.listHostsButton)
+        hostsParkBanner = findViewById(R.id.hostsParkBanner)
+        hostsParkText = findViewById(R.id.hostsParkText)
+        hostsParkDisconnectButton = findViewById(R.id.hostsParkDisconnectButton)
+        viewerMenuHostsButton = findViewById(R.id.viewerMenuHostsButton)
+        listWindowsButton = findViewById(R.id.listWindowsButton)
+        listDevicesButton = findViewById(R.id.listDevicesButton)
+        listSettingsButton = findViewById(R.id.listSettingsButton)
+        listRefreshButton = findViewById(R.id.listRefreshButton)
+        settingsPanel = findViewById(R.id.settingsPanel)
+        settingsQualityLowButton = findViewById(R.id.settingsQualityLowButton)
+        settingsQualityHighButton = findViewById(R.id.settingsQualityHighButton)
+        settingsQualityBestButton = findViewById(R.id.settingsQualityBestButton)
+        settingsFpsSpinner = findViewById(R.id.settingsFpsSpinner)
+        settingsSharpOffButton = findViewById(R.id.settingsSharpOffButton)
+        settingsSharpWeakButton = findViewById(R.id.settingsSharpWeakButton)
+        settingsSharpMethodDefaultButton = findViewById(R.id.settingsSharpMethodDefaultButton)
+        settingsSharpMethodDisplayButton = findViewById(R.id.settingsSharpMethodDisplayButton)
+        settingsSharpStrongButton = findViewById(R.id.settingsSharpStrongButton)
+        settingsDesktopBackendDxgiButton = findViewById(R.id.settingsDesktopBackendDxgiButton)
+        settingsDesktopBackendWgcButton = findViewById(R.id.settingsDesktopBackendWgcButton)
+        settingsDesktopBackendGdiButton = findViewById(R.id.settingsDesktopBackendGdiButton)
+        settingsDesktopBackendStatusText = findViewById(R.id.settingsDesktopBackendStatusText)
+        settingsApplyButton = findViewById(R.id.settingsApplyButton)
+        settingsAppliedText = findViewById(R.id.settingsAppliedText)
+        viewerControlsBar = findViewById(R.id.viewerControlsBar)
+        viewerBackButton = findViewById(R.id.viewerBackButton)
+        viewerKeyboardButton = findViewById(R.id.viewerKeyboardButton)
+        viewerOverlayStatusText = findViewById(R.id.viewerOverlayStatusText)
+        viewerSplit = findViewById(R.id.viewerSplit)
+        viewerControlsBar = findViewById(R.id.viewerControlsBar)
+        viewerRotateButton = findViewById(R.id.viewerRotateButton)
+        viewerMenuButton = findViewById(R.id.viewerMenuButton)
+        viewerDataUsageText = findViewById(R.id.viewerDataUsageText)
+        viewerPathText = findViewById(R.id.viewerPathText)
+        initViewerSheets()
+        viewerUnlockBar = findViewById(R.id.viewerUnlockBar)
+        viewerUnlockButton = findViewById(R.id.viewerUnlockButton)
+        viewerUnlockSettingsButton = findViewById(R.id.viewerUnlockSettingsButton)
+        // One tap when the password is already known, and the dialog only when it is not. The gear
+        // always opens the dialog, which is the only way to change a saved one.
+        viewerUnlockButton.setOnClickListener {
+            val saved = savedUnlockPassword()
+            if (saved.isNullOrEmpty()) showUnlockDialog() else sendUnlockSequence(saved)
+        }
+        viewerUnlockSettingsButton.setOnClickListener { showUnlockDialog() }
+        viewerRotateButton.setOnClickListener {
+            forcePortrait = !forcePortrait
+            lastAppliedLandscape = null
+            applyOrientationForContent(
+                if (videoWidth > 0) videoWidth else expectedContentWidth,
+                if (videoHeight > 0) videoHeight else expectedContentHeight,
+                pendingSelectionTab,
+            )
+            applyViewerRailLayout()
+            renderStatus()
+        }
+        viewerMenuButton.setOnClickListener { openViewerMenu() }
+        // The bar's length changes when the key panel opens or closes, not only on rotation.
+        viewerControlsBar.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top != oldBottom - oldTop) viewerControlsBar.post { fitRailCells() }
+        }
+        viewerKeyPanel = ViewerKeyPanel(
+            this,
+            findViewById(R.id.viewerKeyPanel),
+            onKey = { vk, down -> queueViewerSpecialKey(vk, if (down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP) },
+            // 한 mode: finished syllables go as text, the one being built is only shown.
+            onText = { text -> queueViewerCommittedText(text) },
+            onPreview = { text -> showInputPreview(text) },
+            onPhoneKeyboard = {
+                viewerKeyPanel?.hide()
+                toggleViewerKeyboard()
+            },
+        )
+        viewerClipboardButton = findViewById(R.id.viewerClipboardButton)
+        viewerClipboardButton.setOnClickListener {
+            showViewerControls(emphasized = true)
+            toggleClipboardSync()
+        }
+        renderClipboardButton()
+        viewerLoadingPanel = findViewById(R.id.viewerLoadingPanel)
+        viewerLoadingText = findViewById(R.id.viewerLoadingText)
+        viewerImeCaptureView = findViewById(R.id.viewerImeCaptureView)
+        viewerKeyboardTabs = findViewById(R.id.viewerKeyboardTabs)
+        viewerKeyboardTabPhone = findViewById(R.id.viewerKeyboardTabPhone)
+        viewerKeyboardTabPcKeys = findViewById(R.id.viewerKeyboardTabPcKeys)
+        viewerKeyboardTabPhone.setOnClickListener {
+            if (ViewerKeyboardCycle.onPhoneTab(viewerKeyboardMode()) == ViewerKeyboardCycle.Action.PC_KEYS_TO_PHONE) {
+                diagnosticsLog.log("viewer_keyboard_tab", "to=phone")
+                viewerKeyPanel?.hide()
+                toggleViewerKeyboard()
+            }
+        }
+        viewerKeyboardTabPcKeys.setOnClickListener {
+            if (ViewerKeyboardCycle.onPcKeysTab(viewerKeyboardMode()) == ViewerKeyboardCycle.Action.PHONE_TO_PC_KEYS) {
+                diagnosticsLog.log("viewer_keyboard_tab", "to=pc_keys")
+                showViewerKeyPanelInsteadOfPhone("tab_pc_keys")
+            }
+        }
+        // The capture view holding focus is what "the phone keyboard is up" means here; however it
+        // gains or loses it (rail button, tab, the IME put away, a scene change), the bar follows.
+        viewerImeCaptureView.setOnFocusChangeListener { _, _ -> renderViewerKeyboardTabs() }
+        viewerKeyPanel?.onOpenChanged = { renderViewerKeyboardTabs() }
+        viewerInputPreviewText = findViewById(R.id.viewerInputPreviewText)
+        videoTextureView = findViewById(R.id.videoTextureView)
+
+        findViewById<View>(R.id.viewerVideoFrame).addOnLayoutChangeListener {
+                view, left, _, right, _, _, _, _, _ ->
+            val available = (right - left - dp(24f)).coerceAtLeast(1)
+            viewerInputPreviewText.maxWidth =
+                (view.width * 0.62f).roundToInt().coerceAtMost(available).coerceAtLeast(1)
+        }
+
+        videoTextureView.surfaceTextureListener = this
+        videoTextureView.isOpaque = true
+        videoTextureView.isFocusableInTouchMode = true
+        videoTextureView.setOnTouchListener { view, event ->
+            handleViewerTouch(view, event)
+        }
+        videoTextureView.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+            syncVideoSurface(forceRebind = false)
+        }
+        viewerImeCaptureView.listener =
+            object : ImeCaptureView.Listener {
+                override fun onCommitText(text: CharSequence) {
+                    queueViewerCommittedText(text)
+                }
+
+                override fun onDeleteBackward(count: Int) {
+                    repeat(count.coerceAtMost(8)) {
+                        queueViewerSpecialKey(INPUT_VK_BACK, KeyEvent.ACTION_DOWN)
+                        queueViewerSpecialKey(INPUT_VK_BACK, KeyEvent.ACTION_UP)
+                    }
+                }
+
+                override fun onSpecialKey(keyCode: Int, action: Int) {
+                    val windowsVk = mapAndroidKeyCodeToWindowsVk(keyCode) ?: return
+                    queueViewerSpecialKey(windowsVk, action)
+                }
+
+                override fun onPreviewTextChanged(text: CharSequence) {
+                    viewerInputPreviewText.post { showInputPreview(text) }
+                }
+            }
+
+        targetListAdapter = TargetCardAdapter()
+        targetListView.adapter = targetListAdapter
+        targetListView.emptyView = targetListEmptyText
+        targetListView.setOnItemClickListener { _, _, position, _ ->
+            if (position < 0 || position >= targetListIds.size) return@setOnItemClickListener
+            val targetId = targetListIds[position]
+            startSelectionTransition(targetId, targetListLabels[position], activeTargetTab, "tap")
+            renderStatus()
+        }
+
+        viewerModeBanner = findViewById(R.id.viewerModeBanner)
+        initVirtualMouse()
+        initZoneBar()
+        macroRecordBar = findViewById(R.id.macroRecordBar)
+        macroRecordBarText = findViewById(R.id.macroRecordBarText)
+        macroRecordBarPause = findViewById(R.id.macroRecordBarPause)
+        macroRecordBarPause.setOnClickListener { toggleMacroPause() }
+        findViewById<Button>(R.id.macroRecordBarStop).setOnClickListener { stopMacroRecording() }
+        findViewById<Button>(R.id.viewerMacroButton).setOnClickListener {
+            closeViewerMenu("macro")
+            showMacroDialog()
+        }
+        initDirectoryUi()
+
+        val savedEndpoint = SessionPersistence.load(this)
+        val launchHost = intent.getStringExtra("host")?.trim().orEmpty()
+        val launchVideoPort = intent.getIntExtra("videoPort", 0)
+        val launchControlPort = intent.getIntExtra("controlPort", 0)
+        hostEdit.setText(if (launchHost.isNotEmpty()) launchHost else savedEndpoint.host.ifEmpty { "192.168.0.10" })
+        videoPortEdit.setText(if (launchVideoPort > 0) launchVideoPort.toString() else savedEndpoint.videoPort.toString())
+        controlPortEdit.setText(if (launchControlPort > 0) launchControlPort.toString() else savedEndpoint.controlPort.toString())
+        requestedRuntimeBitrateKbps = savedEndpoint.bitrateKbps
+        requestedRuntimeFps = savedEndpoint.fps
+        sharpness = SessionPersistence.loadSharpness(this)
+        sharpenMethod = SessionPersistence.loadSharpenMethod(this)  // sh-strength r3: unset = DEFAULT (A)
+        executeSharpen(sharpenPolicy.select(sharpness))  // no surface yet: only records the choice
+        settingsStatusMessage =
+            requestSummary()
+        settingsAppliedText.text = settingsStatusMessage
+        renderQualityControls()
+        updateDesktopBackendButtons()
+
+        diagnosticsLog.log(
+            "app_start",
+            "savedHost=${savedEndpoint.host} savedVideoPort=${savedEndpoint.videoPort} " +
+                "savedControlPort=${savedEndpoint.controlPort} logFile=${diagnosticsLog.filePath()}"
+        )
+
+        startUpdateCheck()
+
+        findViewById<Button>(R.id.connectButton).setOnClickListener { beginConnect("connect_tap") }
+
+        // Playback smoothness can only be judged from a running session, and driving the UI
+        // with synthetic taps to get one is both fragile and a poor thing to do to whatever
+        // is on screen. A launch extra starts the session directly:
+        //   am start -n <pkg>/.MainActivity --es host <ip> --ez autoConnect true
+        if (intent.getBooleanExtra("autoConnect", false)) {
+            val autoDesktop = intent.getBooleanExtra("autoDesktop", false)
+            hostEdit.post {
+                beginConnect("connect_auto")
+                if (autoDesktop) {
+                    // The host needs a moment to answer the window-list request before a
+                    // selection will take.
+                    hostEdit.postDelayed({
+                        activeTargetTab = TargetTab.DESKTOP
+                        startSelectionTransition(0L, "desktop", TargetTab.DESKTOP, "auto")
+                        renderStatus()
+                    }, 1500L)
+                }
+            }
+        }
+
+        listDisconnectButton.setOnClickListener {
+            diagnosticsLog.log("disconnect_tap", "scene=$currentScene")
+            disconnectSession("disconnect_tap")
+        }
+        // keepalive r1: the list keeping this connection; and, on the list, ending the kept one.
+        listHostsButton.setOnClickListener { parkToHostList("targets") }
+        hostsParkDisconnectButton.setOnClickListener {
+            diagnosticsLog.log("park_disconnect_tap", "scene=$currentScene")
+            endPark("disconnect_tap", announce = false)
+            renderStatus()
+        }
+
+        listRefreshButton.setOnClickListener {
+            diagnosticsLog.log("refresh_tap", "scene=$currentScene")
+            NativeSessionBridge.nativeRequestWindowList()
+            renderStatus()
+        }
+
+        listWindowsButton.setOnClickListener {
+            activeTargetTab = TargetTab.WINDOWS
+            diagnosticsLog.log("tab_switch", "tab=windows")
+            NativeSessionBridge.nativeRequestWindowList()
+            renderStatus()
+        }
+
+        listDevicesButton.setOnClickListener {
+            activeTargetTab = TargetTab.DESKTOP
+            diagnosticsLog.log("tab_switch", "tab=desktop")
+            renderStatus()
+        }
+
+        listSettingsButton.setOnClickListener {
+            activeTargetTab = TargetTab.SETTINGS
+            diagnosticsLog.log("tab_switch", "tab=settings")
+            renderStatus()
+        }
+
+        settingsDesktopBackendDxgiButton.setOnClickListener { requestSessionDesktopBackend(DesktopCaptureBackendOption.DXGI) }
+        settingsDesktopBackendWgcButton.setOnClickListener { requestSessionDesktopBackend(DesktopCaptureBackendOption.WGC) }
+        settingsDesktopBackendGdiButton.setOnClickListener { requestSessionDesktopBackend(DesktopCaptureBackendOption.GDI) }
+
+        settingsApplyButton.setOnClickListener {
+            // The picture level and the frame rate are already chosen (and stored) by the controls
+            // above; Apply re-sends them together with the capture backend.
+            val messages = mutableListOf<String>()
+            val bitrateBps = requestedRuntimeBitrateKbps * 1000
+            if (NativeSessionBridge.nativeRequestRuntimeConfig(bitrateBps, requestedRuntimeFps)) {
+                pendingRuntimeConfigSync = false
+                diagnosticsLog.log("runtime_config_request", "bitrateBps=$bitrateBps fps=$requestedRuntimeFps")
+            } else {
+                messages += getString(R.string.ui_request_quality_failed)
+                diagnosticsLog.log("runtime_config_failed", "bitrateBps=$bitrateBps fps=$requestedRuntimeFps")
+            }
+
+            // ua2-apk r1: the capture backend is not part of Apply any more -- its buttons ask the connected PC at
+            // once, for this connection only.
+            if (messages.isEmpty()) {
+                settingsStatusMessage =
+                    requestSummary()
+            } else {
+                settingsStatusMessage = messages.joinToString(" / ")
+            }
+            settingsAppliedText.text = settingsStatusMessage
+            saveCurrentEndpoint()
+            renderStatus()
+        }
+
+        viewerBackButton.setOnClickListener {
+            closeViewerSheets("viewer_back")
+            showViewerControls(emphasized = true)
+            handleViewerBack("viewer_back")
+        }
+        // apk-ui r3: one keyboard button. apk-keyboard-phone-first r1: the phone keyboard comes first.
+        // apk-keyboard-tabs r1: the PC key panel is one tab away on the bar above the phone keyboard
+        // (a second press of this button is covered by a landscape phone keyboard); the button
+        // closes whichever is up.
+        viewerKeyboardButton.setOnClickListener {
+            showViewerControls(emphasized = true)
+            when (ViewerKeyboardCycle.onKeyboardButton(viewerKeyboardMode())) {
+                ViewerKeyboardCycle.Action.SHOW_PHONE -> toggleViewerKeyboard()
+                ViewerKeyboardCycle.Action.CLOSE_ALL -> {
+                    hideViewerKeyboard("rail_keyboard")
+                    viewerKeyPanel?.hide()
+                }
+                else -> Unit
+            }
+        }
+        findViewById<View>(R.id.viewerMenuDisconnectButton).setOnClickListener { confirmDisconnectFromViewer() }
+        viewerMenuHostsButton.setOnClickListener {
+            closeViewerMenu("to_hosts")
+            parkToHostList("viewer_menu")
+        }
+        // The phone keyboard can be put away without the app hearing a key (its own down arrow, or
+        // Back while it is up). Whatever it was showing as typed goes with it (apk-ui r3 (7)).
+        ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { view, insets ->
+            val imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime())
+            imeBottomPx = if (imeVisible) insets.getInsets(WindowInsetsCompat.Type.ime()).bottom else 0
+            if (imeBottomPx > 0) awaitingIme = false
+            if (imeWasVisible && !imeVisible && viewerImeCaptureView.hasFocus()) {
+                hideViewerKeyboard("ime_hidden")
+            }
+            imeWasVisible = imeVisible
+            renderViewerKeyboardTabs()
+            ViewCompat.onApplyWindowInsets(view, insets)
+        }
+        renderStatus()
+    }
+
+    override fun onBackPressed() {
+        handleSystemBack()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        statusHandler.removeCallbacks(statusPollRunnable)
+        statusHandler.post(statusPollRunnable)
+        applyImmersiveMode()
+        syncVideoSurface(forceRebind = false)
+        // Only listen while in the foreground: that is the only time the clipboard can be read
+        // anyway (Android 10+), and a listener left registered would fire uselessly.
+        if (!clipboardListenerRegistered) {
+            clipboardManager.addPrimaryClipChangedListener(clipboardChangedListener)
+            clipboardListenerRegistered = true
+        }
+    }
+
+    override fun onPause() {
+        saveCurrentEndpoint()
+        if (clipboardListenerRegistered) {
+            clipboardManager.removePrimaryClipChangedListener(clipboardChangedListener)
+            clipboardListenerRegistered = false
+        }
+        statusHandler.removeCallbacks(statusPollRunnable)
+        dismissViewerLogDialog()
+        releaseViewerModifiers()
+        cancelActiveViewerTouch("pause")
+        hideViewerKeyboard("pause")
+        super.onPause()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        connectIntents.onStart()
+    }
+
+    override fun onStop() {
+        connectIntents.onStop()  // r4 S2-b: a fallback scheduled before this stop never runs
+        // keepalive r1: a park lives only while the list is in front. Backgrounded, locked or switched
+        // away from, the connection is ended for real -- no foreground service keeps it.
+        if (parked != null) endPark("app_stopped", announce = false)
+        // r3 R2: a connect still on its way is not carried on in the background either -- it stops at its
+        // next step (native included) and adopts nothing; the list is not left busy.
+        if (directoryBusy) {
+            connectOwner.invalidate()
+            setDirectoryBusy(false)
+            directoryConnectingName = ""
+        }
+        super.onStop()
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) {
+            applyImmersiveMode()
+            // Gaining focus is the moment the clipboard becomes readable (Android 10+), so a copy
+            // made in another app is picked up here rather than being missed entirely.
+            pushLocalClipboardToHost("focus_gained")
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        if (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING) {
+            applyViewerRailLayout()
+        }
+        diagnosticsLog.log(
+            "configuration_changed",
+            "orientation=${if (newConfig.orientation == Configuration.ORIENTATION_LANDSCAPE) "landscape" else "portrait"}"
+        )
+        applyImmersiveMode()
+        videoTextureView.post {
+            renderStatus()
+            syncVideoSurface(forceRebind = true)
+        }
+    }
+
+    // ---------------------------------------------------------------- updates
+
+    private var updateStatusReceiver: UpdateInstaller.StatusReceiver? = null
+    private var pendingUpdateArtifact: UpdateManifest.Artifact? = null
+
+    /**
+     * Asks whether there is a newer build, on a thread nothing waits for.
+     *
+     * Not waiting is the requirement rather than an optimisation. This runs on a phone that is
+     * often somewhere with no route to the server, and an app that will not show its sign-in
+     * screen until an update server answers is an app that cannot be used on a train.
+     *
+     * Only "there is a newer version" reaches the user. A start-up check that could not reach the
+     * server is the ordinary case, and a dialog for it teaches people to dismiss dialogs --
+     * including the next one, which matters. Everything else goes to the diagnostics log.
+     */
+    private fun startUpdateCheck() {
+        val endpoint = updateEndpoint()
+        val key = trustedUpdateKeyHex()
+        UpdateFlow.checkAsync(endpoint, key, installedVersionCode()) { outcome ->
+            diagnosticsLog.log("update_check",
+                "verdict=${outcome.verdict} version=${outcome.version} ${outcome.detail}")
+            if (outcome.verdict == UpdateDecision.Verdict.Install && outcome.artifact != null) {
+                pendingUpdateArtifact = outcome.artifact
+                offerUpdate(outcome.version)
+            }
+        }
+    }
+
+    private fun offerUpdate(version: String) {
+        if (isFinishing || isDestroyed) return
+        AlertDialog.Builder(this)
+            .setTitle("업데이트")
+            .setMessage("새 버전 $version 이 있습니다. 지금 설치하시겠습니까?")
+            .setPositiveButton("설치") { _, _ -> beginUpdateDownload() }
+            // Later is an answer. Nothing happens, and it is not asked again this run.
+            .setNegativeButton("나중에") { _, _ ->
+                diagnosticsLog.log("update_check", "the user chose later")
+            }
+            .show()
+    }
+
+    private fun beginUpdateDownload() {
+        val artifact = pendingUpdateArtifact ?: return
+        // Asking before downloading: without the permission the download would be wasted, and the
+        // user would have spent it before finding out they had to grant something.
+        if (!UpdateInstaller.canInstallPackages(this)) {
+            diagnosticsLog.log("update_install", "asking for permission to install packages")
+            try {
+                startActivity(UpdateInstaller.manageUnknownSourcesIntent(this))
+            } catch (_: Exception) {
+                Toast.makeText(this, "설치 권한 화면을 열지 못했습니다.", Toast.LENGTH_SHORT).show()
+            }
+            // Deliberately not retried automatically. The user may grant it and tap again, or not
+            // -- refusing is an answer, and chasing them for it is not.
+            return
+        }
+
+        Toast.makeText(this, "업데이트를 내려받는 중입니다.", Toast.LENGTH_SHORT).show()
+        Thread {
+            val file = UpdateFlow.download(this, artifact)
+            runOnUiThread {
+                if (file == null) {
+                    diagnosticsLog.log("update_install", "download failed or did not verify")
+                    Toast.makeText(this, "업데이트 파일을 확인하지 못했습니다.", Toast.LENGTH_LONG).show()
+                    return@runOnUiThread
+                }
+                registerUpdateStatusReceiver()
+                if (!UpdateInstaller.install(this, file)) {
+                    diagnosticsLog.log("update_install", "the install session could not be opened")
+                    Toast.makeText(this, "설치를 시작하지 못했습니다.", Toast.LENGTH_LONG).show()
+                }
+            }
+        }.apply { isDaemon = true; name = "gnlink-update-download"; start() }
+    }
+
+    /**
+     * Opens the system's own install screen for the APK already downloaded and verified.
+     *
+     * Reached only when the device refused to let this app install itself (Samsung reports
+     * "Self update is blocked by unknown source package"). The file is not re-downloaded: it was
+     * verified before the session was opened and it is still in this app's cache, so what changes
+     * is only who is asked to install it.
+     */
+    private fun openSystemInstaller() {
+        val apk = UpdateInstaller.downloadTarget(this)
+        if (!apk.isFile) {
+            diagnosticsLog.log("update_install", "no downloaded apk to hand to the system installer")
+            Toast.makeText(this, "설치 파일을 찾지 못했습니다.", Toast.LENGTH_LONG).show()
+            return
+        }
+        // The system screen still needs this app to be an allowed install source.
+        if (!UpdateInstaller.canInstallPackages(this)) {
+            diagnosticsLog.log("update_install", "asking for install permission before the fallback")
+            try {
+                startActivity(UpdateInstaller.manageUnknownSourcesIntent(this))
+            } catch (_: Exception) {
+                Toast.makeText(this, "설치 권한 화면을 열지 못했습니다.", Toast.LENGTH_SHORT).show()
+            }
+            return
+        }
+        val intent = UpdateInstaller.systemInstallerIntent(this, apk)
+        if (intent == null) {
+            diagnosticsLog.log("update_install", "could not build the system installer intent")
+            Toast.makeText(this, "설치 화면을 열지 못했습니다.", Toast.LENGTH_LONG).show()
+            return
+        }
+        try {
+            startActivity(intent)
+            diagnosticsLog.log("update_install", "handed the apk to the system installer")
+            // Said plainly, because from here the app cannot see what happens: the system screen
+            // reports nothing back, so the user needs to know the next tap is theirs.
+            Toast.makeText(this, "설치 화면에서 '설치'를 눌러 주세요.", Toast.LENGTH_LONG).show()
+        } catch (_: Exception) {
+            diagnosticsLog.log("update_install", "the system installer screen would not open")
+            Toast.makeText(this, "설치 화면을 열지 못했습니다.", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun registerUpdateStatusReceiver() {
+        if (updateStatusReceiver != null) return
+        val receiver = UpdateInstaller.StatusReceiver(
+            onOutcome = { outcome, message ->
+                diagnosticsLog.log("update_install", "outcome=$outcome $message")
+                // A refusal is not an error. The user still has a working app, which is exactly
+                // why they were free to say no -- telling them it failed would be arguing with a
+                // decision they just made.
+                if (!UpdateDecision.isUserDecision(outcome) &&
+                    outcome != UpdateDecision.InstallOutcome.Installed) {
+                    Toast.makeText(this, "설치하지 못했습니다.", Toast.LENGTH_LONG).show()
+                }
+            },
+            onUserActionRequired = { confirm ->
+                // The system asking for its own confirmation screen. Not an outcome -- reporting
+                // it as one would announce a failure before the user had been asked anything.
+                try {
+                    startActivity(confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                } catch (_: Exception) {
+                    diagnosticsLog.log("update_install", "could not show the confirmation screen")
+                }
+            },
+            onSelfUpdateBlocked = { message ->
+                diagnosticsLog.log("update_install", "self-update blocked by the device: $message")
+                openSystemInstaller()
+            })
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, receiver.filter(), Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(receiver, receiver.filter())
+        }
+        updateStatusReceiver = receiver
+    }
+
+    private fun installedVersionCode(): Long = try {
+        val info = packageManager.getPackageInfo(packageName, 0)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            info.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            info.versionCode.toLong()
+        }
+    } catch (_: Exception) {
+        0L
+    }
+
+    /**
+     * The build constant when one was set, otherwise derived from the directory address this
+     * phone signs in to. Empty still means NotConfigured rather than a failure -- an http
+     * directory with no override has nowhere safe to fetch an installable APK from.
+     */
+    private fun updateEndpoint(): DirectoryClient.UpdateEndpoint = DirectoryClient.updateEndpointFor(
+        BuildConfig.UPDATE_MANIFEST_URL,
+        DirectoryClient.directoryUrl,
+        DirectoryClient.session(),
+    )
+
+    /** Empty until an operational key exists. Empty means this build cannot check, not that it failed. */
+    private fun trustedUpdateKeyHex(): String = BuildConfig.UPDATE_PUBLIC_KEY_HEX
+
+    override fun onDestroy() {
+        updateStatusReceiver?.let {
+            try { unregisterReceiver(it) } catch (_: Exception) { }
+        }
+        updateStatusReceiver = null
+        saveCurrentEndpoint()
+        directoryExecutor.shutdownNow()
+        exitDialog?.dismiss()
+        exitDialog = null
+        dismissViewerLogDialog()
+        releaseViewerModifiers()
+        hideViewerKeyboard("destroy")
+        releaseVideoSurface()
+        super.onDestroy()
+    }
+
+    override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+        syncVideoSurface(forceRebind = true)
+    }
+
+    override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+        // sh-filter r2: TextureView has just set this SurfaceTexture's default buffer size to the VIEW's size
+        // (width x height) before calling us -- the size we set is gone. The decoder's own buffers never
+        // noticed (they carry their size), but the sharpening pass's EGL window surface takes the default
+        // size, and was then drawn at 1970x1080 for a 1920x1080 picture (resampled twice: blurred). Seen
+        // when the rotation to landscape came after the bind. Forget the cached size so the sync sets it again.
+        surfaceBufferWidth = 0
+        surfaceBufferHeight = 0
+        syncVideoSurface(forceRebind = false)
+    }
+
+    override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+        // sh-filter r1 (contract 4): with the sharpening pass on this surface, Android must not release it
+        // while the renderer's EGL surface may still use it -- the app releases it once the renderer has
+        // let go (single owner). With the decoder on it directly, Android releases it as before.
+        val destroyedId = sharpenPolicy.surfaceId
+        val (commands, androidReleases) = sharpenPolicy.surfaceDestroyed()
+        // r2 H1: kept per surface id -- a late release of an older surface's renderer frees exactly that one.
+        if (destroyedId != null) {
+            if (androidReleases) sharpenSurfaceTextures.remove(destroyedId) else sharpenAppOwnedSurfaces += destroyedId
+        }
+        executeSharpen(commands)
+        surfaceBufferWidth = 0
+        surfaceBufferHeight = 0
+        diagnosticsLog.log("viewer_surface_released", "scene=$currentScene destroyed=1 appReleases=${if (androidReleases) 0 else 1}")
+        return androidReleases
+    }
+
+    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+        val latchNs = System.nanoTime()
+        val surfaceId = sharpenPolicy.surfaceId ?: 0L
+        val timestamp = surface.timestamp
+        // sh-strength r5 (Codex codex_sh_strength_r4.md N1-c1): the buffer the view LATCHED, by its own timestamp -- a
+        // renderer output is looked up in that renderer's log (what it is, its layout, its decoder frame); never the
+        // renderer's latest swap. A cleared buffer or an unknown one counts as nothing and shows no layout.
+        // r6 (N1-b): a decoder frame's FIRST time on screen (its VIDEO, or a REDRAW of it when the VIDEO was never
+        // latched) counts once; a cleared or unknown buffer shows no layout (the fence holds) and counts as nothing.
+        val latched = SharpenLatch.qualify(timestamp, sharpenRenderer?.outputs, latchClassifier, surfaceId)
+        latched.shownGen?.let { sharpenShownPlacementGen = it }
+        if (!latched.firstShow && !latched.redraw) return
+        val frameTs = latched.frameTs  // the decoder frame this buffer shows
+        enterSharpenLatencySegment(latchNs)
+        if (!latched.firstShow) {
+            sharpenStats.addRedraw()
+            return
+        }
+        // Fires once per frame this view actually latched. Frames handed to the surface that
+        // the view never latched -- because a newer one arrived before it drew -- are invisible
+        // to every other counter, and are exactly what "it says 30 but looks like 15" is.
+        NativeSessionBridge.nativeNotifyFrameDisplayed()
+        val info = FrameInfo.of(NativeSessionBridge.nativeHandoffInfo(frameTs))
+        // S4: the decoder's handoff of THIS frame -> this latch.
+        if (info != null) sharpenStats.addMatched(info.handoffNs, latchNs) else sharpenStats.addUnmatched()
+        // H2: the renderer's first output is THIS latch, if it is a frame of that renderer, surface and codec.
+        val liveGen = if (sharpenPolicy.path == SharpenPathPolicy.Path.LIVE) sharpenPolicy.generation else -1L
+        if (sharpenGate.onLatch(liveGen, surfaceId, true, info)) {
+            sharpenGateTimeout?.let { sharpenHandler.removeCallbacks(it) }
+            sharpenGateTimeout = null
+            diagnosticsLog.log(
+                "sharpen_first_output",
+                "gen=$liveGen surface=$surfaceId streamGen=${info?.streamGeneration} codec=${info?.codecEpoch} " +
+                    "ts=$frameTs latchesBefore=${sharpenGate.latchesBeforeConfirm} " +
+                    "ms=${SystemClock.elapsedRealtime() - sharpenGate.armedAtMs}"
+            )
+        }
+        maybeLogSharpenLatency(latchNs)
+    }
+
+    private fun applyImmersiveMode() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            window.setDecorFitsSystemWindows(false)
+            window.insetsController?.let { controller ->
+                controller.hide(WindowInsets.Type.systemBars())
+                controller.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            }
+            return
+        }
+
+        @Suppress("DEPRECATION")
+        window.decorView.systemUiVisibility =
+            View.SYSTEM_UI_FLAG_LAYOUT_STABLE or
+                View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_HIDE_NAVIGATION or
+                View.SYSTEM_UI_FLAG_FULLSCREEN or
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+    }
+
+    private fun handleSystemBack() {
+        when (currentScene) {
+            UiScene.VIEWER, UiScene.SWITCHING -> {
+                if (isViewerSheetOpen()) {
+                    closeViewerSheets("system_back")
+                    return
+                }
+                if (viewerKeyPanel?.isOpen == true) {
+                    viewerKeyPanel?.hide()
+                    return
+                }
+                if (viewerImeCaptureView.hasFocus()) {
+                    hideViewerKeyboard("system_back")
+                    showViewerControls(emphasized = true)
+                    return
+                }
+                handleViewerBack("system_back")
+            }
+            UiScene.CONNECT ->
+                // Typing an address was a detour from signing in; back should undo the detour.
+                if (manualConnectMode) {
+                    manualConnectMode = false
+                    currentScene = homeScene()
+                    renderStatus()
+                } else {
+                    showExitConfirmDialog()
+                }
+            UiScene.TARGETS, UiScene.LOGIN, UiScene.HOSTS -> showExitConfirmDialog()
+        }
+    }
+
+    private fun handleViewerBack(reason: String) {
+        diagnosticsLog.log(
+            "viewer_back",
+            "reason=$reason selected=${pendingSelectionLabel.ifBlank { "none" }} " +
+                "currentScene=$currentScene stage=$selectionStage"
+        )
+        moveToTargets(reason, abortPendingSwitch = selectionStage != SelectionStage.IDLE)
+        renderStatus()
+    }
+
+    private fun showExitConfirmDialog() {
+        if (exitDialog?.isShowing == true) return
+
+        exitDialog = AlertDialog.Builder(this)
+            .setMessage(R.string.exit_confirm_message)
+            .setPositiveButton(R.string.exit_confirm_yes) { _, _ ->
+                exitDialog = null
+                exitApplication()
+            }
+            .setNegativeButton(R.string.exit_confirm_no) { dialog, _ ->
+                dialog.dismiss()
+            }
+            .setOnDismissListener {
+                exitDialog = null
+                applyImmersiveMode()
+            }
+            .show()
+    }
+
+    private fun exitApplication() {
+        diagnosticsLog.log("exit_confirmed", "scene=$currentScene status=${NativeSessionBridge.nativeGetStatus()}")
+        dismissViewerLogDialog()
+        releaseViewerModifiers()
+        cancelActiveViewerTouch("exit")
+        hideViewerKeyboard("exit")
+        desiredStreamActive = false
+        pendingRuntimeConfigSync = false
+        lastAppliedStreamActive = null
+        if (selectionStage != SelectionStage.IDLE) {
+            NativeSessionBridge.nativeAbortVideoSwitch()
+        } else {
+            NativeSessionBridge.nativeResetVideoStream()
+        }
+        if (parked != null) endPark("exit", announce = false)
+        connectOwner.invalidate()  // r3 R2: a connect on its way adopts nothing after the exit
+        NativeSessionBridge.nativeDisconnect()
+        connectFlowActive = false
+        clearPendingSelection()
+        resetViewerObservability()
+        finishAffinity()
+    }
+
+    private fun resetViewerObservability() {
+        // Cleared with the rest of the session: a path badge left over from the last connection
+        // would be a claim about this one, and the next may take a different route entirely.
+        connectionPathKind = ""
+        videoWidth = 0
+        videoHeight = 0
+        expectedContentWidth = 0
+        expectedContentHeight = 0
+        lastViewerOutCount = -1
+        lastViewerOutChangeAtMs = 0L
+        lastViewerStallLogAtMs = 0L
+        lastViewerRecoveryTargetId = Long.MIN_VALUE
+        lastViewerRecoveryAtMs = 0L
+        lastViewerRecoveryAttempts = 0
+        resetViewerTouchState()
+    }
+
+    /** Opens the session using whatever is currently in the endpoint fields. */
+    private fun beginConnect(reason: String) {
+        val host = hostEdit.text?.toString()?.trim().orEmpty()
+        val videoPort = videoPortEdit.text?.toString()?.toIntOrNull() ?: 0
+        val controlPort = controlPortEdit.text?.toString()?.toIntOrNull() ?: 0
+        saveCurrentEndpoint()
+        diagnosticsLog.log(reason, "host=$host videoPort=$videoPort controlPort=$controlPort")
+
+        // r4 S1: a new user intent -- any directory connect on its way is stale from here, and this one is
+        // adopted through the same native gate (so no stale cleanup can close it).
+        val op = connectOwner.begin()
+        val ok = NativeSessionBridge.nativeConnect(host, videoPort, controlPort, op) != 0L
+        if (ok) {
+            connectFlowActive = true
+            pendingRuntimeConfigSync = true
+            resetSessionDesktopBackend("connect")
+            desiredStreamActive = false
+            lastAppliedStreamActive = null
+            clearPendingSelection()
+            currentScene = UiScene.TARGETS
+            NativeSessionBridge.nativeRequestWindowList()
+        } else {
+            diagnosticsLog.log("connect_failed", NativeSessionBridge.nativeGetLastError())
+        }
+        renderStatus()
+    }
+
+    private fun clearPendingSelection() {
+        selectionStage = SelectionStage.IDLE
+        pendingSelectionId = null
+        pendingSelectionLabel = ""
+        pendingSelectionTab = activeTargetTab
+        pendingSelectionGeneration = 0L
+        pendingSelectionStartedAtMs = 0L
+        pendingSelectionAckLogged = false
+    }
+
+    private fun updateExpectedContentSize(width: Int, height: Int, reason: String) {
+        val nextWidth = width.coerceAtLeast(0)
+        val nextHeight = height.coerceAtLeast(0)
+        if (expectedContentWidth == nextWidth && expectedContentHeight == nextHeight) {
+            return
+        }
+        expectedContentWidth = nextWidth
+        expectedContentHeight = nextHeight
+        diagnosticsLog.log(
+            "content_hint",
+            "reason=$reason expected=${expectedContentWidth}x${expectedContentHeight} decoded=${videoWidth}x${videoHeight}"
+        )
+    }
+
+    private fun syncExpectedContentSize(panelSnapshot: WindowPanelUiSnapshot, reason: String) {
+        val nextSize =
+            if (selectionStage != SelectionStage.IDLE) {
+                when (pendingSelectionTab) {
+                    TargetTab.WINDOWS -> {
+                        val pendingId = pendingSelectionId
+                        panelSnapshot.items.firstOrNull { it.id == pendingId }?.let { Pair(it.width, it.height) }
+                            ?: Pair(expectedContentWidth, expectedContentHeight)
+                    }
+                    TargetTab.DESKTOP,
+                    TargetTab.SETTINGS -> Pair(0, 0)
+                }
+            } else {
+                Pair(panelSnapshot.selectedWidth, panelSnapshot.selectedHeight)
+            }
+        updateExpectedContentSize(nextSize.first, nextSize.second, reason)
+    }
+
+    private fun resolveSelectionHintSize(targetId: Long, tab: TargetTab): Pair<Int, Int> {
+        if (tab != TargetTab.WINDOWS) {
+            return Pair(0, 0)
+        }
+        val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson())
+        val item = panelSnapshot.items.firstOrNull { it.id == targetId }
+        return if (item != null) Pair(item.width, item.height) else Pair(0, 0)
+    }
+
+    private fun requestStreamActive(active: Boolean, reason: String): Boolean {
+        val ok = NativeSessionBridge.nativeRequestStreamActive(active)
+        if (ok) {
+            lastAppliedStreamActive = active
+            diagnosticsLog.log("stream_state_request", "active=$active reason=$reason")
+        } else {
+            diagnosticsLog.log("stream_state_failed", "active=$active reason=$reason")
+        }
+        return ok
+    }
+
+    /** ua2-apk r1: a new connection (or none): no choice of its own -- the host's default until the user picks. */
+    private fun resetSessionDesktopBackend(reason: String) {
+        sessionDesktopBackend = null
+        desktopBackendQueryAtMs = 0L
+        diagnosticsLog.log("desktop_backend_session_reset", "reason=$reason")
+        updateDesktopBackendButtons()
+    }
+
+    /** ua2-apk r1: the user's pick goes to the CONNECTED PC now, for this connection only. */
+    private fun requestSessionDesktopBackend(choice: DesktopCaptureBackendOption) {
+        diagnosticsLog.log("desktop_backend_tap", "backend=${choice.label.lowercase()} connected=${desktopBackendConnected()} " +
+            "parked=${parked != null}")
+        if (!desktopBackendConnected()) {
+            updateDesktopBackendButtons()
+            return
+        }
+        if (NativeSessionBridge.nativeRequestDesktopCaptureBackend(choice.code)) {
+            sessionDesktopBackend = choice
+            desktopBackendQueryAtMs = SystemClock.elapsedRealtime()  // the request asks for the answer itself
+            diagnosticsLog.log("desktop_backend_request", "backend=${choice.label.lowercase()} scope=connection")
+        } else {
+            Toast.makeText(this, R.string.ui_request_backend_failed, Toast.LENGTH_SHORT).show()
+            diagnosticsLog.log("desktop_backend_failed", "backend=${choice.label.lowercase()}")
+        }
+        updateDesktopBackendButtons()
+    }
+
+    private fun desktopBackendConnected(): Boolean = parked == null && sessionConnectedNow
+
+    /**
+     * ua2-apk r1/r2: the buttons and the line under them (DesktopBackendPresentation): the host's capability, the
+     * CURRENT request (matched by its wire seq), and what captures now -- kept apart. Nothing is lit until the host has
+     * handled this connection's method; the session scope is said only when the host confirms it.
+     */
+    private fun updateDesktopBackendButtons() {
+        if (!::settingsDesktopBackendStatusText.isInitialized) return
+        val p = DesktopBackendPresentation
+        val connected = desktopBackendConnected()
+        val status = if (connected) DesktopBackendPresentation.HostStatus.of(NativeSessionBridge.nativeGetDesktopBackendStatus()) else null
+        val v = p.present(connected, sessionDesktopBackend?.code, status)
+        for ((button, code) in listOf(settingsDesktopBackendDxgiButton to p.DXGI, settingsDesktopBackendWgcButton to p.WGC,
+                                      settingsDesktopBackendGdiButton to p.GDI)) {
+            button.text = p.label(code)
+            button.isSelected = v.lit == code
+            button.isEnabled = v.enabled
+            button.alpha = if (v.enabled) 1f else 0.45f
+        }
+        val asked = v.asked?.let { p.label(it) }
+        val reasons = v.reasons.map {
+            getString(when (it) {
+                DesktopBackendPresentation.Reason.WINDOW_TARGET -> R.string.settings_desktop_backend_reason_window
+                DesktopBackendPresentation.Reason.DXGI_QUARANTINED -> R.string.settings_desktop_backend_reason_quarantine
+                DesktopBackendPresentation.Reason.BEFORE_LOGIN -> R.string.settings_desktop_backend_reason_logon
+            })
+        }.filter { it != getString(R.string.settings_desktop_backend_reason_window) }  // said by "지금 창 캡처" itself
+        var now = if (v.windowTarget) getString(R.string.settings_desktop_backend_now_window)
+            else getString(R.string.settings_desktop_backend_now_desktop, p.label(v.active))
+        if (reasons.isNotEmpty()) now += " (" + reasons.joinToString(", ") + ")"
+        var text = when (v.state) {
+            DesktopBackendPresentation.State.NOT_CONNECTED -> getString(R.string.settings_desktop_backend_not_connected)
+            DesktopBackendPresentation.State.CHECKING -> getString(R.string.settings_desktop_backend_checking)
+            DesktopBackendPresentation.State.NO_ANSWER_HOST ->
+                if (asked != null) getString(R.string.settings_desktop_backend_no_answer_asked, asked)
+                else getString(R.string.settings_desktop_backend_no_answer)
+            DesktopBackendPresentation.State.IDLE -> getString(R.string.settings_desktop_backend_idle, now)
+            DesktopBackendPresentation.State.APPLYING -> getString(R.string.settings_desktop_backend_applying, asked ?: "?", now)
+            DesktopBackendPresentation.State.APPLIED -> getString(R.string.settings_desktop_backend_applied, asked ?: "?", now)
+            DesktopBackendPresentation.State.POLICY_REPLACED ->
+                getString(R.string.settings_desktop_backend_policy, asked ?: "?", p.label(v.effective), now)
+            DesktopBackendPresentation.State.RECEIVED -> getString(R.string.settings_desktop_backend_received, asked ?: "?", now)
+            DesktopBackendPresentation.State.STORED_FOR_DESKTOP -> getString(R.string.settings_desktop_backend_stored, asked ?: "?", now)
+            DesktopBackendPresentation.State.REFUSED -> getString(R.string.settings_desktop_backend_refused, asked ?: "?", now)
+        }
+        if (v.sessionScoped && v.state != DesktopBackendPresentation.State.NOT_CONNECTED &&
+            v.state != DesktopBackendPresentation.State.CHECKING) {
+            text += " · " + getString(R.string.settings_desktop_backend_scope)
+        }
+        if (settingsDesktopBackendStatusText.text?.toString() != text) {
+            settingsDesktopBackendStatusText.text = text
+            diagnosticsLog.log("desktop_backend_ui", "state=${v.state} lit=${v.lit?.let { p.label(it) } ?: "none"} " +
+                "asked=${asked ?: "none"} window=${v.windowTarget} scoped=${v.sessionScoped} enabled=${v.enabled} " +
+                "seq=${status?.seq ?: 0} sentSeq=${status?.intentSentSeq ?: 0}")
+        }
+    }
+
+    private fun syncConnectedClientPreferences(isConnected: Boolean) {
+        if (!isConnected) {
+            lastAppliedStreamActive = null
+            updateDesktopBackendButtons()  // ua2-apk r1: disabled, nothing lit
+            return
+        }
+
+        if (pendingRuntimeConfigSync) {
+            val bitrateBps = requestedRuntimeBitrateKbps * 1000
+            if (NativeSessionBridge.nativeRequestRuntimeConfig(bitrateBps, requestedRuntimeFps)) {
+                pendingRuntimeConfigSync = false
+                settingsStatusMessage =
+                    requestSummary()
+                settingsAppliedText.text = settingsStatusMessage
+                qualityStatusMessage =
+                    getString(R.string.ui_quality_status_requested, qualityLabel(), requestedRuntimeFps)
+                renderQualityControls()
+                diagnosticsLog.log(
+                    "runtime_config_sync",
+                    "bitrateBps=$bitrateBps fps=$requestedRuntimeFps"
+                )
+            }
+        }
+
+        // ua2-apk r1: nothing is re-sent on connect (no stored backend). While the settings screen shows, the host
+        // is asked what runs now -- about every 2 s (checked on the status poll) -- and the answer is what the buttons show.
+        if (activeTargetTab == TargetTab.SETTINGS && currentScene == UiScene.TARGETS) {
+            val nowMs = SystemClock.elapsedRealtime()
+            if (nowMs - desktopBackendQueryAtMs >= 2000L) {
+                desktopBackendQueryAtMs = nowMs
+                NativeSessionBridge.nativeQueryDesktopCaptureBackend()
+            }
+        }
+        updateDesktopBackendButtons()
+
+        if (lastAppliedStreamActive != desiredStreamActive) {
+            requestStreamActive(desiredStreamActive, "connected_sync")
+        }
+    }
+
+    /** 연결 해제: the session ends for real (the parked one too), back to where the app starts. */
+    private fun disconnectSession(reason: String) {
+        if (parked != null) endPark(reason, announce = false)
+        connectOwner.invalidate()  // r2 K2
+        cancelActiveViewerTouch("disconnect")
+        hideViewerKeyboard("disconnect")
+        desiredStreamActive = false
+        pendingRuntimeConfigSync = false
+        lastAppliedStreamActive = null
+        NativeSessionBridge.nativeDisconnect()
+        connectFlowActive = false
+        clearPendingSelection()
+        resetViewerObservability()
+        currentScene = homeScene()
+        if (currentScene == UiScene.HOSTS) loadHosts("disconnect")
+        renderStatus()
+    }
+
+    // ------------------------------------------------------------------ keepalive r1: park
+    //
+    // The rules are SessionPark's; here they are applied. Parking is "PC 목록" from a directory
+    // session; 연결 해제, sign-out, leaving the app, another PC, the network changing, the peer going
+    // and five minutes all end it with a real disconnect.
+
+    private fun nativeParkState(): SessionPark.NativeState = SessionPark.NativeState(
+        connected = NativeSessionBridge.nativeGetStatus().startsWith("connected"),
+        connectionGeneration = NativeSessionBridge.nativeConnectionGeneration(),
+        phase = SessionPark.NativePhase.of(NativeSessionBridge.nativeParkPhase()),
+    )
+
+    /** Whether "PC 목록" is offered for the session on screen. */
+    private fun parkAllowedHere(): Boolean = parked == null && SessionPark.canPark(
+        directoryHostKey, manualConnectMode, DirectoryClient.sessionAccount(), DirectoryClient.session(),
+        NativeSessionBridge.nativeGetStatus().startsWith("connected"),
+    ) && NativeSessionBridge.nativeHostHonorsStreamPause()  // r2 K5: an older host gets 연결 해제 only
+
+    private fun parkToHostList(origin: String) {
+        if (parked != null) return
+        if (!parkAllowedHere()) {
+            diagnosticsLog.log("park_refused", "origin=$origin host=$directoryHostKey manual=$manualConnectMode " +
+                "hostHonorsPause=${NativeSessionBridge.nativeHostHonorsStreamPause()}")
+            disconnectSession("park_refused_$origin")
+            return
+        }
+        diagnosticsLog.log("park_tap", "origin=$origin scene=$currentScene host=$directoryHostName")
+        // Leaving the viewer as Targets does, first: what a finger or the key panel holds goes up now, so
+        // its release is queued before the park drops everything that is not a release.
+        dismissViewerLogDialog()
+        closeViewerSheets("park")
+        releaseViewerModifiers()
+        cancelActiveViewerTouch("park")
+        hideViewerKeyboard("park")
+        viewerKeyPanel?.hide()
+        if (selectionStage != SelectionStage.IDLE) {
+            NativeSessionBridge.nativeAbortVideoSwitch()
+        } else {
+            NativeSessionBridge.nativeResetVideoStream()
+        }
+        clearPendingSelection()
+        resetViewerObservability()
+        resetViewerOrientationState()
+        desiredStreamActive = false
+        if (!NativeSessionBridge.nativeBeginPark()) {
+            diagnosticsLog.log("park_refused", "origin=$origin reason=native_begin")
+            disconnectSession("park_begin_failed")
+            return
+        }
+        // The native side pauses the stream itself and refuses stream requests while parked.
+        lastAppliedStreamActive = false
+        val now = SystemClock.elapsedRealtime()
+        val p = SessionPark.Parked(
+            hostId = directoryHostKey,
+            hostName = directoryHostName.ifEmpty { directoryHostKey },
+            accountId = DirectoryClient.sessionAccount(),
+            directoryOrigin = directoryOrigin(),
+            connectionGeneration = NativeSessionBridge.nativeConnectionGeneration(),
+            startedAtMs = now,
+            episode = ++parkEpisodeCounter,
+        )
+        parked = p
+        parkConfirmLogged = false
+        diagnosticsLog.log("park_begin",
+            "episode=${p.episode} host=${p.hostName} id=${p.hostId} gen=${p.connectionGeneration} " +
+                NativeSessionBridge.nativeSessionCounters())
+        statusHandler.removeCallbacks(parkExpiryRunnable)
+        statusHandler.postDelayed(parkExpiryRunnable, SessionPark.PARK_LIMIT_MS)
+        watchParkNetwork(p.episode)
+        hostsStatusText.text = ""
+        currentScene = UiScene.HOSTS
+        hostListAdapter.notifyDataSetChanged()
+        renderStatus()
+    }
+
+    /** Confirms the park once, and ends it when SessionPark says so. Main thread. */
+    private fun parkTick() {
+        val p = parked ?: return
+        val now = SystemClock.elapsedRealtime()
+        val native = nativeParkState()
+        if (!parkConfirmLogged && native.phase == SessionPark.NativePhase.PARKED) {
+            parkConfirmLogged = true
+            diagnosticsLog.log("park_confirmed",
+                "episode=${p.episode} ms=${now - p.startedAtMs} released=${NativeSessionBridge.nativeParkReleasedCount()} " +
+                    "dropped=${NativeSessionBridge.nativeParkDroppedActionCount()}")
+        }
+        val identity = SessionPark.Identity(DirectoryClient.sessionAccount(), directoryOrigin(),
+            DirectoryClient.session().isNotEmpty())
+        val reason = SessionPark.endReason(p, now, native, identity)
+        if (reason != null) {
+            endPark(reason)
+            return
+        }
+        // r2 K4: the tap made while it was confirming is carried out now, once.
+        val held = parkPendingTap
+        if (held != null && held.episode == p.episode && native.phase == SessionPark.NativePhase.PARKED) {
+            parkPendingTap = null
+            diagnosticsLog.log("park_tap_resumed", "episode=${p.episode} heldMs=${now - p.startedAtMs}")
+            if (!resumeParked(p)) {
+                directoryHosts.firstOrNull { it.hostId == held.hostId }?.let { connectToDirectoryHost(it) }
+            }
+        }
+    }
+
+    /** Ends the park with a real disconnect. */
+    private fun endPark(reason: String, announce: Boolean = true) {
+        val p = parked ?: return
+        parked = null
+        val held = parkPendingTap?.takeIf { it.episode == p.episode }
+        parkPendingTap = null
+        statusHandler.removeCallbacks(parkExpiryRunnable)
+        unwatchParkNetwork()
+        diagnosticsLog.log("park_end",
+            "episode=${p.episode} reason=$reason heldMs=${SystemClock.elapsedRealtime() - p.startedAtMs} " +
+                NativeSessionBridge.nativeSessionCounters())
+        NativeSessionBridge.nativeEndPark()
+        NativeSessionBridge.nativeDisconnect()
+        desiredStreamActive = false
+        pendingRuntimeConfigSync = false
+        lastAppliedStreamActive = null
+        connectFlowActive = false
+        clearPendingSelection()
+        resetViewerObservability()
+        if (announce) hostsStatusText.text = getString(R.string.hosts_park_ended, p.hostName)
+        hostListAdapter.notifyDataSetChanged()
+        // r2 K4: the park failed on its own under a held tap -- that tap still connects, the ordinary way, once.
+        if (held != null && SessionPark.pendingTapFallsBack(reason)) {
+            // r3 R2-b: scheduled under the owner, account and directory of now; carried out only if none of
+            // them changed and the app is still in front when it runs.
+            // r4 S2-b: a stop between this and the run ends it for good (ConnectIntents).
+            val fallback = connectIntents.scheduleFallback(DirectoryClient.sessionAccount(), directoryOrigin(), held.hostId)
+            diagnosticsLog.log("park_tap_fallback",
+                "episode=${p.episode} reason=$reason host=${held.hostId} owner=${fallback.owner} life=${fallback.lifeEpoch}")
+            statusHandler.post {
+                val host = directoryHosts.firstOrNull { it.hostId == fallback.hostId }
+                if (!connectIntents.fallbackRuns(fallback, DirectoryClient.sessionAccount(), directoryOrigin(), host != null)) {
+                    diagnosticsLog.log("park_tap_fallback_cancelled",
+                        "host=${fallback.hostId} owner=${fallback.owner}->${connectOwner.current()} life=${fallback.lifeEpoch} listed=${host != null}")
+                    return@post
+                }
+                connectToDirectoryHost(host!!)
+            }
+        }
+    }
+
+    /** The same PC again: its target list on this connection. false = the native side refused. */
+    private fun resumeParked(p: SessionPark.Parked): Boolean {
+        val t0 = SystemClock.elapsedRealtime()
+        if (!NativeSessionBridge.nativeResumePark()) {
+            endPark("resume_refused", announce = false)
+            return false
+        }
+        parked = null
+        statusHandler.removeCallbacks(parkExpiryRunnable)
+        unwatchParkNetwork()
+        // What the phone holds now is not news to the PC: copied while parked, it does not travel. If it
+        // cannot be read, nothing is pushed until the clipboard really changes (r2 §7).
+        val baseline = readLocalClipboardText()
+        if (baseline.isNullOrEmpty()) {
+            clipboardResumeHold = true
+        } else {
+            clipboardResumeHold = false
+            NativeSessionBridge.nativeSeedClipboardBaseline(baseline)
+        }
+        diagnosticsLog.log("park_reuse",
+            "episode=${p.episode} heldMs=${t0 - p.startedAtMs} host=${p.hostName} " +
+                NativeSessionBridge.nativeSessionCounters())
+        directoryHostKey = p.hostId
+        directoryHostName = p.hostName
+        connectFlowActive = true
+        desiredStreamActive = false
+        lastAppliedStreamActive = false
+        clearPendingSelection()
+        currentScene = UiScene.TARGETS
+        startTargetsReadyWatch("reuse", t0)
+        NativeSessionBridge.nativeRequestWindowList()
+        hostListAdapter.notifyDataSetChanged()
+        renderStatus()
+        return true
+    }
+
+    private fun readLocalClipboardText(): String? = try {
+        clipboardManager.primaryClip?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)?.coerceToText(this)?.toString()
+    } catch (t: Throwable) {
+        null
+    }
+
+    private fun renderParkBanner(nowMs: Long) {
+        val p = parked
+        if (p == null) {
+            hostsParkBanner.visibility = View.GONE
+            return
+        }
+        hostsParkBanner.visibility = View.VISIBLE
+        val text = if (parkConfirmLogged) {
+            getString(R.string.hosts_park_banner, p.hostName, SessionPark.formatRemaining(p.remainingMs(nowMs)))
+        } else {
+            getString(R.string.hosts_park_banner_preparing, p.hostName)
+        }
+        if (hostsParkText.text.toString() != text) hostsParkText.text = text
+    }
+
+    /** The network the park was made on; another one (or none) ends it. */
+    private fun watchParkNetwork(episode: Long) {
+        unwatchParkNetwork()
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        parkNetwork = cm.activeNetwork
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (parkNetwork != null && network != parkNetwork) end("network_changed")
+            }
+            override fun onLost(network: Network) {
+                if (network == parkNetwork) end("network_lost")
+            }
+            private fun end(reason: String) = runOnUiThread {
+                if (parked?.episode != episode) return@runOnUiThread
+                endPark(reason)
+                renderStatus()
+            }
+        }
+        try {
+            cm.registerDefaultNetworkCallback(callback)
+            parkNetworkCallback = callback
+        } catch (t: Throwable) {
+            diagnosticsLog.log("park_network_watch_failed", t.javaClass.simpleName)
+        }
+    }
+
+    private fun unwatchParkNetwork() {
+        val cb = parkNetworkCallback ?: return
+        parkNetworkCallback = null
+        parkNetwork = null
+        try {
+            (getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager)?.unregisterNetworkCallback(cb)
+        } catch (_: Throwable) {
+        }
+    }
+
+    private fun startTargetsReadyWatch(origin: String, startMs: Long) {
+        targetsReadyWatchStartMs = startMs
+        targetsReadyWatchOrigin = origin
+    }
+
+    /** "targets_ready": the tap until a window list of this connection is on screen. */
+    private fun noteTargetsReady(nowMs: Long, panelSnapshot: WindowPanelUiSnapshot) {
+        if (targetsReadyWatchStartMs == 0L || currentScene != UiScene.TARGETS) return
+        if (!panelSnapshot.status.startsWith("window_list_received")) return
+        diagnosticsLog.log("targets_ready",
+            "origin=$targetsReadyWatchOrigin ms=${nowMs - targetsReadyWatchStartMs} items=${panelSnapshot.items.size} " +
+                NativeSessionBridge.nativeSessionCounters())
+        targetsReadyWatchStartMs = 0L
+    }
+
+    private fun moveToTargets(reason: String, abortPendingSwitch: Boolean) {
+        diagnosticsLog.log("targets_return", "reason=$reason scene=$currentScene")
+        dismissViewerLogDialog()
+        closeViewerSheets(reason)
+        releaseViewerModifiers()
+        cancelActiveViewerTouch(reason)
+        hideViewerKeyboard(reason)
+        viewerKeyPanel?.hide()
+        desiredStreamActive = false
+        requestStreamActive(false, reason)
+        if (abortPendingSwitch) {
+            NativeSessionBridge.nativeAbortVideoSwitch()
+        } else {
+            NativeSessionBridge.nativeResetVideoStream()
+        }
+        clearPendingSelection()
+        currentScene = UiScene.TARGETS
+        resetViewerObservability()
+        // Leaving the viewer releases the orientation lock so the target list is usable in
+        // whichever way the phone is held, and so the next selection re-evaluates cleanly.
+        resetViewerOrientationState()
+        NativeSessionBridge.nativeRequestWindowList()
+    }
+
+    private fun startSelectionTransition(targetId: Long, label: String, tab: TargetTab, origin: String): Boolean {
+        // A screen pick on a host that cannot acknowledge one used to wait 6 s and fall back to
+        // the list without a word. Say why, and do not start the switch (t-970r4zgo).
+        if (tab == TargetTab.DESKTOP && targetId >= MONITOR_ID_BASE &&
+            !parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson()).hostSupportsMonitorSelect
+        ) {
+            diagnosticsLog.log(
+                "select_unsupported",
+                "targetId=$targetId label=$label tab=$tab origin=$origin reason=host_update_required"
+            )
+            Toast.makeText(this, R.string.ui_monitor_select_needs_host_update, Toast.LENGTH_LONG).show()
+            return false
+        }
+        val selectionGeneration = ++selectionGenerationCounter
+        desiredStreamActive = true
+        if (!requestStreamActive(true, "selection_$origin")) {
+            desiredStreamActive = false
+            currentScene = UiScene.TARGETS
+            return false
+        }
+        resetViewerObservability()
+        val expectedSize = resolveSelectionHintSize(targetId, tab)
+        updateExpectedContentSize(expectedSize.first, expectedSize.second, "selection_request")
+        // Rotate now, while the viewer surface does not exist yet. Rotating later would
+        // destroy and recreate the TextureView's SurfaceTexture mid-stream.
+        applyOrientationForContent(expectedSize.first, expectedSize.second, tab)
+        NativeSessionBridge.nativePrepareVideoSwitch(selectionGeneration)
+        val ok = when (tab) {
+            TargetTab.WINDOWS -> NativeSessionBridge.nativeSelectWindow(targetId)
+            // A screen id rather than a window id, when the host reported more than one.
+            TargetTab.DESKTOP ->
+                if (targetId >= MONITOR_ID_BASE) {
+                    // Against the list the user was shown: if a newer one replaced it, this is
+                    // refused (and said) rather than read as another screen.
+                    NativeSessionBridge.nativeSelectMonitorAt(
+                        (targetId - MONITOR_ID_BASE).toInt(), targetListMonitorRevision
+                    )
+                } else {
+                    NativeSessionBridge.nativeSelectDesktopMode()
+                }
+            TargetTab.SETTINGS -> false
+        }
+        if (!ok) {
+            if (tab == TargetTab.DESKTOP && targetId >= MONITOR_ID_BASE &&
+                parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson()).status
+                    .contains("monitor_list_changed")
+            ) {
+                Toast.makeText(this, R.string.ui_monitor_list_changed, Toast.LENGTH_SHORT).show()
+            }
+            desiredStreamActive = false
+            requestStreamActive(false, "selection_failed")
+            NativeSessionBridge.nativeAbortVideoSwitch()
+            diagnosticsLog.log(
+                "select_request_failed",
+                "targetId=$targetId label=$label tab=$tab gen=$selectionGeneration origin=$origin"
+            )
+            clearPendingSelection()
+            currentScene = UiScene.TARGETS
+            return false
+        }
+
+        selectionStage = SelectionStage.REQUESTING
+        pendingSelectionId = targetId
+        pendingSelectionLabel = label
+        pendingSelectionTab = tab
+        pendingSelectionGeneration = selectionGeneration
+        pendingSelectionStartedAtMs = SystemClock.elapsedRealtime()
+        pendingSelectionAckLogged = false
+        resetViewerViewport("select")
+        currentScene = UiScene.SWITCHING
+        diagnosticsLog.log(
+            "select_request",
+            "targetId=$targetId label=$label tab=$tab gen=$selectionGeneration origin=$origin " +
+                "expected=${expectedContentWidth}x${expectedContentHeight}"
+        )
+        return true
+    }
+
+    private fun handleViewerTouch(view: View, event: MotionEvent): Boolean {
+        if (currentScene != UiScene.VIEWER) return false
+        // viewer-sharpness r1 B / r2 R1: a stream begun in 크게보기 with 화면 이동 on moves / scales the picture to its
+        // end -- even past a pinch back to 전체보기 -- and sends nothing; a PC stream cut by a mode / size / scene
+        // change was released once (interruptViewerTouch) and its rest reaches nobody. Decided at ACTION_DOWN only.
+        // sh-strength r5 (N1-c2): a stream that starts while B's new layout is not shown yet is swallowed WHOLE (second
+        // finger, moves, partial ups) until its final up; the next new DOWN is judged again.
+        val layoutShown = !sharpenLayoutNotShown()
+        if (event.actionMasked == MotionEvent.ACTION_DOWN && !layoutShown && !(viewerPanMode && viewerViewport.isLarge) &&
+            sharpenInputHeldGen != sharpenPlacementGenSent) {
+            sharpenInputHeldGen = sharpenPlacementGenSent
+            diagnosticsLog.log("input_held_layout", "sent=$sharpenPlacementGenSent shown=$sharpenShownPlacementGen")
+        }
+        when (viewerTouchRouter.route(event.actionMasked, viewerPanMode && viewerViewport.isLarge, layoutShown)) {
+            ViewerTouchRouter.Owner.LOCAL -> return handleViewportGesture(event)
+            ViewerTouchRouter.Owner.SWALLOW, ViewerTouchRouter.Owner.NONE -> return true
+            ViewerTouchRouter.Owner.PC -> Unit
+        }
+        if (event.actionMasked == MotionEvent.ACTION_DOWN) {
+            showViewerControls()
+        }
+
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN,
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                val pointerIndex = event.actionIndex
+                val mappedOrNull = mapTouchToVideoCoords(
+                    event.getX(pointerIndex),
+                    event.getY(pointerIndex),
+                    clampToContent = false
+                )
+                if (mappedOrNull == null) {
+                    handleMarginPress(view, event.getPointerId(pointerIndex),
+                                      event.getY(pointerIndex))
+                    return true
+                }
+                if (activeTouchPointerId != MotionEvent.INVALID_POINTER_ID) return true
+                val mapped = mappedOrNull
+                // Never take focus away from the IME capture view: tapping the remote screen
+                // to place the caret would otherwise tear down the InputConnection and leave
+                // the soft keyboard visible but dead.
+                if (!viewerImeCaptureView.hasFocus()) view.requestFocus()
+                if (isTabletModeActive()) {
+                    activeTouchPointerId = event.getPointerId(pointerIndex)
+                    activeViewerTouchMode = ViewerTouchMode.SCROLL
+                    activeTouchButtons = 0
+                    lastTouchVideoX = mapped.first
+                    lastTouchVideoY = mapped.second
+                    scrollLastTouchY = event.getY(pointerIndex)
+                    scrollWheelCarryPx = 0f
+                    val queued = queueRemoteInput(
+                        INPUT_KIND_MOUSE_MOVE,
+                        mapped.first,
+                        mapped.second,
+                        0,
+                        0,
+                        0
+                    )
+                    if (!queued) {
+                        resetViewerTouchState()
+                    }
+                    return queued
+                }
+                activeTouchPointerId = event.getPointerId(pointerIndex)
+                activeViewerTouchMode = ViewerTouchMode.DIRECT
+                activeTouchIsSecondary = isRightClickModeActive()
+                activeTouchButtons =
+                    if (activeTouchIsSecondary) INPUT_BUTTON_SECONDARY else INPUT_BUTTON_PRIMARY
+                // Reuse the previous tap's pixel when this one follows quickly and lands close
+                // by: two taps by the same thumb are several remote pixels apart, and Windows
+                // only promotes the second press to a double-click within a 4px box.
+                val nowMs = SystemClock.uptimeMillis()
+                val reuseAnchor =
+                    lastTapAnchorValid &&
+                        lastTapSecondary == activeTouchIsSecondary &&
+                        nowMs - lastTapUpAtMs <= DOUBLE_TAP_ANCHOR_WINDOW_MS &&
+                        abs(mapped.first - lastTapVideoX) <= DOUBLE_TAP_ANCHOR_RADIUS_PX &&
+                        abs(mapped.second - lastTapVideoY) <= DOUBLE_TAP_ANCHOR_RADIUS_PX
+                val downX = if (reuseAnchor) lastTapVideoX else mapped.first
+                val downY = if (reuseAnchor) lastTapVideoY else mapped.second
+                touchDownViewX = event.getX(pointerIndex)
+                touchDownViewY = event.getY(pointerIndex)
+                touchDownVideoX = downX
+                touchDownVideoY = downY
+                touchDragLatched = false
+                lastTouchVideoX = downX
+                lastTouchVideoY = downY
+                val queued = queueRemoteInput(
+                    INPUT_KIND_MOUSE_DOWN,
+                    downX,
+                    downY,
+                    0,
+                    if (activeTouchIsSecondary) INPUT_VK_RBUTTON else INPUT_VK_LBUTTON,
+                    activeTouchButtons
+                )
+                if (!queued) {
+                    resetViewerTouchState()
+                }
+                return queued
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                // A second finger on the picture while tablet mode is held means zoom, which
+                // the remote side has no notion of; Ctrl+wheel is what applications understand.
+                if (isTabletModeActive() && handlePinchZoom(event)) {
+                    return true
+                }
+                val pointerId = activeTouchPointerId
+                if (pointerId == MotionEvent.INVALID_POINTER_ID) return false
+                val pointerIndex = event.findPointerIndex(pointerId)
+                if (pointerIndex < 0) return true
+                if (activeViewerTouchMode == ViewerTouchMode.SCROLL) {
+                    // Natural scrolling: the content follows the finger, as it does everywhere
+                    // else on a phone. Dragging up shows what is further down, so it becomes
+                    // wheel-down on the remote side.
+                    val touchY = event.getY(pointerIndex)
+                    scrollWheelCarryPx += touchY - scrollLastTouchY
+                    scrollLastTouchY = touchY
+                    val direction =
+                        when {
+                            scrollWheelCarryPx > 0f -> 1
+                            scrollWheelCarryPx < 0f -> -1
+                            else -> 0
+                        }
+                    val stepCount =
+                        if (direction == 0) {
+                            0
+                        } else {
+                            (abs(scrollWheelCarryPx) / scrollGestureStepPx).toInt()
+                        }
+                    if (stepCount > 0) {
+                        val queued = queueRemoteInput(
+                            INPUT_KIND_MOUSE_WHEEL,
+                            lastTouchVideoX,
+                            lastTouchVideoY,
+                            direction * stepCount * INPUT_WHEEL_DELTA_STEP,
+                            0,
+                            0
+                        )
+                        if (!queued) {
+                            resetViewerTouchState()
+                            return false
+                        }
+                        scrollWheelCarryPx -= direction * stepCount * scrollGestureStepPx
+                    }
+                    return true
+                }
+                val mapped = mapTouchToVideoCoords(
+                    event.getX(pointerIndex),
+                    event.getY(pointerIndex),
+                    clampToContent = true
+                ) ?: return true
+                if (mapped.first == lastTouchVideoX && mapped.second == lastTouchVideoY) {
+                    return true
+                }
+                if (!touchDragLatched) {
+                    // Measure the slop in view pixels: the remote-pixel delta is scaled by the
+                    // letterboxing factor, so the same finger wobble reads as a bigger jump on
+                    // a downscaled desktop and the threshold would drift with resolution.
+                    val dx = event.getX(pointerIndex) - touchDownViewX
+                    val dy = event.getY(pointerIndex) - touchDownViewY
+                    if (hypot(dx, dy) < viewerTouchSlopPx) return true
+                    touchDragLatched = true
+                }
+                lastTouchVideoX = mapped.first
+                lastTouchVideoY = mapped.second
+                queueRemoteInput(
+                    INPUT_KIND_MOUSE_MOVE,
+                    mapped.first,
+                    mapped.second,
+                    0,
+                    0,
+                    activeTouchButtons
+                )
+                return true
+            }
+
+            MotionEvent.ACTION_UP,
+            MotionEvent.ACTION_POINTER_UP -> {
+                val pointerIndex = event.actionIndex
+                if (event.getPointerId(pointerIndex) == rightClickModifierPointerId) {
+                    rightClickModifierPointerId = MotionEvent.INVALID_POINTER_ID
+                    renderViewerModeBanner()
+                    diagnosticsLog.log("right_click_released", "reason=pointer_up")
+                    return true
+                }
+                if (event.getPointerId(pointerIndex) == tabletModePointerId) {
+                    tabletModePointerId = MotionEvent.INVALID_POINTER_ID
+                    pinchStartSpan = 0f
+                    renderViewerModeBanner()
+                    diagnosticsLog.log("tablet_mode_released", "reason=pointer_up")
+                    return true
+                }
+                if (event.getPointerId(pointerIndex) != activeTouchPointerId) return true
+                val mapped = mapTouchToVideoCoords(
+                    event.getX(pointerIndex),
+                    event.getY(pointerIndex),
+                    clampToContent = true
+                ) ?: Pair(lastTouchVideoX, lastTouchVideoY)
+                if (activeViewerTouchMode == ViewerTouchMode.SCROLL) {
+                    resetViewerTouchState()
+                    view.performClick()
+                    return true
+                }
+                // A tap that never became a drag releases exactly where it pressed, so the
+                // press/release pair is one clean click at one pixel.
+                val upX = if (touchDragLatched) mapped.first else touchDownVideoX
+                val upY = if (touchDragLatched) mapped.second else touchDownVideoY
+                lastTouchVideoX = upX
+                lastTouchVideoY = upY
+                val wasSecondary = activeTouchIsSecondary
+                val wasTap = !touchDragLatched
+                val queued = queueRemoteInput(
+                    INPUT_KIND_MOUSE_UP,
+                    upX,
+                    upY,
+                    0,
+                    if (wasSecondary) INPUT_VK_RBUTTON else INPUT_VK_LBUTTON,
+                    0
+                )
+                // Only a tap whose release actually reached the host can anchor the next one.
+                if (wasTap && queued) {
+                    lastTapVideoX = upX
+                    lastTapVideoY = upY
+                    lastTapSecondary = wasSecondary
+                    lastTapUpAtMs = SystemClock.uptimeMillis()
+                    lastTapAnchorValid = true
+                } else {
+                    lastTapAnchorValid = false
+                }
+                resetViewerTouchState()
+                view.performClick()
+                return queued
+            }
+
+            MotionEvent.ACTION_CANCEL -> {
+                rightClickModifierPointerId = MotionEvent.INVALID_POINTER_ID
+                tabletModePointerId = MotionEvent.INVALID_POINTER_ID
+                pinchStartSpan = 0f
+                renderViewerModeBanner()
+                cancelActiveViewerTouch("touch_cancel")
+                return true
+            }
+        }
+
+        return false
+    }
+
+    /**
+     * Wires the on-screen mouse. It reports intent in relative terms; the absolute position is
+     * kept here because that is what the wire protocol carries.
+     */
+    private fun initVirtualMouse() {
+        val overlay = findViewById<android.widget.FrameLayout>(R.id.viewerVirtualMouse)
+        virtualMouse = ViewerVirtualMouse(overlay, object : ViewerVirtualMouse.Listener {
+            override fun onMoveBy(dx: Int, dy: Int) {
+                val contentRect = resolveViewerContentRect() ?: return
+                if (virtualPointerX < 0) {
+                    virtualPointerX = contentRect.contentWidth / 2
+                    virtualPointerY = contentRect.contentHeight / 2
+                }
+                // The widget speaks in view pixels; the pointer lives in remote pixels. A 1920
+                // wide screen shown in a 700 wide box means one view pixel is nearly three
+                // remote ones, and applying the delta raw made the pointer crawl at a fifth of
+                // the intended speed.
+                val viewToRemoteX =
+                    if (contentRect.width > 0f) contentRect.contentWidth / contentRect.width else 1f
+                val viewToRemoteY =
+                    if (contentRect.height > 0f) contentRect.contentHeight / contentRect.height else 1f
+                virtualPointerX = (virtualPointerX + (dx * viewToRemoteX).roundToInt())
+                    .coerceIn(0, contentRect.contentWidth - 1)
+                virtualPointerY = (virtualPointerY + (dy * viewToRemoteY).roundToInt())
+                    .coerceIn(0, contentRect.contentHeight - 1)
+                // Kept in step with direct touches, so releasing a button here lands where the
+                // last real touch was if the two are mixed.
+                lastTouchVideoX = virtualPointerX
+                lastTouchVideoY = virtualPointerY
+                queueRemoteInput(
+                    INPUT_KIND_MOUSE_MOVE, virtualPointerX, virtualPointerY, 0, 0, activeTouchButtons,
+                )
+                syncVirtualMouseMarker()
+            }
+
+            override fun onRequestInitialPosition() {
+                val contentRect = resolveViewerContentRect() ?: return
+                if (virtualPointerX < 0) {
+                    virtualPointerX = contentRect.contentWidth / 2
+                    virtualPointerY = contentRect.contentHeight / 2
+                    queueRemoteInput(
+                        INPUT_KIND_MOUSE_MOVE, virtualPointerX, virtualPointerY, 0, 0, 0,
+                    )
+                }
+                syncVirtualMouseMarker()
+            }
+
+            override fun onButtonDown(button: ViewerVirtualMouse.Button) {
+                val vk = virtualButtonVk(button)
+                activeTouchButtons = virtualButtonMask(button)
+                queueRemoteInput(
+                    INPUT_KIND_MOUSE_DOWN, virtualPointerX.coerceAtLeast(0),
+                    virtualPointerY.coerceAtLeast(0), 0, vk, activeTouchButtons,
+                )
+            }
+
+            override fun onButtonUp(button: ViewerVirtualMouse.Button) {
+                val vk = virtualButtonVk(button)
+                activeTouchButtons = 0
+                queueRemoteInput(
+                    INPUT_KIND_MOUSE_UP, virtualPointerX.coerceAtLeast(0),
+                    virtualPointerY.coerceAtLeast(0), 0, vk, 0,
+                )
+            }
+
+            override fun onWheel(notches: Int) {
+                queueRemoteInput(
+                    INPUT_KIND_MOUSE_WHEEL, virtualPointerX.coerceAtLeast(0),
+                    virtualPointerY.coerceAtLeast(0), notches * INPUT_WHEEL_DELTA_STEP, 0, 0,
+                )
+            }
+        })
+    }
+
+    /** Places the ring on the pointer, converting remote pixels back into view pixels. */
+    private fun syncVirtualMouseMarker() {
+        val mouse = virtualMouse ?: return
+        val contentRect = resolveViewerContentRect() ?: return
+        if (virtualPointerX < 0 || contentRect.contentWidth <= 1 || contentRect.contentHeight <= 1) {
+            return
+        }
+        val viewX = contentRect.left +
+            (virtualPointerX.toFloat() / (contentRect.contentWidth - 1)) * contentRect.width
+        val viewY = contentRect.top +
+            (virtualPointerY.toFloat() / (contentRect.contentHeight - 1)) * contentRect.height
+        mouse.moveTo(viewX, viewY)
+    }
+
+    private fun virtualButtonVk(button: ViewerVirtualMouse.Button): Int = when (button) {
+        ViewerVirtualMouse.Button.LEFT -> INPUT_VK_LBUTTON
+        ViewerVirtualMouse.Button.RIGHT -> INPUT_VK_RBUTTON
+        ViewerVirtualMouse.Button.MIDDLE -> INPUT_VK_MBUTTON
+    }
+
+    private fun virtualButtonMask(button: ViewerVirtualMouse.Button): Int = when (button) {
+        ViewerVirtualMouse.Button.LEFT -> INPUT_BUTTON_PRIMARY
+        ViewerVirtualMouse.Button.RIGHT -> INPUT_BUTTON_SECONDARY
+        ViewerVirtualMouse.Button.MIDDLE -> INPUT_BUTTON_MIDDLE
+    }
+
+    /**
+     * The margin is split into thirds. Top and middle are held modifiers; the bottom is a tap,
+     * because the on-screen mouse has to stay up while both hands are used on it.
+     */
+    private fun handleMarginPress(view: View, pointerId: Int, y: Float) {
+        val height = view.height.toFloat()
+        val zone = when {
+            height <= 0f -> MarginZone.TOP
+            y < height / 3f -> MarginZone.TOP
+            y < height * 2f / 3f -> MarginZone.MIDDLE
+            else -> MarginZone.BOTTOM
+        }
+        when (zone) {
+            MarginZone.TOP -> {
+                if (rightClickModifierPointerId == MotionEvent.INVALID_POINTER_ID) {
+                    rightClickModifierPointerId = pointerId
+                    showViewerControls(emphasized = true)
+                    renderViewerModeBanner()
+                    diagnosticsLog.log("right_click_armed", "pointer=$pointerId")
+                }
+            }
+            MarginZone.MIDDLE -> {
+                if (tabletModePointerId == MotionEvent.INVALID_POINTER_ID) {
+                    tabletModePointerId = pointerId
+                    pinchStartSpan = 0f
+                    pinchZoomCarry = 0f
+                    showViewerControls(emphasized = true)
+                    renderViewerModeBanner()
+                    diagnosticsLog.log("tablet_mode_armed", "pointer=$pointerId")
+                }
+            }
+            MarginZone.BOTTOM -> {
+                toggleVirtualMouse()
+            }
+        }
+    }
+
+    /** A modifier counts whether it came from the strip or from a letterbox margin. */
+    private fun isRightClickModeActive(): Boolean =
+        zoneRightClickHeld || rightClickModifierPointerId != MotionEvent.INVALID_POINTER_ID
+
+    private fun isTabletModeActive(): Boolean =
+        zoneTabletHeld || zoneTabletLocked || tabletModePointerId != MotionEvent.INVALID_POINTER_ID
+
+    /**
+     * The left strip. Because it is its own view, the finger holding it never enters the
+     * picture's gesture, which is what let a held margin finger masquerade as a pinch.
+     */
+    private fun initZoneBar() {
+        viewerZoneRightClick = findViewById(R.id.viewerZoneRightClick)
+        viewerZoneTablet = findViewById(R.id.viewerZoneTablet)
+        viewerTabletLockButton = findViewById(R.id.viewerTabletLockButton)
+        viewerTabletLockButton.setOnClickListener {
+            zoneTabletLocked = !zoneTabletLocked
+            diagnosticsLog.log("tablet_mode_lock", "locked=$zoneTabletLocked")
+            if (zoneTabletLocked) showViewerControls(emphasized = true)
+            renderViewerModeBanner()
+        }
+        val bar = findViewById<LinearLayout>(R.id.viewerZoneBar)
+        bar.setOnTouchListener { view, event ->
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    // The strip lies along the left edge in landscape and along the top in
+                    // portrait, so the thirds are measured along whichever way it runs.
+                    val extent =
+                        if (bar.orientation == LinearLayout.VERTICAL) view.height.toFloat()
+                        else view.width.toFloat()
+                    val position =
+                        if (bar.orientation == LinearLayout.VERTICAL) event.y else event.x
+                    when {
+                        extent <= 0f || position < extent / 3f -> {
+                            zoneRightClickHeld = true
+                            diagnosticsLog.log("right_click_armed", "source=zone_bar")
+                        }
+                        position < extent * 2f / 3f -> {
+                            zoneTabletHeld = true
+                            pinchStartSpan = 0f
+                            pinchZoomCarry = 0f
+                            diagnosticsLog.log("tablet_mode_armed", "source=zone_bar")
+                        }
+                        else -> {
+                            // A tap, not a hold: both hands are needed on the mouse itself.
+                            toggleVirtualMouse()
+                        }
+                    }
+                    showViewerControls(emphasized = true)
+                    renderViewerModeBanner()
+                    true
+                }
+
+                MotionEvent.ACTION_UP,
+                MotionEvent.ACTION_CANCEL -> {
+                    releaseZoneBarModifiers()
+                    view.performClick()
+                    true
+                }
+
+                else -> true
+            }
+        }
+    }
+
+    private fun releaseZoneBarModifiers() {
+        if (!zoneRightClickHeld && !zoneTabletHeld) return
+        zoneRightClickHeld = false
+        zoneTabletHeld = false
+        pinchStartSpan = 0f
+        if (::viewerModeBanner.isInitialized) renderViewerModeBanner()
+    }
+
+    /** Shows which modifier is currently held, so the mode is never a guess. */
+    private fun renderViewerModeBanner() {
+        val text = when {
+            zoneTabletLocked -> getString(R.string.viewer_mode_tablet_locked)
+            isTabletModeActive() -> getString(R.string.viewer_mode_tablet)
+            isRightClickModeActive() -> getString(R.string.viewer_mode_right_click)
+            else -> ""
+        }
+        viewerModeBanner.text = text
+        viewerModeBanner.visibility = if (text.isEmpty()) View.GONE else View.VISIBLE
+        if (::viewerTabletLockButton.isInitialized) {
+            viewerTabletLockButton.visibility =
+                if (isTabletModeActive()) View.VISIBLE else View.GONE
+            viewerTabletLockButton.text = getString(
+                if (zoneTabletLocked) R.string.tablet_lock_closed else R.string.tablet_lock_open,
+            )
+        }
+        // Idle zones stay readable: 0.85 keeps the label at 7.55:1 on ui_bg where 0.55 gave 3.86:1
+        // (Codex 4). Active is full strength on a green tint.
+        if (::viewerZoneRightClick.isInitialized) {
+            viewerZoneRightClick.alpha = if (isRightClickModeActive()) 1.0f else ZONE_IDLE_ALPHA
+            viewerZoneRightClick.setBackgroundColor(
+                if (isRightClickModeActive()) 0x3345E08C else 0x00000000,
+            )
+            viewerZoneTablet.alpha = if (isTabletModeActive()) 1.0f else ZONE_IDLE_ALPHA
+            viewerZoneTablet.setBackgroundColor(
+                if (isTabletModeActive()) 0x3345E08C else 0x00000000,
+            )
+        }
+    }
+
+    /**
+     * Two fingers on the picture: turn the change in spread into Ctrl+wheel, which is how
+     * browsers, editors and image viewers all spell zoom.
+     */
+    private fun handlePinchZoom(event: MotionEvent): Boolean {
+        // Only fingers that are actually on the picture can pinch. When tablet mode is held
+        // via a letterbox margin, that margin finger shares this event stream, and counting it
+        // turned every one-finger drag into a phantom zoom that ate the scroll gesture.
+        val pinchIndices = (0 until event.pointerCount).filter {
+            val id = event.getPointerId(it)
+            id != tabletModePointerId && id != rightClickModifierPointerId
+        }
+        if (pinchIndices.size < 2) {
+            pinchStartSpan = 0f
+            return false
+        }
+        val a = pinchIndices[0]
+        val b = pinchIndices[1]
+        val span = kotlin.math.hypot(
+            (event.getX(b) - event.getX(a)).toDouble(),
+            (event.getY(b) - event.getY(a)).toDouble(),
+        ).toFloat()
+        if (pinchStartSpan <= 0f) {
+            pinchStartSpan = span
+            pinchZoomCarry = 0f
+            return true
+        }
+        pinchZoomCarry += span - pinchStartSpan
+        pinchStartSpan = span
+        val step = scrollGestureStepPx * 2f
+        val notches = (abs(pinchZoomCarry) / step).toInt()
+        if (notches > 0) {
+            val direction = if (pinchZoomCarry > 0f) 1 else -1
+            pinchZoomCarry -= direction * notches * step
+            queueViewerSpecialKey(INPUT_VK_CONTROL, KeyEvent.ACTION_DOWN)
+            queueRemoteInput(
+                INPUT_KIND_MOUSE_WHEEL,
+                lastTouchVideoX,
+                lastTouchVideoY,
+                direction * notches * INPUT_WHEEL_DELTA_STEP,
+                0,
+                0,
+            )
+            queueViewerSpecialKey(INPUT_VK_CONTROL, KeyEvent.ACTION_UP)
+        }
+        return true
+    }
+
+    private fun toggleVirtualMouse() {
+        val mouse = virtualMouse ?: return
+        if (mouse.isOpen) {
+            mouse.hide()
+            diagnosticsLog.log("virtual_mouse", "state=hidden")
+            return
+        }
+        mouse.show()
+        showViewerControls(emphasized = true)
+        diagnosticsLog.log("virtual_mouse", "state=shown at=$virtualPointerX,$virtualPointerY")
+    }
+
+    // ---------------------------------------------------------------- macro
+
+    private fun showMacroDialog() {
+        if (macroDialog?.isShowing == true) return
+        val view = layoutInflater.inflate(R.layout.viewer_macro_dialog, null)
+        macroStatusText = view.findViewById(R.id.macroStatusText)
+        macroStepListContainer = view.findViewById(R.id.macroStepListContainer)
+        macroRecordButton = view.findViewById(R.id.macroRecordButton)
+        macroPlayButton = view.findViewById(R.id.macroPlayButton)
+        macroPauseButton = view.findViewById(R.id.macroPauseButton)
+        macroListRenderedSignature = null
+
+        macroRecordButton?.setOnClickListener {
+            if (NativeSessionBridge.nativeMacroState() == MACRO_STATE_RECORDING) {
+                stopMacroRecording()
+            } else {
+                startMacroRecording()
+            }
+        }
+        macroPlayButton?.setOnClickListener {
+            if (NativeSessionBridge.nativeMacroState() == MACRO_STATE_PLAYING) {
+                NativeSessionBridge.nativeMacroStopPlayback()
+                diagnosticsLog.log("macro", "playback_stopped")
+            } else {
+                startMacroPlayback(view)
+            }
+            renderMacroUi()
+        }
+        macroPauseButton?.setOnClickListener { toggleMacroPause() }
+        view.findViewById<Button>(R.id.macroClearButton).setOnClickListener {
+            NativeSessionBridge.nativeMacroStopPlayback()
+            NativeSessionBridge.nativeMacroClear()
+            renderMacroUi()
+        }
+        view.findViewById<Button>(R.id.macroSaveButton).setOnClickListener { showMacroSaveDialog() }
+        view.findViewById<Button>(R.id.macroLoadButton).setOnClickListener { showMacroLoadDialog() }
+        view.findViewById<Button>(R.id.macroCloseButton).setOnClickListener {
+            macroDialog?.dismiss()
+        }
+
+        macroDialog = AlertDialog.Builder(this)
+            .setView(view)
+            .setOnDismissListener {
+                // Recording and playback deliberately survive the window closing: the actions
+                // being recorded happen on the picture this window is covering.
+                macroDialog = null
+                macroStatusText = null
+                macroStepListContainer = null
+                macroRecordButton = null
+                macroPlayButton = null
+                macroPauseButton = null
+                applyImmersiveMode()
+            }
+            .create()
+        macroDialog?.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        macroDialog?.show()
+        renderMacroUi()
+    }
+
+    private fun startMacroRecording() {
+        NativeSessionBridge.nativeMacroStopPlayback()
+        NativeSessionBridge.nativeMacroStartRecording()
+        diagnosticsLog.log("macro", "recording_started")
+        // Out of the way, so the actions can be performed on the picture.
+        macroDialog?.dismiss()
+        scheduleMacroPump()
+        renderMacroUi()
+    }
+
+    private fun stopMacroRecording() {
+        NativeSessionBridge.nativeMacroStopRecording()
+        diagnosticsLog.log("macro", "recorded=${NativeSessionBridge.nativeMacroStepCount()}")
+        renderMacroUi()
+        showMacroDialog()
+    }
+
+    private fun startMacroPlayback(view: View) {
+        fun field(id: Int, fallback: Int): Int =
+            view.findViewById<EditText>(id).text?.toString()?.trim()?.toIntOrNull() ?: fallback
+
+        val started = NativeSessionBridge.nativeMacroStartPlayback(
+            field(R.id.macroTimingJitterInput, 0),
+            field(R.id.macroPositionJitterInput, 0),
+            field(R.id.macroRepeatInput, 1),
+            field(R.id.macroGapMinInput, 0),
+            field(R.id.macroGapMaxInput, 0),
+        )
+        diagnosticsLog.log("macro", "playback_started=$started")
+        if (started) scheduleMacroPump()
+    }
+
+    private fun scheduleMacroPump() {
+        if (macroPumpScheduled) return
+        macroPumpScheduled = true
+        statusHandler.post(macroPumpRunnable)
+    }
+
+    private fun toggleMacroPause() {
+        val paused = NativeSessionBridge.nativeMacroIsPaused()
+        NativeSessionBridge.nativeMacroSetPaused(!paused)
+        diagnosticsLog.log("macro", if (paused) "resumed" else "paused")
+        renderMacroUi()
+    }
+
+    private fun renderMacroUi() {
+        val state = NativeSessionBridge.nativeMacroState()
+        val count = NativeSessionBridge.nativeMacroStepCount()
+        val paused = NativeSessionBridge.nativeMacroIsPaused()
+        val pauseLabel = getString(if (paused) R.string.macro_resume else R.string.macro_pause)
+
+        macroRecordBar.visibility =
+            if (state == MACRO_STATE_RECORDING) View.VISIBLE else View.GONE
+        if (state == MACRO_STATE_RECORDING) {
+            macroRecordBarText.text =
+                if (paused) getString(R.string.macro_paused_recording, count)
+                else getString(R.string.macro_recording, count)
+            macroRecordBarPause.text = pauseLabel
+        }
+
+        macroRecordButton?.text =
+            if (state == MACRO_STATE_RECORDING) getString(R.string.macro_stop)
+            else getString(R.string.macro_record)
+        macroPlayButton?.text =
+            if (state == MACRO_STATE_PLAYING) getString(R.string.macro_stop)
+            else getString(R.string.macro_play)
+        macroPlayButton?.isEnabled = count > 0
+        macroPauseButton?.text = pauseLabel
+        macroPauseButton?.isEnabled = state != MACRO_STATE_IDLE
+
+        macroStatusText?.text = when {
+            state == MACRO_STATE_RECORDING && paused ->
+                getString(R.string.macro_paused_recording, count)
+            state == MACRO_STATE_RECORDING -> getString(R.string.macro_recording, count)
+            state == MACRO_STATE_PLAYING && paused -> getString(R.string.macro_paused_playing)
+            state == MACRO_STATE_PLAYING -> getString(
+                R.string.macro_playing_summary,
+                NativeSessionBridge.nativeMacroCompletedRepeats(),
+            )
+            else -> getString(R.string.macro_idle_summary, count)
+        }
+        renderMacroSteps(state, count)
+    }
+
+    /** Rebuilds the row list only when its contents actually changed. */
+    private fun renderMacroSteps(state: Int, count: Int) {
+        val container = macroStepListContainer ?: return
+        val signature = "$state/$count"
+        if (signature == macroListRenderedSignature) return
+        macroListRenderedSignature = signature
+
+        container.removeAllViews()
+        fun addLine(text: String, dim: Boolean = false): TextView {
+            val row = TextView(this)
+            row.text = text
+            row.textSize = 11f
+            row.typeface = android.graphics.Typeface.MONOSPACE
+            row.setTextColor(if (dim) 0xFF9AA3B2.toInt() else 0xFFD8DEE9.toInt())
+            row.setPadding(dp(4f), dp(5f), dp(4f), dp(5f))
+            container.addView(row)
+            return row
+        }
+
+        if (count == 0) {
+            addLine(getString(R.string.macro_empty), dim = true)
+            return
+        }
+        addLine(getString(R.string.macro_edit_hint), dim = true)
+        val lines = NativeSessionBridge.nativeMacroStepLines().split('\n')
+        val editable = state == MACRO_STATE_IDLE
+        // A runaway recording can hold thousands of steps; a dialog list stops being a review
+        // tool long before that, and building the views would stall the UI thread.
+        val shown = lines.take(MACRO_LIST_MAX_ROWS)
+        shown.forEachIndexed { index, line ->
+            val row = addLine(line)
+            if (editable) {
+                row.setBackgroundResource(android.R.drawable.list_selector_background)
+                row.setOnClickListener { showMacroStepEditDialog(index) }
+            }
+        }
+        if (lines.size > shown.size) {
+            addLine(getString(R.string.macro_list_truncated, lines.size - shown.size), dim = true)
+        }
+    }
+
+    private fun dp(v: Float): Int = (v * resources.displayMetrics.density).toInt()
+
+    /** One action: adjust where it lands and how long it waits, or drop it entirely. */
+    private fun showMacroStepEditDialog(index: Int) {
+        val fields = NativeSessionBridge.nativeMacroStepFields(index).split(' ')
+        if (fields.size < 7) return
+        val container = LinearLayout(this)
+        container.orientation = LinearLayout.VERTICAL
+        container.setPadding(dp(20f), dp(8f), dp(20f), dp(0f))
+
+        fun labelled(labelRes: Int, value: String): EditText {
+            val label = TextView(this)
+            label.text = getString(labelRes)
+            label.textSize = 12f
+            container.addView(label)
+            val edit = EditText(this)
+            edit.inputType = android.text.InputType.TYPE_CLASS_NUMBER
+            edit.setText(value)
+            container.addView(edit)
+            return edit
+        }
+
+        val xEdit = labelled(R.string.macro_step_x, fields[1])
+        val yEdit = labelled(R.string.macro_step_y, fields[2])
+        val delayEdit = labelled(R.string.macro_step_delay, fields[6])
+
+        AlertDialog.Builder(this)
+            .setTitle(getString(R.string.macro_step_edit_title, index + 1))
+            .setView(container)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                NativeSessionBridge.nativeMacroUpdateStep(
+                    index,
+                    xEdit.text.toString().toIntOrNull() ?: 0,
+                    yEdit.text.toString().toIntOrNull() ?: 0,
+                    delayEdit.text.toString().toIntOrNull() ?: 0,
+                )
+                macroListRenderedSignature = null
+                renderMacroUi()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .setNeutralButton(R.string.macro_step_delete) { _, _ ->
+                NativeSessionBridge.nativeMacroRemoveStep(index)
+                macroListRenderedSignature = null
+                renderMacroUi()
+            }
+            .show()
+    }
+
+    // ------------------------------------------------------------ macro save/load
+
+    private fun macroDir(): java.io.File =
+        java.io.File(filesDir, "macros").apply { mkdirs() }
+
+    private fun showMacroSaveDialog() {
+        if (NativeSessionBridge.nativeMacroStepCount() == 0) return
+        val nameEdit = EditText(this)
+        nameEdit.hint = getString(R.string.macro_save_hint)
+        nameEdit.maxLines = 1
+        val wrapper = LinearLayout(this)
+        wrapper.setPadding(dp(20f), dp(8f), dp(20f), dp(0f))
+        wrapper.addView(
+            nameEdit,
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+        AlertDialog.Builder(this)
+            .setTitle(R.string.macro_save_title)
+            .setView(wrapper)
+            .setPositiveButton(R.string.macro_save) { _, _ ->
+                val raw = nameEdit.text.toString().trim()
+                // The name becomes a file name; strip anything the filesystem might interpret.
+                val name = raw.replace(Regex("[\\\\/:*?\"<>|]"), "_").take(40)
+                if (name.isEmpty()) return@setPositiveButton
+                java.io.File(macroDir(), "$name.gnmacro")
+                    .writeText(NativeSessionBridge.nativeMacroSerialize())
+                diagnosticsLog.log("macro", "saved name=$name")
+                Toast.makeText(this, getString(R.string.macro_saved_toast, name), Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton(android.R.string.cancel, null)
+            .show()
+    }
+
+    private fun showMacroLoadDialog() {
+        val files = macroDir().listFiles { f -> f.isFile && f.name.endsWith(".gnmacro") }
+            ?.sortedByDescending { it.lastModified() }
+            .orEmpty()
+        if (files.isEmpty()) {
+            Toast.makeText(this, R.string.macro_load_empty, Toast.LENGTH_SHORT).show()
+            return
+        }
+        val names = files.map { it.name.removeSuffix(".gnmacro") }
+        val list = ListView(this)
+        list.adapter = android.widget.ArrayAdapter(
+            this, android.R.layout.simple_list_item_1, names,
+        )
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.macro_load_title)
+            .setView(list)
+            .setNegativeButton(android.R.string.cancel, null)
+            .create()
+        list.setOnItemClickListener { _, _, position, _ ->
+            val ok = runCatching { files[position].readText() }
+                .map { NativeSessionBridge.nativeMacroLoadSerialized(it) }
+                .getOrDefault(false)
+            if (ok) {
+                diagnosticsLog.log("macro", "loaded name=${names[position]}")
+                Toast.makeText(
+                    this, getString(R.string.macro_loaded_toast, names[position]), Toast.LENGTH_SHORT,
+                ).show()
+                macroListRenderedSignature = null
+                renderMacroUi()
+            } else {
+                Toast.makeText(this, R.string.macro_load_failed, Toast.LENGTH_SHORT).show()
+            }
+            dialog.dismiss()
+        }
+        list.setOnItemLongClickListener { _, _, position, _ ->
+            AlertDialog.Builder(this)
+                .setMessage(getString(R.string.macro_delete_confirm, names[position]))
+                .setPositiveButton(android.R.string.ok) { _, _ ->
+                    files[position].delete()
+                    dialog.dismiss()
+                }
+                .setNegativeButton(android.R.string.cancel, null)
+                .show()
+            true
+        }
+        dialog.show()
+    }
+
+    private fun cancelActiveViewerTouch(reason: String) {
+        // A cancelled gesture is not a tap, so it must not anchor whatever comes next.
+        lastTapAnchorValid = false
+        if (activeViewerTouchMode == ViewerTouchMode.SCROLL) {
+            resetViewerTouchState()
+            return
+        }
+        if (activeTouchPointerId == MotionEvent.INVALID_POINTER_ID || activeTouchButtons == 0) {
+            resetViewerTouchState()
+            return
+        }
+
+        val queued = queueRemoteInput(
+            INPUT_KIND_MOUSE_UP,
+            lastTouchVideoX,
+            lastTouchVideoY,
+            0,
+            if (activeTouchIsSecondary) INPUT_VK_RBUTTON else INPUT_VK_LBUTTON,
+            0
+        )
+        if (!queued) {
+            diagnosticsLog.log(
+                "touch_release_skipped",
+                "reason=$reason x=$lastTouchVideoX y=$lastTouchVideoY"
+            )
+        }
+        resetViewerTouchState()
+    }
+
+    /** The margin-hold right click has no visible affordance, so say it once per session. */
+    private fun showRightClickHintOnce() {
+        if (rightClickHintShown) return
+        rightClickHintShown = true
+        Toast.makeText(this, R.string.viewer_right_click_hint, Toast.LENGTH_LONG).show()
+    }
+
+    private fun resetViewerTouchState() {
+        activeTouchIsSecondary = false
+        activeTouchPointerId = MotionEvent.INVALID_POINTER_ID
+        activeViewerTouchMode = ViewerTouchMode.DIRECT
+        activeTouchButtons = 0
+        lastTouchVideoX = 0
+        lastTouchVideoY = 0
+        scrollLastTouchY = 0f
+        scrollWheelCarryPx = 0f
+        touchDragLatched = false
+        touchDownViewX = 0f
+        touchDownViewY = 0f
+        touchDownVideoX = 0
+        touchDownVideoY = 0
+    }
+
+    private fun viewerKeyboardMode(): ViewerKeyboardCycle.Mode =
+        ViewerKeyboardCycle.mode(viewerImeCaptureView.hasFocus(), viewerKeyPanel?.isOpen == true)
+
+    /** 'PC 키': the phone keyboard goes down and the PC key panel takes its place. */
+    private fun showViewerKeyPanelInsteadOfPhone(reason: String) {
+        hideViewerKeyboard(reason)
+        viewerKeyPanel?.reservedHeightPx = keyPanelReservedHeightPx()
+        viewerKeyPanel?.show()
+    }
+
+    /** Shows, places and marks the [휴대폰 자판 | PC 키] bar for what is up now. */
+    private fun renderViewerKeyboardTabs() {
+        if (!::viewerKeyboardTabs.isInitialized) return
+        val mode = viewerKeyboardMode()
+        val visible = ViewerKeyboardCycle.barVisible(mode, imeBottomPx, awaitingIme)
+        viewerKeyboardTabs.visibility = if (visible) View.VISIBLE else View.GONE
+        viewerKeyboardTabs.translationY =
+            ViewerKeyboardCycle.barTranslationYPx(mode, imeBottomPx, panelHeightPx = 0).toFloat()
+        viewerKeyboardTabPhone.alpha = if (mode == ViewerKeyboardCycle.Mode.PHONE) 1.0f else 0.55f
+        viewerKeyboardTabPcKeys.alpha = if (mode == ViewerKeyboardCycle.Mode.PC_KEYS) 1.0f else 0.55f
+    }
+
+    private fun toggleViewerKeyboard() {
+        showViewerControls(emphasized = true)
+        if (viewerImeCaptureView.hasFocus()) {
+            hideViewerKeyboard("toolbar_toggle")
+            return
+        }
+        diagnosticsLog.log("viewer_keyboard_tap", "scene=$currentScene")
+        viewerImeCaptureView.resetPreviewState()
+        // Give the IME a moment to take its height before the tab bar shows; if none comes (a
+        // hardware keyboard, an IME that does not show), the bar appears at the bottom anyway.
+        awaitingIme = true
+        statusHandler.removeCallbacks(imeWaitOverRunnable)
+        statusHandler.postDelayed(imeWaitOverRunnable, imeWaitMs)
+        viewerImeCaptureView.requestFocus()
+        viewerImeCaptureView.post {
+            val imm = getSystemService(InputMethodManager::class.java)
+            imm?.showSoftInput(viewerImeCaptureView, InputMethodManager.SHOW_IMPLICIT)
+        }
+    }
+
+    /** The typed-text preview at the top left; blank hides it. */
+    private fun showInputPreview(text: CharSequence) {
+        if (!::viewerInputPreviewText.isInitialized) return
+        val visibleText = text.toString().replace('\n', ' ').replace('\r', ' ')
+        viewerInputPreviewText.text = visibleText
+        viewerInputPreviewText.visibility = if (visibleText.isBlank()) View.GONE else View.VISIBLE
+    }
+
+    /** 연결 해제 from the viewer menu: one light confirmation, then the same path as the list's. */
+    private fun confirmDisconnectFromViewer() {
+        if (disconnectDialog?.isShowing == true) return
+        closeViewerMenu("disconnect")
+        disconnectDialog = AlertDialog.Builder(this)
+            .setTitle(R.string.ui_disconnect_confirm_title)
+            .setMessage(R.string.ui_disconnect_confirm_message)
+            .setPositiveButton(R.string.ui_disconnect_confirm_yes) { _, _ ->
+                diagnosticsLog.log("viewer_disconnect", "scene=$currentScene")
+                viewerKeyPanel?.hide()
+                releaseViewerModifiers()
+                listDisconnectButton.performClick()
+            }
+            .setNegativeButton(R.string.ui_cancel, null)
+            .create()
+        disconnectDialog?.setOnDismissListener {
+            disconnectDialog = null
+            applyImmersiveMode()
+        }
+        disconnectDialog?.show()
+    }
+
+    private fun hideViewerKeyboard(reason: String) {
+        if (!::viewerImeCaptureView.isInitialized) return
+        val hadFocus = viewerImeCaptureView.hasFocus()
+        val imm = getSystemService(InputMethodManager::class.java)
+        imm?.hideSoftInputFromWindow(viewerImeCaptureView.windowToken, 0)
+        viewerImeCaptureView.clearFocus()
+        viewerImeCaptureView.resetPreviewState()
+        showInputPreview("")
+        if (hadFocus) {
+            diagnosticsLog.log("viewer_keyboard_hide", "reason=$reason")
+        }
+    }
+
+    private fun showViewerControls(emphasized: Boolean = false) {
+        if (!::viewerControlsBar.isInitialized) return
+        val targetAlpha = 1.0f
+        viewerControlsBar.animate().alpha(targetAlpha).setDuration(120L).start()
+        statusHandler.removeCallbacks(viewerControlsFadeRunnable)
+        val delayMs = if (emphasized) 3200L else 2400L
+        statusHandler.postDelayed(viewerControlsFadeRunnable, delayMs)
+    }
+
+    /** Drops every held modifier, the tablet lock, and any scroll gesture that depended on one. */
+    private fun releaseViewerModifiers() {
+        zoneTabletLocked = false
+        releaseZoneBarModifiers()
+        if (::viewerModeBanner.isInitialized) renderViewerModeBanner()
+        if (activeViewerTouchMode == ViewerTouchMode.SCROLL) {
+            resetViewerTouchState()
+        }
+    }
+
+    private fun toggleViewerLogDialog() {
+        showViewerControls(emphasized = true)
+        val existing = viewerLogDialog
+        if (existing?.isShowing == true) {
+            existing.dismiss()
+            return
+        }
+
+        val contentView = layoutInflater.inflate(R.layout.viewer_log_dialog, null)
+        viewerLogStatusText = contentView.findViewById(R.id.viewerLogStatusText)
+        viewerLogTextView = contentView.findViewById(R.id.viewerLogText)
+        contentView.findViewById<Button>(R.id.viewerLogRefreshButton).setOnClickListener {
+            refreshViewerLogBody()
+            renderStatus()
+        }
+        contentView.findViewById<Button>(R.id.viewerLogCloseButton).setOnClickListener {
+            dismissViewerLogDialog()
+        }
+
+        val dialog = AlertDialog.Builder(this).setView(contentView).create()
+        dialog.setOnDismissListener {
+            viewerLogDialog = null
+            viewerLogStatusText = null
+            viewerLogTextView = null
+            applyImmersiveMode()
+        }
+        dialog.show()
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.window?.setLayout(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        viewerLogDialog = dialog
+        refreshViewerLogBody()
+        updateViewerLogHeader(
+            NativeSessionBridge.nativeGetStatus(),
+            parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson()),
+            NativeSessionBridge.nativeGetVideoDebugStatus(),
+            NativeSessionBridge.nativeGetLastError()
+        )
+    }
+
+    private fun dismissViewerLogDialog() {
+        viewerLogDialog?.dismiss()
+    }
+
+    private fun refreshViewerLogBody() {
+        // Up to 512 KB off the main thread; the callback lands back on it.
+        diagnosticsLog.readAllTextAsync { currentLog ->
+            viewerLogTextView?.text =
+                if (currentLog.isBlank()) {
+                    getString(R.string.viewer_log_empty)
+                } else {
+                    currentLog
+                }
+        }
+    }
+
+    private fun updateViewerLogHeader(
+        statusValue: String,
+        panelSnapshot: WindowPanelUiSnapshot,
+        videoDebugValue: String,
+        errorValue: String,
+    ) {
+        val headerView = viewerLogStatusText ?: return
+        headerView.text =
+            buildString {
+                append("selected: ")
+                append(panelSnapshot.selectedTitle)
+                append('\n')
+                append("status: ")
+                append(statusValue)
+                append('\n')
+                append("panel: ")
+                append(panelSnapshot.status)
+                append('\n')
+                append("video: ")
+                append(if (videoDebugValue.isBlank()) "n/a" else videoDebugValue)
+                if (errorValue.isNotBlank()) {
+                    append('\n')
+                    append("error: ")
+                    append(errorValue)
+                }
+                append('\n')
+                append("file: ")
+                append(diagnosticsLog.filePath())
+            }
+    }
+
+    private fun queueViewerCommittedText(text: CharSequence) {
+        if (currentScene != UiScene.VIEWER || text.isEmpty()) return
+        val normalized =
+            buildString(text.length) {
+                text.forEach { ch ->
+                    when (ch) {
+                        '\u0000' -> {}
+                        '\n' -> append('\r')
+                        '\u00A0' -> append(' ')
+                        else -> append(ch)
+                    }
+                }
+            }
+        if (normalized.isEmpty()) return
+        val ok = NativeSessionBridge.nativeQueueInputText(normalized)
+        if (!ok) {
+            diagnosticsLog.log("viewer_text_queue_failed", "len=${normalized.length}")
+        }
+    }
+
+    private fun queueViewerSpecialKey(windowsVk: Int, action: Int): Boolean {
+        if (currentScene != UiScene.VIEWER) return false
+        val inputKind =
+            when (action) {
+                KeyEvent.ACTION_DOWN -> INPUT_KIND_KEY_DOWN
+                KeyEvent.ACTION_UP -> INPUT_KIND_KEY_UP
+                else -> return false
+            }
+        val x = resolveKeyboardVideoCoord(lastTouchVideoX, videoWidth)
+        val y = resolveKeyboardVideoCoord(lastTouchVideoY, videoHeight)
+        return queueRemoteInput(
+            inputKind,
+            x,
+            y,
+            0,
+            windowsVk,
+            activeTouchButtons
+        )
+    }
+
+    private fun resolveKeyboardVideoCoord(lastCoord: Int, extent: Int): Int {
+        if (extent <= 0) return 0
+        return lastCoord.coerceIn(0, extent - 1)
+    }
+
+    private fun mapAndroidKeyCodeToWindowsVk(keyCode: Int): Int? =
+        when (keyCode) {
+            KeyEvent.KEYCODE_ENTER,
+            KeyEvent.KEYCODE_NUMPAD_ENTER -> 0x0D
+            KeyEvent.KEYCODE_SPACE -> 0x20
+            KeyEvent.KEYCODE_TAB -> 0x09
+            KeyEvent.KEYCODE_ESCAPE -> 0x1B
+            KeyEvent.KEYCODE_FORWARD_DEL -> 0x2E
+            KeyEvent.KEYCODE_DPAD_LEFT -> 0x25
+            KeyEvent.KEYCODE_DPAD_UP -> 0x26
+            KeyEvent.KEYCODE_DPAD_RIGHT -> 0x27
+            KeyEvent.KEYCODE_DPAD_DOWN -> 0x28
+            KeyEvent.KEYCODE_MOVE_HOME -> 0x24
+            KeyEvent.KEYCODE_MOVE_END -> 0x23
+            KeyEvent.KEYCODE_PAGE_UP -> 0x21
+            KeyEvent.KEYCODE_PAGE_DOWN -> 0x22
+            KeyEvent.KEYCODE_DEL -> 0x08
+            KeyEvent.KEYCODE_INSERT -> 0x2D
+            // Modifiers, so host-side shortcuts (Ctrl+C, Alt+Tab, Shift-select) work at all.
+            KeyEvent.KEYCODE_SHIFT_LEFT -> 0xA0
+            KeyEvent.KEYCODE_SHIFT_RIGHT -> 0xA1
+            KeyEvent.KEYCODE_CTRL_LEFT -> 0xA2
+            KeyEvent.KEYCODE_CTRL_RIGHT -> 0xA3
+            KeyEvent.KEYCODE_ALT_LEFT -> 0xA4
+            KeyEvent.KEYCODE_ALT_RIGHT -> 0xA5
+            KeyEvent.KEYCODE_META_LEFT -> 0x5B
+            KeyEvent.KEYCODE_META_RIGHT -> 0x5C
+            in KeyEvent.KEYCODE_F1..KeyEvent.KEYCODE_F12 ->
+                0x70 + (keyCode - KeyEvent.KEYCODE_F1)
+            in KeyEvent.KEYCODE_A..KeyEvent.KEYCODE_Z ->
+                0x41 + (keyCode - KeyEvent.KEYCODE_A)
+            in KeyEvent.KEYCODE_0..KeyEvent.KEYCODE_9 ->
+                0x30 + (keyCode - KeyEvent.KEYCODE_0)
+            else -> null
+        }
+
+    // Key events only ever arrived through InputConnection.sendKeyEvent, so a physical or
+    // Bluetooth keyboard attached to the tablet was silently ignored in the viewer.
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val sheetOpen = isViewerSheetOpen()
+        if (sheetOpen && ::viewerImeCaptureView.isInitialized && viewerImeCaptureView.hasFocus()) {
+            // The capture view forwards whatever reaches it; with a sheet up it must not be the
+            // one that does (apk-ui r2 (4)).
+            viewerImeCaptureView.clearFocus()
+        }
+        val route = ViewerKeyRouting.route(
+            inViewer = currentScene == UiScene.VIEWER,
+            sheetOpen = sheetOpen,
+            fromVirtualKeyboard = event.deviceId == KeyCharacterMap.VIRTUAL_KEYBOARD,
+            isBack = event.keyCode == KeyEvent.KEYCODE_BACK,
+        )
+        if (route == KeyRoute.HOST) {
+            val vk = mapAndroidKeyCodeToWindowsVk(event.keyCode)
+            // VK down/up only. The host posts a real WM_KEYDOWN with a scan code, and the
+            // target app's own TranslateMessage synthesises WM_CHAR from it — sending the
+            // character here as well doubled every keystroke ("hello" -> "hheelllloo").
+            if (vk != null && queueViewerSpecialKey(vk, event.action)) {
+                if (::viewerImeCaptureView.isInitialized && viewerImeCaptureView.hasFocus()) {
+                    viewerImeCaptureView.recordHardwareKeyEvent(event)
+                }
+                return true
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    /** The remote picture's size: what decoded (the decoder's visible size), else what the selection expects. */
+    private fun viewerContentSize(): Pair<Int, Int>? {
+        val contentWidth = if (videoWidth > 0) videoWidth else expectedContentWidth
+        val contentHeight = if (videoHeight > 0) videoHeight else expectedContentHeight
+        return if (contentWidth > 0 && contentHeight > 0) Pair(contentWidth, contentHeight) else null
+    }
+
+    // viewer-sharpness r1 B: the placement the picture is drawn with (applyVideoTransform) -- every touch, the
+    // virtual mouse and its pointer read this, so input lands where the picture is, in 전체보기 and 크게보기 alike.
+    private fun resolveViewerContentRect(): ViewerContentRect? {
+        val (contentWidth, contentHeight) = viewerContentSize() ?: return null
+        val p = viewerViewport.place(
+            videoTextureView.width.toFloat(), videoTextureView.height.toFloat(), contentWidth, contentHeight
+        ) ?: return null
+        return ViewerContentRect(
+            left = p.left,
+            top = p.top,
+            width = p.width,
+            height = p.height,
+            contentWidth = contentWidth,
+            contentHeight = contentHeight
+        )
+    }
+
+    private fun mapTouchToVideoCoords(touchX: Float, touchY: Float, clampToContent: Boolean): Pair<Int, Int>? {
+        val contentRect = resolveViewerContentRect() ?: return null
+        val minX = contentRect.left
+        val maxX = contentRect.left + contentRect.width
+        val minY = contentRect.top
+        val maxY = contentRect.top + contentRect.height
+        val mappedX =
+            if (clampToContent) {
+                touchX.coerceIn(minX, maxX)
+            } else {
+                if (touchX < minX || touchX > maxX) return null
+                touchX
+            }
+        val mappedY =
+            if (clampToContent) {
+                touchY.coerceIn(minY, maxY)
+            } else {
+                if (touchY < minY || touchY > maxY) return null
+                touchY
+            }
+
+        val relX =
+            ((mappedX - contentRect.left) / contentRect.width)
+                .coerceIn(0f, 1f)
+        val relY =
+            ((mappedY - contentRect.top) / contentRect.height)
+                .coerceIn(0f, 1f)
+        val videoX =
+            (relX * (contentRect.contentWidth - 1).toFloat())
+                .roundToInt()
+                .coerceIn(0, contentRect.contentWidth - 1)
+        val videoY =
+            (relY * (contentRect.contentHeight - 1).toFloat())
+                .roundToInt()
+                .coerceIn(0, contentRect.contentHeight - 1)
+        return Pair(videoX, videoY)
+    }
+
+    private fun renderStatus() {
+        val nowMs = SystemClock.elapsedRealtime()
+        parkTick()  // keepalive r1: confirm / end the parked connection before anything reads the status
+        // Clipboard text sync (K1): the bridge has no native->Java callback, so the text the host
+        // sent is collected on the poll that is already running, and the button follows the host's
+        // advertised capability as soon as the first pong reports it.
+        drainIncomingClipboard()
+        pollRebootOutcome()
+        // Once per session the session asks for this phone's clipboard, so a PC still holding an
+        // older copy does not pull it back over what the user copied since.
+        if (parked == null && NativeSessionBridge.nativeTakeClipboardPushRequest()) {
+            pushLocalClipboardToHost("session_started")
+        }
+        renderClipboardButton()
+        val statusValue = NativeSessionBridge.nativeGetStatus()
+        val errorValue = NativeSessionBridge.nativeGetLastError()
+        val panelSnapshot = parseWindowPanelSnapshot(NativeSessionBridge.nativeGetWindowPanelJson())
+        syncExpectedContentSize(panelSnapshot, if (selectionStage != SelectionStage.IDLE) "selection_pending" else "panel_snapshot")
+        val videoDebugValue = NativeSessionBridge.nativeGetVideoDebugStatus()
+        val readySelectionGeneration = NativeSessionBridge.nativeGetReadySelectionGeneration()
+        val lastOutputPresentationUs = NativeSessionBridge.nativeGetLastOutputPresentationUs()
+        val isConnecting = statusValue.startsWith("connecting")
+        val isConnected = statusValue.startsWith("connected")
+        sessionConnectedNow = isConnected
+        connectFlowActive = isConnecting || isConnected
+        if (!isConnecting && !isConnected && rebootFlow.onDisconnected()) {
+            // The restart took the connection: the request's state, not an error.
+            val text = rebootFlow.statusText()
+            diagnosticsLog.log("remote_reboot", "action=disconnected phase=${rebootFlow.phase}")
+            rebootFlow.reset()
+            if (text != null) {
+                AlertDialog.Builder(this)
+                    .setTitle(R.string.ui_remote_reboot)
+                    .setMessage(text)
+                    .setPositiveButton(R.string.quick_close, null)
+                    .show()
+            }
+        }
+
+        val idleScene = homeScene()
+        val onIdleScreen = currentScene == UiScene.LOGIN || currentScene == UiScene.HOSTS ||
+            currentScene == UiScene.CONNECT
+        if (!isConnecting && !isConnected) {
+            if (!onIdleScreen) {
+                currentScene = idleScene
+                desiredStreamActive = false
+                clearPendingSelection()
+                resetViewerObservability()
+            }
+        } else if (onIdleScreen && connectFlowActive && parked == null) {
+            // keepalive r1: a parked connection is connected and still belongs on the list.
+            currentScene = UiScene.TARGETS
+        }
+
+        if (selectionStage != SelectionStage.IDLE) {
+            val selectionVerdict = SelectionStatusPolicy.verdict(panelSnapshot.status)
+            if (selectionVerdict == SelectionStatusPolicy.Verdict.FAILED) {
+                diagnosticsLog.log(
+                    "select_failed",
+                    "targetId=$pendingSelectionId gen=$pendingSelectionGeneration " +
+                        "seq=${panelSnapshot.lastSelectSeq} status=${panelSnapshot.status}"
+                )
+                moveToTargets("select_failed", abortPendingSwitch = true)
+            } else {
+                if (!pendingSelectionAckLogged && selectionVerdict == SelectionStatusPolicy.Verdict.ACKED) {
+                    selectionStage = SelectionStage.WAITING_FIRST_FRAME
+                    pendingSelectionAckLogged = true
+                    diagnosticsLog.log(
+                        "select_ack",
+                        "targetId=$pendingSelectionId gen=$pendingSelectionGeneration " +
+                            "streamGen=${panelSnapshot.lastSelectStreamGeneration} " +
+                            "hostSendQpcUs=${panelSnapshot.lastSelectHostSendQpcUs} " +
+                            "title=${panelSnapshot.selectedTitle}"
+                    )
+                }
+                if (readySelectionGeneration == pendingSelectionGeneration && pendingSelectionGeneration != 0L &&
+                    sharpenOutputConfirmed(nowMs, panelSnapshot.lastSelectStreamGeneration)) {
+                    diagnosticsLog.log(
+                        "select_ready",
+                        "targetId=$pendingSelectionId gen=$pendingSelectionGeneration " +
+                            "lastOutUs=$lastOutputPresentationUs title=${panelSnapshot.selectedTitle} " +
+                            "ms=${if (pendingSelectionStartedAtMs > 0L) nowMs - pendingSelectionStartedAtMs else -1L}"
+                    )
+                    clearPendingSelection()
+                    currentScene = UiScene.VIEWER
+                    if (closeWindowSheetOnReady) closeWindowSheet("select_ready")
+                    showViewerControls(emphasized = true)
+                    showRightClickHintOnce()
+                } else if (selectionStage == SelectionStage.REQUESTING &&
+                    pendingSelectionStartedAtMs > 0L && nowMs - pendingSelectionStartedAtMs >= 6000L
+                ) {
+                    // Only REQUESTING dies at 6 s: the host never even acked the select within 6 s,
+                    // so the request is genuinely lost and Targets is the honest fallback.
+                    //
+                    // WAITING_FIRST_FRAME (ack received, first frame not yet) is deliberately NOT
+                    // timed out here. Under GPU load the host can take well over 6 s to produce the
+                    // first encoded frame, and the old combined 6 s deadline threw the viewer back to
+                    // Targets mid-open -- the "the view just exits" the user reported. It now holds and
+                    // shows a preparing/soft-warning state (renderViewerScene), leaving only three
+                    // exits: the first frame arrives, the host reports select_failed, or the user
+                    // backs out.
+                    diagnosticsLog.log(
+                        "select_timeout",
+                        "stage=REQUESTING targetId=$pendingSelectionId gen=$pendingSelectionGeneration " +
+                            "scene=$currentScene status=${panelSnapshot.status} debug=$videoDebugValue"
+                    )
+                    moveToTargets("select_timeout", abortPendingSwitch = true)
+                }
+            }
+        } else if (currentScene == UiScene.SWITCHING) {
+            currentScene = UiScene.VIEWER
+            showViewerControls(emphasized = true)
+        }
+
+        if (parked == null) syncConnectedClientPreferences(isConnected)
+        noteTargetsReady(nowMs, panelSnapshot)
+
+        connectStatusText.text = when {
+            statusValue.startsWith("connecting") -> getString(R.string.ui_status_connecting)
+            statusValue.startsWith("connected") -> getString(R.string.ui_status_connected)
+            else -> ""
+        }
+        // The log path is developer detail; surfacing it as the permanent error line pushed
+        // the real message out of the 3-line box. It stays available in the LOG overlay.
+        connectErrorText.text = errorValue
+        connectErrorText.visibility = if (errorValue.isNotBlank()) View.VISIBLE else View.GONE
+
+        // Only the active scene renders (A1): the viewer-only JNI calls used to run on every
+        // login/hosts/connect tick as well.
+        if (currentScene == UiScene.TARGETS) {
+            renderTargetsScene(isConnected, panelSnapshot)
+        }
+        if (currentScene == UiScene.HOSTS) renderParkBanner(nowMs)
+        viewerMenuHostsButton.visibility = if (parkAllowedHere()) View.VISIBLE else View.GONE
+        if (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING) {
+            renderViewerScene(statusValue, panelSnapshot, videoDebugValue)
+            renderViewerSheets(panelSnapshot)
+            updateViewerLogHeader(statusValue, panelSnapshot, videoDebugValue, errorValue)
+        } else {
+            closeViewerSheets("scene_$currentScene")
+            if (viewerViewport.isLarge || viewerPanMode) resetViewerViewport("scene_$currentScene")
+            if (viewerControlsHidden) setViewerControlsHidden(false, "scene_$currentScene")
+        }
+        applySceneVisibility()
+        syncVideoSurface(forceRebind = false)
+        observeDiagnostics(nowMs, statusValue, panelSnapshot, videoDebugValue, lastOutputPresentationUs)
+    }
+
+    private fun renderTargetsScene(isConnected: Boolean, panelSnapshot: WindowPanelUiSnapshot) {
+        val selectionPending = selectionStage != SelectionStage.IDLE
+        val settingsActive = activeTargetTab == TargetTab.SETTINGS
+        // The current tab is shown as selected (tinted, accent border), not by brackets and not by
+        // greying it out as if it were unavailable.
+        listWindowsButton.isSelected = activeTargetTab == TargetTab.WINDOWS
+        listDevicesButton.isSelected = activeTargetTab == TargetTab.DESKTOP
+        listSettingsButton.isSelected = settingsActive
+        listWindowsButton.isEnabled = !selectionPending
+        listDevicesButton.isEnabled = !selectionPending
+        listSettingsButton.isEnabled = !selectionPending
+        listRefreshButton.isEnabled = isConnected && !selectionPending && !settingsActive
+        listRefreshButton.visibility = if (settingsActive) View.GONE else View.VISIBLE
+        listDisconnectButton.isEnabled = isConnected || connectFlowActive
+        listHostsButton.visibility = if (parkAllowedHere()) View.VISIBLE else View.GONE
+        listHostsButton.isEnabled = isConnected && !selectionPending
+        targetListView.isEnabled = isConnected && !selectionPending && !settingsActive
+        settingsPanel.visibility = if (settingsActive) View.VISIBLE else View.GONE
+        // A pick made while disconnected is stored and sent on connect, so only a switch in flight
+        // holds these.
+        settingsQualityLowButton.isEnabled = !selectionPending
+        settingsQualityHighButton.isEnabled = !selectionPending
+        settingsFpsSpinner.isEnabled = !selectionPending
+        settingsDesktopBackendDxgiButton.isEnabled = isConnected && !selectionPending
+        settingsDesktopBackendWgcButton.isEnabled = isConnected && !selectionPending
+        settingsApplyButton.isEnabled = isConnected && !selectionPending
+        targetListView.visibility = if (settingsActive) View.GONE else View.VISIBLE
+        updateDesktopBackendButtons()
+
+        val currentName =
+            if (panelSnapshot.selectedId == 0L) getString(R.string.ui_windows_desktop_name) else panelSnapshot.selectedTitle
+        listSelectedText.text = if (isConnected) getString(R.string.ui_targets_current, currentName) else ""
+        listSelectedText.visibility = if (listSelectedText.text.isEmpty()) View.GONE else View.VISIBLE
+        // The path is said in full here, once, before anything is opened. In the viewer there is
+        // only room for a two-character badge, and "my data is being billed" is not something to
+        // learn from a badge alone.
+        val pathNote = when (connectionPathKind) {
+            "private" -> getString(R.string.connect_path_direct_lan)
+            "relay" -> getString(R.string.connect_path_relay)
+            "public", "public-alt" -> getString(R.string.connect_path_direct)
+            else -> ""
+        }
+        // The host's status line ("window_list_received count=8") is for the log, not the screen.
+        listStatusText.text =
+            when {
+                selectionStage != SelectionStage.IDLE ->
+                    switchingText(pendingSelectionId, pendingSelectionTab, pendingSelectionLabel)
+                !isConnected -> getString(R.string.ui_status_connecting)
+                panelSnapshot.status.startsWith("window_list_request") -> getString(R.string.ui_targets_loading)
+                else -> pathNote
+            }
+        listStatusText.visibility = if (listStatusText.text.isEmpty()) View.GONE else View.VISIBLE
+
+        val labels = mutableListOf<String>()
+        val ids = mutableListOf<Long>()
+
+        when (activeTargetTab) {
+            TargetTab.WINDOWS -> {
+                panelSnapshot.items.forEach { item ->
+                    labels.add(
+                        if (item.minimized) getString(R.string.ui_targets_minimized, item.title) else item.title
+                    )
+                    ids.add(item.id)
+                }
+                targetListEmptyText.text = getString(R.string.targets_empty)
+            }
+
+            TargetTab.DESKTOP -> {
+                // One screen means there is nothing to choose, so the single "Desktop" entry is
+                // still the honest label. With more, they are numbered as the host ordered them:
+                // primary first, then left to right, so "Monitor 2" is the same screen every time.
+                val monitors = panelSnapshot.monitors
+                targetListMonitorRevision = panelSnapshot.monitorListRevision
+                if (monitors.size > 1) {
+                    monitors.forEach { mon ->
+                        val primaryMark = if (mon.primary) " • " + getString(R.string.monitor_primary) else ""
+                        labels.add(
+                            getString(R.string.monitor_label, mon.id + 1) +
+                                "  ${mon.width}x${mon.height}$primaryMark"
+                        )
+                        // Encoded so one list can carry both kinds; window ids are real HWND-derived
+                        // values and never collide with these.
+                        ids.add(MONITOR_ID_BASE + mon.id)
+                    }
+                } else {
+                    labels.add(getString(R.string.desktop_mode_button))
+                    ids.add(0L)
+                }
+                targetListEmptyText.text = ""
+            }
+            TargetTab.SETTINGS -> {
+                settingsAppliedText.text = settingsStatusMessage
+            }
+        }
+
+        // renderStatus runs on a 250 ms poll. Rebuilding the adapter unconditionally reset the
+        // list four times a second and fought the user's scroll, so only publish real changes.
+        if (targetListLabels != labels || targetListIds != ids ||
+            targetListSelectedId != panelSnapshot.selectedId
+        ) {
+            targetListLabels.clear()
+            targetListLabels.addAll(labels)
+            targetListIds.clear()
+            targetListIds.addAll(ids)
+            targetListSelectedId = panelSnapshot.selectedId
+            targetListAdapter.notifyDataSetChanged()
+        }
+        if (!settingsActive) refreshThumbnails(panelSnapshot.items)
+        targetListEmptyText.visibility =
+            if (settingsActive) View.GONE else if (targetListLabels.isEmpty()) View.VISIBLE else View.GONE
+    }
+
+    private fun renderViewerScene(statusValue: String, panelSnapshot: WindowPanelUiSnapshot, videoDebugValue: String) {
+        if (currentScene == UiScene.SWITCHING) {
+            // Before this panel existed the switch showed a plain black screen with no
+            // feedback for up to the 6 s selection timeout.
+            val target = pendingSelectionLabel.ifBlank { panelSnapshot.selectedTitle }
+            val waitedMs =
+                if (pendingSelectionStartedAtMs > 0L) SystemClock.elapsedRealtime() - pendingSelectionStartedAtMs
+                else 0L
+            // Waiting on the first frame is not a failure: a GPU-loaded host can take far longer than
+            // the 6 s that used to abort the switch. Keep the switch alive, but let the words admit the
+            // wait so a long "preparing" doesn't read as a hang, and after 30 s say plainly that Back
+            // cancels -- there is no automatic give-up.
+            viewerLoadingText.text = when {
+                selectionStage == SelectionStage.WAITING_FIRST_FRAME && waitedMs >= 30000L ->
+                    getString(R.string.ui_preparing_long)
+                selectionStage == SelectionStage.WAITING_FIRST_FRAME && waitedMs >= 6000L ->
+                    getString(R.string.ui_preparing)
+                else -> switchingText(pendingSelectionId, pendingSelectionTab, target)
+            }
+            viewerLoadingPanel.visibility = View.VISIBLE
+            viewerOverlayStatusText.visibility = View.GONE
+            videoTextureView.alpha = 0.0f
+            return
+        }
+        viewerLoadingPanel.visibility = View.GONE
+        videoTextureView.alpha = 1.0f
+        applyViewerOrientation()
+        renderDataUsage()
+        renderUnlockBar()
+        val hasFrame = videoWidth > 0 && videoHeight > 0
+        // A frozen last frame with no overlay looks like a live desktop. Treat a stalled
+        // decoder or a dropped connection as reasons to bring the status text back.
+        val lastOutputUs = NativeSessionBridge.nativeGetLastOutputPresentationUs()
+        val nowUs = SystemClock.elapsedRealtime() * 1000L
+        if (lastOutputUs != lastVideoOutputPtsUs) {
+            lastVideoOutputPtsUs = lastOutputUs
+            lastVideoOutputSeenUs = nowUs
+        }
+        val videoStalled = hasFrame && lastVideoOutputSeenUs > 0L &&
+            nowUs - lastVideoOutputSeenUs > VIEWER_STALL_OVERLAY_US
+        val disconnected = !statusValue.startsWith("connected")
+        if (hasFrame && !videoStalled && !disconnected) {
+            viewerOverlayStatusText.visibility = View.GONE
+        } else {
+            viewerOverlayStatusText.visibility = View.VISIBLE
+            val line = getString(
+                when {
+                    disconnected -> R.string.ui_viewer_disconnected
+                    videoStalled -> R.string.ui_viewer_stalled
+                    else -> R.string.ui_viewer_waiting
+                }
+            )
+            if (viewerOverlayStatusText.text.toString() != line) {
+                viewerOverlayStatusText.text = line
+                // The counters that used to be painted over the picture belong in the log.
+                diagnosticsLog.log(
+                    "viewer_overlay",
+                    "line=$line title=${panelSnapshot.selectedTitle} status=$statusValue debug=$videoDebugValue"
+                )
+            }
+        }
+    }
+
+    // ---------------------------------------------------------------- directory sign-in
+
+    /**
+     * Starts on the sign-in screen, or straight on the PC list when a stored session is still
+     * valid. Connecting by IP stays available for a LAN where no server is running.
+     */
+    private fun initDirectoryUi() {
+        hostListAdapter = HostCardAdapter()
+        hostsListView.adapter = hostListAdapter
+        hostsListView.setOnItemClickListener { _, _, position, _ ->
+            directoryHosts.getOrNull(position)?.let { connectToDirectoryHost(it) }
+        }
+
+        loginIdInput.setText(DirectoryClient.savedAccountId(this))
+        // Two fields, so the keyboard's own key finishes the form: Next from the id, Done from
+        // the password signs in.
+        loginPasswordInput.setOnEditorActionListener { _, actionId, _ ->
+            if (actionId == EditorInfo.IME_ACTION_DONE) {
+                performLogin()
+                true
+            } else {
+                false
+            }
+        }
+
+        loginButton.setOnClickListener { performLogin() }
+        loginManualButton.setOnClickListener {
+            diagnosticsLog.log("login_manual", "scene=$currentScene")
+            manualConnectMode = true
+            currentScene = UiScene.CONNECT
+            renderStatus()
+        }
+        hostsRefreshButton.setOnClickListener { loadHosts("refresh") }
+        hostsLogoutButton.setOnClickListener { performSignOut() }
+        loginRetryButton.setOnClickListener { if (!directoryBusy) beginAutoLogin() }
+
+        // A version from before this kept the session itself in preferences, in the clear. One
+        // that is still good is taken into memory for this run; the stored copy goes either way.
+        DirectoryClient.takeLegacySession(this)
+        if (DirectoryClient.session().isNotEmpty()) {
+            currentScene = UiScene.HOSTS
+            loadHosts("resume")
+        } else {
+            beginAutoLogin()
+        }
+    }
+
+    /** Where the app sits when no session is running. */
+    private fun homeScene(): UiScene = when {
+        manualConnectMode -> UiScene.CONNECT
+        DirectoryClient.session().isNotEmpty() -> UiScene.HOSTS
+        else -> UiScene.LOGIN
+    }
+
+    // ------------------------------------------------------------------ staying signed in
+    //
+    // The rules are LoginFlow's. What is here is when each step runs and what the screen says.
+    // Every step runs on directoryExecutor -- each waits for the vault and for the network --
+    // and every result is taken up on the main thread, under the epoch that was current when
+    // the step began. A sign-in, a sign-out and an attempt to come back each move the epoch, so
+    // an answer that arrives after the user has done something else is dropped.
+
+    private val loginVault: LoginFlow.Vault by lazy { KeystoreLoginVault(this) }
+    private var signInEpoch = 0
+
+    private fun directoryOrigin(): String = DirectoryClient.originKey(DirectoryClient.directoryUrl)
+
+    private fun flowLog(line: String) = diagnosticsLog.log("sign_in_store", line)
+
+    /** Takes a session into use: memory, the log uploader, and the host list. Main thread. */
+    private fun adoptSession(token: String, accountId: String, reason: String) {
+        // The session and its owner go in together (DirectoryClient keeps them as one value), so
+        // a recreated Activity finds both -- not the id in the form, which a failed attempt
+        // also changes.
+        DirectoryClient.adoptSession(token, accountId)
+        LogUploader.configure(this, DirectoryClient.directoryUrl, token)
+        setDirectoryBusy(false)
+        manualConnectMode = false
+        // Nothing keeps the password around once it has been exchanged for a token.
+        loginPasswordInput.setText("")
+        loginErrorText.text = ""
+        loginRetryButton.visibility = View.GONE
+        currentScene = UiScene.HOSTS
+        loadHosts(reason)
+        renderStatus()
+    }
+
+    private fun performLogin() {
+        if (directoryBusy) return
+        val url = DirectoryClient.directoryUrl
+        val id = loginIdInput.text?.toString()?.trim().orEmpty()
+        val password = loginPasswordInput.text?.toString().orEmpty()
+        if (id.isEmpty() || password.isEmpty()) {
+            loginErrorText.text = getString(R.string.login_needs_credentials)
+            (if (id.isEmpty()) loginIdInput else loginPasswordInput).requestFocus()
+            return
+        }
+
+        val epoch = ++signInEpoch
+        DirectoryClient.dropSession()
+        setDirectoryBusy(true)
+        loginRetryButton.visibility = View.GONE
+        loginErrorText.text = getString(R.string.login_signing_in)
+        // Kept whatever the outcome, so a failed attempt does not wipe the form.
+        DirectoryClient.rememberAccount(this, id)
+        diagnosticsLog.log("login_attempt", "server=$url id=$id")
+        directoryExecutor.execute {
+            try {
+                val generation = LoginFlow.beginSignIn(loginVault, ::flowLog)
+                if (generation == 0L) {
+                    // Without the counter nothing can tell this sign-in's answer from one that
+                    // arrives after a sign-out -- or after a sign-in as somebody else. So no
+                    // request is sent, with or without a device credential.
+                    diagnosticsLog.log("login_failed", "the sign-in store could not be written")
+                    runOnUiThread {
+                        if (epoch != signInEpoch) return@runOnUiThread
+                        setDirectoryBusy(false)
+                        loginErrorText.text = getString(R.string.login_store_unavailable)
+                    }
+                    return@execute
+                }
+                val result = DirectoryClient.loginWithDevice(url, id, password, deviceLabel())
+                // Where observations go rides on the login response. Kept for this run so the
+                // connect below does not have to ask again.
+                directoryObserveEndpoint = result.advertised
+                val remembered = LoginFlow.rememberSignIn(
+                    loginVault, DirectoryClient.directoryCalls(url), directoryOrigin(), generation,
+                    id, result.signedIn, ::flowLog)
+                diagnosticsLog.log("login_remembered", remembered.name)
+                val refused = when (remembered) {
+                    LoginFlow.Remembered.SUPERSEDED -> getString(R.string.login_superseded)
+                    LoginFlow.Remembered.NOT_SAVED -> getString(R.string.login_not_saved)
+                    else -> null
+                }
+                if (refused == null) {
+                    LoginFlow.settleOwedSignOuts(
+                        loginVault, DirectoryClient.directoryCalls(url), directoryOrigin(), ::flowLog)
+                }
+                runOnUiThread {
+                    // Moved on since: a sign-out moved the counter too, so what this stored (if
+                    // anything) was already ended by it; a newer sign-in owes it a sign-out.
+                    if (epoch != signInEpoch) return@runOnUiThread
+                    if (refused != null) {
+                        setDirectoryBusy(false)
+                        loginErrorText.text = refused
+                    } else {
+                        adoptSession(result.signedIn.sessionToken, id, "login")
+                    }
+                }
+            } catch (e: Exception) {
+                diagnosticsLog.log("login_failed", e.message.orEmpty())
+                runOnUiThread {
+                    if (epoch != signInEpoch) return@runOnUiThread
+                    setDirectoryBusy(false)
+                    loginErrorText.text = e.message ?: "로그인에 실패했습니다"
+                }
+            }
+        }
+    }
+
+    /** What this phone is called in the account's list of devices. */
+    private fun deviceLabel(): String =
+        listOf(Build.MANUFACTURER, Build.MODEL).filter { !it.isNullOrBlank() }.joinToString(" ")
+            .ifBlank { "Android" }
+
+    /**
+     * Comes back signed in, if this phone was left signed in.
+     *
+     * One attempt holds the form. If there was no answer about the credential -- the server was
+     * out of reach, or busy -- the form is given back and up to three more attempts follow
+     * behind it, further apart each time. Typing a password ends them: a sign-in moves the epoch.
+     */
+    private fun beginAutoLogin() {
+        if (DirectoryClient.session().isNotEmpty()) return
+        val epoch = ++signInEpoch
+        val url = DirectoryClient.directoryUrl
+        setDirectoryBusy(true)
+        loginRetryButton.visibility = View.GONE
+        loginErrorText.text = getString(R.string.login_coming_back)
+        directoryExecutor.execute {
+            val calls = DirectoryClient.directoryCalls(url)
+            LoginFlow.settleOwedSignOuts(loginVault, calls, directoryOrigin(), ::flowLog)
+            val waits = longArrayOf(1000, 4000, 15000)
+            var attempt = 0
+            var result: LoginFlow.ReturnResult
+            while (true) {
+                result = LoginFlow.comeBack(loginVault, calls, directoryOrigin(), ::flowLog)
+                val later = result.outcome == LoginFlow.Return.TRY_LATER ||
+                    result.outcome == LoginFlow.Return.BUSY
+                if (!later || attempt >= waits.size) break
+                runOnUiThread {
+                    if (epoch == signInEpoch) {
+                        setDirectoryBusy(false)
+                        loginErrorText.text = getString(R.string.login_retrying)
+                    }
+                }
+                val until = System.currentTimeMillis() + waits[attempt]
+                while (System.currentTimeMillis() < until && epoch == signInEpoch) Thread.sleep(100)
+                if (epoch != signInEpoch) return@execute
+                ++attempt
+            }
+            diagnosticsLog.log("auto_login", result.outcome.name)
+            val finished = result
+            runOnUiThread {
+                if (epoch != signInEpoch) return@runOnUiThread
+                when (finished.outcome) {
+                    LoginFlow.Return.SIGNED_IN ->
+                        adoptSession(finished.sessionToken, finished.accountId, "resume")
+                    LoginFlow.Return.REJECTED -> {
+                        setDirectoryBusy(false)
+                        loginErrorText.text = getString(R.string.login_again)
+                    }
+                    LoginFlow.Return.TRY_LATER, LoginFlow.Return.BUSY, LoginFlow.Return.NOT_SAVED -> {
+                        setDirectoryBusy(false)
+                        loginErrorText.text = getString(R.string.login_unreachable)
+                        loginRetryButton.visibility = View.VISIBLE
+                    }
+                    else -> {
+                        setDirectoryBusy(false)
+                        loginErrorText.text = ""
+                    }
+                }
+                renderStatus()
+            }
+        }
+    }
+
+    /** Signs this phone out: here at once, and at the directory as soon as it can be told. */
+    private fun performSignOut() {
+        if (parked != null) endPark("sign_out", announce = false)
+        // r2 K2: a connect still on its way belonged to this sign-in: disowned, and the screen is not busy.
+        connectOwner.invalidate()
+        setDirectoryBusy(false)
+        directoryConnectingName = ""
+        ++signInEpoch
+        val url = DirectoryClient.directoryUrl
+        val session = DirectoryClient.session()
+        DirectoryClient.dropSession()
+        manualConnectMode = false
+        directoryHosts = emptyList()
+        hostListAdapter.notifyDataSetChanged()
+        currentScene = UiScene.LOGIN
+        loginErrorText.text = ""
+        loginRetryButton.visibility = View.GONE
+        renderStatus()
+        directoryExecutor.execute {
+            val result = LoginFlow.signOut(
+                loginVault, DirectoryClient.directoryCalls(url), directoryOrigin(), ::flowLog)
+            diagnosticsLog.log("sign_out",
+                "local=${result.localDone} server=${result.serverTold} owed=${result.owed}")
+            if (!result.serverTold && !result.owed && session.isNotEmpty()) {
+                // A session from a sign-in with no device credential has no family to end; the
+                // session itself is what the directory is asked to forget.
+                DirectoryClient.endDevice(url, "", "", session)
+            }
+            if (!result.localDone) {
+                runOnUiThread { loginErrorText.text = getString(R.string.login_sign_out_failed) }
+            }
+        }
+    }
+
+    private fun loadHosts(reason: String) {
+        val url = DirectoryClient.directoryUrl
+        val token = DirectoryClient.session()
+        LogUploader.configure(this, url, token)
+        if (url.isEmpty() || token.isEmpty()) {
+            currentScene = UiScene.LOGIN
+            renderStatus()
+            return
+        }
+        val epoch = signInEpoch
+        val account = DirectoryClient.sessionAccount()
+        setDirectoryBusy(true)
+        hostsStatusText.text = getString(R.string.hosts_loading)
+        directoryExecutor.execute {
+            var anotherAccount = false
+            try {
+                var list: List<DirectoryClient.Host>
+                try {
+                    list = DirectoryClient.hosts(url, token)
+                } catch (e: DirectoryClient.DirectoryException) {
+                    if (e.status != 401) throw e
+                    // The session is no longer one: twelve hours went by, or the server was
+                    // restarted. This phone may still hold what gets another -- asked once, and
+                    // only for the account this screen shows. What is stored may be another's
+                    // by now; its session would show that account's PCs under this one's name.
+                    if (account.isEmpty()) throw e
+                    val back = LoginFlow.comeBack(
+                        loginVault, DirectoryClient.directoryCalls(url), directoryOrigin(), ::flowLog,
+                        onlyForAccount = account)
+                    diagnosticsLog.log("session_refused", "coming back: ${back.outcome}")
+                    anotherAccount = back.outcome == LoginFlow.Return.OTHER_ACCOUNT
+                    if (back.outcome != LoginFlow.Return.SIGNED_IN || back.accountId != account) throw e
+                    if (epoch != signInEpoch) return@execute
+                    DirectoryClient.adoptSession(back.sessionToken, back.accountId)
+                    LogUploader.configure(this, url, back.sessionToken)
+                    list = DirectoryClient.hosts(url, back.sessionToken)
+                }
+                // The server accepted the session. If it was one carried over from a former name
+                // of the server, this is the moment the stored address becomes the server's own.
+                DirectoryClient.confirmCarriedOver(this)
+                runOnUiThread {
+                    if (epoch != signInEpoch) return@runOnUiThread
+                    setDirectoryBusy(false)
+                    directoryHosts = list
+                    // keepalive r1: a PC no longer in this account's list ends its park.
+                    parked?.let { p -> if (list.none { it.hostId == p.hostId }) endPark("host_gone") }
+                    hostListAdapter.notifyDataSetChanged()
+                    hostsStatusText.text = account.ifEmpty { DirectoryClient.savedAccountId(this) }
+                    renderStatus()
+                }
+            } catch (e: Exception) {
+                diagnosticsLog.log("hosts_failed", "reason=$reason error=${e.message}")
+                runOnUiThread {
+                    if (epoch != signInEpoch) return@runOnUiThread
+                    setDirectoryBusy(false)
+                    // A refused session with nothing to replace it: ask for the password again
+                    // rather than leaving an empty list that looks like "no PCs registered".
+                    if (e is DirectoryClient.DirectoryException && e.status == 401) {
+                        // r2 K2: the session is refused -- the park on it ends now, before the screen moves.
+                        if (parked != null) endPark("session_refused", announce = false)
+                        connectOwner.invalidate()
+                        ++signInEpoch
+                        DirectoryClient.dropSession()
+                        currentScene = UiScene.LOGIN
+                        loginErrorText.text = getString(
+                            if (anotherAccount) R.string.login_other_account else R.string.login_again)
+                    } else {
+                        hostsStatusText.text = e.message ?: ""
+                    }
+                    renderStatus()
+                }
+            }
+        }
+    }
+
+    /**
+     * Address exchange, then punch, then the ordinary session. The address probe has to run on
+     * the media socket, so it lives in native code; only the HTTP call happens here.
+     */
+    private fun connectToDirectoryHost(host: DirectoryClient.Host) {
+        if (directoryBusy) return
+        // keepalive r1: a parked connection decides first -- before "offline", since the list's online
+        // flag lags the connection this phone already holds.
+        parked?.let { p ->
+            when (val tap = SessionPark.onHostTap(
+                p, host.hostId, DirectoryClient.sessionAccount(), directoryOrigin(),
+                SystemClock.elapsedRealtime(), nativeParkState())) {
+                SessionPark.Tap.Reuse -> if (resumeParked(p)) return
+                SessionPark.Tap.Wait -> {
+                    // r2 K4: kept, one per park, and carried out when the park settles (parkTick / endPark).
+                    if (parkPendingTap?.episode != p.episode) {
+                        parkPendingTap = SessionPark.PendingTap(p.episode, host.hostId)
+                        diagnosticsLog.log("park_tap_held", "episode=${p.episode} tapped=${host.hostId}")
+                    } else {
+                        diagnosticsLog.log("park_tap_dup", "episode=${p.episode} tapped=${host.hostId}")
+                    }
+                    return
+                }
+                is SessionPark.Tap.Discard -> {
+                    diagnosticsLog.log("park_discard", "episode=${p.episode} reason=${tap.reason} tapped=${host.hostId}")
+                    endPark(tap.reason, announce = false)
+                }
+            }
+        }
+        if (!host.online) {
+            hostsStatusText.text = getString(R.string.hosts_offline_detail)
+            return
+        }
+        val url = DirectoryClient.directoryUrl
+        val token = DirectoryClient.session()
+        if (url.isEmpty() || token.isEmpty()) {
+            currentScene = UiScene.LOGIN
+            renderStatus()
+            return
+        }
+
+        setDirectoryBusy(true)
+        directoryConnectingName = host.hostName
+        directoryHostKey = host.hostId
+        directoryHostName = host.hostName
+        hostsStatusText.text = getString(R.string.hosts_connecting, host.hostName)
+        diagnosticsLog.log("directory_connect",
+            "host=${host.hostName} id=${host.hostId} ${NativeSessionBridge.nativeSessionCounters()}")
+        startTargetsReadyWatch("connect", SystemClock.elapsedRealtime())
+        // r2 K2: this connect owns the native session only while it is the current operation. A sign-out,
+        // a disconnect, a refused session or another connect makes it stale: it stops at the next step,
+        // and if its native connect already ran it closes only the connection it made.
+        val op = connectOwner.begin()
+        var madeGeneration = 0L
+        fun stillMine(step: String): Boolean {
+            if (connectOwner.isCurrent(op)) return true
+            diagnosticsLog.log("directory_connect_stale", "op=$op step=$step")
+            return false
+        }
+
+        val observeToken = DirectoryClient.newObserveToken()
+
+        directoryExecutor.execute {
+            try {
+                // A run that resumed from a stored session never saw a login response, so it asks
+                // the health route -- which needs no session and carries the same value.
+                // The decision lives in DirectoryClient, where it can be exercised without a
+                // server. Here it is only applied.
+                if (!stillMine("before_observe")) return@execute
+                val target = DirectoryClient.resolveObserveTarget(url, directoryObserveEndpoint)
+                if (target is DirectoryClient.ObserveTarget.Refused) {
+                    throw DirectoryClient.DirectoryException(target.message)
+                }
+                val ready = target as DirectoryClient.ObserveTarget.Ready
+                directoryObserveEndpoint = ready.advertised
+                val directoryHost = ready.host
+                val observePort = ready.port
+                if (ready.advertised.hostRejected) {
+                    diagnosticsLog.log("directory_observe_host_rejected", "using $directoryHost")
+                }
+
+                val observe = {
+                    val seen = NativeSessionBridge.nativeDirectoryObserve(
+                        directoryHost, observePort, observeToken, op
+                    )
+                    if (seen.isEmpty()) {
+                        throw DirectoryClient.DirectoryException(
+                            NativeSessionBridge.nativeDirectoryLastError().ifEmpty { "주소 확인 실패" }
+                        )
+                    }
+                    diagnosticsLog.log("directory_observed", seen)
+                }
+                observe()
+
+                // One retry, and only when the directory says it has no observation for us. That
+                // is a state this end can repair -- send another from the same socket -- and it is
+                // not an authentication failure, so the session stays and nothing signs out. A
+                // loop here would spin against a server refusing for a reason the phone cannot
+                // fix, with the user waiting on it.
+                val connected = try {
+                    DirectoryClient.connect(url, token, host.hostId, observeToken)
+                } catch (e: DirectoryClient.DirectoryException) {
+                    if (e.status != 409 || !e.serverError.startsWith("observation")) throw e
+                    diagnosticsLog.log("directory_reobserve", e.serverError)
+                    observe()
+                    DirectoryClient.connect(url, token, host.hostId, observeToken)
+                }
+                diagnosticsLog.log("directory_target", connected.candidates.joinToString(" "))
+
+                // r2 K2: no punch / Hello for an operation that is no longer the user's.
+                if (!stillMine("before_native_connect")) return@execute
+                // r3 R2-a: the native side checks this operation again after the punch and adopts the session
+                // only while it is current; what comes back is the generation THIS call made (0 = none).
+                madeGeneration = NativeSessionBridge.nativeDirectoryConnectAny(
+                    connected.candidates.toTypedArray(), 4000, connected.punchToken, op
+                )
+                val started = madeGeneration != 0L
+                if (!started && !connectOwner.isCurrent(op)) {
+                    diagnosticsLog.log("directory_connect_stale",
+                        "op=$op step=native ${NativeSessionBridge.nativeSessionCounters()}")
+                    return@execute
+                }
+                // Which address won matters when something goes wrong later: "private" means the
+                // traffic never left the LAN, and a fallback with no answer explains a slow start.
+                val chosenCandidate = NativeSessionBridge.nativeDirectoryChosenCandidate()
+                diagnosticsLog.log("directory_chosen", chosenCandidate)
+                connectionPathKind = parseChosenCandidateKind(chosenCandidate)
+                if (!started) {
+                    throw DirectoryClient.DirectoryException(
+                        NativeSessionBridge.nativeDirectoryLastError().ifEmpty { "연결을 시작하지 못했습니다" }
+                    )
+                }
+                runOnUiThread {
+                    if (!connectOwner.isCurrent(op)) {
+                        // r2 K2 / r4 S1: stale -- the connection this operation made is closed only if it is
+                        // still the one running, compared and closed in ONE native step with every adoption
+                        // (off the UI thread: it may wait for another operation's Connect). Nothing newer here
+                        // (busy state, scene, another connect's session) is touched.
+                        val gen = madeGeneration
+                        Thread {
+                            val closed = NativeSessionBridge.nativeCloseIfOwn(op, gen)
+                            diagnosticsLog.log("directory_connect_dropped", "op=$op closedOwn=$closed gen=$gen")
+                        }.start()
+                        return@runOnUiThread
+                    }
+                    setDirectoryBusy(false)
+                    directoryConnectingName = ""
+                    connectFlowActive = true
+                    pendingRuntimeConfigSync = true
+                    resetSessionDesktopBackend("directory_connect")
+                    desiredStreamActive = false
+                    lastAppliedStreamActive = null
+                    clearPendingSelection()
+                    currentScene = UiScene.TARGETS
+                    NativeSessionBridge.nativeRequestWindowList()
+                    renderStatus()
+                }
+            } catch (e: Exception) {
+                diagnosticsLog.log("directory_connect_failed", "op=$op ${e.message.orEmpty()}")
+                runOnUiThread {
+                    if (!connectOwner.isCurrent(op)) return@runOnUiThread  // r2 K2: not this screen's any more
+                    setDirectoryBusy(false)
+                    directoryConnectingName = ""
+                    hostsStatusText.text = getString(R.string.hosts_connect_failed, e.message.orEmpty())
+                    renderStatus()
+                }
+            }
+        }
+    }
+
+    private fun setDirectoryBusy(busy: Boolean) {
+        directoryBusy = busy
+        loginButton.isEnabled = !busy
+        hostsRefreshButton.isEnabled = !busy
+        hostsListView.isEnabled = !busy
+    }
+
+    private inner class HostCardAdapter : BaseAdapter() {
+        override fun getCount(): Int = directoryHosts.size
+
+        override fun getItem(position: Int): Any = directoryHosts[position]
+
+        override fun getItemId(position: Int): Long = position.toLong()
+
+        override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+            val view = convertView ?: layoutInflater.inflate(R.layout.host_card, parent, false)
+            val host = directoryHosts[position]
+            view.findViewById<TextView>(R.id.hostCardName).text = host.hostName
+            // keepalive r1: the parked PC says so on its own card.
+            val isParked = parked?.hostId == host.hostId
+            view.findViewById<TextView>(R.id.hostCardDetail).text = when {
+                isParked -> getString(R.string.hosts_parked_detail)
+                host.online -> getString(R.string.hosts_title)
+                else -> getString(R.string.hosts_offline_detail)
+            }
+            val state = view.findViewById<TextView>(R.id.hostCardState)
+            state.text = when {
+                isParked -> getString(R.string.hosts_parked_state)
+                host.online -> getString(R.string.hosts_online)
+                else -> getString(R.string.hosts_offline)
+            }
+            state.setTextColor(getColor(if (host.online || isParked) R.color.ui_success else R.color.ui_text_secondary))
+            view.alpha = if (host.online || isParked) 1.0f else 0.8f
+            return view
+        }
+    }
+
+    private fun applySceneVisibility() {
+        loginScene.visibility = if (currentScene == UiScene.LOGIN) View.VISIBLE else View.GONE
+        hostsScene.visibility = if (currentScene == UiScene.HOSTS) View.VISIBLE else View.GONE
+        hostsEmptyText.visibility =
+            if (currentScene == UiScene.HOSTS && directoryHosts.isEmpty()) View.VISIBLE else View.GONE
+        connectScene.visibility = if (currentScene == UiScene.CONNECT) View.VISIBLE else View.GONE
+        targetsScene.visibility = if (currentScene == UiScene.TARGETS) View.VISIBLE else View.GONE
+        viewerScene.visibility =
+            if (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING) View.VISIBLE else View.GONE
+        if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING) {
+            dismissViewerLogDialog()
+            releaseViewerModifiers()
+            applySceneOrientation()
+        }
+        if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING &&
+            sharpenPolicy.path != SharpenPathPolicy.Path.NONE) {
+            releaseVideoSurface()
+        }
+        if (currentScene != UiScene.VIEWER) {
+            statusHandler.removeCallbacks(viewerControlsFadeRunnable)
+            virtualMouse?.hide()
+            renderViewerModeBanner()
+        }
+        if (currentScene != lastVisibilityScene) {
+            if (currentScene != UiScene.VIEWER &&
+                NativeSessionBridge.nativeMacroState() != MACRO_STATE_IDLE
+            ) {
+                // Once per scene transition, not per tick: polling macro state every 250ms
+                // from non-viewer scenes was pure JNI overhead.
+                NativeSessionBridge.nativeMacroStopPlayback()
+                NativeSessionBridge.nativeMacroStopRecording()
+                renderMacroUi()
+            }
+            if (currentScene == UiScene.VIEWER) {
+                // The stall tracker stops updating outside the viewer now; stale values from
+                // a previous session would flash a false stall overlay on re-entry.
+                lastVideoOutputPtsUs = 0L
+                lastVideoOutputSeenUs = 0L
+            }
+            lastVisibilityScene = currentScene
+        }
+    }
+
+    /**
+     * Every input event to the host goes through here. sh-filter r2 (H5.1): in a TEST build the seam logs
+     * what was queued -- the remote (video) coordinate a touch became -- so the harness can check it against
+     * the point of the picture that was tapped; the shipped seam returns null and nothing is logged.
+     */
+    private fun queueRemoteInput(kind: Int, x: Int, y: Int, wheelDelta: Int, keyCode: Int, buttons: Int): Boolean {
+        val queued = NativeSessionBridge.nativeQueueInputEvent(kind, x, y, wheelDelta, keyCode, buttons)
+        SharpenTestSeam.inputLine(kind, x, y, buttons, queued)?.let { diagnosticsLog.log("seam_input", it) }
+        return queued
+    }
+
+    // ---- sh-filter r1: the sharpening pass. SharpenPathPolicy decides who writes into the TextureView;
+    // this executes its commands on the UI thread. The renderer's own thread does all GL. ----
+    private var sharpness = SharpnessLevel.DEFAULT
+    private val sharpenPolicy = SharpenPathPolicy(SharpnessLevel.DEFAULT)
+    /** The renderer of the CURRENT generation (null when none is starting or live). */
+    private val sharpenRenderer: SharpenRenderer?
+        get() = sharpenRenderers[sharpenRendererGeneration]
+    private var sharpenRendererGeneration = 0L
+    /** r2 H1: every renderer not yet confirmed released, by generation (a held one outlives the next). */
+    private val sharpenRenderers = HashMap<Long, SharpenRenderer>()
+    private val sharpenReleaseTimeouts = HashMap<Long, Runnable>()
+    private var sharpenInputSurface: Surface? = null
+    /** r2 H1: TextureView surfaces by id: the current one, and destroyed ones the app still has to release. */
+    private var sharpenSurfaceSeq = 0L
+    private val sharpenSurfaceTextures = HashMap<Long, SurfaceTexture>()
+    private val sharpenAppOwnedSurfaces = HashSet<Long>()
+    private val sharpenHandler = Handler(Looper.getMainLooper())
+    private var sharpenStartTimeout: Runnable? = null
+    private val sharpenFaults: SharpenRenderer.SharpenFaults by lazy { SharpenTestSeam.faultsFrom(intent) }
+    /** sh-strength r2 B: the test seam's switch (test builds only; the shipped seam always answers 0). */
+    private val sharpenDisplayPass: Int by lazy { SharpenTestSeam.displayPassFrom(intent) }
+    private var sharpenDisplayPlacementLogged = ""
+    /** sh-strength r3: the user's choice of where the pass draws (settings; stored). */
+    private var sharpenMethod = SharpenMethod.DEFAULT
+    /** r3 (N2): the placement last handed to the current renderer (null: none) -- the same one is never sent again. */
+    private var sharpenPlacementSent: DisplayPlacement? = null
+    /** r4 (N1 c): the generation of the placement last sent to the renderer, and the one the view has shown. A remote
+     *  touch starting while they differ (B) is held: the screen still shows the old layout, the mapping the new. */
+    private var sharpenPlacementGenSent = 0L
+    private var sharpenShownPlacementGen = 0L
+    private var sharpenInputHeldGen = -1L
+
+    /** r4 (N1 c): B is drawing a layout the view has not shown yet. */
+    private fun sharpenLayoutNotShown(): Boolean =
+        sharpenPlacementSent != null && sharpenDisplayPassActive() && sharpenShownPlacementGen != sharpenPlacementGenSent
+
+    /** 0 = A, 1 = B, 2 = B with the double transform (the test seam's negative control only). */
+    private fun displayPassMode(): Int =
+        if (sharpenDisplayPass != 0) sharpenDisplayPass else if (sharpenMethod == SharpenMethod.DISPLAY) 1 else 0
+
+    /** B is in effect while the sharpening renderer is the TextureView's producer (starting or live). */
+    private fun sharpenDisplayPassActive(): Boolean =
+        displayPassMode() != 0 &&
+            (sharpenPolicy.path == SharpenPathPolicy.Path.STARTING || sharpenPolicy.path == SharpenPathPolicy.Path.LIVE) &&
+            videoTextureView.width > 0 && videoTextureView.height > 0
+
+    /** r3 (N1): B is what the renderer WILL draw (a filtered level, no fallback): the output is sized for the view from
+     *  the start, so the renderer begins with the layout it draws. */
+    private fun sharpenDisplayPassIntended(): Boolean =
+        displayPassMode() != 0 && sharpenPolicy.requested.filtered && sharpenPolicy.fallbackReason == null &&
+            videoTextureView.width > 0 && videoTextureView.height > 0
+
+    /** sh-strength r3: the user picks where the pass draws. A live renderer is replaced through the usual release. */
+    private fun selectSharpenMethod(method: SharpenMethod, origin: String) {
+        if (method == sharpenMethod) return
+        sharpenMethod = method
+        SessionPersistence.saveSharpenMethod(this, method)
+        diagnosticsLog.log("sharpen_method", "method=${method.code} origin=$origin path=${sharpenPolicy.path}")
+        executeSharpen(sharpenPolicy.restartRenderer())
+        syncVideoSurface(forceRebind = false)  // the output size follows (view for B, source for A)
+        renderQualityControls()
+    }
+    // r2 H2/H3: frames by timestamp (SharpenFrames.kt).
+    private val latchClassifier = LatchClassifier()
+    private val sharpenGate = SharpenOutputGate()
+    private var sharpenGateTimeout: Runnable? = null
+    /** SWITCHING: since when the decoder is ready for the selection but no output of it was latched. */
+    private var sharpenSelectionWaitGen = 0L
+    private var sharpenSelectionWaitSinceMs = 0L
+    private val sharpenStats = SharpenLatencyStats()
+    // Bounds on the renderer's start, first output and release (no endless waits).
+    private val SHARPEN_START_TIMEOUT_MS = 3000L
+    private val SHARPEN_FIRST_OUTPUT_TIMEOUT_MS = 3000L
+    private val SHARPEN_RELEASE_TIMEOUT_MS = 2000L
+    private var sharpenLatencyWindowStartMs = 0L
+    private var sharpenCountersBase = LongArray(4)
+    private var sharpenCountersGen = 0L
+
+    private fun selectSharpness(level: SharpnessLevel, origin: String) {
+        sharpness = level
+        SessionPersistence.saveSharpness(this, level)
+        executeSharpen(sharpenPolicy.select(level))
+        diagnosticsLog.log(
+            "sharpness_select",
+            "level=${level.code} s=${level.strength} origin=$origin path=${sharpenPolicy.path} " +
+                "effective=${sharpenPolicy.effective.code}"
+        )
+        renderQualityControls()
+    }
+
+    private fun executeSharpen(commands: List<SharpenPathPolicy.Command>) {
+        for (command in commands) {
+            when (command) {
+                SharpenPathPolicy.Command.BindDirect -> {
+                    cancelSharpenGate()
+                    val st = videoTextureView.surfaceTexture
+                    if (st == null) {
+                        diagnosticsLog.log("sharpen_direct_skipped", "reason=no_surface_texture")
+                        continue
+                    }
+                    val surface = Surface(st)
+                    videoSurface = surface
+                    NativeSessionBridge.nativeSetSurface(surface)
+                    diagnosticsLog.log(
+                        "sharpen_path",
+                        "path=direct requested=${sharpenPolicy.requested.code} effective=off " +
+                            "fallback=${sharpenPolicy.fallbackReason ?: "none"}"
+                    )
+                }
+                SharpenPathPolicy.Command.DetachDecoder -> {
+                    // Synchronous on the native side: the codec is stopped and the window released before
+                    // this returns -- the old producer is gone before any new one connects.
+                    NativeSessionBridge.nativeSetSurface(null)
+                    videoSurface?.release()
+                    videoSurface = null
+                    sharpenInputSurface = null  // the renderer owns and releases its input Surface
+                }
+                is SharpenPathPolicy.Command.StartRenderer -> startSharpenRenderer(command.generation, command.strength)
+                is SharpenPathPolicy.Command.AttachDecoderToRenderer -> {
+                    val input = sharpenInputSurface
+                    if (input != null && command.generation == sharpenRendererGeneration) {
+                        val epochBefore = NativeSessionBridge.nativeCodecEpoch()
+                        armSharpenGate(command.generation, epochBefore)
+                        NativeSessionBridge.nativeSetSurface(input)
+                        diagnosticsLog.log(
+                            "sharpen_path",
+                            "path=sharpen gen=${command.generation} requested=${sharpenPolicy.requested.code} " +
+                                "s=${sharpenPolicy.requested.strength}"
+                        )
+                    }
+                }
+                is SharpenPathPolicy.Command.ReleaseRenderer -> {
+                    val gen = command.generation
+                    val renderer = sharpenRenderers[gen]
+                    cancelSharpenGate()
+                    if (gen == sharpenRendererGeneration) {
+                        sharpenStartTimeout?.let { sharpenHandler.removeCallbacks(it) }
+                        sharpenStartTimeout = null
+                    }
+                    if (renderer == null) {
+                        // Never made (no SurfaceTexture at start): nothing holds the surface.
+                        executeSharpen(sharpenPolicy.rendererReleased(gen, detached = true))
+                        continue
+                    }
+                    renderer.release()
+                    val timeout = Runnable {
+                        sharpenReleaseTimeouts.remove(gen)
+                        // r2 H1: the surface stays BLOCKED for this renderer -- no producer is connected to it
+                        // until the release arrives, however often the viewer asks.
+                        diagnosticsLog.log("sharpen_release_timeout", "gen=$gen surface=${sharpenPolicy.surfaceId} -- blocked until it lets go")
+                        executeSharpen(sharpenPolicy.rendererReleaseTimedOut(gen))
+                    }
+                    sharpenReleaseTimeouts[gen] = timeout
+                    sharpenHandler.postDelayed(timeout, SHARPEN_RELEASE_TIMEOUT_MS)
+                }
+                is SharpenPathPolicy.Command.SetStrength -> {
+                    if (command.generation == sharpenRendererGeneration) sharpenRenderer?.setStrength(command.strength)
+                }
+                is SharpenPathPolicy.Command.ProducerStuck -> {
+                    diagnosticsLog.log("sharpen_producer_stuck", "gen=${command.generation} surface=${sharpenPolicy.surfaceId} -- this surface stays unconnected until it is replaced")
+                }
+                is SharpenPathPolicy.Command.ShowFallback -> {
+                    diagnosticsLog.log(
+                        "sharpen_fallback",
+                        "requested=${sharpenPolicy.requested.code} effective=off reason=${command.reason}"
+                    )
+                    Toast.makeText(this, R.string.ui_sharpness_fallback, Toast.LENGTH_SHORT).show()
+                }
+                is SharpenPathPolicy.Command.ReleaseSurfaceTexture -> {
+                    val id = command.surfaceId
+                    if (sharpenAppOwnedSurfaces.remove(id)) {
+                        sharpenSurfaceTextures.remove(id)?.release()
+                        diagnosticsLog.log("sharpen_surface_released", "surface=$id")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startSharpenRenderer(generation: Long, strength: Float) {
+        val st = videoTextureView.surfaceTexture
+        sharpenRendererGeneration = generation
+        if (st == null) {
+            executeSharpen(sharpenPolicy.rendererFailed(generation, "no_surface_texture"))
+            return
+        }
+        val listener = object : SharpenRenderer.Listener {
+            override fun onReady(generation: Long, input: Surface) {
+                sharpenHandler.post {
+                    if (generation != sharpenRendererGeneration) return@post
+                    sharpenStartTimeout?.let { sharpenHandler.removeCallbacks(it) }
+                    sharpenStartTimeout = null
+                    sharpenInputSurface = input
+                    executeSharpen(sharpenPolicy.rendererReady(generation))
+                }
+            }
+            override fun onFailed(generation: Long, reason: String) {
+                sharpenHandler.post { executeSharpen(sharpenPolicy.rendererFailed(generation, reason)) }
+            }
+            override fun onReleased(generation: Long, detached: Boolean) {
+                sharpenHandler.post {
+                    sharpenReleaseTimeouts.remove(generation)?.let { sharpenHandler.removeCallbacks(it) }
+                    val r = sharpenRenderers.remove(generation)
+                    diagnosticsLog.log(
+                        "sharpen_released",
+                        "gen=$generation detached=${if (detached) 1 else 0} notes=${r?.teardownNotes?.ifEmpty { "none" } ?: "none"}"
+                    )
+                    executeSharpen(sharpenPolicy.rendererReleased(generation, detached))
+                }
+            }
+        }
+        sharpenRenderers[generation] = SharpenRenderer(generation, st, strength, listener, sharpenFaults)
+        sharpenPlacementSent = null  // r3: a new renderer has no placement yet
+        sharpenShownPlacementGen = 0L  // r4: and nothing of it shown
+        sharpenDisplayPlacementLogged = ""  // ...and its own first placement is logged
+        val timeout = Runnable { executeSharpen(sharpenPolicy.rendererFailed(generation, "start_timeout")) }
+        sharpenStartTimeout = timeout
+        sharpenHandler.postDelayed(timeout, SHARPEN_START_TIMEOUT_MS)
+        diagnosticsLog.log("sharpen_start", "gen=$generation s=$strength faults=${if (SharpenTestSeam.ACTIVE) sharpenFaults else "none"}")
+    }
+
+    /**
+     * Contract 6 / r2 H2: with the sharpening pass in between, the decoder's "ready" is not yet a picture.
+     * The gate is armed when the decoder is attached to the renderer and confirmed by the first latch that is
+     * a frame of THAT renderer, surface and codec (SharpenOutputGate) -- whenever it happens, no counter
+     * baseline. Bounded by the gate's own timeout (armSharpenGate) in every scene, SWITCHING or VIEWER.
+     */
+    private fun armSharpenGate(generation: Long, codecEpochBefore: Long) {
+        val surfaceId = sharpenPolicy.surfaceId ?: return
+        sharpenGate.arm(generation, surfaceId, System.nanoTime(), codecEpochBefore, SystemClock.elapsedRealtime())
+        sharpenGateTimeout?.let { sharpenHandler.removeCallbacks(it) }
+        val timeout = Runnable {
+            sharpenGateTimeout = null
+            if (sharpenGate.isArmed && !sharpenGate.confirmed && sharpenPolicy.generation == generation &&
+                sharpenPolicy.path == SharpenPathPolicy.Path.LIVE) {
+                executeSharpen(sharpenPolicy.rendererFailed(generation, "no_output_after_ready"))
+            }
+        }
+        sharpenGateTimeout = timeout
+        sharpenHandler.postDelayed(timeout, SHARPEN_FIRST_OUTPUT_TIMEOUT_MS)
+    }
+
+    private fun cancelSharpenGate() {
+        sharpenGate.cancel()
+        sharpenGateTimeout?.let { sharpenHandler.removeCallbacks(it) }
+        sharpenGateTimeout = null
+    }
+
+    /**
+     * SWITCHING (the decoder is ready for this selection): is a frame of THIS selection's stream generation
+     * on screen through the renderer? A renderer kept across a target change waits for the new target's own
+     * frame; bounded at SHARPEN_FIRST_OUTPUT_TIMEOUT_MS from the decoder's ready, then a renderer failure.
+     */
+    private fun sharpenOutputConfirmed(nowMs: Long, selectionStreamGeneration: Long): Boolean {
+        val path = sharpenPolicy.path
+        if (path != SharpenPathPolicy.Path.STARTING && path != SharpenPathPolicy.Path.LIVE) {
+            sharpenSelectionWaitGen = 0L
+            return true
+        }
+        if (path == SharpenPathPolicy.Path.LIVE && sharpenGate.confirmedFor(selectionStreamGeneration)) {
+            sharpenSelectionWaitGen = 0L
+            return true
+        }
+        if (sharpenSelectionWaitGen != selectionStreamGeneration) {
+            sharpenSelectionWaitGen = selectionStreamGeneration
+            sharpenSelectionWaitSinceMs = nowMs
+        } else if (path == SharpenPathPolicy.Path.LIVE && !sharpenGate.timedOut(nowMs, SHARPEN_FIRST_OUTPUT_TIMEOUT_MS) &&
+            nowMs - sharpenSelectionWaitSinceMs > SHARPEN_FIRST_OUTPUT_TIMEOUT_MS) {
+            sharpenSelectionWaitGen = 0L
+            executeSharpen(sharpenPolicy.rendererFailed(sharpenPolicy.generation, "no_output_for_selection"))
+        }
+        return false
+    }
+
+    /** S4 (r2 H3): one segment per (effective level, path, renderer generation, surface). */
+    private fun enterSharpenLatencySegment(nowNs: Long) {
+        val path = when (sharpenPolicy.path) {
+            SharpenPathPolicy.Path.LIVE, SharpenPathPolicy.Path.STARTING -> "sharpen"
+            SharpenPathPolicy.Path.DIRECT -> "direct"
+            else -> "none"
+        }
+        val key = SharpenLatencyStats.Key(
+            sharpenPolicy.effective.code, path, if (path == "sharpen") sharpenPolicy.generation else 0L,
+            sharpenPolicy.surfaceId ?: 0L,
+        )
+        val closedSegment = sharpenStats.segmentId
+        val closed = sharpenStats.enter(key, nowNs) ?: return
+        diagnosticsLog.log(
+            "sh_latency_segment",
+            "seg=$closedSegment ${closed.first} fps=$requestedRuntimeFps ${closed.second.fields()}"
+        )
+        sharpenLatencyWindowStartMs = SystemClock.elapsedRealtime()
+    }
+
+    /** S4: a 5 s progress line for the current segment (the segment line is the whole distribution). */
+    private fun maybeLogSharpenLatency(nowNs: Long) {
+        val now = SystemClock.elapsedRealtime()
+        if (sharpenLatencyWindowStartMs == 0L) sharpenLatencyWindowStartMs = now
+        if (now - sharpenLatencyWindowStartMs < 5000L) return
+        sharpenLatencyWindowStartMs = now
+        val w = sharpenStats.window(nowNs)
+        val seg = sharpenStats.segment(nowNs)
+        val r = sharpenRenderer
+        val counters = longArrayOf(
+            r?.framesAvailable?.get() ?: 0L, r?.framesDrawn?.get() ?: 0L, r?.framesSkipped?.get() ?: 0L, r?.redraws?.get() ?: 0L)
+        // Counters belong to one renderer: a new generation starts again from its own zero.
+        val d = if (sharpenCountersGen != sharpenPolicy.generation) counters
+                else LongArray(4) { counters[it] - sharpenCountersBase[it] }
+        sharpenCountersGen = sharpenPolicy.generation
+        sharpenCountersBase = counters
+        diagnosticsLog.log(
+            "sh_latency",
+            "seg=${sharpenStats.segmentId} ${sharpenStats.key} requested=${sharpenPolicy.requested.code} fps=$requestedRuntimeFps " +
+                "window: ${w.fields()} | segment: n=${seg.count} p95us=${seg.p95Us} | " +
+                "glAvail=${d[0]} glDrawn=${d[1]} glSkipped=${d[2]} glRedraws=${d[3]} " +
+                "drawWallUs=${(r?.lastDrawNs?.get() ?: 0L) / 1000} src=${r?.lastSourceSize ?: "-"} " +
+                "stepFromOutput=${r?.stepFromOutputSize?.get() ?: 0L} srcNeOut=${r?.framesSourceNotOutput?.get() ?: 0L}"
+        )
+    }
+
+    /** r2 H1: the policy knows the CURRENT TextureView surface by id; a different object is a new surface. */
+    private fun ensureSharpenSurface(surfaceTexture: SurfaceTexture) {
+        val id = sharpenPolicy.surfaceId
+        if (id != null && sharpenSurfaceTextures[id] === surfaceTexture) return
+        sharpenSurfaceSeq += 1
+        sharpenSurfaceTextures[sharpenSurfaceSeq] = surfaceTexture
+        sharpenPolicy.surfaceAvailable(sharpenSurfaceSeq)
+        diagnosticsLog.log("sharpen_surface", "surface=$sharpenSurfaceSeq")
+    }
+
+    private fun bindVideoSurface(surfaceTexture: SurfaceTexture?) {
+        if (surfaceTexture == null) {
+            releaseVideoSurface()
+            return
+        }
+        ensureSharpenSurface(surfaceTexture)
+
+        val targetBufferWidth = resolveSurfaceBufferWidth()
+        val targetBufferHeight = resolveSurfaceBufferHeight()
+        if (targetBufferWidth <= 0 || targetBufferHeight <= 0) {
+            Log.w(LOG_TAG, "skip binding surface without resolved buffer size")
+            return
+        }
+
+        val bufferSizeChanged =
+            surfaceBufferWidth != targetBufferWidth || surfaceBufferHeight != targetBufferHeight
+        val held = sharpenPolicy.path == SharpenPathPolicy.Path.RELEASING ||
+            sharpenPolicy.path == SharpenPathPolicy.Path.BLOCKED
+        if (held && !bufferSizeChanged) {
+            // r2: the surface is still held by a renderer that has not confirmed it let go. bind() only records
+            // what to wire afterwards; the periodic sync calls this every tick, so no log and no buffer reset.
+            executeSharpen(sharpenPolicy.bind())
+        } else if (sharpenPolicy.path == SharpenPathPolicy.Path.NONE || held) {
+            surfaceTexture.setDefaultBufferSize(targetBufferWidth, targetBufferHeight)
+            surfaceBufferWidth = targetBufferWidth
+            surfaceBufferHeight = targetBufferHeight
+            // sh-filter r1: who writes into the TextureView is the policy's call -- the decoder directly
+            // (off / fallback), or the sharpening pass (the decoder is attached to it once it is up).
+            executeSharpen(sharpenPolicy.bind())
+            diagnosticsLog.log(
+                "viewer_surface_bound",
+                "buffer=${surfaceBufferWidth}x${surfaceBufferHeight} video=${videoWidth}x${videoHeight} " +
+                    "expected=${expectedContentWidth}x${expectedContentHeight} " +
+                    "view=${videoTextureView.width}x${videoTextureView.height}"
+            )
+        } else if (bufferSizeChanged) {
+            surfaceTexture.setDefaultBufferSize(targetBufferWidth, targetBufferHeight)
+            surfaceBufferWidth = targetBufferWidth
+            surfaceBufferHeight = targetBufferHeight
+            diagnosticsLog.log(
+                "viewer_surface_buffer_resize",
+                "buffer=${surfaceBufferWidth}x${surfaceBufferHeight} video=${videoWidth}x${videoHeight} " +
+                    "expected=${expectedContentWidth}x${expectedContentHeight} " +
+                    "view=${videoTextureView.width}x${videoTextureView.height}"
+            )
+        }
+        applyVideoTransform()
+    }
+
+    private fun releaseVideoSurface() {
+        if (sharpenPolicy.path == SharpenPathPolicy.Path.NONE) return
+        executeSharpen(sharpenPolicy.unbind())
+        surfaceBufferWidth = 0
+        surfaceBufferHeight = 0
+        diagnosticsLog.log("viewer_surface_released", "scene=$currentScene")
+    }
+
+    private fun syncVideoSurface(forceRebind: Boolean) {
+        if (currentScene != UiScene.VIEWER && currentScene != UiScene.SWITCHING) {
+            if (sharpenPolicy.path != SharpenPathPolicy.Path.NONE) {
+                releaseVideoSurface()
+            }
+            return
+        }
+
+        val packedSize = NativeSessionBridge.nativeGetVideoSizePacked()
+        val latestVideoWidth = (packedSize ushr 32).toInt()
+        val latestVideoHeight = (packedSize and 0xffffffffL).toInt()
+        val videoSizeChanged = latestVideoWidth != videoWidth || latestVideoHeight != videoHeight
+        if (videoSizeChanged) {
+            videoWidth = latestVideoWidth
+            videoHeight = latestVideoHeight
+            if (viewerViewport.isLarge || viewerPanMode) resetViewerViewport("video_size")
+            diagnosticsLog.log(
+                "video_size",
+                "video=${videoWidth}x${videoHeight} expected=${expectedContentWidth}x${expectedContentHeight}"
+            )
+        }
+
+        if (!videoTextureView.isAvailable) {
+            return
+        }
+
+        if (currentScene == UiScene.SWITCHING &&
+            sharpenPolicy.path != SharpenPathPolicy.Path.NONE &&
+            videoSizeChanged &&
+            !forceRebind
+        ) {
+            diagnosticsLog.log(
+                "viewer_surface_resize_deferred",
+                "video=${videoWidth}x${videoHeight} buffer=${surfaceBufferWidth}x${surfaceBufferHeight}"
+            )
+            applyVideoTransform()
+            return
+        }
+
+        val targetBufferWidth = resolveSurfaceBufferWidth()
+        val targetBufferHeight = resolveSurfaceBufferHeight()
+        if (targetBufferWidth <= 0 || targetBufferHeight <= 0) {
+            return
+        }
+
+        if (forceRebind ||
+            videoSizeChanged ||
+            sharpenPolicy.path == SharpenPathPolicy.Path.NONE ||
+            sharpenPolicy.path == SharpenPathPolicy.Path.RELEASING ||
+            sharpenPolicy.path == SharpenPathPolicy.Path.BLOCKED ||
+            surfaceBufferWidth != targetBufferWidth ||
+            surfaceBufferHeight != targetBufferHeight) {
+            bindVideoSurface(videoTextureView.surfaceTexture)
+            return
+        }
+
+        applyVideoTransform()
+    }
+
+    private fun resolveSurfaceBufferWidth(): Int {
+        // sh-strength r2 B: the pass draws at the view's pixel size (the remote source size is unchanged elsewhere).
+        // r3 (N1): from the moment B is intended, so a renderer starts with the size it draws at.
+        if (sharpenDisplayPassIntended()) return videoTextureView.width
+        if (videoWidth > 0) return videoWidth
+        if (expectedContentWidth > 0) return expectedContentWidth
+        if (videoTextureView.width > 0) return videoTextureView.width
+        return 0
+    }
+
+    private fun resolveSurfaceBufferHeight(): Int {
+        if (sharpenDisplayPassIntended()) return videoTextureView.height
+        if (videoHeight > 0) return videoHeight
+        if (expectedContentHeight > 0) return expectedContentHeight
+        if (videoTextureView.height > 0) return videoTextureView.height
+        return 0
+    }
+
+    private fun applyVideoTransform() {
+        val viewWidth = videoTextureView.width.toFloat()
+        val viewHeight = videoTextureView.height.toFloat()
+        val resolvedContentWidth =
+            when {
+                videoWidth > 0 -> videoWidth
+                expectedContentWidth > 0 -> expectedContentWidth
+                else -> surfaceBufferWidth
+            }
+        val resolvedContentHeight =
+            when {
+                videoHeight > 0 -> videoHeight
+                expectedContentHeight > 0 -> expectedContentHeight
+                else -> surfaceBufferHeight
+            }
+        val matrix = Matrix()
+        // viewer-sharpness r1 B: the TextureView first stretches the buffer over the whole view; this maps that onto
+        // the placement -- the aspect-correct fit (전체보기), or the zoomed, moved picture (크게보기). One uniform
+        // scale (never one axis alone), the same placement input reads.
+        val p = viewerViewport.place(viewWidth, viewHeight, resolvedContentWidth, resolvedContentHeight)
+        if (sharpenDisplayPassActive()) {
+            // sh-strength r2 B: the pass draws the picture where the viewport placed it, in a view-sized buffer;
+            // the TextureView adds nothing (identity) -- else the placement would be applied twice. The double
+            // transform is the negative control's (test seam 2) only.
+            val place = if (p != null) DisplayPlacement(p.left, p.top, p.width, p.height, viewWidth, viewHeight)
+            else DisplayPlacement(0f, 0f, viewWidth, viewHeight, viewWidth, viewHeight)
+            if (displayPassMode() == 2 && p != null) {
+                matrix.setScale(p.width / viewWidth, p.height / viewHeight)
+                matrix.postTranslate(p.left, p.top)
+            }
+            videoTextureView.setTransform(matrix)
+            if (place != sharpenPlacementSent) {  // r3 (N2): the same placement is not sent again
+                sharpenPlacementSent = place
+                sharpenPlacementGenSent += 1  // r4 (N1 c): named, so its display can be told
+                sharpenRenderer?.setDisplayPlacement(place, sharpenPlacementGenSent)
+                // r5 (N1-c2): a PC stream under way was mapped with the old layout -- released once, the rest swallowed
+                interruptViewerTouch("layout_$sharpenPlacementGenSent")
+            }
+            val logged = "%.1f,%.1f,%.1fx%.1f buffer=%dx%d".format(place.left, place.top, place.width, place.height,
+                surfaceBufferWidth, surfaceBufferHeight)
+            if (logged != sharpenDisplayPlacementLogged) {
+                sharpenDisplayPlacementLogged = logged
+                diagnosticsLog.log("sharpen_display_pass", "mode=${displayPassMode()} method=${sharpenMethod.code} place=$logged " +
+                    "view=${viewWidth.toInt()}x${viewHeight.toInt()} content=${resolvedContentWidth}x$resolvedContentHeight")
+            }
+            if (::viewerPanChip.isInitialized) renderViewportChips()
+            return
+        }
+        if (sharpenPlacementSent != null) {
+            sharpenPlacementSent = null
+            sharpenRenderer?.setDisplayPlacement(null)
+        }
+        if (p == null) {
+            videoTextureView.setTransform(matrix)
+            return
+        }
+        matrix.setScale(p.width / viewWidth, p.height / viewHeight)
+        matrix.postTranslate(p.left, p.top)
+        videoTextureView.setTransform(matrix)
+        if (::viewerPanChip.isInitialized) renderViewportChips()
+    }
+
+    /** 크게보기: fill the view, centred; 화면 이동 off (touches still control the PC) until the user turns it on. */
+    private fun enterLargeView(origin: String) {
+        val (cw, ch) = viewerContentSize() ?: return
+        interruptViewerTouch("view_large")
+        viewerViewport.enterLarge(videoTextureView.width.toFloat(), videoTextureView.height.toFloat(), cw, ch)
+        viewerPanMode = false
+        diagnosticsLog.log("viewer_view", "mode=large origin=$origin zoom=${"%.2f".format(viewerViewport.zoom)} " +
+            "view=${videoTextureView.width}x${videoTextureView.height} content=${cw}x$ch")
+        applyVideoTransform()
+        renderViewportChips()
+    }
+
+    /** One step back to 전체보기, from anywhere (the chip, the menu, a pinch below the fit). */
+    private fun exitLargeView(origin: String) {
+        resetViewerViewport(origin)
+        diagnosticsLog.log("viewer_view", "mode=full origin=$origin")
+    }
+
+    private fun resetViewerViewport(reason: String) {
+        if (viewerViewport.isLarge || viewerPanMode) interruptViewerTouch("view_reset_$reason")
+        viewerViewport.reset()
+        viewerPanMode = false
+        viewportPanPointerId = MotionEvent.INVALID_POINTER_ID
+        if (::videoTextureView.isInitialized) applyVideoTransform()
+        if (::viewerPanChip.isInitialized) renderViewportChips()
+    }
+
+    /**
+     * r2 R1: a mode / size / scene change in the middle of a touch stream. A PC stream gets its release once and is
+     * swallowed to its end, with the margin modifiers and the pinch state it held; a local stream stays local. The next
+     * ACTION_DOWN starts in the new mode.
+     */
+    private fun interruptViewerTouch(reason: String) {
+        if (!viewerTouchRouter.interrupt()) return
+        cancelActiveViewerTouch(reason)
+        rightClickModifierPointerId = MotionEvent.INVALID_POINTER_ID
+        tabletModePointerId = MotionEvent.INVALID_POINTER_ID
+        pinchStartSpan = 0f
+        pinchZoomCarry = 0f
+        if (::viewerModeBanner.isInitialized) renderViewerModeBanner()
+        diagnosticsLog.log("viewer_touch_interrupted", "reason=$reason")
+    }
+
+    /** 화면 이동: one finger moves the picture, two scale it about the fingers. Consumed here, never sent. */
+    private fun handleViewportGesture(event: MotionEvent): Boolean {
+        val (cw, ch) = viewerContentSize() ?: return true
+        val vw = videoTextureView.width.toFloat()
+        val vh = videoTextureView.height.toFloat()
+        viewportScaleDetector.onTouchEvent(event)
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                viewportPanPointerId = event.getPointerId(0)
+                viewportPanLastX = event.x
+                viewportPanLastY = event.y
+            }
+            MotionEvent.ACTION_POINTER_UP -> {
+                // keep moving with a finger that is still down
+                val left = (0 until event.pointerCount).firstOrNull { it != event.actionIndex } ?: return true
+                viewportPanPointerId = event.getPointerId(left)
+                viewportPanLastX = event.getX(left)
+                viewportPanLastY = event.getY(left)
+            }
+            MotionEvent.ACTION_MOVE -> {
+                val idx = event.findPointerIndex(viewportPanPointerId)
+                if (idx >= 0 && !viewportScaleDetector.isInProgress && event.pointerCount == 1) {
+                    viewerViewport.panBy(event.getX(idx) - viewportPanLastX, event.getY(idx) - viewportPanLastY, vw, vh, cw, ch)
+                    applyVideoTransform()
+                }
+                if (idx >= 0) {
+                    viewportPanLastX = event.getX(idx)
+                    viewportPanLastY = event.getY(idx)
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> viewportPanPointerId = MotionEvent.INVALID_POINTER_ID
+        }
+        return true
+    }
+
+    /** The zone strip and the rail out of the way (their room goes to the picture), or back. */
+    private fun setViewerControlsHidden(hidden: Boolean, origin: String) {
+        interruptViewerTouch("controls_$origin")
+        releaseViewerModifiers()
+        viewerControlsHidden = hidden
+        findViewById<View>(R.id.viewerZoneBar).visibility = if (hidden) View.GONE else View.VISIBLE
+        viewerControlsBar.visibility = if (hidden) View.GONE else View.VISIBLE
+        diagnosticsLog.log("viewer_view", "controls=${if (hidden) "hidden" else "shown"} origin=$origin")
+        renderViewportChips()
+    }
+
+    private fun renderViewportChips() {
+        val large = viewerViewport.isLarge
+        viewerFullViewChip.visibility = if (large) View.VISIBLE else View.GONE
+        viewerPanChip.visibility = if (large) View.VISIBLE else View.GONE
+        viewerPanChip.setText(if (viewerPanMode) R.string.viewer_chip_pan_on else R.string.viewer_chip_pan)
+        viewerPanChip.isSelected = viewerPanMode
+        viewerShowControlsChip.visibility = if (viewerControlsHidden) View.VISIBLE else View.GONE
+        viewerMenuViewButton.setText(if (large) R.string.viewer_view_full else R.string.viewer_view_large)
+    }
+
+    private fun parseWindowPanelSnapshot(rawJson: String): WindowPanelUiSnapshot {
+        if (rawJson.isBlank()) return WindowPanelUiSnapshot.EMPTY
+        return try {
+            val root = JSONObject(rawJson)
+            val itemsJson = root.optJSONArray("items")
+            val items = buildList {
+                if (itemsJson != null) {
+                    for (index in 0 until itemsJson.length()) {
+                        val item = itemsJson.optJSONObject(index) ?: continue
+                        add(
+                            WindowPanelItem(
+                                id = item.optLong("id"),
+                                title = item.optString("title", "window"),
+                                width = item.optInt("width"),
+                                height = item.optInt("height"),
+                                minimized = item.optBoolean("minimized"),
+                                thumbVersion = item.optLong("thumbVersion"),
+                            )
+                        )
+                    }
+                }
+            }
+            WindowPanelUiSnapshot(
+                selectedId = root.optLong("selectedId"),
+                selectedTitle = root.optString("selectedTitle", "desktop"),
+                selectedWidth = root.optInt("selectedWidth"),
+                selectedHeight = root.optInt("selectedHeight"),
+                selectionLocked = root.optBoolean("selectionLocked"),
+                status = root.optString("status", "waiting_control"),
+                lastSelectSeq = root.optInt("lastSelectSeq"),
+                lastSelectOk = root.optBoolean("lastSelectOk"),
+                lastSelectWindowId = root.optLong("lastSelectWindowId"),
+                lastSelectStreamGeneration = root.optLong("lastSelectStreamGeneration"),
+                lastSelectHostSendQpcUs = root.optLong("lastSelectHostSendQpcUs"),
+                items = items,
+                hostSupportsMonitors = root.optBoolean("hostSupportsMonitors"),
+                hostSupportsMonitorSelect = root.optBoolean("hostSupportsMonitorSelect"),
+                monitorListRevision = root.optLong("monitorListRevision"),
+                selectedMonitorId = root.optInt("selectedMonitorId"),
+                monitors = buildList {
+                    val monitorsJson = root.optJSONArray("monitors")
+                    if (monitorsJson != null) {
+                        for (index in 0 until monitorsJson.length()) {
+                            val mon = monitorsJson.optJSONObject(index) ?: continue
+                            add(
+                                MonitorPanelItem(
+                                    id = mon.optInt("id"),
+                                    width = mon.optInt("width"),
+                                    height = mon.optInt("height"),
+                                    primary = mon.optBoolean("primary"),
+                                )
+                            )
+                        }
+                    }
+                },
+            )
+        } catch (_: JSONException) {
+            WindowPanelUiSnapshot.EMPTY
+        }
+    }
+
+    private fun observeDiagnostics(
+        nowMs: Long,
+        statusValue: String,
+        panelSnapshot: WindowPanelUiSnapshot,
+        videoDebugValue: String,
+        lastOutputPresentationUs: Long,
+    ) {
+        if (currentScene != lastLoggedScene) {
+            diagnosticsLog.log("scene", currentScene.name)
+            lastLoggedScene = currentScene
+        }
+        if (statusValue != lastLoggedStatus) {
+            diagnosticsLog.log("status", statusValue)
+            lastLoggedStatus = statusValue
+        }
+        if (panelSnapshot.status != lastLoggedPanelStatus) {
+            diagnosticsLog.log(
+                "panel_status",
+                panelSnapshot.status + " selectedId=" + panelSnapshot.selectedId + " selectedTitle=" + panelSnapshot.selectedTitle
+            )
+            lastLoggedPanelStatus = panelSnapshot.status
+        }
+        if (videoDebugValue != lastLoggedVideoDebug &&
+            (currentScene == UiScene.VIEWER || currentScene == UiScene.SWITCHING)
+        ) {
+            diagnosticsLog.log("video_debug", videoDebugValue)
+            lastLoggedVideoDebug = videoDebugValue
+        }
+
+        if (currentScene == UiScene.VIEWER && statusValue.startsWith("connected")) {
+            val outCount = parseVideoCounter(videoDebugValue, "out")
+            // A stall is frames going in and nothing coming out. Frames not going in either is
+            // a host with nothing to send -- a desktop nobody is touching produces no updates
+            // to capture, and that is the correct outcome, not a fault. Watching only the
+            // output count made a still screen look identical to a broken decoder, and after
+            // fifteen seconds of stillness the viewer closed itself and returned to the target
+            // list, which is what "it disconnected on its own" was.
+            val inCount = parseVideoCounter(videoDebugValue, "in")
+            val nothingArriving = inCount >= 0 && inCount == lastViewerInCount
+            lastViewerInCount = inCount
+            if (outCount >= 0) {
+                if (outCount != lastViewerOutCount || nothingArriving) {
+                    lastViewerOutCount = outCount
+                    lastViewerOutChangeAtMs = nowMs
+                    lastViewerStallLogAtMs = 0L
+                    lastViewerRecoveryAttempts = 0
+                } else {
+                    if (lastViewerOutChangeAtMs == 0L) {
+                        lastViewerOutChangeAtMs = nowMs
+                    }
+                    val stalledForMs = nowMs - lastViewerOutChangeAtMs
+                    if (stalledForMs >= 5000L && nowMs - lastViewerStallLogAtMs >= 5000L) {
+                        diagnosticsLog.log(
+                            "viewer_stall",
+                            "stalledMs=$stalledForMs out=$outCount scene=$currentScene " +
+                                "selectedId=${panelSnapshot.selectedId} selected=${panelSnapshot.selectedTitle} " +
+                                "lastOutChangeMs=$lastViewerOutChangeAtMs lastOutPtsUs=$lastOutputPresentationUs " +
+                                "hostStatus=${panelSnapshot.status} status=$statusValue debug=$videoDebugValue"
+                        )
+                        lastViewerStallLogAtMs = nowMs
+                        recoverFromViewerStall(nowMs, panelSnapshot, statusValue, videoDebugValue, lastOutputPresentationUs)
+                    }
+                }
+            }
+        } else {
+            lastViewerOutCount = -1
+            lastViewerInCount = -1
+            lastViewerOutChangeAtMs = 0L
+            lastViewerStallLogAtMs = 0L
+            lastViewerRecoveryAttempts = 0
+        }
+    }
+
+    private fun recoverFromViewerStall(
+        nowMs: Long,
+        panelSnapshot: WindowPanelUiSnapshot,
+        statusValue: String,
+        videoDebugValue: String,
+        lastOutputPresentationUs: Long,
+    ) {
+        if (selectionStage != SelectionStage.IDLE) return
+
+        val targetId = panelSnapshot.selectedId
+        val targetLabel = panelSnapshot.selectedTitle.ifBlank { if (targetId == 0L) "desktop" else "window" }
+        val targetTab = if (targetId == 0L) TargetTab.DESKTOP else TargetTab.WINDOWS
+
+        if (lastViewerRecoveryTargetId != targetId || nowMs - lastViewerRecoveryAtMs >= 15000L) {
+            lastViewerRecoveryTargetId = targetId
+            lastViewerRecoveryAtMs = nowMs
+            lastViewerRecoveryAttempts = 1
+            diagnosticsLog.log(
+                "viewer_stall_recover",
+                "action=reselect targetId=$targetId label=$targetLabel status=$statusValue " +
+                    "hostStatus=${panelSnapshot.status} lastOutPtsUs=$lastOutputPresentationUs"
+            )
+            startSelectionTransition(targetId, targetLabel, targetTab, "watchdog")
+            return
+        }
+
+        lastViewerRecoveryAttempts += 1
+        diagnosticsLog.log(
+            "viewer_stall_recover",
+            "action=targets targetId=$targetId attempts=$lastViewerRecoveryAttempts " +
+                "status=$statusValue hostStatus=${panelSnapshot.status} debug=$videoDebugValue"
+        )
+        moveToTargets("viewer_stall", abortPendingSwitch = false)
+    }
+
+    private fun parseVideoCounter(debugLine: String, key: String): Int {
+        val needle = "$key="
+        val start = debugLine.indexOf(needle)
+        if (start < 0) return -1
+        val valueStart = start + needle.length
+        var valueEnd = valueStart
+        while (valueEnd < debugLine.length && debugLine[valueEnd].isDigit()) {
+            valueEnd += 1
+        }
+        if (valueEnd <= valueStart) return -1
+        return debugLine.substring(valueStart, valueEnd).toIntOrNull() ?: -1
+    }
+
+    private fun saveCurrentEndpoint() {
+        val host = hostEdit.text?.toString()?.trim().orEmpty()
+        val videoPort = videoPortEdit.text?.toString()?.toIntOrNull() ?: 43000
+        val controlPort = controlPortEdit.text?.toString()?.toIntOrNull() ?: 43001
+        val bitrateKbps = requestedRuntimeBitrateKbps
+        val fps = requestedRuntimeFps
+        SessionPersistence.save(
+            this,
+            host,
+            videoPort,
+            controlPort,
+            bitrateKbps,
+            fps,
+        )
+    }
+}

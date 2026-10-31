@@ -1,0 +1,3 @@
+I/remote60_android_direct(21935): 2026-10-26 13:34:38.173 [desktop_backend_session_reset] reason=connect
+I/remote60_android_direct(21935): 2026-10-26 13:34:38.997 [desktop_backend_ui] state=CHECKING lit=none asked=none enabled=true
+I/remote60_android_direct(21935): 2026-10-26 13:35:06.525 [desktop_backend_ui] state=APPLIED lit=DXGI asked=none enabled=true

@@ -1,0 +1,46 @@
+﻿viewer_stats_chain_e2e_test scenario=gap fps=30 warmSec=15 gapSec=120 afterSec=25 bitrate=6000000
+PASS  the host could be staged
+PASS  an on-screen, invisible, click-through window is up for the host to capture
+PASS  the launched host is isolated from the user's files, input injection off
+PASS  the host started
+PASS  the product Hello is answered
+PASS  the viewer's clipboard sync is off (the user's clipboard is never touched)
+PASS  the first real frame reached the FrameBuffer
+--- stream paused (product StreamStateControl, as the initial picker does) for 120 s
+--- stream resumed
+PASS  the host captured the window this test paints (its hwnd, this pid)  10-26 14:07:39.711 [native-video-host] capture-window target hwnd=0x1120b50 pid=39924 process=remote60_viewer_stats_chain_e2e_test.exe title=remote60 stats chain target pid 39924 20ce8e3f clientOnly=0
+PASS  ...and stayed off: the host never advertised clipboard sync during the run
+
+--- host [abr] lines (2) ---
+10-26 14:10:24.898 [native-video-host][abr] profile=mid encode=480x270 bitrate=4500000 reason=high_to_mid_severe fps=30 priority=standard clientSize=0x0 clientDecodedFps=0 clientAvgLatUs=0 clientAvgTailUs=0 clientMbps=0 evidence=stale_active metricsFresh=0 clientDecodeValid=0 clientReports=40 clientReportAgeMs=5256 clientFirstReportAgeMs=164218 clientFirstDecodeAgeMs=164218 rawDecodedFps=23.82 rawAvgLatUs=1876 rawAvg
+10-26 14:10:28.900 [native-video-host][abr] profile=low encode=480x270 bitrate=3300000 reason=mid_to_low_severe fps=30 priority=standard clientSize=0x0 clientDecodedFps=0 clientAvgLatUs=0 clientAvgTailUs=0 clientMbps=0 evidence=stale_active metricsFresh=0 clientDecodeValid=0 clientReports=40 clientReportAgeMs=9258 clientFirstReportAgeMs=168220 clientFirstDecodeAgeMs=168220 rawDecodedFps=23.82 rawAvgLatUs=1876 rawAvgT
+
+--- viewer stats lines around the resume (t = s from it) ---
+t= -3  lines= 0 published= 0 minPublishedDecodedFps=- realFramesShown=0  recvFrames=[]
+t= -2  lines= 0 published= 0 minPublishedDecodedFps=- realFramesShown=0  recvFrames=[]
+t= -1  lines= 0 published= 0 minPublishedDecodedFps=- realFramesShown=0  recvFrames=[]
+t= +0  lines= 2 published= 1 minPublishedDecodedFps=21 realFramesShown=23  recvFrames=[10u,12,]
+t= +1  lines= 1 published= 1 minPublishedDecodedFps=25 realFramesShown=24  recvFrames=[26,]
+t= +2  lines= 1 published= 1 minPublishedDecodedFps=23 realFramesShown=23  recvFrames=[23,]
+t= +3  lines= 1 published= 1 minPublishedDecodedFps=25 realFramesShown=26  recvFrames=[26,]
+t= +4  lines= 1 published= 1 minPublishedDecodedFps=24 realFramesShown=24  recvFrames=[24,]
+t= +5  lines= 1 published= 1 minPublishedDecodedFps=24 realFramesShown=26  recvFrames=[25,]
+t= +6  lines= 1 published= 1 minPublishedDecodedFps=25 realFramesShown=23  recvFrames=[25,]
+t= +7  lines= 1 published= 1 minPublishedDecodedFps=22 realFramesShown=24  recvFrames=[23,]
+t= +8  lines= 1 published= 1 minPublishedDecodedFps=26 realFramesShown=24  recvFrames=[26,]
+t= +9  lines= 1 published= 1 minPublishedDecodedFps=24 realFramesShown=24  recvFrames=[25,]
+t=+10  lines= 1 published= 1 minPublishedDecodedFps=25 realFramesShown=27  recvFrames=[24,]
+t=+11  lines= 1 published= 1 minPublishedDecodedFps=25 realFramesShown=24  recvFrames=[27,]
+t=+12  lines= 1 published= 1 minPublishedDecodedFps=24 realFramesShown=25  recvFrames=[24,]
+PASS  the host's ABR was at high before the gap  abrProfile=high
+PASS  the host sent a real cadence after the resume (ABR-judged seconds)  25 of 25 s
+PASS  the viewer reports again after the resume  25 published reports in 25 s, first 630 ms after the resume
+PASS  NO REPORT SAYS THE STREAM COLLAPSED (decoded rate under the 12% floor) after the resume  0 published reports under 3.600000 fps
+PASS  the reports do not flood in the first 5 s after the resume (<= 8 published)  5 published / 6 stats lines
+PASS  the picture comes back at the cadence (real frames shown >= 85% of what the host sent, and >= fps/2)  24.584787 fps shown, host sent 24.761905 fps (21 host seconds), from 3 s after the resume
+PASS  THE HOST'S ABR DOES NOT STEP DOWN AFTER THE RESUME  none
+PASS  ...and is still at high at the end  abrProfile=high
+
+17 checks, 0 failed, 0 not judged
+viewer_stats_chain_e2e_test(gap): PASS
+RESULT: PASS

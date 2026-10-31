@@ -1,0 +1,670 @@
+// Main-loop helpers: capture restart, cursor forwarder, TCP data reconnect, window selection.
+//
+// Host split refactor Phase 3.5: moved verbatim out of host_main_loop.cpp so each stage reads on its
+// own; see host_main_loop.hpp for the loop, HostContext / TickContext and Flow.
+
+
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#ifdef min
+#undef min
+#endif
+#ifdef max
+#undef max
+#endif
+
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <mfapi.h>
+#include <wrl/client.h>
+
+#include <winrt/Windows.Foundation.h>
+#include <winrt/Windows.Graphics.Capture.h>
+#include <winrt/Windows.Graphics.DirectX.Direct3D11.h>
+#include <winrt/base.h>
+
+#include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "capture_backend_dxgi.hpp"
+#include "d3d_capture_readback.hpp"
+#include "encode_resolution_ladder.hpp"
+#include "gdi_capture_process.hpp"
+#include "host_abr.hpp"
+#include "host_args.hpp"
+#include "host_backend_policy.hpp"
+#include "host_bgra_scale.hpp"
+#include "host_bottleneck.hpp"
+#include "host_capture_device.hpp"
+#include "host_capture_session.hpp"
+#include "monitor_select_target.hpp"
+#include "stream_test_hold.hpp"
+#include "host_client_metrics.hpp"
+#include "host_control_session.hpp"
+#include "host_encoded_sender.hpp"
+#include "host_encoder_manager.hpp"
+#include "host_frame_gate.hpp"
+#include "host_frame_state.hpp"
+#include "host_gpu_scaler.hpp"
+#include "host_input_inject.hpp"
+#include "host_input_router.hpp"
+#include "host_input_target_rect.hpp"
+#include "host_secure_target_rect.hpp"
+#include "host_kick.hpp"
+#include "host_log.hpp"
+#include "host_main_loop.hpp"
+#include "host_net_io.hpp"
+#include "host_session.hpp"
+#include "host_stats.hpp"
+#include "host_string_util.hpp"
+#include "host_watchdog.hpp"
+#include "host_window_enum.hpp"
+#include "mf_h264_codec.hpp"
+#include "native_video_transport.hpp"
+#include "poc_protocol.hpp"
+#include "time_utils.hpp"
+
+using namespace winrt::Windows::Graphics::Capture;
+using namespace winrt::Windows::Graphics::DirectX::Direct3D11;
+using remote60::host::DesktopCaptureBackend;
+using remote60::host::DxgiDesktopCaptureConfig;
+using remote60::host::DxgiDesktopCaptureSession;
+
+namespace remote60::native_poc {
+
+bool query_monitor_physical_rect(HMONITOR monitor, MonitorPhysicalRect* out) {
+  if (!monitor || !out) return false;
+  MONITORINFO info{};
+  info.cbSize = sizeof(info);
+  if (!GetMonitorInfoW(monitor, &info)) return false;
+  out->originX = info.rcMonitor.left;
+  out->originY = info.rcMonitor.top;
+  out->width = static_cast<uint32_t>(std::max<LONG>(0, info.rcMonitor.right - info.rcMonitor.left));
+  out->height = static_cast<uint32_t>(std::max<LONG>(0, info.rcMonitor.bottom - info.rcMonitor.top));
+  return out->valid();
+}
+
+InputTargetRect broker_target_rect(const InputRouterState& inputRouter) {
+  InputTargetRect r;
+  inputRouter.broker.GetTargetRect(&r.originX, &r.originY, &r.width, &r.height);
+  r.source = (r.width && r.height) ? "broker" : "none";
+  return r;
+}
+
+void sync_input_target_rect(CaptureState& capture, InputRouterState& inputRouter, const char* reason) {
+  // The rect of the monitor the capture session opened, read LIVE: a display arrangement change
+  // that keeps the resolution (the primary moved, a monitor re-ordered) changes the origin
+  // without a size change, so no restart would follow -- the periodic call (stats tick) catches
+  // it here, and the secure dispatch re-reads it per event (secure_target_rect_ready). The handle
+  // is mirrored for the control thread. A failed query does NOT keep the previous rect: the
+  // broker's rect is cleared, so no secure event is sent until the monitor is known again.
+  const bool windowMode = capture.windowModeActive.load(std::memory_order_acquire);
+  const HMONITOR monitor = (!windowMode && capture.monitorInfo.has_value()) ? capture.monitorInfo->monitor : nullptr;
+  {
+    // The control thread's one-record view of the capture target (P9): version moves only when
+    // something changed, so a dispatch that straddles a target switch can tell.
+    std::lock_guard<std::mutex> lk(capture.inputTargetMu);
+    const uint64_t handle = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(monitor));
+    const uint64_t gen = capture.streamGenerationState.load(std::memory_order_acquire);
+    if (capture.inputTarget.windowMode != windowMode || capture.inputTarget.monitorHandle != handle ||
+        capture.inputTarget.streamGeneration != gen) {
+      capture.inputTarget.windowMode = windowMode;
+      capture.inputTarget.monitorHandle = handle;
+      capture.inputTarget.streamGeneration = gen;
+      ++capture.inputTarget.version;
+    }
+  }
+  MonitorPhysicalRect live;
+  const bool queryOk = !windowMode && query_monitor_physical_rect(monitor, &live);
+  const InputTargetRect next = windowMode ? derive_input_target_rect(true, live)
+                               : queryOk ? derive_input_target_rect(false, live)
+                                         : derive_input_target_rect(false, MonitorPhysicalRect{});
+  const InputTargetRect current = broker_target_rect(inputRouter);
+  if (!windowMode && !queryOk) {
+    ++inputRouter.targetRectQueryFailures;
+    if (inputRouter.targetRectQueryFailures <= 3 || (inputRouter.targetRectQueryFailures % 60) == 0) {
+      std::cout << "[native-video-host] secure-input target rect UNKNOWN (monitor query failed) reason="
+                << (reason ? reason : "-") << " failures=" << inputRouter.targetRectQueryFailures
+                << " -> secure input refused until known\n";
+    }
+  }
+  const bool first = std::string(inputRouter.targetRectSent.source) == "none";
+  if (!first && input_target_rect_same(current, next) && input_target_rect_same(inputRouter.targetRectSent, next)) return;
+  inputRouter.broker.SetTargetRect(next.originX, next.originY, next.width, next.height);
+  inputRouter.targetRectSent = next;
+  std::cout << "[native-video-host] secure-input target rect=" << describe_input_target_rect(next)
+            << " reason=" << (reason ? reason : "-") << "\n";
+}
+
+namespace {
+
+SecureDispatchOutcome secure_dispatch_impl(CaptureState& capture, InputRouterState& inputRouter,
+                                           const std::function<bool(const InputTargetRect&)>& send) {
+  SecureDispatchPorts ports;
+  ports.snapshot = [&capture]() {
+    std::lock_guard<std::mutex> lk(capture.inputTargetMu);
+    InputTargetSnapshotView v;
+    v.version = capture.inputTarget.version;
+    v.windowMode = capture.inputTarget.windowMode;
+    v.monitorHandle = capture.inputTarget.monitorHandle;
+    v.streamGeneration = capture.inputTarget.streamGeneration;
+    return v;
+  };
+  ports.queryMonitor = [](uint64_t handle, MonitorPhysicalRect* out) {
+    return query_monitor_physical_rect(reinterpret_cast<HMONITOR>(static_cast<uintptr_t>(handle)), out);
+  };
+  ports.send = send;
+  const SecureDispatchResult r = secure_dispatch(ports);
+  SecureDispatchOutcome out;
+  out.sent = r.sent;
+  out.writeFailed = r.writeFailed;
+  out.why = r.why;
+  if (r.sent) {
+    if (!input_target_rect_same(inputRouter.lastDispatchedRect, r.rect)) {
+      inputRouter.secureRectUpdatedAtDispatch.fetch_add(1, std::memory_order_relaxed);
+      std::cout << "[native-video-host] secure-input target rect=" << describe_input_target_rect(r.rect)
+                << " reason=dispatch gen=" << r.streamGeneration << " (was "
+                << describe_input_target_rect(inputRouter.lastDispatchedRect) << ")\n";
+      inputRouter.lastDispatchedRect = r.rect;
+    }
+  } else if (!r.writeFailed) {
+    inputRouter.secureSkipRectUnknown.fetch_add(1, std::memory_order_relaxed);
+    static std::atomic<uint64_t> lastLogUs{0};
+    const uint64_t nowUs = qpc_now_us();
+    const uint64_t last = lastLogUs.load(std::memory_order_relaxed);
+    if (nowUs - last > 1'000'000) {
+      lastLogUs.store(nowUs, std::memory_order_relaxed);
+      std::cout << "[native-video-host] secure-input event refused why=" << r.why
+                << " (rect not knowable for this event; not injecting at an unknown place)\n";
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
+SecureDispatchOutcome secure_dispatch_event(CaptureState& capture, InputRouterState& inputRouter,
+                                            const ControlInputEventMessage& input, uint32_t domainW, uint32_t domainH) {
+  return secure_dispatch_impl(capture, inputRouter, [&](const InputTargetRect& rect) {
+    return inputRouter.broker.SendInputEventWithRect(input, domainW, domainH, rect.originX, rect.originY, rect.width,
+                                                     rect.height);
+  });
+}
+
+SecureDispatchOutcome secure_dispatch_text(CaptureState& capture, InputRouterState& inputRouter,
+                                           const ControlInputTextMessage& text, uint32_t domainW, uint32_t domainH) {
+  return secure_dispatch_impl(capture, inputRouter, [&](const InputTargetRect& rect) {
+    return inputRouter.broker.SendInputTextWithRect(text, domainW, domainH, rect.originX, rect.originY, rect.width,
+                                                    rect.height);
+  });
+}
+
+bool restart_capture_session(HostContext& hx, CaptureState::RestartOwner owner) {
+  auto& useH264 = hx.useH264;
+  auto& stop = hx.stop;
+  auto& item = hx.item;
+  auto& token = hx.token;
+  auto& frameGating = hx.frameGating;
+  auto& backend = hx.backend;
+  auto& watchdog = hx.watchdog;
+  auto& inputRouter = hx.inputRouter;
+  auto& sender = hx.sender;
+  auto& clientSession = hx.clientSession;
+  auto& encoder = hx.encoder;
+  auto& capture = hx.capture;
+  auto& res = hx.res;
+  watchdog.EnterMainPhase(MainLoopPhase::CaptureRestart);
+  const uint64_t attemptUs = qpc_now_us();
+  if (capture.restartPending && attemptUs < capture.restartRetryAtUs) return false;
+  // A restarted session invalidates the held pointer sample even when the stream generation
+  // survives (some size-changes keep it): a stale position against the new capture geometry
+  // would misplace the remote cursor until the next real mouse update.
+  capture.dxgiPointerUpdateUs.store(0, std::memory_order_release);
+  // capture-lifecycle r3 (Codex N1-a/N4): a full-frame reacquire's own restart -- first try or its retry -- is
+  // no new source for the episode budget (DetachCaptureSession reads this).
+  capture.fullFrameOwnRestart = owner == CaptureState::RestartOwner::FullFrame;
+  const bool started = capture.RestartCaptureSessionImpl(res, backend, clientSession, encoder, stop, useH264, item, token);
+  capture.fullFrameOwnRestart = false;
+  if (!started) {
+    capture.restartOwner = owner;
+    capture.restartPending = true;
+    capture.restartFailures = std::min<uint32_t>(capture.restartFailures + 1, 5);
+    capture.restartRetryAtUs = qpc_now_us() + (250000ULL << capture.restartFailures);
+    return false;
+  }
+  capture.restartPending = false;
+  capture.restartRetryAtUs = 0;
+  capture.restartFailures = 0;
+  capture.restartOwner = CaptureState::RestartOwner::General;
+  uint32_t finalW = 0, finalH = 0;
+  {
+    std::lock_guard<std::mutex> lk(capture.resourceMu);
+    finalW = capture.width;
+    finalH = capture.height;
+  }
+  encoder.ApplyConfirmedCaptureGeometry(capture, res, frameGating, inputRouter, sender, finalW, finalH,
+                                        "capture-restart", /*allowWindowOverride=*/false, &hx.rate);
+  // The agent's rect follows what was just opened: RDP<->console, DXGI<->WGC<->GDI, a monitor
+  // select and a geometry change all come through here (P9).
+  sync_input_target_rect(capture, inputRouter, "capture-restart");
+  return true;
+}
+
+void pump_cursor_forward(HostContext& hx, uint64_t nowUs) {
+  auto& transport = hx.transport;
+  auto& backend = hx.backend;
+  auto& inputRouter = hx.inputRouter;
+  auto& sender = hx.sender;
+  auto& clientSession = hx.clientSession;
+  auto& capture = hx.capture;
+  // Field verdict: the remote-cursor marker reads as clutter, not signal -- the user asked for
+  // it gone. Default OFF on both ends; the reviewed machinery (generation fence, overlay) stays
+  // dormant behind this env for future reconsideration.
+  static const bool remoteCursorEnabled = env_truthy("REMOTE60_NATIVE_REMOTE_CURSOR");
+  if (!remoteCursorEnabled) return;
+  if (transport != VideoTransport::Udp || !sender.udpPeerReady) return;
+  if (!clientSession.streamControlActive.load(std::memory_order_acquire)) return;
+  if (capture.windowModeActive.load(std::memory_order_acquire)) return;
+  if (backend.active != DesktopCaptureBackend::Dxgi) return;
+  if (capture.dxgiPointerUpdateUs.load(std::memory_order_acquire) == 0) return;
+  if (nowUs < inputRouter.cursorSendLastUs + 33'000) return;  // <=30Hz
+  // Generation fence: a sample captured under the previous target/attachment must never be
+  // sent as if it belonged to the current one (stale desktop cursor over a fresh window).
+  const uint64_t sampleGen = capture.dxgiPointerGeneration.load(std::memory_order_relaxed);
+  if (sampleGen != capture.streamGenerationState.load(std::memory_order_acquire)) return;
+  const int32_t px = capture.dxgiPointerX.load(std::memory_order_acquire);
+  const int32_t py = capture.dxgiPointerY.load(std::memory_order_acquire);
+  const bool visible = capture.dxgiPointerVisible.load(std::memory_order_acquire);
+  const bool changed = px != inputRouter.cursorSentX || py != inputRouter.cursorSentY || visible != inputRouter.cursorSentVisible;
+  if (!changed && (!visible || nowUs < inputRouter.cursorSendLastUs + 250'000)) return;
+  remote60::native_poc::UdpCursorPosPacket pkt{};
+  if (visible) pkt.flags |= 0x1u;
+  pkt.x = px;
+  pkt.y = py;
+  pkt.streamGeneration = sampleGen;
+  {
+    std::lock_guard<std::mutex> lk(capture.resourceMu);
+    pkt.captureW = capture.width;
+    pkt.captureH = capture.height;
+  }
+  pkt.hostQpcUs = nowUs;
+  (void)sendto(clientSession.clientSock, reinterpret_cast<const char*>(&pkt), sizeof(pkt), 0,
+               reinterpret_cast<const sockaddr*>(&sender.udpPeer), sizeof(sender.udpPeer));
+  inputRouter.cursorSendLastUs = nowUs;
+  inputRouter.cursorSentX = px;
+  inputRouter.cursorSentY = py;
+  inputRouter.cursorSentVisible = visible;
+}
+
+bool reconnect_tcp_data_session(HostContext& hx, const char* reason) {
+  auto& args = hx.args;
+  auto& transport = hx.transport;
+  auto& stop = hx.stop;
+  auto& frameGating = hx.frameGating;
+  auto& kick = hx.kick;
+  auto& clientMetrics = hx.clientMetrics;
+  auto& clientSession = hx.clientSession;
+  auto& encoder = hx.encoder;
+  auto& stats = hx.stats;
+  auto& res = hx.res;
+  if (transport != VideoTransport::Tcp) return false;
+  if (args.seconds > 0) return false;
+  if (clientSession.listenSock == INVALID_SOCKET) return false;
+  if (clientSession.clientSock != INVALID_SOCKET) {
+    shutdown(clientSession.clientSock, SD_BOTH);
+    closesocket(clientSession.clientSock);
+    clientSession.clientSock = INVALID_SOCKET;
+  }
+  std::cout << "[native-video-host] data disconnected reason="
+            << (reason ? reason : "unknown")
+            << " waiting reconnect\n";
+  while (!stop.load()) {
+    sockaddr_in peer{};
+    int peerLen = sizeof(peer);
+    SOCKET accepted = accept(clientSession.listenSock, reinterpret_cast<sockaddr*>(&peer), &peerLen);
+    if (accepted == INVALID_SOCKET) {
+      if (stop.load()) return false;
+      Sleep(50);
+      continue;
+    }
+    clientSession.clientSock = accepted;
+    int noDelay = 1;
+    setsockopt(clientSession.clientSock, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<const char*>(&noDelay), sizeof(noDelay));
+    if (args.tcpSendBufKb > 0) {
+      const int sendBuf = static_cast<int>(args.tcpSendBufKb * 1024u);
+      setsockopt(clientSession.clientSock, SOL_SOCKET, SO_SNDBUF, reinterpret_cast<const char*>(&sendBuf), sizeof(sendBuf));
+    }
+    int effectiveSendBuf = 0;
+    int effectiveSendBufLen = sizeof(effectiveSendBuf);
+    (void)getsockopt(clientSession.clientSock, SOL_SOCKET, SO_SNDBUF,
+                     reinterpret_cast<char*>(&effectiveSendBuf), &effectiveSendBufLen);
+    std::cout << "[native-video-host] client reconnected transport=tcp sndbuf="
+              << effectiveSendBuf << " bytes\n";
+    clientMetrics.Reset();
+    // Outstanding requests belong to the client that made them. (Phase 4.)
+    hx.mailbox.Clear();
+    encoder.ResetKeyRequestBucket();
+    encoder.RequestKey(kHostKeyReasonSession);
+    kick.selectionFirstKeyframeDropCount = 0;
+    encoder.encodedSeq = 0;
+    stats.lastSendStartUs = 0;
+    frameGating.lastSentUs = 0;
+    {
+      std::lock_guard<std::mutex> lk(res.frame.mu);
+      stats.lastVersionSent = res.frame.version;
+    }
+    return true;
+  }
+  return false;
+}
+
+bool apply_selected_window_capture(HostContext& hx, uint64_t requestedWindowId,
+                                   const std::wstring& requestedMonitorDevice, uint64_t nowUs,
+                                   uint32_t* outFlags, uint64_t* outWindowId,
+                                   uint64_t* outStreamGeneration,
+                                   std::string* outReason, std::string* outTitle,
+                                   uint64_t ownerEpoch) {
+  auto& useH264 = hx.useH264;
+  auto& captureWindowRebindIntervalUs = hx.captureWindowRebindIntervalUs;
+  auto& nextCaptureWindowCheckUs = hx.nextCaptureWindowCheckUs;
+  auto& item = hx.item;
+  auto& frameGating = hx.frameGating;
+  auto& kick = hx.kick;
+  auto& backend = hx.backend;
+  auto& watchdog = hx.watchdog;
+  auto& inputRouter = hx.inputRouter;
+  auto& sender = hx.sender;
+  auto& encoder = hx.encoder;
+  auto& stats = hx.stats;
+  auto& capture = hx.capture;
+  auto& res = hx.res;
+  if (outFlags) *outFlags = 0;
+  if (outWindowId) *outWindowId = requestedWindowId;
+  if (outStreamGeneration) {
+    *outStreamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
+  }
+  if (outReason) outReason->clear();
+  if (outTitle) outTitle->clear();
+  if (capture.windowSelectionLocked.load(std::memory_order_acquire)) {
+    if (outFlags) *outFlags |= 0x2u;
+    if (outReason) *outReason = "selection_locked_by_config";
+    if (requestedWindowId == 0 && outTitle) *outTitle = "desktop";
+    return false;
+  }
+
+  const auto prevItem = item;
+  const bool prevCaptureWindowModeActive = capture.windowModeActive.load(std::memory_order_acquire);
+  const bool prevCaptureWindowClientOnlyActive =
+      capture.windowClientOnlyActive.load(std::memory_order_acquire);
+  const auto prevCaptureWindowCriteria = capture.windowCriteria;
+  const auto prevCaptureWindowInfo = capture.windowInfo;
+  const uint64_t prevSelectedWindowId = capture.selectedWindowId.load(std::memory_order_acquire);
+  const uint64_t prevCaptureStreamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
+  const uint32_t prevHostCaptureFlags = capture.targetFlags.load(std::memory_order_acquire);
+  const uint32_t prevHostCapturePid = capture.targetPid.load(std::memory_order_acquire);
+  const uint64_t prevHostCaptureHwnd = capture.targetHwnd.load(std::memory_order_acquire);
+  const uint32_t prevHostCaptureRebindCount = capture.rebindCount.load(std::memory_order_acquire);
+  std::string prevHostCaptureProcess;
+  std::string prevHostCaptureTitle;
+  {
+    std::lock_guard<std::mutex> lk(capture.metaMu);
+    prevHostCaptureProcess = capture.targetProcess;
+    prevHostCaptureTitle = capture.targetTitle;
+  }
+  // t-970r4zgo: the picked screen is part of the target too -- a failed monitor select must give
+  // back the screen, its index and its geometry (the secure-input rect is derived from it), not
+  // just the window fields.
+  const std::wstring prevSelectedMonitorDevice = capture.selectedMonitorDevice;
+  const uint32_t prevSelectedMonitorId = capture.selectedMonitorId.load(std::memory_order_acquire);
+  const auto prevMonitorInfo = capture.monitorInfo;
+
+  auto restore_previous_target = [&]() {
+    item = prevItem;
+    capture.windowModeActive.store(prevCaptureWindowModeActive, std::memory_order_release);
+    capture.windowClientOnlyActive.store(prevCaptureWindowClientOnlyActive, std::memory_order_release);
+    capture.windowCriteria = prevCaptureWindowCriteria;
+    capture.windowInfo = prevCaptureWindowInfo;
+    capture.selectedWindowId.store(prevSelectedWindowId, std::memory_order_release);
+    capture.streamGenerationState.store(prevCaptureStreamGeneration, std::memory_order_release);
+    capture.targetFlags.store(prevHostCaptureFlags, std::memory_order_release);
+    capture.targetPid.store(prevHostCapturePid, std::memory_order_release);
+    capture.targetHwnd.store(prevHostCaptureHwnd, std::memory_order_release);
+    capture.rebindCount.store(prevHostCaptureRebindCount, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lk(capture.metaMu);
+      capture.targetProcess = prevHostCaptureProcess;
+      capture.targetTitle = prevHostCaptureTitle;
+      capture.selectedMonitorDevice = prevSelectedMonitorDevice;
+    }
+    capture.selectedMonitorId.store(prevSelectedMonitorId, std::memory_order_release);
+    capture.monitorInfo = prevMonitorInfo;
+  };
+
+  winrt::Windows::Graphics::Capture::GraphicsCaptureItem nextItem{nullptr};
+  CaptureWindowInfo nextCaptureWindowInfo{};
+  bool nextCaptureWindowModeActive = false;
+  bool nextCaptureWindowClientOnlyActive = false;
+  CaptureWindowCriteria nextCaptureWindowCriteria{};
+  uint64_t nextSelectedWindowId = requestedWindowId;
+  std::string nextReason = "ok";
+  std::string nextTitle;
+  std::string nextProcess = "monitor";
+  uint32_t nextPid = 0;
+  uint64_t nextHwnd = 0;
+  uint32_t nextFlags = 0;
+  const uint64_t nextCaptureStreamGeneration = prevCaptureStreamGeneration + 1;
+  // t-970r4zgo: a monitor-select target is desktop mode on that screen. It is classified before
+  // any HWND use; internally the selection is "desktop + the screen's device", never the target id.
+  const SelectTarget selectTarget = classify_select_target(requestedWindowId);
+  std::wstring nextMonitorDevice = prevSelectedMonitorDevice;
+  if (selectTarget.kind == SelectTargetKind::Malformed) {
+    if (outReason) *outReason = "invalid_target";
+    return false;
+  }
+
+  if (selectTarget.kind == SelectTargetKind::Monitor) {
+    if (requestedMonitorDevice.empty()) {
+      if (outReason) *outReason = "monitor_not_listed";
+      return false;
+    }
+    // The screen the client was listed under that id must still be attached -- by device name,
+    // so an index that now means another screen is not taken for it.
+    const auto monitors = enumerate_monitors();
+    const MonitorListEntry* screen = nullptr;
+    for (const auto& m : monitors) {
+      if (m.device == requestedMonitorDevice) screen = &m;
+    }
+    if (!screen) {
+      if (outReason) *outReason = "monitor_gone";
+      return false;
+    }
+    if (backend.EffectiveRequested() == DesktopCaptureBackend::Wgc || backend.active == DesktopCaptureBackend::Wgc ||
+        !screen->primary) {
+      nextItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(monitor-select)", screen->handle);
+      if (!nextItem) {
+        if (outReason) *outReason = "monitor_capture_item_failed";
+        if (outTitle) *outTitle = screen->name;
+        return false;
+      }
+    } else {
+      nextItem = nullptr;
+    }
+    nextSelectedWindowId = 0;
+    nextReason = "monitor_selected";
+    nextTitle = screen->name;
+    nextMonitorDevice = screen->device;
+  } else if (requestedWindowId == 0) {
+    if (backend.EffectiveRequested() == DesktopCaptureBackend::Wgc ||
+        backend.active == DesktopCaptureBackend::Wgc) {
+      nextItem = CreateItemForPrimaryMonitor(nullptr, "CreateForMonitor(window-select-desktop)");
+      if (!nextItem) {
+        if (outReason) *outReason = "desktop_capture_item_failed";
+        if (outTitle) *outTitle = "desktop";
+        return false;
+      }
+    } else {
+      nextItem = nullptr;
+    }
+    nextReason = "desktop_mode_selected";
+    nextTitle = "desktop";
+  } else {
+    const auto selected = find_window_by_id(requestedWindowId);
+    if (!selected.has_value()) {
+      if (outReason) *outReason = "window_not_found_or_not_shareable";
+      return false;
+    }
+    nextItem = CreateItemForPrimaryMonitor(selected->hwnd, "CreateForWindow(window-select)");
+    if (!nextItem) {
+      if (outReason) *outReason = "window_capture_item_failed";
+      if (outTitle) *outTitle = selected->title;
+      return false;
+    }
+    nextCaptureWindowModeActive = true;
+    nextCaptureWindowClientOnlyActive = false;
+    nextCaptureWindowInfo.hwnd = selected->hwnd;
+    nextCaptureWindowInfo.pid = selected->pid;
+    nextCaptureWindowInfo.processName = get_window_process_name(selected->hwnd, nullptr);
+    nextCaptureWindowInfo.title = utf8_to_wide(selected->title);
+    nextSelectedWindowId = selected->id;
+    nextReason = "ok";
+    nextTitle = selected->title;
+    nextProcess = nextCaptureWindowInfo.processName.empty() ? "unknown" : nextCaptureWindowInfo.processName;
+    nextPid = selected->pid;
+    nextHwnd = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(selected->hwnd));
+    nextFlags = 0x1u;
+  }
+
+  item = nextItem;
+  capture.windowModeActive.store(nextCaptureWindowModeActive, std::memory_order_release);
+  capture.windowClientOnlyActive.store(nextCaptureWindowClientOnlyActive, std::memory_order_release);
+  capture.windowCriteria = nextCaptureWindowCriteria;
+  capture.windowInfo = nextCaptureWindowInfo;
+  capture.selectedWindowId.store(nextSelectedWindowId, std::memory_order_release);
+  capture.streamGenerationState.store(nextCaptureStreamGeneration, std::memory_order_release);
+  capture.targetFlags.store(nextFlags, std::memory_order_release);
+  capture.targetPid.store(nextPid, std::memory_order_release);
+  capture.targetHwnd.store(nextHwnd, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lk(capture.metaMu);
+    capture.targetProcess = nextProcess;
+    capture.targetTitle = nextTitle == "desktop" ? std::string{} : nextTitle;
+    capture.selectedMonitorDevice = nextMonitorDevice;
+  }
+  nextCaptureWindowCheckUs = nowUs + captureWindowRebindIntervalUs;
+  watchdog.lastCaptureRestartUs = nowUs;
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  stream_test_hold_wait("restart", hx.stop);  // test build: checked, target switched, not yet restarted
+#endif
+  // r4 M5-A: the session this selection was made in must still be the current one at each step that
+  // changes what the next viewer sees -- not only before the function was entered. (ownerEpoch 0 =
+  // not bound to a session.)
+  const auto stillOwner = [&] {
+    return ownerEpoch == 0 || hx.clientSession.epoch.load(std::memory_order_acquire) == ownerEpoch;
+  };
+  // The target is given back and the capture reopened on it: a pick that must not stand once the
+  // capture has already been restarted for it. If the previous screen is gone too, that restart
+  // falls back by the ordinary rule -- the state is then that confirmed fallback, under the
+  // previous generation.
+  const auto rollBackRestarted = [&](const char* why) {
+    restore_previous_target();
+    watchdog.lastCaptureRestartUs = nowUs;
+    if (restart_capture_session(hx)) {
+      ++capture.restartCount;
+      capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+      capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+      capture.lastCallbackUs.store(0, std::memory_order_release);
+      encoder.ResetTimelineAnchors(capture);
+      encoder.RequestKey(kHostKeyReasonSelection);
+      capture.FlushCapturePipelineState(res, frameGating, stats, "monitor-select-rollback");
+      std::cout << "[native-video-host][control] monitor-select rolled back (" << why
+                << "); previous target restored streamGen="
+                << capture.streamGenerationState.load(std::memory_order_acquire) << "\n";
+    } else {
+      // The previous target could not be reopened now; the restart retry takes it from here.
+      std::cout << "[native-video-host][control] monitor-select rolled back (" << why
+                << "); previous target restart pending\n";
+    }
+    if (outStreamGeneration) *outStreamGeneration = capture.streamGenerationState.load(std::memory_order_acquire);
+    if (outReason) *outReason = why;
+    if (outTitle) *outTitle = nextTitle;
+    return false;
+  };
+  if (!stillOwner()) {
+    // Replaced before the capture was touched: give the target back, nothing to reopen.
+    restore_previous_target();
+    std::cout << "[native-video-host][control] window-select: the session changed before the restart; "
+                 "previous target kept\n";
+    if (outReason) *outReason = "stale_session";
+    if (outTitle) *outTitle = nextTitle;
+    return false;
+  }
+  if (!restart_capture_session(hx)) {
+    restore_previous_target();
+    if (outReason) *outReason = "capture_restart_failed";
+    if (outTitle) *outTitle = nextTitle;
+    return false;
+  }
+  if (selectTarget.kind == SelectTargetKind::Monitor && capture.selectedMonitorDevice != nextMonitorDevice) {
+    // r3 M3: the screen went between the check above and the restart, and the restart opened the
+    // fallback screen instead (host_monitor_selection.hpp). That is not the pick and it is not
+    // what was shown before, so it is neither acknowledged nor left standing.
+    return rollBackRestarted("monitor_gone");
+  }
+#ifdef REMOTE60_STREAM_TEST_SEAM
+  stream_test_hold_wait("restarted", hx.stop);  // test build: restarted on the pick, not yet committed
+#endif
+  if (!stillOwner()) {
+    // r4 M5-A: replaced while the capture was being restarted for it.
+    return rollBackRestarted("stale_session");
+  }
+
+  capture.clockOffsetUs.store(std::numeric_limits<int64_t>::max(), std::memory_order_release);
+  capture.lastCaptureUsForInterval.store(0, std::memory_order_release);
+  capture.lastCallbackUs.store(0, std::memory_order_release);
+  encoder.ResetTimelineAnchors(capture);
+  // Confirmed window selection: re-fit the encoder to the FINAL window geometry now (before the
+  // selection first-frame gate opens), so the first IDR is already at the final size. Without this,
+  // apply_confirmed_capture_geometry (called inside restart_capture_session) bails for window mode
+  // and the encoder stays at the pre-selection size -- the client would get an old-size IDR, then a
+  // new-size IDR a frame later, and reconfigure twice. A window DRAG still returns early there and
+  // keeps the 0.4s settle. The desktop selection already re-fit through the non-window path.
+  if (nextCaptureWindowModeActive && useH264) {
+    uint32_t finalW = 0;
+    uint32_t finalH = 0;
+    {
+      std::lock_guard<std::mutex> lk(capture.resourceMu);
+      finalW = capture.width;
+      finalH = capture.height;
+    }
+    encoder.ApplyConfirmedCaptureGeometry(capture, res, frameGating, inputRouter, sender, finalW, finalH,
+                                          "window-select", /*allowWindowOverride=*/true, &hx.rate);
+  }
+  encoder.RequestKey(kHostKeyReasonSelection);
+  kick.selectionFirstKeyframePendingGeneration = nextCaptureStreamGeneration;
+  kick.selectionFirstKeyframeDropCount = 0;
+  ++capture.restartCount;
+  capture.FlushCapturePipelineState(res, frameGating, stats, "window-select");
+
+  if (outFlags) *outFlags = 0x1u;
+  // A monitor select is answered with the target id it was asked with (the marker), not the
+  // internal "desktop" 0, so the client can tell which request this completes.
+  if (outWindowId) *outWindowId = selectTarget.kind == SelectTargetKind::Monitor ? requestedWindowId : nextSelectedWindowId;
+  if (outStreamGeneration) *outStreamGeneration = nextCaptureStreamGeneration;
+  if (outReason) *outReason = nextReason;
+  if (outTitle) *outTitle = nextTitle;
+  return true;
+}
+
+}  // namespace remote60::native_poc

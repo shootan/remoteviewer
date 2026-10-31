@@ -1,0 +1,1248 @@
+#pragma once
+
+#include <cstdint>
+
+namespace remote60::native_poc {
+
+constexpr uint32_t kMagic = 0x31435052;  // "RPC1"
+
+enum class MessageType : uint16_t {
+  FrameTick = 1,
+  Ack = 2,
+  RawFrameBgra = 10,
+  EncodedFrameH264 = 11,
+  ControlPing = 20,
+  ControlPong = 21,
+  ControlInputEvent = 22,
+  ControlInputAck = 23,
+  ControlClientMetrics = 24,
+  ControlRequestKeyFrame = 25,
+  ControlRuntimeEncoderConfig = 26,
+  ControlCaptureModeRequest = 27,
+  ControlWindowListRequest = 28,
+  ControlWindowList = 29,
+  ControlWindowSelect = 30,
+  ControlWindowSelected = 31,
+  ControlInputText = 32,
+  ControlStreamState = 33,
+  ControlDesktopBackendRequest = 34,
+  ControlWindowThumbnailRequest = 35,
+  ControlWindowThumbnail = 36,
+  // Desktop mode used to mean "the primary monitor", which is only the whole desktop when there
+  // is one. These name the others so a client can ask for the second screen.
+  ControlMonitorListRequest = 37,
+  ControlMonitorList = 38,
+  ControlMonitorSelect = 39,
+  // Sealed unlock v1 (lock-screen password over an encrypted, replay-bound challenge). Advertised
+  // via kCaptureFlagUnlockSealedV1; an old peer is never sent these.
+  ControlUnlockChallengeRequest = 40,
+  ControlUnlockChallenge = 41,
+  ControlUnlockSealedRequest = 42,
+  ControlUnlockAccepted = 43,
+  ControlUnlockStatusRequest = 44,
+  ControlUnlockStatusResult = 45,
+  // Host-side IME v1: raw physical key (vk+scan+flags) so the host IME composes live. Advertised via
+  // kCaptureFlagHostImeV1; sent only when the viewer opts in and the host advertised support.
+  ControlPhysicalKey = 46,
+  // Host-side IME v2: the viewer asks the host to align its IME (to English) for the current target
+  // and report the authoritative state; the host answers with ControlImeStateResponse. Gated on
+  // kCaptureFlagHostImePulseStateV2 so an old v1 host never sees these (it would drop them silently).
+  ControlImeStateRequest = 47,
+  ControlImeStateResponse = 48,
+  // Sent only after kCaptureFlagPeerVersion is advertised in a regular Pong.
+  ControlVersionRequest = 49,
+  ControlVersionResponse = 50,
+  // Clipboard text sync v1 (K1). Additive: a peer only sends these once the other advertised
+  // kCaptureFlagClipboardTextV1, so an old peer never receives one -- it would mis-drain the
+  // variable-length UTF-16 payload (its Serve loop discards only header.size - sizeof(header))
+  // and desync the stream. CF_UNICODETEXT only; images and files are a later feature (K2).
+  ControlClipboardUpdate = 51,   // client -> host: the client's clipboard changed (payload follows)
+  ControlClipboardRequest = 52,  // client -> host: poll for a clipboard newer than knownGeneration
+  ControlClipboardData = 53,     // host -> client: reply to Request (payload follows when bit0 set)
+  // C0 stage 1: the viewer's bandwidth observation, once a second. The next unused number after
+  // 53. A NEW kind rather than fields added to ControlClientMetrics (24): the host accepts 24 only
+  // at its exact size, so a longer 24 would make an old host drop every metrics report and blind
+  // its ABR. Sent only when both sides set kUdpFeatureBandwidthObserve; no reply.
+  ControlClientBandwidth = 54,
+  // Clipboard image v1 (clip-image, plan r2). Fixed-size control messages, metadata only -- the
+  // image itself never rides the control channel. Requests are the viewer's, answers the host's
+  // (the host cannot push on control). Sent only once the Pong carries
+  // kCaptureFlagClipboardImageV1 AND the HelloAck carries kUdpFeatureBulkChannel.
+  ControlClipImageOffer = 55,        // viewer -> host: "I have an image" (direction A)
+  ControlClipImageOfferReply = 56,   // host -> viewer: verdict, epochTag, bulkGen
+  ControlClipImageCancel = 57,       // viewer -> host
+  ControlClipImageCancelReply = 58,  // host -> viewer
+  // 59 / 60 were the r1 "Result" pair, removed in r2 (a host-initiated message cannot exist on a
+  // request/response control channel). Left unused so an r1 build is never mistaken for r2.
+  ControlClipImageStatus = 61,       // viewer -> host, every 500 ms during a transfer
+  ControlClipImageStatusReply = 62,  // host -> viewer: the only way the host's outcome is told
+  // The bulk stream's own messages (never on the control channel; see kBulkStreamTag).
+  ClipBulkPull = 63,                 // host -> viewer: send me [offset, offset + len)
+  ClipBulkChunk = 64,                // viewer -> host: those bytes
+  // File copy (t-zdmsd4gb, file_copy_wire.hpp is the codec). Control 65~76: viewer request, host
+  // answer; bulk 77/78 on the bulk stream. 79 reserved.
+  ControlFileOffer = 65,
+  ControlFileOfferReply = 66,
+  ControlFileOfferQuery = 67,
+  ControlFileOfferQueryReply = 68,
+  ControlFilePasteQuery = 69,
+  ControlFilePasteQueryReply = 70,
+  ControlFilePrepare = 71,
+  ControlFilePrepareReply = 72,
+  ControlFileEnd = 73,
+  ControlFileEndReply = 74,
+  ControlFileStatus = 75,
+  ControlFileStatusReply = 76,
+  FileBulkPull = 77,
+  FileBulkChunk = 78,
+  // 79 stays reserved for file copy. Paste on demand (t-y4wj64jw, numbers assigned by the verifier):
+  // the viewer sends the text it is about to paste and the host answers with the OUTCOME of writing
+  // its clipboard -- not a receipt. Gated on kCaptureFlagPasteOnDemandV1; layouts in
+  // paste_apply_wire.hpp, which only the Windows viewer and the host compile.
+  ControlPasteTextApply = 80,
+  ControlPasteApplied = 81,
+  // Prelogin remote access (prelogin-service, numbers assigned by the verifier). 82~83 are the prelogin
+  // control pair; their fixed payloads are defined with the prelogin worker unit (prelogin_wire.hpp).
+  // Gated on kCaptureFlagPreloginV1; an old host never sees them.
+  ControlPreloginStatus = 82,   // host -> viewer: the answer to 83 (r9 R5: op Sas -> PreloginSasResult)
+  ControlPreloginControl = 83,  // viewer -> host: a pre-login request (r9 R5: op 1 = Ctrl+Alt+Del / SAS)
+  // Remote reboot (prelogin-service r2, user decision 2026-10-07). A directory-authenticated viewer
+  // asks the host to restart; the SYSTEM service performs InitiateShutdownW. Works in prelogin too.
+  // Gated on kCaptureFlagRemoteRebootV1; an old host leaves the menu item disabled. Layout in
+  // reboot_wire.hpp.
+  ControlRebootRequest = 84,    // viewer -> host: requestId
+  ControlRebootReply = 85,      // host -> viewer: requestId, result (Accepted/Refused/NotAuthorized/Failed), win32
+  // (86/87 are the ordered file-offer pair, file_copy_wire.hpp.)
+  // Lock-screen "Windows 로그인" (lockscreen-cred r1, number assigned by the verifier): the user pressed it while the
+  // host's own session is locked on the console. The layout is ControlUnlockChallengeRequestMessage's;
+  // the host answers 41 with `reserved` = kUnlockPurposeLockCred, and 42~45 follow as for the unlock.
+  // Gated on kCaptureFlagLockCredV1; an old host never sees it.
+  ControlLockCredChallengeRequest = 88,
+  // lk-ux-retry r1 (number assigned by the verifier): the SAME connection presses "Windows 로그인" again while
+  // its typed lock-screen credential still waits for an unlock. ControlLockCredRetryChallengeRequestMessage: the
+  // new requestId and the one it supersedes. The host ends that wait in the service (only that connection's,
+  // only that request) and only then asks for the new challenge -- one serialized step; the answer is 41 as for 88.
+  // Gated on kCaptureFlagLockCredRetryV1; an old host never sees it.
+  ControlLockCredRetryChallengeRequest = 89,
+  // capture-lifecycle r1 (UA-2, Codex §1; number assigned by the verifier): host -> viewer, the answer to a
+  // ControlDesktopBackendRequest (34) that set kDesktopBackendRequestFlagStatusV1 -- what this connection's
+  // session asked for, what may run for it and what runs now. Only ever an ANSWER (the control channel is
+  // request/response): a client follows a later change by asking again (backend 0 = ask only). Sent only by a
+  // host with kCaptureFlagDesktopBackendStatusV1, only to a request that asked for it.
+  ControlDesktopBackendStatus = 90,
+};
+
+enum class UdpPacketKind : uint16_t {
+  Hello = 300,
+  HelloAck = 301,
+  VideoChunk = 302,
+  // Sent only to open a NAT mapping towards a peer whose address came from the directory
+  // service. It carries no state and the receiver discards it; the real session still starts
+  // with Hello/HelloAck.
+  Punch = 303,
+  // Control traffic carried over the media socket. A separate TCP control connection cannot
+  // survive hole punching -- only the punched UDP path reaches a host behind NAT -- so the
+  // control protocol is tunnelled through these, message-framed and made reliable.
+  ControlData = 304,
+  ControlAck = 305,
+  ControlNack = 306,
+  // Hardware-cursor position report (UdpCursorPosPacket). Latest-wins and unreliable by design;
+  // an old viewer drops the unknown kind before its video-size guard, so both directions stay
+  // compatible without a handshake.
+  CursorPos = 307,
+  // Selective retransmit request (client -> host) for missing video chunks of one AU. Sent on the
+  // media socket; the host replays just those chunks from a small recent-AU cache. Negotiated via
+  // kUdpFeatureVideoNack, so an old host that never advertised it is never sent one. (video NACK.)
+  VideoNack = 308,
+  // Control-channel resume (item 8). A viewer whose control channel has stopped answering while
+  // video is still arriving asks to rebuild control on the SAME session rather than reconnecting:
+  // the media socket and its NAT mapping are demonstrably fine, so tearing the session down to
+  // recover a channel that rides it throws away the one thing that still works.
+  //
+  // It is its own packet kind rather than a control message because the thing being repaired is
+  // the message stream itself. UdpControlChannel::Reset() restarts the sequence numbers, so a
+  // message sent through the broken stream to ask for a reset cannot be relied on to arrive, and
+  // a reset performed by one side alone leaves the other answering acks while dropping the data
+  // (the channel says so itself, udp_control_channel.cpp:62-63).
+  //
+  // Negotiated via kUdpFeatureControlResume, so a host that never advertised it is never sent one
+  // -- and a host that does not know the kind ignores it, which is the same outcome.
+  ControlResume = 309,
+  ControlResumeAck = 310,
+  // keepalive-r2 A (spike/host-admission): control-only STANDBY entries -- an authenticated client that
+  // keeps its place at this host without being the session. All six are UdpStandbyPacket. A host that
+  // does not know them ignores them (they fall through to directoryAgent.ConsumeUdpPacket, which only
+  // takes punches and observe replies), so StandbyHello is also the support probe: no answer = an old
+  // host, and a client must then NOT send it a Hello on its own -- that would take its session.
+  //   StandbyHello    c->h  capability (as a Hello's) + device id + client generation -> one entry
+  //   StandbyAck      h->c  entry id + entry secret + lease, or status Busy
+  //   StandbyPing     c->h  entry id + secret: keeps the entry (and follows a moved endpoint)
+  //   StandbyPong     h->c  status Ok / Unknown
+  //   StandbyActivate c->h  entry id + secret + generation: the explicit user activation -- takes the
+  //                         session through the same admission an authenticated Hello uses; the reply
+  //                         is an ordinary HelloAck
+  //   StandbyRelease  c->h  entry id + secret: drop the entry (no reply)
+  StandbyHello = 311,
+  StandbyAck = 312,
+  StandbyPing = 313,
+  StandbyPong = 314,
+  StandbyActivate = 315,
+  StandbyRelease = 316,
+};
+
+// Control messages are numbered per direction so a peer can tell a retransmission from a new
+// message. Stream ids are fixed by role rather than negotiated.
+constexpr uint32_t kUdpControlStreamClientToHost = 1;
+constexpr uint32_t kUdpControlStreamHostToClient = 2;
+constexpr uint16_t kUdpControlMaxMissingPerNack = 64;
+
+enum class UdpCodec : uint16_t {
+  Raw = 1,
+  H264 = 2,
+};
+
+constexpr uint32_t kControlWindowListMaxEntries = 64;
+constexpr uint32_t kControlInputTextMaxUtf16 = 64;
+// Clipboard text sync v1 (K1): the largest clipboard the sync carries, in UTF-16 code units.
+// 512Ki units = 1 MiB on the wire, well under the UDP control channel's 8 MiB message cap. A
+// larger local clipboard is skipped (and logged); it is not truncated, because half a paste is
+// worse than none. The host also bounds what it reads by this so a malformed count cannot allocate.
+constexpr uint32_t kClipboardTextMaxUtf16 = 512u * 1024u;
+
+// Window preview thumbnails. There is no version handshake on the control channel, so a peer
+// that predates these messages must never be sent one: unknown opcodes are drained without a
+// reply, which would stall the requester's strict request/response loop. The host therefore
+// advertises support via kControlWindowListFlagThumbnails and clients only ask when it is set.
+constexpr uint32_t kControlWindowListFlagSelectionLocked = 0x1u;
+constexpr uint32_t kControlWindowListFlagThumbnails = 0x2u;
+// Same reasoning as thumbnails: the monitor messages are newer than some hosts, and an unknown
+// opcode is drained without a reply, which would hang a client waiting for one. The window list
+// is fetched on every connect, so it is where support gets advertised.
+constexpr uint32_t kControlWindowListFlagMonitors = 0x4u;
+// t-970r4zgo: this host selects a monitor through the window-select transaction -- a
+// ControlWindowSelect whose windowId is a monitor-select target (monitor_select_target.hpp),
+// answered with ControlWindowSelected only once the capture is restarted on that screen (bit0 ok
+// + the new streamGeneration) or with the reason it was not. The legacy ControlMonitorSelect ->
+// ControlMonitorList exchange is unchanged. A client uses the new form only on a connection
+// whose window list carried this bit.
+constexpr uint32_t kControlWindowListFlagMonitorSelectTransactionV1 = 0x8u;
+// Two or three screens is the normal case and a dozen is somebody's video wall; the cap only
+// bounds the message.
+constexpr uint32_t kControlMonitorListMaxEntries = 8;
+constexpr uint32_t kWindowThumbnailMaxWidth = 320;
+constexpr uint32_t kWindowThumbnailMaxHeight = 320;
+// BGRA, so the cap covers the largest thumbnail plus slack. Nothing else bounds payloadSize.
+constexpr uint32_t kWindowThumbnailMaxPayloadBytes = 320u * 320u * 4u;
+
+#pragma pack(push, 1)
+struct MessageHeader {
+  uint32_t magic = kMagic;
+  uint16_t type = 0;
+  uint16_t size = 0;
+};
+
+struct FrameTickMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint64_t sendQpcUs = 0;
+};
+
+struct AckMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint64_t hostSendQpcUs = 0;
+  uint64_t clientRecvQpcUs = 0;
+};
+
+struct RawFrameHeader {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t stride = 0;
+  uint32_t payloadSize = 0;
+  uint64_t streamGeneration = 0;
+  uint64_t captureQpcUs = 0;
+  uint64_t encodeStartQpcUs = 0;
+  uint64_t encodeEndQpcUs = 0;
+  uint64_t sendQpcUs = 0;
+};
+
+// EncodedFrameHeader::flags. bit1 marks a frame the host produced by re-encoding its cached
+// picture -- a trailing-edge kick or the 1Hz static refresh -- rather than from new capture. The
+// pixels are right, but the frame says nothing about the pipeline: its capture stamp is the kick
+// time, so a viewer that folds it into latency / decode-tail averages, the catch-up trigger or the
+// "real" fps reads a static desktop as a stalled one (avgLatency 0.6~0.8s in the field), and the
+// host's ABR -- which takes those averages as input -- can demote quality for nothing. (Viewer
+// ledger F-10 / host H-13.) On the UDP wire the same fact rides UdpVideoChunkHeader bit6.
+constexpr uint32_t kEncodedFrameFlagKeyFrame = 0x1u;
+constexpr uint32_t kEncodedFrameFlagSynthetic = 0x2u;
+constexpr uint16_t kUdpVideoChunkFlagSynthetic = 0x40u;
+
+struct EncodedFrameHeader {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t payloadSize = 0;
+  uint32_t flags = 0;  // bit0: keyFrame  bit1: synthetic refresh (kEncodedFrameFlagSynthetic)
+  uint64_t streamGeneration = 0;
+  uint64_t captureQpcUs = 0;
+  uint64_t encodeStartQpcUs = 0;
+  uint64_t encodeEndQpcUs = 0;
+  uint64_t sendQpcUs = 0;
+};
+
+struct ControlPingMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+
+// Bits of ControlPongMessage::captureTargetFlags.
+constexpr uint32_t kCaptureFlagWindowTargetEnabled = 0x1u;
+constexpr uint32_t kCaptureFlagClientAreaOnly = 0x2u;
+constexpr uint32_t kCaptureFlagSecureDesktopActive = 0x4u;
+// The host advertises sealed-unlock v1 support here so a client only sends the unlock messages to a
+// host that understands them (an old host drains an unknown control opcode without replying, which
+// would hang the client's strict request/response loop). Control-level so TCP and UDP both see it.
+constexpr uint32_t kCaptureFlagUnlockSealedV1 = 0x8u;
+// The host advertises host-side IME (raw physical-key injection) support here.
+constexpr uint32_t kCaptureFlagHostImeV1 = 0x10u;
+// Host-side IME v2: host understands the make-only (Hangul/Hanja pulse) physical-key flag and the
+// ControlImeStateRequest/Response handshake. The default-on host-IME path uses the v2 pulse/state
+// features only when this is advertised; a v1-only host falls back to legacy client-side IME so the
+// new viewer never strands a make-only key or blocks on a state request an old host cannot answer.
+constexpr uint32_t kCaptureFlagHostImePulseStateV2 = 0x20u;
+// Active H.264 streams periodically refresh even a static desktop. Without this capability a
+// legacy/change-driven host may legitimately send no pixels while its control remains alive.
+constexpr uint32_t kCaptureFlagFrameHeartbeat = 0x80u;
+constexpr uint32_t kCaptureFlagPeerVersion = 0x40u;
+static_assert((kCaptureFlagFrameHeartbeat & kCaptureFlagPeerVersion) == 0,
+              "heartbeat and peer version capabilities must remain independent on the wire");
+// Clipboard text sync v1 (K1): the host understands ControlClipboardUpdate/Request/Data and runs a
+// clipboard monitor. A viewer only sends clipboard messages once it sees this bit, so an old host
+// that never advertises it is never sent one (its Serve loop would mis-drain the variable payload).
+constexpr uint32_t kCaptureFlagClipboardTextV1 = 0x100u;
+// Clipboard image v1: the host runs the image receiver (Offer/Cancel/Status, bulk pulls) and can
+// publish PNG + CF_DIBV5 to its clipboard. Meaningful only together with kUdpFeatureBulkChannel.
+constexpr uint32_t kCaptureFlagClipboardImageV1 = 0x200u;
+// Mouse X buttons (back / forward, mouse-xbutton r1): the host maps VK_XBUTTON1/2 button edges
+// to WM_XBUTTONDOWN/UP or MOUSEEVENTF_XDOWN/XUP and reads the X bits of `buttons`. A viewer sends
+// an X edge, or an X bit in the held mask, ONLY to a host that advertises this: an older host
+// masks `buttons` with 0x7 and its default branch turned any unknown button key into a LEFT
+// click, so "back" against it would have been a left click.
+constexpr uint32_t kCaptureFlagMouseXButtonsV1 = 0x400u;
+// File copy v1 (t-zdmsd4gb): the host takes file offers (messages 65~78) -- switched on, and its
+// Medium clipboard helper can run as the interactive user. Meaningful only with kUdpFeatureBulkChannel.
+// A viewer sends no file message to a host that does not advertise it.
+constexpr uint32_t kCaptureFlagFileCopyV1 = 0x800u;
+// Paste on demand v1 (t-y4wj64jw): the host takes ControlPasteTextApply (80) and answers
+// ControlPasteApplied (81) with whether its OS clipboard was actually written; a clip image
+// Published and a file OfferReply Accept likewise mean "on the clipboard". A viewer sends 80 only to
+// a host that advertises this: an older host discards an unknown type without answering, and the
+// strict request/response link would then wait on a reply that never comes.
+constexpr uint32_t kCaptureFlagPasteOnDemandV1 = 0x1000u;
+// Prelogin remote access v1 (prelogin-service): the host is serving a pre-login secure desktop RIGHT
+// NOW (no interactive user; the remote login screen is live). This is the momentary state, so the
+// viewer can label the session and gate the sealed "Windows 로그인" credential entry. A viewer sends
+// the prelogin control pair (82/83) only to a host that advertises it. (Codex r4 R1: this is distinct
+// from the durable-enabled signal below -- do not conflate "in prelogin now" with "will come up before
+// login after a reboot".)
+constexpr uint32_t kCaptureFlagPreloginV1 = 0x2000u;
+// Remote reboot v1 (prelogin-service r2): the host takes ControlRebootRequest (84) and answers
+// ControlRebootReply (85). A viewer enables its in-menu reboot item (with the confirm popup) only when
+// it sees this bit; an old host leaves the item disabled with a reason.
+constexpr uint32_t kCaptureFlagRemoteRebootV1 = 0x4000u;
+// Prelogin DURABLE-ENABLED (prelogin-service r3, Codex r4 R1): the host has pre-login remote access
+// turned on, so AFTER A REBOOT it will be reachable before anyone logs in. This is independent of
+// kCaptureFlagPreloginV1 -- a logged-in host advertises THIS (durable on) but not that (not in prelogin
+// now). The reboot confirm popup keys its "...can't connect until someone logs in" warning on the
+// ABSENCE of this bit, so a feature-on host is never falsely warned.
+constexpr uint32_t kCaptureFlagPreloginEnabledV1 = 0x8000u;
+// Paste on demand r7 (D2): this host answers the ordered offer query (file messages 86/87): each R->P
+// file offer says which copy on the host it was made of (its copy generation). A viewer asks 86 only
+// of a host that advertises this; an older host is asked 67 as before (its offers carry no order).
+constexpr uint32_t kCaptureFlagFileOfferCopyGenV1 = 0x10000u;
+// prelogin-ui r9 R5: Ctrl+Alt+Del can be asked of this host (ControlPreloginControl op Sas, 83 -> 82). Only a
+// --prelogin worker advertises it; the answer may still be "policy does not allow" (prelogin_sas_wire.hpp).
+constexpr uint32_t kCaptureFlagPreloginSasV1 = 0x20000u;
+// lockscreen-cred r1 (number assigned by the verifier): the host's OWN session is locked on the console right now
+// (known from WTS, not guessed from the secure desktop -- a UAC prompt does not set it), and the SYSTEM
+// service said it can type a sealed credential into the lock screen. The viewer offers "Windows 로그인"
+// for it (ControlLockCredChallengeRequest 88). The momentary state, like kCaptureFlagPreloginV1, but a
+// different role: it never turns on the pre-login control allowlist.
+constexpr uint32_t kCaptureFlagLockCredV1 = 0x40000u;
+// lk-ux-retry r1 (assigned by the verifier): the host and its service can end this connection's own typed-and-waiting lock-screen
+// credential on an explicit retry (ControlLockCredRetryChallengeRequest 89). Without it a viewer keeps saying
+// "wait for the earlier one" -- it never pretends an older service replaced anything.
+constexpr uint32_t kCaptureFlagLockCredRetryV1 = 0x80000u;
+// capture-lifecycle r1 (UA-2, assigned by the verifier): a capture backend asked for applies to THIS session
+// only (a new session starts from the host's default), and a request may ask for its answer
+// (ControlDesktopBackendStatus 90; backend 0 = ask only). Without it a client cannot know either.
+constexpr uint32_t kCaptureFlagDesktopBackendStatusV1 = 0x100000u;
+
+// ControlInputEventMessage::buttons -- the wire bits of the held mouse buttons. Also the viewer's
+// own held mask, so the two cannot drift. These are NOT the Win32 MK_* values (MK_XBUTTON1 is
+// 0x20); the host translates (mouse_button_map.hpp). Platform-neutral so the shared client core
+// and the Android session compile them without windows.h.
+constexpr uint16_t kMouseWireLeft = 0x1u;
+constexpr uint16_t kMouseWireRight = 0x2u;
+constexpr uint16_t kMouseWireMiddle = 0x4u;
+constexpr uint16_t kMouseWireX1 = 0x8u;
+constexpr uint16_t kMouseWireX2 = 0x10u;
+// What a host without kCaptureFlagMouseXButtonsV1 reads (it masks `buttons` with 0x7).
+constexpr uint16_t kMouseWireLegacyMask = kMouseWireLeft | kMouseWireRight | kMouseWireMiddle;
+constexpr uint16_t kMouseWireXMask = kMouseWireX1 | kMouseWireX2;
+constexpr uint16_t kMouseWireMask = kMouseWireLegacyMask | kMouseWireXMask;
+
+struct ControlVersionMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  char productVersion[32] = {};
+};
+
+struct ControlPongMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint64_t clientSendQpcUs = 0;
+  uint64_t hostRecvQpcUs = 0;
+  uint64_t hostSendQpcUs = 0;
+  uint32_t captureTargetPid = 0;
+  // bit0: windowTargetEnabled, bit1: clientAreaOnly, bit2: secureDesktopActive
+  //
+  // bit2 says the input desktop is not the ordinary one -- a UAC consent prompt or the lock
+  // screen is in front. Nothing in the product can capture that desktop yet, so the picture is
+  // frozen or blank while it is set, and a viewer that says so is worth a great deal more than a
+  // stalled rectangle the operator cannot explain. Carried in the existing flags word on purpose:
+  // growing the struct would change its size, which older peers validate.
+  uint32_t captureTargetFlags = 0;
+  uint32_t captureRebindCount = 0;
+  uint64_t captureTargetHwnd = 0;
+  char captureTargetProcess[32] = {};
+  char captureTargetTitle[96] = {};
+};
+
+struct ControlInputEventMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint16_t kind = 0;     // 1:mouse_move 2:mouse_down 3:mouse_up 4:wheel 5:key_down 6:key_up
+  uint16_t buttons = 0;  // kMouseWire*: bit0:left bit1:right bit2:middle bit3:X1 bit4:X2 (X bits
+                         // only to a host with kCaptureFlagMouseXButtonsV1)
+  int32_t x = 0;         // client-local coordinates
+  int32_t y = 0;
+  int32_t wheelDelta = 0;
+  uint32_t keyCode = 0;  // kind 2/3: VK_LBUTTON 1, VK_RBUTTON 2, VK_MBUTTON 4, VK_XBUTTON1 5,
+                         // VK_XBUTTON2 6 (the last two only with kCaptureFlagMouseXButtonsV1)
+  uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlInputAckMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint64_t hostRecvQpcUs = 0;
+  uint64_t hostSendQpcUs = 0;
+};
+
+struct ControlInputTextMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint16_t utf16Count = 0;
+  uint16_t reserved = 0;
+  uint16_t utf16[kControlInputTextMaxUtf16] = {};
+  uint64_t clientSendQpcUs = 0;
+};
+
+// Clipboard text sync v1 (K1). Three variable-length messages; like the thumbnail family, the
+// header.size describes only this FIXED part and utf16Count UTF-16 code units follow it on the
+// wire (little-endian, matching the struct layout). The fixed part is small and constant, so
+// header.size stays valid for old peers even though the true message is longer -- which is exactly
+// why these are gated on kCaptureFlagClipboardTextV1 and never sent to a peer that lacks it.
+//
+// contentHash is the sync's echo guard: a peer never re-sends or re-applies content whose hash it
+// last set locally or last applied from the peer, so a change cannot bounce back and forth.
+struct ControlClipboardUpdateMessage {
+  MessageHeader header{};      // size = sizeof(*this); utf16Count units follow
+  uint32_t seq = 0;
+  uint32_t utf16Count = 0;     // UTF-16 code units of clipboard text that follow this struct
+  uint64_t contentHash = 0;    // FNV-1a of the text; echo/duplicate suppression
+  uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlClipboardRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t reserved = 0;
+  uint64_t knownGeneration = 0;  // the host clipboard generation the client already holds
+  uint64_t clientSendQpcUs = 0;
+};
+
+// Reply to ControlClipboardRequest. flags bit0 (has-data) set means utf16Count units follow this
+// struct; clear means the client is already current and nothing follows. generation is always the
+// host's current clipboard generation so the client can advance knownGeneration either way.
+struct ControlClipboardDataHeader {
+  MessageHeader header{};      // size = sizeof(*this); utf16Count units follow when bit0 set
+  uint32_t seq = 0;
+  uint32_t flags = 0;          // bit0: has data
+  uint64_t generation = 0;     // host clipboard generation this reply describes
+  uint32_t utf16Count = 0;     // UTF-16 code units following this struct (0 when bit0 clear)
+  uint32_t reserved = 0;
+  uint64_t contentHash = 0;    // FNV-1a of the text (0 when bit0 clear)
+  uint64_t hostSendQpcUs = 0;
+};
+constexpr uint32_t kClipboardDataFlagHasData = 0x1u;
+// Paste on demand r4 (t-y4wj64jw, assigned by the verifier): when set, `reserved` carries the host's
+// copy generation -- every change of its clipboard in ANY format (text, image, files, a menu copy,
+// a copy made at the host PC) except the host's own writes. A viewer that knows a copy happened
+// there after its own pastes the host's clipboard instead of sending its own. Older viewers read
+// bit0 only and never looked at `reserved`, so the reply is unchanged for them.
+constexpr uint32_t kClipboardDataFlagHostCopyGen = 0x2u;
+
+struct ControlStreamStateMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;  // bit0: stream active
+  uint64_t clientSendQpcUs = 0;
+};
+
+/**
+ * C0 stage 1 -- the viewer's bandwidth observation (kind 54). OBSERVATION ONLY: the host logs it
+ * and nothing reads it. See viewer_bwe.hpp for what each figure means.
+ *
+ * Wire: 60 bytes, packed, little-endian like every message here, accepted only at exactly that
+ * size. Ranges the host checks: usage 0..2, rateState 0..2, lossPm 0..1000, flags bits 0..1 only.
+ * `seq` counts from 1 per viewer control session and wraps modulo 2^32 (a new session may start
+ * lower; the host compares nothing across sessions). `clientSendQpcUs` is the VIEWER's clock and
+ * is carried for the viewer's own logs only -- the host judges freshness by when IT received the
+ * message and never compares this value with its own clock.
+ */
+struct ControlClientBandwidthMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;              // bit0 application-limited, bit1 still-screen hold
+  uint8_t usage = 0;               // BweUsage: 0 normal, 1 underuse, 2 overuse
+  uint8_t rateState = 0;           // BweRateState: 0 hold, 1 increase, 2 decrease
+  uint16_t lossPm = 0;             // assembly drop permille, 0..1000
+  uint32_t bweBps = 0;             // estimate, bits/s (up to 4.29 Gb/s)
+  uint32_t goodputUniqueBps = 0;   // unique media payload received, bits/s
+  uint32_t wireLoadBps = 0;        // every datagram as received, bits/s
+  int32_t delayGradientUs = 0;     // detector trend x1000 (draft units, not a physical delay)
+  int32_t thresholdUs = 0;         // the adaptive threshold it was compared with, x1000
+  uint16_t delaySamples = 0;       // frames sampled in the window (saturates)
+  uint16_t reserved = 0;
+  uint64_t streamGeneration = 0;   // the video stream the figures describe
+  uint64_t clientSendQpcUs = 0;    // viewer clock
+};
+static_assert(sizeof(ControlClientBandwidthMessage) == 60, "bandwidth observation wire drift");
+constexpr uint32_t kBandwidthFlagAppLimited = 0x1u;
+constexpr uint32_t kBandwidthFlagStaticHold = 0x2u;
+
+struct ControlClientMetricsMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t recvFpsX100 = 0;
+  uint32_t decodedFpsX100 = 0;
+  uint32_t recvMbpsX1000 = 0;
+  uint32_t skippedFrames = 0;
+  uint64_t avgLatencyUs = 0;
+  uint64_t maxLatencyUs = 0;
+  uint64_t avgDecodeTailUs = 0;
+  uint64_t maxDecodeTailUs = 0;
+  uint32_t congestionState = 0;           // 0:normal 1:recovering 2:congested
+  uint32_t congestionTransitions = 0;     // cumulative state transitions
+  uint32_t congestionRecoveryCount = 0;   // cumulative recoveries to normal
+  uint32_t congestionRecoveryReq = 0;     // cumulative keyframe/recovery requests
+  uint32_t congestionRecoveryMaxUs = 0;   // max recovery duration (us)
+  uint32_t queueDepthMax = 0;             // max estimated queue depth (frames)
+  uint32_t queueDepthH4p = 0;             // histogram bucket: 4+ frames
+  uint32_t udpAssemblyDropPm = 0;         // latest assembly drop permille
+  uint64_t clientSendQpcUs = 0;
+  // What the viewer actually sees. Everything above describes frames arriving and decoding,
+  // which stays healthy while playback visibly stutters -- the interval between frames
+  // reaching the display is the only number that tracks perceived smoothness.
+  uint32_t presentTargetIntervalUs = 0;   // 0 when the client does not report presentation
+  uint32_t presentFpsX100 = 0;
+  uint32_t presentGapP50Us = 0;
+  uint32_t presentGapP95Us = 0;
+  uint32_t presentGapMaxUs = 0;
+  uint32_t presentOver1_5xCount = 0;      // frames late by half a period or more, this window
+  uint32_t presentOver2xCount = 0;        // a whole missing frame, this window
+  uint32_t presentSampleCount = 0;
+  // Why the gaps look the way they do. A frame handed to the display with a schedule lands
+  // where the playout clock put it; one released immediately landed wherever it happened to
+  // arrive, which is what stutter is made of. Reanchors are the playout clock itself jumping.
+  uint32_t presentScheduledCount = 0;
+  uint32_t presentImmediateCount = 0;
+  uint32_t presentReanchorCount = 0;
+  // Counted by the view itself, once per frame it latched. Every other number here counts
+  // frames handed to the display; this one counts frames that reached it.
+  uint32_t presentDisplayedCount = 0;
+};
+
+struct ControlRequestKeyFrameMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint16_t reason = 0;  // 1:catchup 2:udp_assembly_drop 3:waiting_keyframe 4:decode_fail
+  uint16_t reserved = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlRuntimeEncoderConfigMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t bitrate = 0;  // bps
+  uint32_t keyint = 0;   // frames
+  uint32_t fps = 0;      // frames per second
+  uint32_t flags = 0;    // bit0: bitrate valid, bit1: keyint valid, bit2: fps valid
+  uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlDesktopBackendRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint16_t backend = 0;  // 1:dxgi, 2:wgc; 0 = ask only (with kDesktopBackendRequestFlagStatusV1, to a 0x100000 host)
+  uint16_t flags = 0;    // kDesktopBackendRequestFlag*
+  uint64_t clientSendQpcUs = 0;
+};
+// capture-lifecycle r1: answer this request with ControlDesktopBackendStatus (90). Set only toward a host with
+// kCaptureFlagDesktopBackendStatusV1 -- an older host answers 34 with nothing, and a client waiting would stall.
+constexpr uint16_t kDesktopBackendRequestFlagStatusV1 = 0x1u;
+
+// host -> viewer (90): the backend of this session, as the host's main loop last applied it.
+struct ControlDesktopBackendStatusMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;        // the request's (34) seq
+  uint16_t requested = 0;  // what this session asked for (or the host's default): 1 dxgi, 2 wgc, 3 gdi
+  uint16_t effective = 0;  // what may run for that (the DXGI quarantine applied)
+  uint16_t active = 0;     // what runs now
+  uint16_t flags = 0;      // kDesktopBackendStatusFlag*
+  uint32_t changeCount = 0;  // bumps on every change of the four fields above (in this host process)
+  uint64_t hostSendQpcUs = 0;
+};
+static_assert(sizeof(ControlDesktopBackendStatusMessage) == 32, "desktop backend status wire drift");
+constexpr uint16_t kDesktopBackendStatusFlagSessionScoped = 0x1u;  // the choice ends with this session
+constexpr uint16_t kDesktopBackendStatusFlagDxgiQuarantined = 0x2u;
+constexpr uint16_t kDesktopBackendStatusFlagWindowTarget = 0x4u;   // a window is captured: WGC whatever was asked
+constexpr uint16_t kDesktopBackendStatusFlagBeforeLogin = 0x8u;    // the pre-login worker: DXGI only, requests ignored
+constexpr uint16_t kDesktopBackendStatusFlagNotYetApplied = 0x10u; // the request was not applied in time: as it is now
+
+struct ControlCaptureModeRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint16_t mode = 0;   // 1:overview-monitor, 2:focus-window-at-point
+  uint16_t flags = 0;  // reserved
+  uint32_t xPermille = 0;  // 0..10000
+  uint32_t yPermille = 0;  // 0..10000
+  uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlWindowListRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlWindowEntry {
+  uint64_t id = 0;
+  uint32_t pid = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t flags = 0;  // bit0:minimized
+  char title[96] = {};
+};
+
+struct ControlWindowListMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;  // bit0: selection locked by config
+  uint64_t selectedWindowId = 0;
+  uint32_t itemCount = 0;
+  uint32_t reserved = 0;
+  ControlWindowEntry items[kControlWindowListMaxEntries] = {};
+};
+
+// One screen. Coordinates are the virtual-screen rectangle, so a monitor left of or above the
+// primary one has a negative origin -- the same convention the secure-input mapping already uses.
+struct ControlMonitorEntry {
+  uint32_t id = 0;      // index within this host session; stable until the layout changes
+  int32_t x = 0;
+  int32_t y = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t flags = 0;   // bit0: primary
+  char name[64] = {};
+};
+
+constexpr uint32_t kControlMonitorFlagPrimary = 0x1u;
+
+struct ControlMonitorListRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+
+// Also the reply to a select, so the client learns the new selection from the same shape it
+// already knows how to read.
+struct ControlMonitorListMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;
+  uint32_t selectedMonitorId = 0;
+  uint32_t itemCount = 0;
+  ControlMonitorEntry items[kControlMonitorListMaxEntries] = {};
+};
+
+struct ControlMonitorSelectMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t monitorId = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlWindowThumbnailRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;
+  uint64_t windowId = 0;  // 0 selects the desktop preview
+  uint32_t maxWidth = 0;
+  uint32_t maxHeight = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+
+// header.size describes only this fixed part; payloadSize bytes of BGRA follow, matching the
+// RawFrameHeader/EncodedFrameHeader convention used on the video path.
+struct ControlWindowThumbnailHeader {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;  // bit0: ok, bit1: unchanged since requested version
+  uint64_t windowId = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t stride = 0;
+  uint32_t payloadSize = 0;
+  uint64_t version = 0;
+};
+
+struct ControlWindowSelectMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;
+  uint64_t windowId = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+
+struct ControlWindowSelectedMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t flags = 0;  // bit0: ok, bit1: selection locked by config
+  uint64_t windowId = 0;
+  uint64_t streamGeneration = 0;
+  char reason[64] = {};
+  char title[96] = {};
+  uint64_t hostSendQpcUs = 0;
+};
+
+// Capabilities each side advertises in its Hello. Unknown bits must be ignored, so a peer can
+// gain a feature without breaking older peers. Media encryption is not implemented yet; the bit
+// is claimed now so that adding it later is a field to fill in rather than a format change.
+constexpr uint32_t kUdpFeatureEncryptedMedia = 0x1u;
+constexpr uint32_t kUdpFeatureVideoFec = 0x2u;
+constexpr uint32_t kUdpFeatureDirectoryAuth = 0x4u;
+// Parity groups built from every Nth chunk instead of N consecutive ones. Same packet count,
+// same bandwidth -- but Wi-Fi loses packets in bursts, and consecutive grouping puts a whole
+// burst inside one group, where a single XOR parity repairs none of it. Interleaved, a burst
+// hits each group once and every packet in it is recoverable. Negotiated rather than assumed
+// so a host and viewer built at different times still agree on the layout.
+constexpr uint32_t kUdpFeatureVideoFecInterleaved = 0x8u;
+// Selective retransmit (NACK) of missing video chunks. When both peers advertise it, the client
+// asks for just the missing chunks of an incomplete AU and the host replays them from a small
+// recent-AU cache -- far cheaper than a full 300-chunk IDR, and it repairs a P reference before the
+// chain breaks. RTT on this path is a few ms, so 1-2 retransmit rounds cost almost nothing. An old
+// peer that never sets this bit is never sent a NACK and behaves exactly as before. (video NACK.)
+constexpr uint32_t kUdpFeatureVideoNack = 0x10u;
+// Control-channel resume (item 8). Advertised by a host that can rebuild control on the same
+// session epoch; requested by a viewer that will ask. Both must be set for a resume to be sent,
+// which is what keeps a new viewer working against an old host: it simply never asks, and falls
+// back to the behaviour it had before.
+constexpr uint32_t kUdpFeatureControlResume = 0x20u;
+// C0 stage 1: bandwidth observation (ControlClientBandwidth, kind 54). The next unused bit after
+// 0x20. Requested by a viewer that will send it, advertised by a host that will log it; the viewer
+// sends only when the HelloAck carries it, so an old host is never sent a kind it would drain as
+// unknown, and an old viewer is never asked for one.
+constexpr uint32_t kUdpFeatureBandwidthObserve = 0x40u;
+// Clipboard image v1: this peer demultiplexes bulk-stream datagrams (stream id bit30, see
+// clip_image_core.hpp) ahead of its control channel. Requested by a viewer that will send them,
+// acknowledged by a host that will route them; nothing bulk is sent to a peer that did not agree,
+// because an old peer's control channel would swallow and drop them (udp_control_channel.cpp).
+// NOT encrypted: this path, like the rest of the UDP media socket, is plaintext.
+constexpr uint32_t kUdpFeatureBulkChannel = 0x80u;
+constexpr uint32_t kUdpProtocolVersion = 2u;
+
+// One NACK datagram asks for up to this many missing chunkIndex values of a single AU. A 1080p IDR
+// is ~300 chunks; at the low real loss this path targets, a handful are missing, and the client can
+// send more than one NACK if needed. Fixed-size so the packet is a single small datagram.
+constexpr uint16_t kUdpVideoNackMaxMissing = 48;
+
+// keepalive-r2 A: one layout for every Standby* kind (fields a kind does not use are zero).
+constexpr uint32_t kUdpStandbyStatusOk = 0;
+constexpr uint32_t kUdpStandbyStatusBusy = 1;     // the host holds as many entries as it allows
+constexpr uint32_t kUdpStandbyStatusUnknown = 2;  // no such entry (expired, released, replaced) or wrong secret
+constexpr uint32_t kUdpStandbyStatusSuperseded = 3;  // Activate: an old generation (a late packet), not a new activation
+// keepalive-r2 A r3 (Codex decision 2): an activation's RESULT names its operation. The host answers an
+// accepted StandbyActivate with a StandbyPong {entryId, clientGen = the activation's generation, status Ok,
+// features |= this flag} right before the HelloAck; a refused one with a StandbyPong {entryId, clientGen,
+// status Unknown/Superseded}. A client takes an activation as done only on the Pong of ITS entry and ITS
+// generation -- a late Ack of an earlier activation, or of a cancelled one, carries another generation.
+constexpr uint32_t kUdpStandbyPongActivationGranted = 0x1;
+struct UdpStandbyPacket {
+  uint32_t magic = kMagic;
+  uint16_t kind = 0;
+  uint16_t size = 0;  // set to sizeof(UdpStandbyPacket) by the sender
+  uint32_t version = kUdpProtocolVersion;
+  uint32_t status = 0;          // Ack / Pong
+  uint8_t deviceId[16] = {};    // Hello: the client install's stable id (one entry per device)
+  uint64_t entryId = 0;         // Ack (issued) / Ping / Pong / Activate / Release
+  uint8_t entrySecret[16] = {}; // Ack (issued) / Ping / Activate / Release (proof of the entry)
+  uint32_t clientGen = 0;       // Hello / Activate: the client's attempt number (a retransmit repeats it)
+  uint32_t leaseMs = 0;         // Ack / Pong: the entry lapses this long after its last Ping
+  uint32_t features = 0;        // Hello: the Hello features to use at activation; Ack: host standby features
+  char authToken[33] = {};      // Hello: the one-time directory capability (as UdpHelloPacket's)
+  uint8_t reserved[3] = {};
+};
+static_assert(sizeof(UdpStandbyPacket) == 104, "standby packet wire drift");
+
+struct UdpHelloPacket {
+  uint32_t magic = kMagic;
+  uint16_t kind = static_cast<uint16_t>(UdpPacketKind::Hello);
+  uint16_t size = static_cast<uint16_t>(sizeof(UdpHelloPacket));
+  uint32_t version = kUdpProtocolVersion;
+  uint32_t features = kUdpFeatureVideoFec | kUdpFeatureVideoFecInterleaved;
+  // One-time capability returned by /api/connect and delivered independently to the host.
+  // Empty preserves direct-LAN operation, but cannot authorize SYSTEM secure-desktop input.
+  char authToken[33] = {};
+};
+
+// Hardware-cursor position for the DXGI desktop backend, which does not composite the pointer
+// into captured frames: on a still screen the remote cursor otherwise never moves and the whole
+// session looks frozen (the field case: a static game map "revived" only by dragging it). Sent
+// over the media socket at <=30Hz, latest-wins -- a lost sample is superseded a frame later, so
+// no reliability machinery. x/y are pixels in the capture (monitor) space whose dimensions are
+// captureW/H, letting the viewer map into its letterboxed video rect even across resizes.
+struct UdpCursorPosPacket {
+  uint32_t magic = kMagic;
+  uint16_t kind = static_cast<uint16_t>(UdpPacketKind::CursorPos);
+  uint16_t size = static_cast<uint16_t>(sizeof(UdpCursorPosPacket));
+  uint16_t flags = 0;  // bit0: cursor visible
+  uint16_t reserved = 0;
+  int32_t x = 0;
+  int32_t y = 0;
+  uint32_t captureW = 0;
+  uint32_t captureH = 0;
+  // Generation fence: the sample is only meaningful for the stream generation it was captured
+  // under. Without it, a cursor sampled on the old target could paint over a freshly selected
+  // window for up to the stale-hide timeout.
+  uint64_t streamGeneration = 0;
+  uint64_t hostQpcUs = 0;
+};
+static_assert(sizeof(UdpCursorPosPacket) == 44, "cursor packet wire layout must not drift");
+
+// Selective retransmit request: client -> host over the media socket, asking for specific missing
+// chunkIndex values of AU `seq` in stream generation `streamGeneration`. The host replays just those
+// chunks from a small recent-AU cache. Only ever sent when both peers advertised kUdpFeatureVideoNack.
+struct UdpVideoNackPacket {
+  uint32_t magic = kMagic;
+  uint16_t kind = static_cast<uint16_t>(UdpPacketKind::VideoNack);
+  uint16_t size = static_cast<uint16_t>(sizeof(UdpVideoNackPacket));
+  uint64_t streamGeneration = 0;
+  uint32_t seq = 0;             // AU to repair
+  uint16_t chunkCount = 0;      // total data chunks the client believes this AU has (sanity)
+  uint16_t missingCount = 0;    // valid entries in missing[]
+  uint16_t round = 0;           // retransmit round for this AU (diagnostic + host rate policy)
+  uint16_t reserved = 0;
+  uint16_t missing[kUdpVideoNackMaxMissing];  // chunkIndex values requested
+};
+static_assert(sizeof(UdpVideoNackPacket) == 28 + 2 * kUdpVideoNackMaxMissing,
+              "video nack wire layout must not drift");
+
+// One fragment of a control message. Fragments of a message are sent back to back; the
+// receiver asks for what is missing rather than the sender waiting for each piece.
+struct UdpControlChunkHeader {
+  uint32_t magic = kMagic;
+  uint16_t kind = static_cast<uint16_t>(UdpPacketKind::ControlData);
+  uint16_t size = static_cast<uint16_t>(sizeof(UdpControlChunkHeader));
+  uint32_t streamId = 0;
+  uint32_t messageSeq = 0;
+  uint32_t totalSize = 0;
+  uint16_t fragIndex = 0;
+  uint16_t fragCount = 0;
+  uint32_t fragOffset = 0;
+  uint32_t fragSize = 0;
+};
+
+// Acknowledges a fully assembled message (kind ControlAck), or asks for the fragments listed
+// in missing[] (kind ControlNack). Both carry the same shape so one handler covers them.
+struct UdpControlAckPacket {
+  uint32_t magic = kMagic;
+  uint16_t kind = static_cast<uint16_t>(UdpPacketKind::ControlAck);
+  uint16_t size = static_cast<uint16_t>(sizeof(UdpControlAckPacket));
+  uint32_t streamId = 0;
+  uint32_t messageSeq = 0;
+  uint16_t missingCount = 0;
+  uint16_t reserved = 0;
+  uint16_t missing[kUdpControlMaxMissingPerNack] = {};
+};
+
+// Asks to rebuild the control stream on the current session (kind ControlResume), or answers that
+// request (kind ControlResumeAck). One shape for both, as with ack/nack above.
+//
+// resumeId is chosen by the asker and echoed back. It does not authenticate anything -- it pairs a
+// reply with the attempt that caused it, so a late answer to an abandoned attempt cannot be
+// mistaken for the current one. Session identity is the endpoint the host already bound at Hello;
+// anyone able to send this could already inject control data on the same path, so this does not
+// widen what a stranger can reach. What bounds it instead is WHEN the host will honour one: only
+// while its own control session is not being served, i.e. only when control is already broken.
+struct UdpControlResumePacket {
+  uint32_t magic = kMagic;
+  uint16_t kind = static_cast<uint16_t>(UdpPacketKind::ControlResume);
+  uint16_t size = static_cast<uint16_t>(sizeof(UdpControlResumePacket));
+  uint32_t streamId = 0;   // the sender's own tx stream, so a reply cannot look like a request
+  uint32_t resumeId = 0;   // chosen by the viewer, echoed by the host
+  uint32_t accepted = 0;   // ack only: 1 the stream was reset and is being served, 0 refused
+  uint32_t reserved = 0;
+};
+static_assert(sizeof(UdpControlResumePacket) == 24, "control resume wire layout must not drift");
+
+struct UdpVideoChunkHeader {
+  uint32_t magic = kMagic;
+  uint16_t kind = static_cast<uint16_t>(UdpPacketKind::VideoChunk);
+  uint16_t size = static_cast<uint16_t>(sizeof(UdpVideoChunkHeader));
+  uint32_t seq = 0;
+  uint16_t codec = static_cast<uint16_t>(UdpCodec::H264);
+  // bit0:keyFrame bit1:firstChunk bit2:lastChunk bit3:reserved for encrypted payload
+  // bit4:XOR parity packet -- covers the group beginning at chunkIndex
+  // bit5:that parity group is interleaved, so chunkIndex names the group itself and the
+  //      group holds chunks chunkIndex, chunkIndex+groupCount, chunkIndex+2*groupCount ...
+  // bit6:synthetic refresh frame (see kEncodedFrameFlagSynthetic); preserved by the chunker,
+  //      which only rewrites bits 1/2/4
+  uint16_t flags = 0;
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint32_t stride = 0;
+  uint32_t payloadSize = 0;
+  uint32_t chunkOffset = 0;
+  uint32_t chunkSize = 0;
+  uint16_t chunkIndex = 0;
+  uint16_t chunkCount = 0;
+  uint32_t chunkStride = 0;
+  uint64_t streamGeneration = 0;
+  uint64_t captureQpcUs = 0;
+  uint64_t encodeStartQpcUs = 0;
+  uint64_t encodeEndQpcUs = 0;
+  uint64_t sendQpcUs = 0;
+};
+// --- Sealed unlock v1 messages ------------------------------------------------------------------
+// Wire array sizes mirror sealed_unlock.hpp (literals kept here so this wire header stays standalone):
+//   pub point 64 (P-256 X||Y), salt 32, challengeId 16, nonce 12, tag 16, padded plaintext 258.
+// Layout is deterministic under the file's #pragma pack(1); static_asserts below pin it against drift.
+
+enum class UnlockStage : uint16_t {
+  Unknown = 0,
+  RejectedPolicy = 1,        // not locked / not authorized / cooldown
+  RejectedStaleTopology = 2, // the session topology changed between challenge and execution
+  ChallengeIssued = 3,
+  DecryptFailed = 4,         // bad tag / bad challenge binding
+  TargetResolved = 5,
+  ConnectStarted = 6,
+  WtsConnectAccepted = 7,
+  Injected = 8,              // Winlogon fallback keystrokes queued (not proof of unlock)
+  SessionUnlocked = 9,       // authoritative success: the WTS unlock transition
+  AuthFailed = 10,           // wrong password / account restriction
+  Timeout = 11,
+  InternalError = 12,
+  // lockscreen-cred r1 (numbers assigned by the verifier): what the lock-screen typing came to, apart from Injected.
+  TargetNotReady = 13,      // the lock screen's password field was not the input target: nothing typed
+  InjectFailed = 14,        // the typing itself failed or was cut short: not retried
+  UnlockUnconfirmed = 15,   // typed, but no unlock of that session was seen in the time allowed
+  // lockscreen-cred r3 (Codex UX-R; number assigned by the verifier): another control connection's transaction
+  // holds the service's single unlock pipe right now -- nothing was sent; the user may try again once it ends.
+  Busy = 16,
+  // lk-ux-retry r1 (numbers assigned by the verifier):
+  Superseded = 17,       // this typed credential's wait was ended by the same connection's explicit retry.
+                         // GNLink stopped waiting; Windows' own handling of what was typed is not undone.
+  SupersedeRefused = 18, // the earlier wait could not be confirmed ended: the retry sent nothing
+};
+
+// Which sealed purpose a challenge (41) was issued for, in its `reserved` field (lockscreen-cred r1).
+// 0 is what every older host sends: the disconnected-session unlock (or, from a pre-login worker, its
+// credential). A viewer that asked 88 accepts only kUnlockPurposeLockCred.
+constexpr uint16_t kUnlockPurposeUnlock = 0;
+constexpr uint16_t kUnlockPurposeLockCred = 2;
+
+// client -> host: the user pressed Unlock. The host replies with a fresh one-shot challenge.
+struct ControlUnlockChallengeRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlUnlockChallengeRequestMessage) == 24, "unlock challenge-req wire drift");
+
+// viewer -> host (89, lk-ux-retry r1): a lock-screen challenge that replaces this connection's own waiting one.
+struct ControlLockCredRetryChallengeRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;            // the new attempt
+  uint32_t supersedesRequestId = 0;  // the typed attempt still waiting for its unlock
+  uint32_t reserved = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlLockCredRetryChallengeRequestMessage) == 32, "lock-cred retry-req wire drift");
+
+// host -> client: the one-shot challenge and every binding field (mirrors sealed_unlock::UnlockContext).
+struct ControlUnlockChallengeMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;
+  uint16_t status = 0;  // UnlockStage: ChallengeIssued(3) on success, else a rejection stage
+  uint16_t reserved = 0;
+  uint8_t challengeId[16] = {};
+  uint8_t hostPub[64] = {};
+  uint8_t salt[32] = {};
+  uint64_t hostId = 0;
+  uint64_t clientSessionCookie = 0;
+  uint64_t accountId = 0;
+  uint32_t requesterSession = 0;
+  uint32_t consoleSession = 0;
+  uint32_t lockGeneration = 0;
+  uint32_t topologyGeneration = 0;
+  uint64_t issuedMs = 0;
+  uint64_t expiresMs = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlUnlockChallengeMessage) == 196, "unlock challenge wire drift");
+
+// client -> host: the sealed password for that challenge.
+struct ControlUnlockSealedRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;
+  uint8_t challengeId[16] = {};
+  uint8_t clientPub[64] = {};
+  uint8_t nonce[12] = {};
+  uint8_t tag[16] = {};
+  uint8_t cipher[258] = {};  // AES-256-GCM over the padded plaintext block
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlUnlockSealedRequestMessage) == 390, "unlock sealed-req wire drift");
+
+// host -> client: the unlock job was accepted (NOT completed). Poll status for the terminal result.
+struct ControlUnlockAcceptedMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;
+  uint32_t jobId = 0;
+  uint16_t accepted = 0;  // 1 = accepted, 0 = rejected
+  uint16_t stage = 0;     // UnlockStage on immediate rejection
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlUnlockAcceptedMessage) == 32, "unlock accepted wire drift");
+
+// client -> host: poll a job's result.
+struct ControlUnlockStatusRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;
+  uint32_t jobId = 0;
+  uint32_t reserved = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlUnlockStatusRequestMessage) == 32, "unlock status-req wire drift");
+
+// host -> client: a job's current/terminal result. Terminal results are cached and idempotent, so a
+// duplicate status request never re-runs the unlock.
+struct ControlUnlockStatusResultMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t requestId = 0;
+  uint32_t jobId = 0;
+  uint16_t stage = 0;      // UnlockStage
+  uint16_t terminal = 0;   // 1 once stage is final
+  uint32_t win32Error = 0; // GetLastError from WTSConnectSession / injection when relevant
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlUnlockStatusResultMessage) == 36, "unlock status-result wire drift");
+
+// Host-side IME: one physical key transition, carrying the scan code so the host can inject with
+// KEYEVENTF_SCANCODE (layout/IME independent) and let the host IME compose live. down=1 keydown.
+struct ControlPhysicalKeyMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint16_t down = 0;      // 1 = keydown, 0 = keyup
+  uint16_t vk = 0;        // virtual key (diagnostic / fallback)
+  uint16_t scanCode = 0;  // hardware scan code from the client's WM_KEY* lParam
+  uint16_t flags = 0;     // bit0: extended (E0), bit1: repeat, bit2: make-only (Hangul/Hanja pulse)
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlPhysicalKeyMessage) == 28, "physical-key wire drift");
+
+// Host-side IME v2 handshake. The viewer sends a request when it (re)enters host-IME mode for a
+// target; the host aligns/queries its IME under a target fence and answers with a response echoing
+// the seq and targetGeneration so the viewer can discard a stale/crossed reply.
+struct ControlImeStateRequestMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t targetGeneration = 0;  // viewer's host-IME session generation; bumped on reconnect/retarget
+  uint16_t action = 0;            // 0: query only, 1: set to English (open=false) then query
+  uint16_t reserved = 0;
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlImeStateRequestMessage) == 28, "ime state-req wire drift");
+
+struct ControlImeStateResponseMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;               // echoes the request seq
+  uint32_t targetGeneration = 0;  // echoes the request targetGeneration
+  uint16_t status = 0;            // 0: known, 1: unknown, 2: stale-target, 3: no-target/error
+  uint16_t open = 0;              // IME open? 1=composing(KR-ish) 0=alphanumeric(EN); valid iff status==0
+  uint32_t conversionMode = 0;    // raw IMC conversion bits (NATIVE/FULLSHAPE...), diagnostic
+  uint64_t hostQpcUs = 0;
+};
+static_assert(sizeof(ControlImeStateResponseMessage) == 32, "ime state-resp wire drift");
+
+constexpr uint16_t kUdpVideoFecGroupSize = 8;
+
+// ---------------------------------------------------------------- clipboard image v1 (plan r2)
+// Wire: packed, little-endian, fixed size; each accepted only at exactly its size.
+constexpr uint8_t kClipImageFormatPng = 0x1u;   // the package starts with a PNG (always set)
+constexpr uint8_t kClipImageFormatText = 0x2u;  // the package ends with UTF-16 text of the same copy
+
+enum class ClipImageVerdict : uint8_t {
+  Accept = 0,
+  Busy = 1,        // one image transfer per session, whichever direction (r2 8-2)
+  TooLarge = 2,    // clip_image_gate refused it
+  Disabled = 3,    // clipboard sync is off on the host
+  StaleEpoch = 4,
+  BadDims = 5,
+  BadRequest = 6,  // formats / sizes that cannot describe a package
+};
+
+enum class ClipImageState : uint8_t {
+  Unknown = 0,     // not the current transfer (or no transfer): nothing about it is known
+  Pulling = 1,
+  Verifying = 2,
+  Publishing = 3,
+  Published = 4,
+  Failed = 5,
+  Cancelled = 6,
+  Superseded = 7,  // the host's clipboard changed after the offer was accepted: nothing published
+};
+
+enum class ClipImageReason : uint8_t {
+  None = 0,
+  Stalled = 1,       // 30 s without a chunk
+  Timeout = 2,       // the wall-clock budget for this size ran out
+  VerifyFailed = 3,  // SHA-256 mismatch
+  DecodeFailed = 4,
+  SizeMismatch = 5,  // the PNG is not the size the offer said
+  PublishFailed = 6, // the clipboard refused a Set (it was emptied again, not left half-written)
+  Session = 7,       // the session ended or rolled over
+  Limit = 8,
+  User = 9,
+  Superseded = 10,   // a newer local copy replaced it
+  ColorProfile = 11, // an embedded / linked colour profile, refused rather than recoloured
+};
+
+struct ControlClipImageOfferMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint8_t formats = 0;          // kClipImageFormat*
+  uint8_t reserved[3] = {};
+  uint64_t transferId = 0;      // viewer-chosen random, never 0
+  uint64_t revision = 0;        // the viewer's clipboard sequence number of this copy
+  uint32_t pngBytes = 0;
+  uint32_t textUtf16 = 0;       // UTF-16 code units after the PNG (0 without kClipImageFormatText)
+  uint32_t width = 0;
+  uint32_t height = 0;
+  uint8_t sha256[32] = {};      // of the whole package: [PNG][UTF-16 text]
+  uint64_t clientSendQpcUs = 0;
+};
+static_assert(sizeof(ControlClipImageOfferMessage) == 88, "clip image offer wire drift");
+
+struct ControlClipImageOfferReplyMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;             // echoes the offer
+  uint8_t verdict = 0;          // ClipImageVerdict
+  uint8_t reserved[3] = {};
+  uint64_t transferId = 0;      // echoes the offer
+  uint64_t epochTag = 0;        // (host random32 << 32) | session epoch -- quoted back on every bulk message
+  uint32_t bulkGen = 0;         // the bulk stream generation for this transfer (low 28 bits used)
+  uint32_t pullWindow = 0;      // pulls the host keeps outstanding (logical; the channel is head-only)
+};
+static_assert(sizeof(ControlClipImageOfferReplyMessage) == 40, "clip image offer reply wire drift");
+
+struct ControlClipImageCancelMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint8_t reason = 0;           // ClipImageReason
+  uint8_t reserved[3] = {};
+  uint64_t transferId = 0;
+  uint64_t epochTag = 0;
+};
+static_assert(sizeof(ControlClipImageCancelMessage) == 32, "clip image cancel wire drift");
+
+struct ControlClipImageStatusMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;
+  uint32_t reserved = 0;
+  uint64_t transferId = 0;
+  uint64_t epochTag = 0;
+};
+static_assert(sizeof(ControlClipImageStatusMessage) == 32, "clip image status wire drift");
+
+// The answer to both Cancel (57) and Status (61): where the named transfer stands on the host.
+struct ControlClipImageStatusReplyMessage {
+  MessageHeader header{};
+  uint32_t seq = 0;             // echoes the request
+  uint8_t state = 0;            // ClipImageState (Unknown: not the current transfer -- left alone)
+  uint8_t reason = 0;           // ClipImageReason
+  uint16_t reserved = 0;
+  uint64_t transferId = 0;      // echoes the request
+  uint32_t bytesReceived = 0;
+  uint32_t totalBytes = 0;
+};
+static_assert(sizeof(ControlClipImageStatusReplyMessage) == 32, "clip image status reply wire drift");
+
+// Bulk stream (stream id bit30) messages. transferId + epochTag + bulkGen must all be current, or the
+// message is dropped without an answer; an old datagram never cancels the current transfer.
+struct ClipBulkPullMessage {
+  MessageHeader header{};
+  uint64_t transferId = 0;
+  uint64_t epochTag = 0;
+  uint32_t bulkGen = 0;
+  uint32_t offset = 0;
+  uint32_t len = 0;
+  // The chunk whose arrival released this pull (UINT32_MAX for the opening pulls). The viewer times
+  // its round trip from the last datagram of that chunk to here -- the rate controller's pull RTT.
+  uint32_t triggerOffset = 0xFFFFFFFFu;
+  uint32_t bytesReceived = 0;   // what the host holds so far (progress, for the viewer's evidence)
+  uint32_t reserved = 0;
+};
+static_assert(sizeof(ClipBulkPullMessage) == 48, "clip bulk pull wire drift");
+
+// Followed by `len` bytes of the package.
+struct ClipBulkChunkHeader {
+  MessageHeader header{};       // size = sizeof(*this); the bytes follow
+  uint64_t transferId = 0;
+  uint64_t epochTag = 0;
+  uint32_t bulkGen = 0;
+  uint32_t offset = 0;
+  uint32_t len = 0;
+  uint32_t reserved = 0;
+};
+static_assert(sizeof(ClipBulkChunkHeader) == 40, "clip bulk chunk wire drift");
+#pragma pack(pop)
+
+}  // namespace remote60::native_poc

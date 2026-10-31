@@ -1,0 +1,207 @@
+{
+  "accounts": {
+    "tester": {
+      "id": "tester",
+      "salt": "9b7c3547373593878fd842d9ed6e4ef6",
+      "hash": "19e4ecad50fef2e7f1ab1b5f87ed1c9b2f0a9bd7821a3b0c9c8128ab91d94a49",
+      "status": "active",
+      "createdAt": 1793276274633,
+      "updatedAt": 1793276274633,
+      "approvedAt": 1793276274633,
+      "memo": "",
+      "lastLoginAt": 1793276310508
+    },
+    "other": {
+      "id": "other",
+      "salt": "f1127acf07a68082702ac7de696b643c",
+      "hash": "157721c442e26692d60b0ac03eff355158b6048b5f8d25b6c20f708008e579de",
+      "status": "active",
+      "createdAt": 1793276285554,
+      "updatedAt": 1793276285554,
+      "approvedAt": 1793276285554,
+      "memo": "",
+      "lastLoginAt": 1793276310280
+    }
+  },
+  "hosts": {
+    "9dfeda2019d55cdf": {
+      "hostId": "9dfeda2019d55cdf",
+      "accountId": "tester",
+      "machineId": "fixture-machine",
+      "hostName": "Fixture Host",
+      "tokenHash": "23ce4029ee45ee9e9ba3401091cc560723aba6f37fb3f8fc7dbe84287b469e75",
+      "lastSeen": 0,
+      "publicIp": "",
+      "publicUdpPort": 0,
+      "wireIp": "",
+      "wirePort": 0,
+      "localIps": [],
+      "localUdpPort": 0,
+      "alternateUdpPort": 0
+    }
+  },
+  "devices": {
+    "92980d049c33b6510bc5db9e9206f924": {
+      "deviceId": "92980d049c33b6510bc5db9e9206f924",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "Fixture PC",
+      "credHash": "94531e9d22d010dd083c5871f32dc6ab8f83aa350c8a8339ff9b2e1f76dbdfd6",
+      "prevCredHash": "d19fb0cbccb805ab59d66c8d897e5ef8746f101cd2ac4a72e01b2d97c91698f4",
+      "prevValidUntil": 0,
+      "prevUsesLeft": 0,
+      "issued": [
+        "177f3632aebd8bb676db01483be2e7d7e8fb8383ad3137453442d1cbd3fa696f",
+        "d19fb0cbccb805ab59d66c8d897e5ef8746f101cd2ac4a72e01b2d97c91698f4",
+        "abefd0874f9ec6ae42fe0516284910116a203c052768cd4d94d90493573aaf7a",
+        "94531e9d22d010dd083c5871f32dc6ab8f83aa350c8a8339ff9b2e1f76dbdfd6"
+      ],
+      "revokeHash": "238543f19a9027eb2558e8dad7b56360bd0e1d9f39512c3a513bfb3b6efc62ca",
+      "createdAt": 1793276291987,
+      "lastUsedAt": 1793276302855,
+      "expiresAt": 1801052302855,
+      "revokedAt": 1793276302861,
+      "revokedWhy": "a superseded credential was presented"
+    },
+    "af72841b41feb42bd3c8546f20cacffb": {
+      "deviceId": "af72841b41feb42bd3c8546f20cacffb",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "Fixture PC",
+      "credHash": "e3df389b732c08f27afa6c1b07b316284dc7714c5e8ca1f86431e8c21b82f0be",
+      "prevCredHash": "2a89c330e7bc1c27969234718a328fc258912c446bcf29ad99764c2ba7b275ee",
+      "prevValidUntil": 1793276369787,
+      "prevUsesLeft": 1,
+      "issued": [
+        "2a89c330e7bc1c27969234718a328fc258912c446bcf29ad99764c2ba7b275ee",
+        "e3df389b732c08f27afa6c1b07b316284dc7714c5e8ca1f86431e8c21b82f0be"
+      ],
+      "revokeHash": "55cbd9a68fccf15722c1592cc4551b59f6b8458f3b3c9d2042ae64b443dc86bd",
+      "createdAt": 1793276308697,
+      "lastUsedAt": 1793276309787,
+      "expiresAt": 1801052309787,
+      "revokedAt": 0,
+      "revokedWhy": ""
+    },
+    "2d74322c1e6210b2f31340e714ff2c30": {
+      "deviceId": "2d74322c1e6210b2f31340e714ff2c30",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "Fixture PC",
+      "credHash": "0fa4796b966090114e0cbf49da841a483354046d8dea5d194521d476662d4c34",
+      "prevCredHash": "5538911ae841cc2cfd832cbe853b7d4208931b23027c242cf00c229a8d364a52",
+      "prevValidUntil": 1793276369910,
+      "prevUsesLeft": 0,
+      "issued": [
+        "5538911ae841cc2cfd832cbe853b7d4208931b23027c242cf00c229a8d364a52",
+        "0fa4796b966090114e0cbf49da841a483354046d8dea5d194521d476662d4c34"
+      ],
+      "revokeHash": "6b3ad6b467f6d8d7dc9d9355581fdc38fd7c2f6b0723424b19e8072aeb9c3c2d",
+      "createdAt": 1793276309907,
+      "lastUsedAt": 1793276309910,
+      "expiresAt": 1801052309910,
+      "revokedAt": 1793276309916,
+      "revokedWhy": "signed out"
+    },
+    "480cd1f2edb25a7114ea8b0fc413f25b": {
+      "deviceId": "480cd1f2edb25a7114ea8b0fc413f25b",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "Fixture PC",
+      "credHash": "4929159f7eddd9812b32829fd18805b121e0797e610d41dbae12e60559f2c98e",
+      "prevCredHash": "48ff25d21ecbc38f25b16f90c492e8caf18d8654b0b5309b4e3c767a6e41ec58",
+      "prevValidUntil": 1793276370008,
+      "prevUsesLeft": 0,
+      "issued": [
+        "48ff25d21ecbc38f25b16f90c492e8caf18d8654b0b5309b4e3c767a6e41ec58",
+        "4929159f7eddd9812b32829fd18805b121e0797e610d41dbae12e60559f2c98e"
+      ],
+      "revokeHash": "8471d8bc3398b4a0287e349a2b03324d66368554d8e8cee550842d28bd71f065",
+      "createdAt": 1793276310006,
+      "lastUsedAt": 1793276310008,
+      "expiresAt": 1801052310008,
+      "revokedAt": 1793276310025,
+      "revokedWhy": "signed out"
+    },
+    "4f3fb771826904f56133510e081b3331": {
+      "deviceId": "4f3fb771826904f56133510e081b3331",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "Desk",
+      "credHash": "82ec0d2f724b48c00f53703f21102b18516281619ed5d802a4d6c03bc2498c24",
+      "prevCredHash": "",
+      "prevValidUntil": 0,
+      "prevUsesLeft": 0,
+      "issued": [
+        "82ec0d2f724b48c00f53703f21102b18516281619ed5d802a4d6c03bc2498c24"
+      ],
+      "revokeHash": "e9c9d499c222d952e1b13d33f2d80d79432338a06d4d4345ad317e4b5cea6ec7",
+      "createdAt": 1793276310136,
+      "lastUsedAt": 1793276310136,
+      "expiresAt": 1801052310136,
+      "revokedAt": 1793276310200,
+      "revokedWhy": "revoked by the account"
+    },
+    "abaa62d7ba79eab92473d56adfc98394": {
+      "deviceId": "abaa62d7ba79eab92473d56adfc98394",
+      "accountId": "tester",
+      "kind": "android",
+      "label": "Phone",
+      "credHash": "8ec4569f832bdedc7cf04d9e4eeafeed5a5b72ae913ef98faea6bd2daf5e1498",
+      "prevCredHash": "73d826d6c093c35dbeb58f120c54a9c7a7ef351b7e7db0409548b82e77666c75",
+      "prevValidUntil": 1793276370205,
+      "prevUsesLeft": 1,
+      "issued": [
+        "73d826d6c093c35dbeb58f120c54a9c7a7ef351b7e7db0409548b82e77666c75",
+        "8ec4569f832bdedc7cf04d9e4eeafeed5a5b72ae913ef98faea6bd2daf5e1498"
+      ],
+      "revokeHash": "27e0a27325fde7633fb056cdf363880bf10bb0717caf66289d26673e49de68a1",
+      "createdAt": 1793276310195,
+      "lastUsedAt": 1793276310205,
+      "expiresAt": 1801052310205,
+      "revokedAt": 0,
+      "revokedWhy": ""
+    },
+    "d6a1fd3008d73546fbbe1889909088b8": {
+      "deviceId": "d6a1fd3008d73546fbbe1889909088b8",
+      "accountId": "other",
+      "kind": "android",
+      "label": "Theirs",
+      "credHash": "311c259deea86a0c4d56bc3a5f6526c782b4653c55db1722141c7ea318f8d99b",
+      "prevCredHash": "",
+      "prevValidUntil": 0,
+      "prevUsesLeft": 0,
+      "issued": [
+        "311c259deea86a0c4d56bc3a5f6526c782b4653c55db1722141c7ea318f8d99b"
+      ],
+      "revokeHash": "6c2b18fbdb0d59530b32b41944dcd547c4008d65100fe0897bad38dc8c71ae26",
+      "createdAt": 1793276310280,
+      "lastUsedAt": 1793276310280,
+      "expiresAt": 1801052310280,
+      "revokedAt": 0,
+      "revokedWhy": ""
+    },
+    "acb2da273009bcccd4fbf9c50c893142": {
+      "deviceId": "acb2da273009bcccd4fbf9c50c893142",
+      "accountId": "tester",
+      "kind": "windows-client",
+      "label": "Fixture PC",
+      "credHash": "f242e220053c55fa43444686c739594cc317586db55b3a0104ae87ab119326f4",
+      "prevCredHash": "92f9ac576962520dd641ae716786311f966c1c04ca2550045231d67ad7e214de",
+      "prevValidUntil": 0,
+      "prevUsesLeft": 0,
+      "issued": [
+        "3207f737f4f5c543db6662516746394c994d1669e15944919262fe6c21a89365",
+        "92f9ac576962520dd641ae716786311f966c1c04ca2550045231d67ad7e214de",
+        "8148b03df0d4014a8d159d061400809c6541acfa3a0d7f46acc00701b9495197",
+        "f242e220053c55fa43444686c739594cc317586db55b3a0104ae87ab119326f4"
+      ],
+      "revokeHash": "b0e3d04c6eeca6a41c3ba0adff6b9b8c057b626365b372cbc8d85c16c8964b9b",
+      "createdAt": 1793276310344,
+      "lastUsedAt": 1793276310515,
+      "expiresAt": 1801052310515,
+      "revokedAt": 0,
+      "revokedWhy": ""
+    }
+  }
+}

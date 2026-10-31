@@ -1,0 +1,114 @@
+﻿host_standby_admission_e2e_test (keepalive-r2 A spike)
+
+[direct: two standby entries, one active, no interference, explicit takeover]
+PASS  the fake directory starts
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  a real GNLinkStream starts
+PASS  the host registers  3393347108743-0\punch_standby-1\host_cache.json (--directory-cache)
+
+10-26 14:45:21.160 [native-video-host] directory agent started url=http://127.0.0.1:53174
+
+10-26 14:45:21.160 [native-video-host][dir-cycle] n=1 start cause=first
+
+10-26 14:45:21.163 [native-video-host] directory registered hostId=h-standby name=SHOTAN
+
+10-26 14:45:21.163 [native-video-host][dir-cycle] n=1 step=health ok=1 ms=0
+
+
+PASS  A (device A1) is admitted as a standby entry  status=0
+PASS  B (device B1) is admitted as a standby entry, its own
+PASS  ...and NEITHER admission started a session (no epoch, no stream)  -host] directory capability endpoint translated expected=211.218.222.1:60420 actual=127.0.0.1:52776
+
+10-26 14:45:22.187 [native-video-host][standby] hello admitted entries=1 active=0
+
+10-26 14:45:22.188 [native-video-host] directory capability endpoint translated expected=211.218.222.1:60420 actual=127.0.0.1:52777
+
+10-26 14:45:22.188 [native-video-host][standby] hello admitted entries=2 active=0
+
+
+PASS  A's explicit activation is answered with a HelloAck (DirectoryAuth)  refusal=0
+FAIL  ...through the session admission: epoch 2, logged as a standby activation  2.188 [native-video-host][standby] hello admitted entries=2 active=0
+
+10-26 14:45:22.189 [native-video-host][standby] first session by activation entries=2
+
+10-26 14:45:22.189 [native-video-host] secure-input ready=0 status=secure input requires elevated host
+
+10-26 14:45:22.189 [native-video-host] client connected transport=udp
+
+10-26 14:45:22.189 [native-video-host] socket sndbuf=1048576 bytes
+
+
+PASS  A's control works (its window-select is processed)
+  -- B, parked, keeps itself alive and retries; A must not notice --
+PASS  B's pings are answered Ok (10)
+PASS  B's StandbyHello retransmit (same gen) replays the SAME entry (capability not needed again)
+PASS  B 'reconnects' (new gen, new capability): a new entry replaces its old one
+PASS  ...the old one is gone
+PASS  A's control still works after all that (fence)
+PASS  NO new session, NO control-session end while B pinged / re-admitted / sent control  tive-video-host][control] window-select seq=7 requestedId=11574251042342174722 applied=0 selectedId=11574251042342174722 streamGen=1 reason=window_not_found_or_not_shareable title=<empty>
+
+10-26 14:45:25.340 [native-video-host] wire seq=51 key=0 bytes=40941 chunks=42 wireIntUs=57984 targetIntUs=33333 queueWaitUs=11 sendDurUs=45878 queueDepth=0 epoch=1 clampBurst=0 burstWin2s=964602 cap2r=2000000
+
+
+PASS  B's control datagrams were dropped (never processed)
+  -- explicit takeover by B; A parked; A's late packets --
+PASS  B's explicit activation takes the session  tive-video-host][control] window-select seq=7 requestedId=11574251042342174722 applied=0 selectedId=11574251042342174722 streamGen=1 reason=window_not_found_or_not_shareable title=<empty>
+
+10-26 14:45:25.340 [native-video-host] wire seq=51 key=0 bytes=40941 chunks=42 wireIntUs=57984 targetIntUs=33333 queueWaitUs=11 sendDurUs=45878 queueDepth=0 epoch=1 clampBurst=0 burstWin2s=964602 cap2r=2000000
+
+
+PASS  ...a new epoch (3) and a new keyframe for B
+PASS  B's control works
+PASS  A's late control (old session) is refused
+PASS  A is parked, not dropped: its entry still answers
+FAIL  A's DELAYED Activate (old gen 1) is refused as superseded -- no re-takeover  refusal=0
+PASS  B still has the session (fence)
+PASS  A's NEW explicit activation (gen 2) takes it back
+  -- bounds --
+PASS  six more devices fill the host to eight entries  6
+PASS  a ninth device is answered BUSY  status=1
+PASS  after one Release, a new device gets a place  status=0
+PASS  A's session went through all of it untouched
+  -- lease --
+PASS  an entry that stops pinging lapses after its lease (20 s)
+PASS  the host exited cleanly
+
+[relay stand-in, per-client host-facing socket: A direct active, B and C through the relay]
+PASS  the fake directory starts
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  a real GNLinkStream starts
+PASS  the host registers
+PASS  the relay stand-in starts
+PASS  A (direct) is admitted and activated
+PASS  B and C are admitted THROUGH the relay, each its own entry  b=0 c=0
+PASS  their pings are told apart by entry, not by address
+PASS  A's direct session is untouched by both
+PASS  B activates through the relay: takes the session
+PASS  B's control (through the relay) works
+PASS  C, parked behind the same relay, still answers
+PASS  ...and A, parked, too
+
+[relay stand-in, SHARED host-facing address (today's single lease): A direct active, B and C through the relay]
+PASS  the fake directory starts
+PASS  the host command line keeps the directory cache inside the staging directory
+PASS  the host gets a LOCALAPPDATA inside the staging directory  the diagnostic mirror writes under whatever LOCALAPPDATA it is handed
+PASS  the host reports using the staging cache, not the user's
+PASS  a real GNLinkStream starts
+PASS  the host registers
+PASS  the relay stand-in starts
+PASS  A (direct) is admitted and activated
+PASS  B and C are admitted THROUGH the relay, each its own entry  b=0 c=0
+PASS  their pings are told apart by entry, not by address
+PASS  A's direct session is untouched by both
+PASS  B activates through the relay: takes the session
+PASS  B's control (through the relay) works
+PASS  C, parked behind the same relay, still answers
+PASS  ...and A, parked, too
+
+[an OLDER host] not run (pass --old-host <GNLinkStream.exe without standby>)
+
+RESULT: FAILED  (63 checks, 2 failed)

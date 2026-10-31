@@ -1,0 +1,799 @@
+oa_pick_test (old-APK lane r7): pick_pinned / judge_pick / input_check against a fake 0.2.32
+09:57:47   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:57:47 tapped listWindowsButton at 200,405 text='Windows'
+09:57:48   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+09:57:48 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+09:57:50   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 09:57:50
+09:57:50 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+PASS  control 3: the Windows tab, the pinned card -> PASS (id, gen, streamGen, ready, picture after it)  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 titl
+PASS  the screenshot is named for the window
+PASS  the targets screen is kept as a UI dump (ids, text, bounds) for the record  C:\work\gnlink-wt\old-apk-lane\.claude\oa_runs\pick-ok-20261030095747-40504\avd\3_targets_ui.txt
+09:57:50   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+09:57:53 PASS  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=3 kinds=[1, 2, 3] down seq=2 at 240,135 -> up seq=3 at 240,135 same position aim=(240, 135) off=0,0 (recorded, not judged)
+PASS  control 4: the tap -> its own button down -> up inside the window -> PASS  window=(480, 270) events after the tap=3 kinds=[1, 2, 3] down seq=2 at 240,135 -> up seq=3 at 240,135 same position aim=(240, 135) off=0,0 (recorded, not judged)
+09:57:54 tapped listDevicesButton at 540,405 text='Desktop'
+09:57:54 tapped targetCardTitle at 285,1050 text='Desktop'
+PASS  NEGATIVE r6 path: the Desktop card (id 0) tapped -> judge_pick FAILs it  pinned=80809746 request=targetId=0 tab=DESKTOP gen=1 host window-select=[('0', '0', '')] ack=[] ready=none video out after ready=[] failed=[select_failed] targetId=0 gen=1 seq=1 status=window_select_failed: pinned_test_o
+09:57:54   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:57:54 tapped listWindowsButton at 200,405 text='Windows'
+09:57:54   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+09:57:54 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+09:57:56 FAIL  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  pinned=80809746 request=targetId=0 tab=DESKTOP gen=1 host window-select=[('0', '0', '')] ack=[] ready=none video out after ready=[] failed=[select_failed] targetId=0 gen=1 seq=1 status=window_select_failed: pinned_test_only
+09:57:56   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 09:57:56
+09:57:56   fail1 (after "3 the pinned window picked: the pinned window picked (id 808"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE wrongid: a Windows card whose request goes out as id 0 (the host refuses) -> FAIL  pinned=80809746 request=targetId=0 tab=DESKTOP gen=1 host window-select=[('0', '0', '')] ack=[] ready=none video out after ready=[] failed=[select_failed] targetId=0 gen=1 seq=1 status=window_select_failed: pinned_test_o
+09:57:56   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:57:56 tapped listWindowsButton at 200,405 text='Windows'
+09:57:56   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+09:57:57 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+09:57:58 FAIL  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  pinned=80809746 request=targetId=0 tab=DESKTOP gen=1 host window-select=[('0', '1', '2')] ack=[('0', '1', '2')] ready=[select_ready] targetId=0 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43948 92a video out after ready=[3, 4, 5]
+09:57:58   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 09:57:58
+09:57:58   fail1 (after "3 the pinned window picked: the pinned window picked (id 808"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE zeroready: a request for id 0 that the host applies, with a frame after it -> FAIL  pinned=80809746 request=targetId=0 tab=DESKTOP gen=1 host window-select=[('0', '1', '2')] ack=[('0', '1', '2')] ready=[select_ready] targetId=0 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43948 92a video out a
+09:57:58   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:57:59 tapped listWindowsButton at 200,405 text='Windows'
+09:57:59   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+09:57:59 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+09:58:00 FAIL  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '7')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5]
+09:58:00   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 09:58:00
+09:58:00   fail1 (after "3 the pinned window picked: the pinned window picked (id 808"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE genmismatch: the app's select_ack names another streamGen than the host applied -> FAIL  pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '7')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr targ
+09:58:01   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:58:01 tapped listWindowsButton at 200,405 text='Windows'
+09:58:01   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+09:58:01 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+09:58:11 FAIL  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[]
+09:58:11   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 09:58:11
+09:58:11   fail1 (after "3 the pinned window picked: the pinned window picked (id 808"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE novideo: no picture (video_debug out > 0) after select_ready -> FAIL  pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr targ
+09:58:11   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:58:11 tapped listWindowsButton at 200,405 text='Windows'
+09:58:42   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'Notepad'
+09:58:42 FAIL  3 the pinned window picked: the pinned window's card is listed on the Windows tab (exactly one, enabled)  cards=['Notepad'] pinned title='remote60 mobile abr target pid 43948 92abc8fe'
+09:58:42   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 09:58:42
+09:58:42   fail1 (after "3 the pinned window picked: the pinned window's card is list"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE nopinned: no pinned card on the Windows tab -> FAIL, no card tapped  card taps=[] cards=['Notepad'] pinned title='remote60 mobile abr target pid 43948 92abc8fe'
+09:58:57   3: pinned window from the host log: not one agreed pinned window: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809747 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:58:57 FAIL  3 the pinned window picked: the host names one pinned window  not one agreed pinned window: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809747 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:58:57   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 09:58:57
+09:58:57   fail1 (after "3 the pinned window picked: the host names one pinned window"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE disagree: capture hwnd != window-list selectedId -> FAIL with NO tap at all  taps=0 not one agreed pinned window: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809747 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:59:13   3: pinned window from the host log: not one agreed pinned window: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=0 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:59:13 FAIL  3 the pinned window picked: the host names one pinned window  not one agreed pinned window: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=0 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:59:13   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:13
+09:59:13   fail1 (after "3 the pinned window picked: the host names one pinned window"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE listzero: the host lists id 0 -> FAIL with NO tap at all  taps=0 not one agreed pinned window: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=0 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:59:13   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:59:13 tapped listWindowsButton at 200,405 text='Windows'
+09:59:13   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+09:59:14 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+09:59:15   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:15
+09:59:16 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+09:59:16   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+09:59:19 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=0 kinds=[] no down -> no up
+09:59:19   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:19
+09:59:19   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 none: no events -> FAIL  window=(480, 270) events after the tap=0 kinds=[] no down -> no up
+09:59:19   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:59:20 tapped listWindowsButton at 200,405 text='Windows'
+09:59:20   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+09:59:20 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+09:59:22   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:22
+09:59:22 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+09:59:22   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+09:59:25 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=1 kinds=[3] no down -> no up
+09:59:26   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:26
+09:59:26   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 uponly: an up without its down -> FAIL  window=(480, 270) events after the tap=1 kinds=[3] no down -> no up
+09:59:26   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:59:26 tapped listWindowsButton at 200,405 text='Windows'
+09:59:26   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+09:59:26 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+09:59:28   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:28
+09:59:28 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+09:59:29   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+09:59:32 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=2 kinds=[2, 3] down seq=1 at 900,700 -> up seq=2 at 900,700 same position aim=(240, 135) off=660,565 (recorded, not judged)
+09:59:32   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:32
+09:59:32   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 outside: a down/up outside the window -> FAIL  window=(480, 270) events after the tap=2 kinds=[2, 3] down seq=1 at 900,700 -> up seq=2 at 900,700 same position aim=(240, 135) off=660,565 (recorded, not judged)
+09:59:32   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:59:32 tapped listWindowsButton at 200,405 text='Windows'
+09:59:32   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+09:59:33 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+09:59:35   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:35
+09:59:35 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+09:59:35   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+09:59:38 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=0 kinds=[] no down -> no up
+09:59:38   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:38
+09:59:38   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 pretap: a down/up logged BEFORE the tap (at the pick), nothing after it -> FAIL  window=(480, 270) events after the tap=0 kinds=[] no down -> no up | pair logged before the tap: True
+09:59:38   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:59:39 tapped listWindowsButton at 200,405 text='Windows'
+09:59:39   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+09:59:39 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+09:59:41   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:41
+09:59:41 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+09:59:41   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+09:59:44 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=2 kinds=[1, 1] no down -> no up
+09:59:45   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:45
+09:59:45   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 moveonly: moves only -> FAIL  window=(480, 270) events after the tap=2 kinds=[1, 1] no down -> no up
+09:59:45   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:59:45 tapped listWindowsButton at 200,405 text='Windows'
+09:59:45   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+09:59:45 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+09:59:47   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:47
+09:59:47 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+09:59:48   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+09:59:51 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=2 kinds=[1, 2] down seq=2 at 240,135 -> no up aim=(240, 135) off=0,0 (recorded, not judged)
+09:59:51   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:51
+09:59:51   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 downonly: a down without an up -> FAIL  window=(480, 270) events after the tap=2 kinds=[1, 2] down seq=2 at 240,135 -> no up aim=(240, 135) off=0,0 (recorded, not judged)
+09:59:51   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:59:51 tapped listWindowsButton at 200,405 text='Windows'
+09:59:52   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+09:59:52 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+09:59:54   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:54
+09:59:54 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+09:59:54   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+09:59:57 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=2 kinds=[2, 3] down seq=1 at 240,135 -> up seq=2 at 300,200 MOVED aim=(240, 135) off=0,0 (recorded, not judged)
+09:59:57   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 09:59:57
+09:59:57   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 moved: a down and an up at two positions -> FAIL  window=(480, 270) events after the tap=2 kinds=[2, 3] down seq=1 at 240,135 -> up seq=2 at 300,200 MOVED aim=(240, 135) off=0,0 (recorded, not judged)
+09:59:58   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+09:59:58 tapped listWindowsButton at 200,405 text='Windows'
+09:59:58   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+09:59:58 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:00:00   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:00:00
+10:00:00 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:00:00 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window  NO tap: soft keyboard shown ['mDecorViewVisible', 'mInputShown', 'mWindowVisible']
+10:00:00   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:00:00
+10:00:01   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 r7d: a soft keyboard is up -> FAIL with NO tap on the picture  taps after the pick=0 NO tap: soft keyboard shown ['mDecorViewVisible', 'mInputShown', 'mWindowVisible']
+10:00:01   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:00:01 tapped listWindowsButton at 200,405 text='Windows'
+10:00:01   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:00:01 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:00:03   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:00:03
+10:00:03 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:00:04 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window  NO tap: soft keyboard unknown ["missing / unclear: ['mInputShown', 'mWindowVisible', 'mDecorViewVisible']"]
+10:00:04   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:00:04
+10:00:04   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 r7d: the keyboard state cannot be read -> FAIL with NO tap on the picture  taps after the pick=0 NO tap: soft keyboard unknown ["missing / unclear: ['mInputShown', 'mWindowVisible', 'mDecorViewVisible']"]
+10:00:04   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:00:04 tapped listWindowsButton at 200,405 text='Windows'
+10:00:04   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:00:04 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:00:06   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:00:06
+10:00:07 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:00:07 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window  NO tap: video view on screen: 0
+10:00:07   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:00:07
+10:00:07   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 4 elements, no status / error text
+PASS  NEGATIVE 4 r7d: no video view on screen -> FAIL with NO tap on the picture  taps after the pick=0 NO tap: video view on screen: 0
+10:00:07   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:00:07 tapped listWindowsButton at 200,405 text='Windows'
+10:00:08   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:00:08 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:00:10   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:00:10
+10:00:10 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:00:10   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+10:00:13 PASS  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=3 kinds=[1, 2, 3] down seq=2 at 240,135 -> up seq=3 at 240,135 same position aim=(240, 135) off=0,0 (recorded, not judged)
+PASS  control 4 r7d: keyboard hidden, the ONE tap lands at the video view centre (from the UI dump) -> PASS  taps=[['540', '1268']]
+10:00:13   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:00:14 tapped listWindowsButton at 200,405 text='Windows'
+10:00:14   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:00:14 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:00:16   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:00:16
+10:00:16 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:00:21   menu: no wake tap (soft keyboard shown ['mDecorViewVisible', 'mInputShown', 'mWindowVisible'])
+10:00:23   menu: viewerMenuHostsButton not reached (attempt 1), again
+10:00:30   menu: no wake tap (soft keyboard shown ['mDecorViewVisible', 'mInputShown', 'mWindowVisible'])
+10:00:33   menu: viewerMenuHostsButton not reached (attempt 2), again
+10:00:40   menu: no wake tap (soft keyboard shown ['mDecorViewVisible', 'mInputShown', 'mWindowVisible'])
+10:00:42   menu: viewerMenuHostsButton not reached (attempt 3), again
+PASS  NEGATIVE menu r7d: a keyboard up -> no wake tap on the picture (the menu is not reached; nothing typed)  taps=0 keys=[]
+10:00:44   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:00:44 tapped listWindowsButton at 200,405 text='Windows'
+10:00:45   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:00:45 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:00:47   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:00:47
+10:00:47 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:00:47 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window  NO tap: not the same viewer / connection: since the pick: scenes=['HOSTS'] status=['error'] picks=0 host ended=[] host new clients=0
+10:00:47   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:00:47
+10:00:47   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 r8: the app left the viewer (scene HOSTS, status error) after the pick -> FAIL with NO tap  NO tap: not the same viewer / connection: since the pick: scenes=['HOSTS'] status=['error'] picks=0 host ended=[] host new clients=0
+10:00:47   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:00:48 tapped listWindowsButton at 200,405 text='Windows'
+10:00:48   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:00:48 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:00:50   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:00:50
+10:00:50 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:00:50 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window  NO tap: not the same viewer / connection: since the pick: scenes=[] status=[] picks=0 host ended=['udp control session ended epoch=1 resumed=0 reason=none'] host new clients=0
+10:00:50   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:00:50
+10:00:50   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 r8: the host ended the session after the pick -> FAIL with NO tap  NO tap: not the same viewer / connection: since the pick: scenes=[] status=[] picks=0 host ended=['udp control session ended epoch=1 resumed=0 reason=none'] host new clients=0
+PASS  r8 (source): a 4 FAIL ends the arm before the menu / 5 / 6 / P-5d
+10:00:50 oa run arm=S apk=C:\work\gnlink-wt\old-apk-lane\.claude\oa_runs\flow-4fail-20261030100050-40504\none.apk
+10:00:50   apk sha256=eef2530ea614d39eab7507929eff1b87e01b190ca12730e3b8563bf9dbdd413f
+10:00:50   adb client C:\work\gnlink-wt\old-apk-lane\automation\old_apk_lane\stubs\fake_ui_adb.cmd sha256=feb2733399223622 Android Debug Bridge version 1.0.41 (fake, oa_pick_test) serial=emulator-5554
+10:00:50   fixture: ready run=flow-4fail-20261030100050-40504 hosts=a standby=none controlPort=0 relay=10.0.2.2
+10:00:51   LOGCAT ENDED rc=0 -- no logcat from here (a gap, not an absence of events)
+10:00:51 install: rc=0 Performing Streamed Install
+Success
+10:00:51   pm clear com.remote60.androiddirect: rc=0 stdout='Success' stderr='' -> Success
+10:00:53   installed: versionCode=31 versionName=0.2.32
+10:00:53   installed base.apk sha256=eef2530ea614d39e (the APK eef2530ea614d39e)
+10:00:53   host oa-pc-a: udp bindPort=50000 tcp controlPort=0
+10:00:57 tapped loginIdInput at 540,520 text='ID'
+10:00:58 tapped loginPasswordInput at 540,675 text='Password'
+10:00:59 tapped loginButton at 540,850 text='Sign In'
+10:00:59 PASS  1 sign in (the fixture directory of the 0.2.164 candidate): the PC is listed  [login_attempt] server=http://10.0.2.2:18410 id=oatest
+10:00:59   1b the sign-in keyboard: soft keyboard hidden []
+10:00:59 tapped card:oa-pc-a at 540,480 text='oa-pc-a'
+10:00:59 PASS  2 the ordinary connect (directory): the host's targets are shown  [directory_chosen] 10.0.2.2:18443|relay | [targets_ready] origin=connect ms=1 items=1 gen=1
+10:00:59   2: the host's lines of this connect: 10-30 00:00:00.000 [native-video-host] client connected transport=udp
+10:00:59 tapped listSettingsButton at 860,405 text='Settings'
+10:01:00 tapped settingsSharpOffButton at 185,1350 text='²ô±â'
+10:01:00 PASS  2s SH off: SH requested=off through Settings (settingsSharpOffButton; the app's own sharpness_select level=off origin=settings; the button selected)  [sharpness_select] level=off s=0.0 origin=settings path=none effective=off | selected=True screen=(0, 136, 1080, 2400) button=(40, 1300, 330, 1400)
+10:01:00   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:01:00 tapped listWindowsButton at 200,405 text='Windows'
+10:01:01   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:01:01 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:01:03   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:01:03
+10:01:03 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:01:03 PASS  3s SH off: SH off in effect for the picture (sharpen_path path=direct requested=off; sharpen_start 0)  direct=['[sharpen_path] path=direct requested=off effective=off fallback=none'] other=[] sharpen_start=0 fallback=[]
+10:01:06 PASS  3w the connection: 3 s with no input after the first frame -- the same viewer and connection held, the picture went on  held 3.1 s; video out 11 -> 23; since the pick: scenes=[] status=[] picks=0 host ended=[] host new clients=0
+10:01:07   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+10:01:10 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=0 kinds=[] no down -> no up
+10:01:10   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:01:10
+10:01:10   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+10:01:10 NOT RUN  5: not reached (an earlier step failed or the run stopped)
+10:01:10 NOT RUN  6: not reached (an earlier step failed or the run stopped)
+10:01:10 NOT RUN  7: not reached (an earlier step failed or the run stopped)
+10:01:10 run end: 6/7 PASS, 3 NOT RUN
+PASS  r7e: arm S, 4 FAILs -> the arm ends there: no tap after 4 (no menu wake / menu), 5 6 7 NOT RUN  rc=1 4=[False] taps after 4=[] not run=['5', '6', '7']
+PASS  r7f: the same flow went through 2s SH off (Settings), 3s SH in effect and 3w the 30 s watch (stub: 3 s) -- all PASS before 4  {'1': True, '2': True, '2s': True, '3': True, '3s': True, '3w': True, '4': False}
+10:01:10 oa run arm=S apk=C:\work\gnlink-wt\old-apk-lane\.claude\oa_runs\flow-4fail-c468c27-20261030100110-40504\none.apk
+10:01:10   apk sha256=c713f3d738b6836e0e4143928c92788c5077d0efe8ca7de5c7bd32d1de788b38
+10:01:10   adb client C:\work\gnlink-wt\old-apk-lane\automation\old_apk_lane\stubs\fake_ui_adb.cmd sha256=feb2733399223622 Android Debug Bridge version 1.0.41 (fake, oa_pick_test) serial=emulator-5554
+10:01:10   fixture: ready run=flow-4fail-c468c27-20261030100110-40504 hosts=a standby=none controlPort=0 relay=10.0.2.2
+10:01:11   LOGCAT ENDED rc=0 -- no logcat from here (a gap, not an absence of events)
+10:01:11 install: rc=0 Performing Streamed Install
+Success
+10:01:11   pm clear com.remote60.androiddirect: rc=0 stdout='Success' stderr='' -> Success
+10:01:13   installed: versionCode=31 versionName=0.2.32
+10:01:13   installed base.apk sha256=c713f3d738b6836e (the APK c713f3d738b6836e)
+10:01:13   host oa-pc-a: udp bindPort=50000 tcp controlPort=0
+10:01:17 tapped loginIdInput at 540,520 text='ID'
+10:01:17 tapped loginPasswordInput at 540,675 text='Password'
+10:01:18 tapped loginButton at 540,850 text='Sign In'
+10:01:18 PASS  1 sign in (the fixture directory of the 0.2.164 candidate): the PC is listed  [login_attempt] server=http://10.0.2.2:18410 id=oatest
+10:01:18   1b the sign-in keyboard: soft keyboard hidden []
+10:01:19 tapped card:oa-pc-a at 540,480 text='oa-pc-a'
+10:01:19 PASS  2 the ordinary connect (directory): the host's targets are shown  [directory_chosen] 10.0.2.2:18443|relay | [targets_ready] origin=connect ms=1 items=1 gen=1
+10:01:19   2: the host's lines of this connect: 10-30 00:00:00.000 [native-video-host] client connected transport=udp
+10:01:19   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:01:19 tapped listWindowsButton at 200,405 text='Windows'
+10:01:19   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:01:19 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:01:21   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:01:21
+10:01:22 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:01:22   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+10:01:25 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=0 kinds=[] no down -> no up
+10:01:40   menu: viewerMenuHostsButton not reached (attempt 1), again
+10:01:58   menu: viewerMenuHostsButton not reached (attempt 2), again
+10:02:16   menu: viewerMenuHostsButton not reached (attempt 3), again
+10:02:18 EXCEPTION RuntimeError: menu button not reached: viewerMenuHostsButton (in full: avd_traceback.txt)
+10:02:18   screenshot exception.png sha256=075f8e3f22fcb592 bytes=9 at 10:02:18
+10:02:18 NOT RUN  5: not reached (an earlier step failed or the run stopped)
+10:02:18 NOT RUN  6: not reached (an earlier step failed or the run stopped)
+10:02:18 NOT RUN  7: not reached (an earlier step failed or the run stopped)
+10:02:18 run end: 3/4 PASS, 3 NOT RUN
+PASS  r7e contrast: c468c27 (4 answer thrown away) on the same flow went on tapping after 4 -- the check sees it  taps after 4=9 first=[['540', '1268'], ['540', '1268']] not run=['5', '6', '7']
+10:02:18   1b the sign-in keyboard: soft keyboard shown ['mDecorViewVisible', 'mInputShown', 'mWindowVisible']
+10:02:20 PASS  1b the sign-in keyboard: the sign-in keyboard put away on the PC list (BACK while it was shown); the list still there, no dialog  after: keyboard hidden [] listed=True dialog=False
+PASS  control 1b r7d: on the PC list a keyboard up is put away with BACK (it takes it); the list stays, no dialog  after: keyboard hidden [] listed=True dialog=False
+10:02:20   1b the sign-in keyboard: soft keyboard shown ['mDecorViewVisible', 'mInputShown', 'mWindowVisible']
+10:02:22 FAIL  1b the sign-in keyboard: the sign-in keyboard put away on the PC list (BACK while it was shown); the list still there, no dialog  after: keyboard shown ['mDecorViewVisible', 'mInputShown', 'mWindowVisible'] listed=True dialog=True
+10:02:22   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:02:22
+10:02:22   fail1 (after "1b the sign-in keyboard: the sign-in keyboard put away on th"): ui fail1_ui.txt -- 3 elements, no status / error text
+PASS  NEGATIVE 1b r7d: BACK reaches the app instead (the exit question appears) -> FAIL  after: keyboard shown ['mDecorViewVisible', 'mInputShown', 'mWindowVisible'] listed=True dialog=True
+10:02:22   1b the sign-in keyboard: soft keyboard unknown ["missing / unclear: ['mInputShown', 'mWindowVisible', 'mDecorViewVisible']"]
+10:02:22 FAIL  1b the sign-in keyboard: the soft keyboard state is known (dumpsys input_method)
+10:02:22   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:02:22
+10:02:22   fail1 (after "1b the sign-in keyboard: the soft keyboard state is known (d"): ui fail1_ui.txt -- 2 elements, no status / error text
+PASS  NEGATIVE 1b r7d: the keyboard state unreadable -> FAIL, no key sent  keys=[]
+10:02:23   1b the sign-in keyboard: soft keyboard hidden []
+PASS  1b r7d: no keyboard up -> nothing sent, goes on
+10:02:23 tapped listSettingsButton at 860,405 text='Settings'
+10:02:23 tapped settingsSharpOffButton at 185,1350 text='²ô±â'
+10:02:23 PASS  2s SH off: SH requested=off through Settings (settingsSharpOffButton; the app's own sharpness_select level=off origin=settings; the button selected)  [sharpness_select] level=off s=0.0 origin=settings path=none effective=off | selected=True screen=(0, 136, 1080, 2400) button=(40, 1300, 330, 1400)
+PASS  control 2s r7f: Settings -> settingsSharpOffButton (on screen, enabled) -> sharpness_select level=off origin=settings, the button selected -> PASS; the settings screen kept as a UI dump  [sharpness_select] level=off s=0.0 origin=settings path=none effective=off | selected=True screen=(0, 136, 1080, 2400) button=(40, 1300, 330, 1400)
+10:02:23   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:02:24 tapped listWindowsButton at 200,405 text='Windows'
+10:02:24   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:02:24 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:02:26   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:02:26
+10:02:26 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:02:26 PASS  3s SH off: SH off in effect for the picture (sharpen_path path=direct requested=off; sharpen_start 0)  direct=['[sharpen_path] path=direct requested=off effective=off fallback=none'] other=[] sharpen_start=0 fallback=[]
+PASS  control 3s r7f: the picture: sharpen_path path=direct requested=off, no sharpen_start -> PASS  direct=['[sharpen_path] path=direct requested=off effective=off fallback=none'] other=[] sharpen_start=0 fallback=[]
+10:02:26 tapped listSettingsButton at 860,405 text='Settings'
+PASS  NEGATIVE 2s r7f: no sharpening row on the Settings screen -> the arm is NOT RUN (INVALID), the Off button never tapped  sh taps=[] 2s SH off: settingsSharpOffButton not usable on screen (found 0, - enabled=- screen=(0, 136, 1080, 2400)) -- SH not set; the arm is NOT RUN (no prefs edit, no o
+10:02:37 tapped listSettingsButton at 860,405 text='Settings'
+PASS  NEGATIVE 2s r7f: the Off button below the app's content box (not on screen) -> the arm is NOT RUN (INVALID), the Off button never tapped  sh taps=[] 2s SH off: settingsSharpOffButton not usable on screen (found 1, (40, 2450, 330, 2550) enabled=True screen=(0, 136, 1080, 2400)) -- SH not set; the arm is NOT R
+10:02:38 tapped listSettingsButton at 860,405 text='Settings'
+10:02:38 tapped settingsSharpOffButton at 185,1350 text='²ô±â'
+10:02:49 FAIL  2s SH off: SH requested=off through Settings (settingsSharpOffButton; the app's own sharpness_select level=off origin=settings; the button selected)  no sharpness_select line | selected=True screen=(0, 136, 1080, 2400) button=(40, 1300, 330, 1400)
+10:02:49   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:02:49
+10:02:49   fail1 (after "2s SH off: SH requested=off through Settings (settingsSharpO"): ui fail1_ui.txt -- 7 elements, no status / error text
+PASS  NEGATIVE 2s r7f: the tap logs no sharpness_select level=off -> FAIL  no sharpness_select line | selected=True screen=(0, 136, 1080, 2400) button=(40, 1300, 330, 1400)
+10:02:49 tapped listSettingsButton at 860,405 text='Settings'
+10:02:50 tapped settingsSharpOffButton at 185,1350 text='²ô±â'
+10:02:50 FAIL  2s SH off: SH requested=off through Settings (settingsSharpOffButton; the app's own sharpness_select level=off origin=settings; the button selected)  [sharpness_select] level=off s=0.0 origin=settings path=none effective=off | selected=False screen=(0, 136, 1080, 2400) button=(40, 1300, 330, 1400)
+10:02:50   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:02:50
+10:02:50   fail1 (after "2s SH off: SH requested=off through Settings (settingsSharpO"): ui fail1_ui.txt -- 7 elements, no status / error text
+PASS  NEGATIVE 2s r7f: logged, but the requested level stays weak (the button not selected) -> FAIL  [sharpness_select] level=off s=0.0 origin=settings path=none effective=off | selected=False screen=(0, 136, 1080, 2400) button=(40, 1300, 330, 1400)
+10:02:50   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:02:51 tapped listWindowsButton at 200,405 text='Windows'
+10:02:51   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:02:51 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:02:53   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:02:53
+10:02:53 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:02:53 FAIL  3s SH off: SH off in effect for the picture (sharpen_path path=direct requested=off; sharpen_start 0)  direct=[] other=['[sharpen_path] path=direct requested=weak effective=off fallback=gl_unavailable'] sharpen_start=0 fallback=[]
+10:02:53   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:02:53
+10:02:53   fail1 (after "3s SH off: SH off in effect for the picture (sharpen_path pa"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 3s r7f: weak requested, effective=off by a fallback (path=direct requested=weak) -> FAIL (a fallback is not SH off)  direct=[] other=['[sharpen_path] path=direct requested=weak effective=off fallback=gl_unavailable'] sharpen_start=0 fallback=[]
+10:02:54 tapped listSettingsButton at 860,405 text='Settings'
+10:02:54 tapped settingsSharpOffButton at 185,1350 text='²ô±â'
+10:02:54 PASS  2s SH off: SH requested=off through Settings (settingsSharpOffButton; the app's own sharpness_select level=off origin=settings; the button selected)  [sharpness_select] level=off s=0.0 origin=settings path=none effective=off | selected=True screen=(0, 136, 1080, 2400) button=(40, 1300, 330, 1400)
+10:02:54   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:02:55 tapped listWindowsButton at 200,405 text='Windows'
+10:02:55   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:02:55 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:02:57   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:02:57
+10:02:57 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:02:57 FAIL  3s SH off: SH off in effect for the picture (sharpen_path path=direct requested=off; sharpen_start 0)  direct=[] other=['[sharpen_path] path=sharpen gen=1 requested=off s=0.0'] sharpen_start=1 fallback=[]
+10:02:57   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:02:57
+10:02:57   fail1 (after "3s SH off: SH off in effect for the picture (sharpen_path pa"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 3s r7f: the picture went through the sharpen path (sharpen_start) -> FAIL  direct=[] other=['[sharpen_path] path=sharpen gen=1 requested=off s=0.0'] sharpen_start=1 fallback=[]
+10:02:58   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:02:58 tapped listWindowsButton at 200,405 text='Windows'
+10:02:58   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:02:58 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:03:00   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:03:00
+10:03:00 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:03:04 PASS  3w the connection: 3 s with no input after the first frame -- the same viewer and connection held, the picture went on  held 3.1 s; video out 10 -> 22; since the pick: scenes=[] status=[] picks=0 host ended=[] host new clients=0
+PASS  control 3w r7f: the connection held for the whole watch, the picture went on, NO input during it -> PASS  held 3.1 s; video out 10 -> 22; since the pick: scenes=[] status=[] picks=0 host ended=[] host new clients=0
+10:03:04   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:03:04 tapped listWindowsButton at 200,405 text='Windows'
+10:03:04   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:03:04 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:03:06   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:03:06
+10:03:06 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:03:09 FAIL  3w the connection: 10 s with no input after the first frame -- the same viewer and connection held, the picture went on  held 2.4 s; video out 10 -> 13; since the pick: scenes=['HOSTS'] status=['error: ¿¬°áÀÌ ²÷°å½À´Ï´Ù (peer lost)'] picks=0 host ended=['udp control session ended epoch=1 resumed=0 reason=none'] host new clients=0
+10:03:09   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:03:09
+10:03:09   fail1 (after "3w the connection: 10 s with no input after the first frame "): ui fail1_ui.txt -- statusText                     en=1 sel=0 (40, 300, 1040, 380) '¿¬°áÀÌ ²÷°å½À´Ï´Ù (peer lost)'
+PASS  NEGATIVE 3w r7f: the connection breaks during the watch -> FAIL at once (not after the full watch), no input  2.8 s held 2.4 s; video out 10 -> 13; since the pick: scenes=['HOSTS'] status=['error: ¿¬°áÀÌ ²÷°å½À´Ï´Ù (peer lost)'] picks=0 host ended=['udp control session ended epoch=1 resumed=0 reason=none'] host new clients
+PASS  r7f: right after that FAIL a READ-ONLY record of the screen holds the error text (and the screenshot, logs)  android:id/content             en=1 sel=0 (0, 136, 1080, 2400) ''
+hostCardName                   en=1 sel=0 (40, 400, 1040, 560) 'oa-pc-a'
+statusText           
+10:03:09   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:03:10 tapped listWindowsButton at 200,405 text='Windows'
+10:03:10   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:03:10 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:03:12   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:03:12
+10:03:12 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=3
+10:03:15 FAIL  3w the connection: 3 s with no input after the first frame -- the same viewer and connection held, the picture went on  held 3.3 s; video out 3 -> 3; since the pick: scenes=[] status=[] picks=0 host ended=[] host new clients=0
+10:03:16   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:03:16
+10:03:16   fail1 (after "3w the connection: 3 s with no input after the first frame -"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 3w r7f: connected but the picture does not go on (video out unchanged) -> FAIL  held 3.3 s; video out 3 -> 3; since the pick: scenes=[] status=[] picks=0 host ended=[] host new clients=0
+10:03:16   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:03:16 tapped listWindowsButton at 200,405 text='Windows'
+10:03:16   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:03:16 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:03:18   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:03:18
+10:03:18 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+PASS  NEGATIVE 3w r7f: a watch shorter than 30 s outside the stub test is refused (INVALID)  OA_OBSERVE_SEC=3 is below 30 s: for the stub test only
+PASS  r7f: a record of the sign-in screen never writes the password field's text (the fixture password is absent)  android:id/content             en=1 sel=0 (0, 136, 1080, 2400) ''
+loginIdInput                   en=1 sel=0 (40, 480, 1040, 560) 'ID'
+loginPasswordInput        
+10:03:19 FAIL  2k (P): no soft keyboard up before the manual connect (none put away)  keyboard shown ['mDecorViewVisible', 'mInputShown', 'mWindowVisible']
+10:03:19   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:03:19
+10:03:19   fail1 (after "2k (P): no soft keyboard up before the manual connect (none "): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 2k r7f (P): a keyboard up before the manual connect -> FAIL, nothing sent (no BACK, no tap)  keys=[] taps=0
+10:03:19 PASS  2k (P): no soft keyboard up before the manual connect (none put away)  keyboard hidden []
+PASS  control 2k r7f (P): no keyboard -> PASS
+PASS  r7f (source): both of arm P's connect taps come after its keyboard check
+10:03:19 oa run arm=S apk=C:\work\gnlink-wt\old-apk-lane\.claude\oa_runs\flow-watchdrop-20261030100319-40504\none.apk
+10:03:19   apk sha256=b40dc39ed29fc26949831bbeb177ebacfc543e1b528608c9979bb16e364e0ccc
+10:03:19   adb client C:\work\gnlink-wt\old-apk-lane\automation\old_apk_lane\stubs\fake_ui_adb.cmd sha256=feb2733399223622 Android Debug Bridge version 1.0.41 (fake, oa_pick_test) serial=emulator-5554
+10:03:19   fixture: ready run=flow-watchdrop-20261030100319-40504 hosts=a standby=none controlPort=0 relay=10.0.2.2
+10:03:20   LOGCAT ENDED rc=0 -- no logcat from here (a gap, not an absence of events)
+10:03:20 install: rc=0 Performing Streamed Install
+Success
+10:03:20   pm clear com.remote60.androiddirect: rc=0 stdout='Success' stderr='' -> Success
+10:03:22   installed: versionCode=31 versionName=0.2.32
+10:03:22   installed base.apk sha256=b40dc39ed29fc269 (the APK b40dc39ed29fc269)
+10:03:22   host oa-pc-a: udp bindPort=50000 tcp controlPort=0
+10:03:25 tapped loginIdInput at 540,520 text='ID'
+10:03:26 tapped loginPasswordInput at 540,675 text='Password'
+10:03:27 tapped loginButton at 540,850 text='Sign In'
+10:03:27 PASS  1 sign in (the fixture directory of the 0.2.164 candidate): the PC is listed  [login_attempt] server=http://10.0.2.2:18410 id=oatest
+10:03:27   1b the sign-in keyboard: soft keyboard hidden []
+10:03:28 tapped card:oa-pc-a at 540,480 text='oa-pc-a'
+10:03:28 PASS  2 the ordinary connect (directory): the host's targets are shown  [directory_chosen] 10.0.2.2:18443|relay | [targets_ready] origin=connect ms=1 items=1 gen=1
+10:03:28   2: the host's lines of this connect: 10-30 00:00:00.000 [native-video-host] client connected transport=udp
+10:03:28 tapped listSettingsButton at 860,405 text='Settings'
+10:03:28 tapped settingsSharpOffButton at 185,1350 text='²ô±â'
+10:03:29 PASS  2s SH off: SH requested=off through Settings (settingsSharpOffButton; the app's own sharpness_select level=off origin=settings; the button selected)  [sharpness_select] level=off s=0.0 origin=settings path=none effective=off | selected=True screen=(0, 136, 1080, 2400) button=(40, 1300, 330, 1400)
+10:03:29   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:03:29 tapped listWindowsButton at 200,405 text='Windows'
+10:03:29   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:03:29 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:03:31   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:03:31
+10:03:31 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:03:31 PASS  3s SH off: SH off in effect for the picture (sharpen_path path=direct requested=off; sharpen_start 0)  direct=['[sharpen_path] path=direct requested=off effective=off fallback=none'] other=[] sharpen_start=0 fallback=[]
+10:03:34 FAIL  3w the connection: 12 s with no input after the first frame -- the same viewer and connection held, the picture went on  held 2.8 s; video out 11 -> 14; since the pick: scenes=['HOSTS'] status=['error: ¿¬°áÀÌ ²÷°å½À´Ï´Ù (peer lost)'] picks=0 host ended=['udp control session ended epoch=1 resumed=0 reason=none'] host new clients=0
+10:03:35   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:03:35
+10:03:35   fail1 (after "3w the connection: 12 s with no input after the first frame "): ui fail1_ui.txt -- statusText                     en=1 sel=0 (40, 300, 1040, 380) '¿¬°áÀÌ ²÷°å½À´Ï´Ù (peer lost)'
+10:03:35 NOT RUN  4: not reached (an earlier step failed or the run stopped)
+10:03:35 NOT RUN  5: not reached (an earlier step failed or the run stopped)
+10:03:35 NOT RUN  6: not reached (an earlier step failed or the run stopped)
+10:03:35 NOT RUN  7: not reached (an earlier step failed or the run stopped)
+10:03:35 run end: 5/6 PASS, 4 NOT RUN
+PASS  r7f: arm S driven from the install, the connection breaks in the 30 s watch -> the arm ends there: 3w FAIL, NO tap on the picture at all, 4 5 6 7 NOT RUN  rc=1 taps at the picture=False not run=['4', '5', '6', '7'] 3w=["held 2.8 s; video out 11 -> 14; since the pick: scenes=['HOSTS'] status=['error: ¿¬°áÀÌ ²÷°å½À´Ï´Ù (peer lost)'] picks=0 host en"]
+10:03:35 oa run arm=S apk=C:\work\gnlink-wt\old-apk-lane\.claude\oa_runs\flow-shnorow-20261030100335-40504\none.apk
+10:03:35   apk sha256=5ecb2a9feb4a594f73a8e4366aa1a728764ccf6b3903dc5709f73ffa3b4aa36c
+10:03:35   adb client C:\work\gnlink-wt\old-apk-lane\automation\old_apk_lane\stubs\fake_ui_adb.cmd sha256=feb2733399223622 Android Debug Bridge version 1.0.41 (fake, oa_pick_test) serial=emulator-5554
+10:03:35   fixture: ready run=flow-shnorow-20261030100335-40504 hosts=a standby=none controlPort=0 relay=10.0.2.2
+10:03:35   LOGCAT ENDED rc=0 -- no logcat from here (a gap, not an absence of events)
+10:03:35 install: rc=0 Performing Streamed Install
+Success
+10:03:36   pm clear com.remote60.androiddirect: rc=0 stdout='Success' stderr='' -> Success
+10:03:38   installed: versionCode=31 versionName=0.2.32
+10:03:38   installed base.apk sha256=5ecb2a9feb4a594f (the APK 5ecb2a9feb4a594f)
+10:03:38   host oa-pc-a: udp bindPort=50000 tcp controlPort=0
+10:03:41 tapped loginIdInput at 540,520 text='ID'
+10:03:42 tapped loginPasswordInput at 540,675 text='Password'
+10:03:43 tapped loginButton at 540,850 text='Sign In'
+10:03:43 PASS  1 sign in (the fixture directory of the 0.2.164 candidate): the PC is listed  [login_attempt] server=http://10.0.2.2:18410 id=oatest
+10:03:43   1b the sign-in keyboard: soft keyboard hidden []
+10:03:43 tapped card:oa-pc-a at 540,480 text='oa-pc-a'
+10:03:44 PASS  2 the ordinary connect (directory): the host's targets are shown  [directory_chosen] 10.0.2.2:18443|relay | [targets_ready] origin=connect ms=1 items=1 gen=1
+10:03:44   2: the host's lines of this connect: 10-30 00:00:00.000 [native-video-host] client connected transport=udp
+10:03:44 tapped listSettingsButton at 860,405 text='Settings'
+10:03:55 INVALID  2s SH off: settingsSharpOffButton not usable on screen (found 0, - enabled=- screen=(0, 136, 1080, 2400)) -- SH not set; the arm is NOT RUN (no prefs edit, no other way) -- nothing of this arm is judged
+10:03:55 NOT RUN  3: not reached (an earlier step failed or the run stopped)
+10:03:55 NOT RUN  4: not reached (an earlier step failed or the run stopped)
+10:03:55 NOT RUN  5: not reached (an earlier step failed or the run stopped)
+10:03:55 NOT RUN  6: not reached (an earlier step failed or the run stopped)
+10:03:55 NOT RUN  7: not reached (an earlier step failed or the run stopped)
+10:03:55 run end: 2/2 PASS, 5 NOT RUN
+PASS  r7f: arm S driven from the install, the Settings control not usable -> INVALID (exit 2): nothing picked, nothing tapped after  rc=2 card taps=[]
+10:03:55   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:03:55 tapped listWindowsButton at 200,405 text='Windows'
+10:03:55   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:03:55 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:03:57   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:03:57
+10:03:57 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:03:57 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window  NO tap: not the same viewer / connection: no app snapshot: app log not read (RuntimeError: adb ('pull', '/sdcard/Android/data/com.remote60.androiddirect/files/android_dire)
+10:03:58   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:03:58
+10:03:58   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 r7f(6): the app log pull fails after the pick -> "cannot tell" -> FAIL with NO tap  NO tap: not the same viewer / connection: no app snapshot: app log not read (RuntimeError: adb ('pull', '/sdcard/Android/data/com.remote60.androiddirect/files/android_dire)
+10:03:58   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:03:58 tapped listWindowsButton at 200,405 text='Windows'
+10:03:58   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:03:58 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:04:00   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:00
+10:04:00 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:04:01 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window  NO tap: not the same viewer / connection: the host log shrank (429 < 858 at the pick): cannot tell
+10:04:01   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:01
+10:04:01   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 r7f(6): the host log is shorter than at the pick after the pick -> "cannot tell" -> FAIL with NO tap  NO tap: not the same viewer / connection: the host log shrank (429 < 858 at the pick): cannot tell
+10:04:01   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:04:01 tapped listWindowsButton at 200,405 text='Windows'
+10:04:01   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:04:01 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:04:03   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:03
+10:04:04 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:04:04 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window  NO tap: not the same viewer / connection: the host log does not continue the one read at the pick (replaced): cannot tell
+10:04:04   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:04
+10:04:04   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 r7f(6): the host log was replaced after the pick -> "cannot tell" -> FAIL with NO tap  NO tap: not the same viewer / connection: the host log does not continue the one read at the pick (replaced): cannot tell
+10:04:04   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:04:04 tapped listWindowsButton at 200,405 text='Windows'
+10:04:04   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:04:05 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:04:07   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:07
+10:04:07 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:04:07 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window  NO tap: not the same viewer / connection: the pick marker is gone from the app log (rotated / replaced): cannot tell
+10:04:07   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:07
+10:04:07   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 r7f(6): the pick marker is gone from the app log after the pick -> "cannot tell" -> FAIL with NO tap  NO tap: not the same viewer / connection: the pick marker is gone from the app log (rotated / replaced): cannot tell
+10:04:07   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:04:07 tapped listWindowsButton at 200,405 text='Windows'
+10:04:08   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:04:08 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:04:10   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:10
+10:04:10 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:04:10 FAIL  3w the connection: a readable current-pick video counter exists before the watch  no current snapshot / pick marker / video out baseline; nothing judged as progressing
+10:04:10   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:10
+10:04:10   fail1 (after "3w the connection: a readable current-pick video counter exi"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 3w: the baseline app snapshot fails -> FAIL before the watch, no input  no current snapshot / pick marker / video out baseline; nothing judged as progressing
+10:04:10   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:04:11 tapped listWindowsButton at 200,405 text='Windows'
+10:04:11   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:04:11 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:04:13   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:13
+10:04:13 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:04:14 FAIL  3w the connection: 3 s with no input after the first frame -- the same viewer and connection held, the picture went on  held 0.4 s; video out 10 -> 10; no app snapshot: app log not read (RuntimeError: adb ('pull', '/sdcard/Android/data/com.remote60.androiddirect/files/android_dire)
+10:04:14   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:14
+10:04:14   fail1 (after "3w the connection: 3 s with no input after the first frame -"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 3w: the app log pull fails AFTER a good baseline and initial gate -> FAIL in the loop, no input  reads=[True, True, False, False] injected=1 held 0.4 s; video out 10 -> 10; no app snapshot: app log not read (RuntimeError: adb ('pull', '/sdcard/Android/data/com.remote60.androiddirect/files/android_dir
+10:04:14   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:04:14 tapped listWindowsButton at 200,405 text='Windows'
+10:04:14   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:04:14 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:04:16   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:16
+10:04:17 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:04:17 FAIL  3w the connection: 3 s with no input after the first frame -- the same viewer and connection held, the picture went on  held 0.4 s; video out 10 -> 13; the host log shrank (429 < 858 at the pick): cannot tell
+10:04:17   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:17
+10:04:17   fail1 (after "3w the connection: 3 s with no input after the first frame -"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 3w: the host log shrinks AFTER a good baseline and initial gate -> FAIL in the loop, no input  reads=[True, True, True, True] injected=1 held 0.4 s; video out 10 -> 13; the host log shrank (429 < 858 at the pick): cannot tell
+10:04:18   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:04:18 tapped listWindowsButton at 200,405 text='Windows'
+10:04:18   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:04:18 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:04:20   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:20
+10:04:20 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+PASS  r7f(6) contrast: 9cec590's same_viewer with the app log pull failing said "the same" (True) -- the hole  since the pick: scenes=[] status=[] picks=0 host ended=[] host new clients=0
+10:04:20   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:04:21 tapped listWindowsButton at 200,405 text='Windows'
+10:04:21   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:04:21 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:04:23   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:23
+10:04:23 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+PASS  control r7f(6): two good reads, nothing changed since the pick -> the same viewer (True)  since the pick: scenes=[] status=[] picks=0 host ended=[] host new clients=0
+PASS  NEGATIVE r7f(6): the marker is NOT registered from a failed app log read  app log not read (RuntimeError: adb ('pull', '/sdcard/Android/data/com.remote60.androiddirect/files/android_dire)
+PASS  NEGATIVE r7f(6): the marker is NOT registered from an empty host log  host log empty
+10:04:23 oa run arm=P apk=C:\work\gnlink-wt\old-apk-lane\.claude\oa_runs\flow-p-4fail-20261030100423-40504\none.apk
+10:04:23   apk sha256=c75af2fb5b59af89ce88c4003d0aa45246bfd69f584889855db6163e84445e74
+10:04:23   adb client C:\work\gnlink-wt\old-apk-lane\automation\old_apk_lane\stubs\fake_ui_adb.cmd sha256=feb2733399223622 Android Debug Bridge version 1.0.41 (fake, oa_pick_test) serial=emulator-5554
+10:04:23   fixture: ready run=flow-p-4fail-20261030100423-40504 hosts=a standby=none controlPort=18460 relay=127.0.0.1
+10:04:24   LOGCAT ENDED rc=0 -- no logcat from here (a gap, not an absence of events)
+10:04:24 install: rc=0 Performing Streamed Install
+Success
+10:04:24   pm clear com.remote60.androiddirect: rc=0 stdout='Success' stderr='' -> Success
+10:04:26   installed: versionCode=31 versionName=0.2.32
+10:04:26   installed base.apk sha256=c75af2fb5b59af89 (the APK c75af2fb5b59af89)
+10:04:26   host oa-pc-a: udp bindPort=50000 tcp controlPort=18460
+10:04:26 NOT RUN  1 sign in: the PUBLISHED 0.2.32 signs in only to its fixed https server (b554e76 build.gradle.kts:6/50) -- not this lane's fixture; see arm S
+10:04:26   P start-up: am start (once, budget 120 s, per call <= 5 s): rc=0 
+10:04:27   P precondition: [auto_login] NO_CREDENTIAL and no sign_in_store, in read 1 at 0.2 s after am start (the setup allowance -- not a cold-start performance figure)
+10:04:27   P start-up update check (the published build derives it from its fixed https directory; no session, so no credential): no update_check line yet
+10:04:27 tapped loginManualButton at 540,1050 text='¼öµ¿ ¿¬°á'
+10:04:27 PASS  2k (P): no soft keyboard up before the manual connect (none put away)  keyboard hidden []
+10:04:27 tapped connectButton at 540,1250 text='¿¬°á'
+10:04:27 PASS  2 (P) the manual DIRECT connect (10.0.2.2: UDP video 50000, TCP control 18460) reaches the targets, and the host took ONE TCP control client  host tcp clients +1 listen=NO | [login_manual] host=10.0.2.2 | [targets_ready] origin=connect ms=1 items=1 gen=1
+10:04:28 tapped listSettingsButton at 860,405 text='Settings'
+10:04:28 tapped settingsSharpOffButton at 185,1350 text='²ô±â'
+10:04:28 PASS  2s SH off: SH requested=off through Settings (settingsSharpOffButton; the app's own sharpness_select level=off origin=settings; the button selected)  [sharpness_select] level=off s=0.0 origin=settings path=none effective=off | selected=True screen=(0, 136, 1080, 2400) button=(40, 1300, 330, 1400)
+10:04:28   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:04:29 tapped listWindowsButton at 200,405 text='Windows'
+10:04:29   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:04:29 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:04:31   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:31
+10:04:31 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:04:31 PASS  3s SH off: SH off in effect for the picture (sharpen_path path=direct requested=off; sharpen_start 0)  direct=['[sharpen_path] path=direct requested=off effective=off fallback=none'] other=[] sharpen_start=0 fallback=[]
+10:04:34 PASS  3w the connection: 3 s with no input after the first frame -- the same viewer and connection held, the picture went on  held 3.1 s; video out 11 -> 23; since the pick: scenes=[] status=[] picks=0 host ended=[] host new clients=0
+10:04:35   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+10:04:38 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=0 kinds=[] no down -> no up
+10:04:38   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:38
+10:04:38   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+10:04:38 NOT RUN  5: not reached (an earlier step failed or the run stopped)
+10:04:38 NOT RUN  6: not reached (an earlier step failed or the run stopped)
+10:04:38 NOT RUN  7: not reached (an earlier step failed or the run stopped)
+10:04:38 run end: 6/7 PASS, 4 NOT RUN
+PASS  r7f(6): arm P from its start through 2 (P) / 2k / 2s / 3 / 3s / 3w, 4 FAILs -> no tap after 4 (no menu, no ¿¬°á ÇØÁ¦), 5 6 7 NOT RUN  rc=1 steps={'2k': True, '2': True, '2s': True, '3': True, '3s': True, '3w': True, '4': False} taps after 4=[] not run=['1 sign in', '5', '6', '7']
+PASS  r7i ime_state: the run's pattern: mInputShown / mWindowVisible / mDecorViewVisible false, mIsInputViewShown true -> hidden  hidden ['mIsInputViewShown=true (IME-internal only; mInputShown / mWindowVisible / mDecorViewVisible false)']
+PASS  r7i ime_state: all on -> shown  shown ['mDecorViewVisible', 'mInputShown', 'mWindowVisible']
+PASS  r7i ime_state: mInputShown false but the IME window visible -> shown  shown ['mDecorViewVisible', 'mWindowVisible']
+PASS  r7i ime_state: only mInputShown read (the window state missing) -> unknown  unknown ["missing / unclear: ['mWindowVisible', 'mDecorViewVisible']"]
+PASS  r7i ime_state: no flags at all -> unknown  unknown ["missing / unclear: ['mInputShown', 'mWindowVisible', 'mDecorViewVisible']"]
+10:04:39   1b the sign-in keyboard: soft keyboard shown ['mDecorViewVisible', 'mInputShown', 'mWindowVisible']
+10:04:41 PASS  1b the sign-in keyboard: the sign-in keyboard put away on the PC list (BACK while it was shown); the list still there, no dialog  after: keyboard hidden ['mIsInputViewShown=true (IME-internal only; mInputShown / mWindowVisible / mDecorViewVisible false)'] listed=True dialog=False
+PASS  r7i 1b: BACK puts the keyboard away and only mIsInputViewShown stays true (the run) -> PASS, the flag noted; the flag lines kept (ime_reads.txt)  after: keyboard hidden ['mIsInputViewShown=true (IME-internal only; mInputShown / mWindowVisible / mDecorViewVisible false)'] listed=True dialog=False
+10:04:41   1b the sign-in keyboard: soft keyboard shown ['mDecorViewVisible', 'mInputShown', 'mWindowVisible']
+10:04:44 FAIL  1b the sign-in keyboard: the sign-in keyboard put away on the PC list (BACK while it was shown); the list still there, no dialog  after: keyboard shown ['mIsInputViewShown'] listed=True dialog=False
+10:04:44   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:44
+10:04:44   fail1 (after "1b the sign-in keyboard: the sign-in keyboard put away on th"): ui fail1_ui.txt -- 2 elements, no status / error text
+PASS  r7i contrast: ff1c72a on the same pattern -> 1b FAIL (the run's failure reproduced)  after: keyboard shown ['mIsInputViewShown'] listed=True dialog=False
+10:04:44   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:04:44 tapped listWindowsButton at 200,405 text='Windows'
+10:04:44   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:04:45 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:04:46   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:46
+10:04:47 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:04:47 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window  NO tap: soft keyboard unknown ["missing / unclear: ['mWindowVisible', 'mDecorViewVisible']"]
+10:04:47   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:47
+10:04:47   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+PASS  NEGATIVE 4 r7i: the keyboard state only half read -> unknown -> FAIL with NO tap  NO tap: soft keyboard unknown ["missing / unclear: ['mWindowVisible', 'mDecorViewVisible']"]
+10:04:47   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:04:47 tapped listWindowsButton at 200,405 text='Windows'
+10:04:48   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:04:48 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:04:50   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:04:50
+10:04:50 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.1 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:04:50   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+10:04:53 PASS  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=3 kinds=[1, 2, 3] down seq=2 at 240,135 -> up seq=3 at 240,135 same position aim=(240, 135) off=0,0 (recorded, not judged)
+PASS  control 4 r7i: the run's internal-only pattern counts as no keyboard -> the tap goes, PASS  window=(480, 270) events after the tap=3 kinds=[1, 2, 3] down seq=2 at 240,135 -> up seq=3 at 240,135 same position aim=(240, 135) off=0,0 (recorded, not judged
+10:04:53 oa run arm=P apk=C:\work\gnlink-wt\old-apk-lane\.claude\oa_runs\pstart-late-20261030100453-40504\none.apk
+10:04:53   apk sha256=465bf1a208261f90a9adefabcdb46b2960a65e41461a8f5007b735aa3df5be00
+10:04:53   adb client C:\work\gnlink-wt\old-apk-lane\automation\old_apk_lane\stubs\fake_ui_adb.cmd sha256=feb2733399223622 Android Debug Bridge version 1.0.41 (fake, oa_pick_test) serial=emulator-5554
+10:04:53   fixture: ready run=pstart-late-20261030100453-40504 hosts=a standby=none controlPort=18460 relay=127.0.0.1
+10:04:54   LOGCAT ENDED rc=0 -- no logcat from here (a gap, not an absence of events)
+10:04:54 install: rc=0 Performing Streamed Install
+Success
+10:04:54   pm clear com.remote60.androiddirect: rc=0 stdout='Success' stderr='' -> Success
+10:04:56   installed: versionCode=31 versionName=0.2.32
+10:04:56   installed base.apk sha256=465bf1a208261f90 (the APK 465bf1a208261f90)
+10:04:56   host oa-pc-a: udp bindPort=50000 tcp controlPort=18460
+10:04:56 NOT RUN  1 sign in: the PUBLISHED 0.2.32 signs in only to its fixed https server (b554e76 build.gradle.kts:6/50) -- not this lane's fixture; see arm S
+10:04:56   P start-up: am start (once, budget 6 s, per call <= 1 s): rc=0 
+10:04:59   P precondition: [auto_login] NO_CREDENTIAL and no sign_in_store, in read 6 at 3.1 s after am start (the setup allowance -- not a cold-start performance figure)
+10:04:59   P start-up update check (the published build derives it from its fixed https directory; no session, so no credential): no update_check line yet
+10:05:00 tapped loginManualButton at 540,1050 text='¼öµ¿ ¿¬°á'
+10:05:00 PASS  2k (P): no soft keyboard up before the manual connect (none put away)  keyboard hidden []
+10:05:00 tapped connectButton at 540,1250 text='¿¬°á'
+10:05:00 PASS  2 (P) the manual DIRECT connect (10.0.2.2: UDP video 50000, TCP control 18460) reaches the targets, and the host took ONE TCP control client  host tcp clients +1 listen=NO | [login_manual] host=10.0.2.2 | [targets_ready] origin=connect ms=1 items=1 gen=1
+10:05:01 tapped listSettingsButton at 860,405 text='Settings'
+10:05:01 tapped settingsSharpOffButton at 185,1350 text='²ô±â'
+10:05:01 PASS  2s SH off: SH requested=off through Settings (settingsSharpOffButton; the app's own sharpness_select level=off origin=settings; the button selected)  [sharpness_select] level=off s=0.0 origin=settings path=none effective=off | selected=True screen=(0, 136, 1080, 2400) button=(40, 1300, 330, 1400)
+10:05:01   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:05:01 tapped listWindowsButton at 200,405 text='Windows'
+10:05:02   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:05:02 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:05:04   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:05:04
+10:05:04 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:05:04 PASS  3s SH off: SH off in effect for the picture (sharpen_path path=direct requested=off; sharpen_start 0)  direct=['[sharpen_path] path=direct requested=off effective=off fallback=none'] other=[] sharpen_start=0 fallback=[]
+10:05:07 PASS  3w the connection: 3 s with no input after the first frame -- the same viewer and connection held, the picture went on  held 3.0 s; video out 11 -> 23; since the pick: scenes=[] status=[] picks=0 host ended=[] host new clients=0
+10:05:08   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+10:05:11 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=0 kinds=[] no down -> no up
+10:05:11   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:05:11
+10:05:11   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+10:05:11 NOT RUN  5: not reached (an earlier step failed or the run stopped)
+10:05:11 NOT RUN  6: not reached (an earlier step failed or the run stopped)
+10:05:11 NOT RUN  7: not reached (an earlier step failed or the run stopped)
+10:05:11 run end: 6/7 PASS, 4 NOT RUN
+PASS  r7k: the app log appears 3 s after am start (pulls fail before): confirmed late, then the manual connect -- ONE am start, the first tap only after it  rc=1 am starts=1 first tap at call [23] steps={'2k': True, '2': True, '2s': True, '3': True, '3s': True, '3w': True, '4': False}
+10:05:11 oa run arm=P apk=C:\work\gnlink-wt\old-apk-lane\.claude\oa_runs\pstart-empty-20261030100511-40504\none.apk
+10:05:11   apk sha256=6599b310a65a81ad5bea59b762d298281687dc6c851d90a59e91f381fd845f44
+10:05:11   adb client C:\work\gnlink-wt\old-apk-lane\automation\old_apk_lane\stubs\fake_ui_adb.cmd sha256=feb2733399223622 Android Debug Bridge version 1.0.41 (fake, oa_pick_test) serial=emulator-5554
+10:05:11   fixture: ready run=pstart-empty-20261030100511-40504 hosts=a standby=none controlPort=18460 relay=127.0.0.1
+10:05:12   LOGCAT ENDED rc=0 -- no logcat from here (a gap, not an absence of events)
+10:05:12 install: rc=0 Performing Streamed Install
+Success
+10:05:12   pm clear com.remote60.androiddirect: rc=0 stdout='Success' stderr='' -> Success
+10:05:14   installed: versionCode=31 versionName=0.2.32
+10:05:14   installed base.apk sha256=6599b310a65a81ad (the APK 6599b310a65a81ad)
+10:05:14   host oa-pc-a: udp bindPort=50000 tcp controlPort=18460
+10:05:14 NOT RUN  1 sign in: the PUBLISHED 0.2.32 signs in only to its fixed https server (b554e76 build.gradle.kts:6/50) -- not this lane's fixture; see arm S
+10:05:14   P start-up: am start (once, budget 6 s, per call <= 1 s): rc=0 
+10:05:17   P precondition: [auto_login] NO_CREDENTIAL and no sign_in_store, in read 6 at 3.2 s after am start (the setup allowance -- not a cold-start performance figure)
+10:05:17   P start-up update check (the published build derives it from its fixed https directory; no session, so no credential): no update_check line yet
+10:05:17 tapped loginManualButton at 540,1050 text='¼öµ¿ ¿¬°á'
+10:05:18 PASS  2k (P): no soft keyboard up before the manual connect (none put away)  keyboard hidden []
+10:05:18 tapped connectButton at 540,1250 text='¿¬°á'
+10:05:18 PASS  2 (P) the manual DIRECT connect (10.0.2.2: UDP video 50000, TCP control 18460) reaches the targets, and the host took ONE TCP control client  host tcp clients +1 listen=NO | [login_manual] host=10.0.2.2 | [targets_ready] origin=connect ms=1 items=1 gen=1
+10:05:18 tapped listSettingsButton at 860,405 text='Settings'
+10:05:19 tapped settingsSharpOffButton at 185,1350 text='²ô±â'
+10:05:19 PASS  2s SH off: SH requested=off through Settings (settingsSharpOffButton; the app's own sharpness_select level=off origin=settings; the button selected)  [sharpness_select] level=off s=0.0 origin=settings path=none effective=off | selected=True screen=(0, 136, 1080, 2400) button=(40, 1300, 330, 1400)
+10:05:19   3: pinned window from the host log: capture hwnd=0x4d10f12 (80809746) window-list count=1 selectedId=80809746 title='remote60 mobile abr target pid 43948 92abc8fe'
+10:05:19 tapped listWindowsButton at 200,405 text='Windows'
+10:05:19   ui 3_targets_ui.txt: listWindowsButton            en=1 (0, 380, 400, 430) 'Windows' | listDevicesButton            en=1 (420, 380, 660, 430) 'Desktop' | listSettingsButton           en=1 (680, 380, 1040, 430) 'Settings' | targetCardTitle              en=1 (100, 1000, 470, 1100) 'remote60 mobile abr¡¦'
+10:05:19 tapped the pinned card at 285,1050 text='remote60 mobile abr¡¦'
+10:05:21   screenshot 3_window_first_frame.png sha256=075f8e3f22fcb592 bytes=9 at 10:05:21
+10:05:21 PASS  3 the pinned window picked: the pinned window picked (id 80809746, Windows tab) -> first frame  windowsTab shown=(0, 380, 400, 430) enabled=1 pinned=80809746 request=targetId=80809746 tab=WINDOWS gen=1 host window-select=[('80809746', '1', '2')] ack=[('80809746', '1', '2')] ready=[select_ready] targetId=80809746 gen=1 lastOutUs=1 title=remote60 mobile abr target pid 43 video out after ready=[3, 4, 5] (wall 2.2 s) screenshot=075f8e3f22fcb592 video_debug out=8
+10:05:22 PASS  3s SH off: SH off in effect for the picture (sharpen_path path=direct requested=off; sharpen_start 0)  direct=['[sharpen_path] path=direct requested=off effective=off fallback=none'] other=[] sharpen_start=0 fallback=[]
+10:05:25 PASS  3w the connection: 3 s with no input after the first frame -- the same viewer and connection held, the picture went on  held 3.0 s; video out 11 -> 23; since the pick: scenes=[] status=[] picks=0 host ended=[] host new clients=0
+10:05:25   one tap on the window picture at 540,1268 (video view (0, 136, 1080, 2400), keyboard hidden)
+10:05:28 FAIL  4 the tap on the window reaches the host as its own button down -> up, one position, inside the window ([input-trace] after the tap; not injected: input none)  window=(480, 270) events after the tap=0 kinds=[] no down -> no up
+10:05:28   screenshot fail1_screen.png sha256=075f8e3f22fcb592 bytes=9 at 10:05:28
+10:05:28   fail1 (after "4 the tap on the window reaches the host as its own button d"): ui fail1_ui.txt -- 5 elements, no status / error text
+10:05:28 NOT RUN  5: not reached (an earlier step failed or the run stopped)
+10:05:28 NOT RUN  6: not reached (an earlier step failed or the run stopped)
+10:05:28 NOT RUN  7: not reached (an earlier step failed or the run stopped)
+10:05:28 run end: 6/7 PASS, 4 NOT RUN
+PASS  r7k: the log file there but EMPTY for 3 s is not a success: waited, then confirmed; one am start  rc=1 am starts=1
+10:05:28 oa run arm=P apk=C:\work\gnlink-wt\old-apk-lane\.claude\oa_runs\pstart-expire-20261030100528-40504\none.apk
+10:05:28   apk sha256=3e3dfe70f9dd9b70c047aaf6eb197c9f26d1c39898906b9219860f508ead404a
+10:05:29   adb client C:\work\gnlink-wt\old-apk-lane\automation\old_apk_lane\stubs\fake_ui_adb.cmd sha256=feb2733399223622 Android Debug Bridge version 1.0.41 (fake, oa_pick_test) serial=emulator-5554
+10:05:29   fixture: ready run=pstart-expire-20261030100528-40504 hosts=a standby=none controlPort=18460 relay=127.0.0.1
+10:05:29   LOGCAT ENDED rc=0 -- no logcat from here (a gap, not an absence of events)
+10:05:29 install: rc=0 Performing Streamed Install
+Success
+10:05:29   pm clear com.remote60.androiddirect: rc=0 stdout='Success' stderr='' -> Success
+10:05:31   installed: versionCode=31 versionName=0.2.32
+10:05:32   installed base.apk sha256=3e3dfe70f9dd9b70 (the APK 3e3dfe70f9dd9b70)
+10:05:32   host oa-pc-a: udp bindPort=50000 tcp controlPort=18460
+10:05:32 NOT RUN  1 sign in: the PUBLISHED 0.2.32 signs in only to its fixed https server (b554e76 build.gradle.kts:6/50) -- not this lane's fixture; see arm S
+10:05:32   P start-up: am start (once, budget 6 s, per call <= 1 s): rc=0 
+10:05:38 INVALID  arm P start-up: auto_login NO_CREDENTIAL not confirmed within 6 s of am start (10 reads; last: 5.58s read 10: not read (rc=1) bytes=0 auto_login=[] sign_in_store=0) -- nothing tapped -- nothing of this arm is judged
+10:05:38 NOT RUN  2: not reached (an earlier step failed or the run stopped)
+10:05:38 NOT RUN  3: not reached (an earlier step failed or the run stopped)
+10:05:38 NOT RUN  4: not reached (an earlier step failed or the run stopped)
+10:05:38 NOT RUN  5: not reached (an earlier step failed or the run stopped)
+10:05:38 NOT RUN  6: not reached (an earlier step failed or the run stopped)
+10:05:38 NOT RUN  7: not reached (an earlier step failed or the run stopped)
+10:05:38 run end: 0/0 PASS, 7 NOT RUN
+PASS  r7k: the log appears only after the budget (9 s > 6 s): INVALID (exit 2), nothing tapped, one am start  rc=2 took=9.3s taps=0 am starts=1
+10:05:38 oa run arm=P apk=C:\work\gnlink-wt\old-apk-lane\.claude\oa_runs\pstart-hang-20261030100538-40504\none.apk
+10:05:38   apk sha256=8e96682770f56360aff11916961f74aeacbf6b4fcf2dfe204df321a408a1cfa3
+10:05:38   adb client C:\work\gnlink-wt\old-apk-lane\automation\old_apk_lane\stubs\fake_ui_adb.cmd sha256=feb2733399223622 Android Debug Bridge version 1.0.41 (fake, oa_pick_test) serial=emulator-5554
+10:05:38   fixture: ready run=pstart-hang-20261030100538-40504 hosts=a standby=none controlPort=18460 relay=127.0.0.1
+10:05:38   LOGCAT ENDED rc=0 -- no logcat from here (a gap, not an absence of events)
+10:05:38 install: rc=0 Performing Streamed Install
+Success
+10:05:39   pm clear com.remote60.androiddirect: rc=0 stdout='Success' stderr='' -> Success
+10:05:41   installed: versionCode=31 versionName=0.2.32
+10:05:41   installed base.apk sha256=8e96682770f56360 (the APK 8e96682770f56360)
+10:05:41   host oa-pc-a: udp bindPort=50000 tcp controlPort=18460
+10:05:41 NOT RUN  1 sign in: the PUBLISHED 0.2.32 signs in only to its fixed https server (b554e76 build.gradle.kts:6/50) -- not this lane's fixture; see arm S
+10:05:41   P start-up: am start (once, budget 6 s, per call <= 1 s): rc=0 
+10:05:50 INVALID  arm P start-up: auto_login NO_CREDENTIAL not confirmed within 6 s of am start (2 reads; last: 8.76s read 2: not read (timeout after 1.0 s (child killed)) bytes=0 auto_login=[] sign_in_store=0) -- nothing tapped -- nothing of this arm is judged
+10:05:50 NOT RUN  2: not reached (an earlier step failed or the run stopped)
+10:05:50 NOT RUN  3: not reached (an earlier step failed or the run stopped)
+10:05:50 NOT RUN  4: not reached (an earlier step failed or the run stopped)
+10:05:50 NOT RUN  5: not reached (an earlier step failed or the run stopped)
+10:05:50 NOT RUN  6: not reached (an earlier step failed or the run stopped)
+10:05:50 NOT RUN  7: not reached (an earlier step failed or the run stopped)
+10:05:50 run end: 0/0 PASS, 7 NOT RUN
+PASS  r7k: every pull hangs (4 s each): each bounded by the 1 s cap, the budget still ends it -- INVALID, nothing tapped, one am start, finite  rc=2 took=12.0s taps=0
+10:05:50 oa run arm=P apk=C:\work\gnlink-wt\old-apk-lane\.claude\oa_runs\pstart-cred-20261030100550-40504\none.apk
+10:05:50   apk sha256=223fca8a4f0d99bdf7f64f90886e64826abed6390dcc9565790cbb2d32ef3c26
+10:05:50   adb client C:\work\gnlink-wt\old-apk-lane\automation\old_apk_lane\stubs\fake_ui_adb.cmd sha256=feb2733399223622 Android Debug Bridge version 1.0.41 (fake, oa_pick_test) serial=emulator-5554
+10:05:50   fixture: ready run=pstart-cred-20261030100550-40504 hosts=a standby=none controlPort=18460 relay=127.0.0.1
+10:05:50   LOGCAT ENDED rc=0 -- no logcat from here (a gap, not an absence of events)
+10:05:50 install: rc=0 Performing Streamed Install
+Success
+10:05:51   pm clear com.remote60.androiddirect: rc=0 stdout='Success' stderr='' -> Success
+10:05:53   installed: versionCode=31 versionName=0.2.32
+10:05:53   installed base.apk sha256=223fca8a4f0d99bd (the APK 223fca8a4f0d99bd)
+10:05:53   host oa-pc-a: udp bindPort=50000 tcp controlPort=18460
+10:05:53 NOT RUN  1 sign in: the PUBLISHED 0.2.32 signs in only to its fixed https server (b554e76 build.gradle.kts:6/50) -- not this lane's fixture; see arm S
+10:05:53   P start-up: am start (once, budget 6 s, per call <= 1 s): rc=0 
+10:05:53 INVALID  arm P precondition: not an empty sign-in store at 0.2 s (auto_login=['[auto_login] RESTORED account=oatest'] sign_in_store=[]) -- nothing tapped -- nothing of this arm is judged
+10:05:53 NOT RUN  2: not reached (an earlier step failed or the run stopped)
+10:05:53 NOT RUN  3: not reached (an earlier step failed or the run stopped)
+10:05:53 NOT RUN  4: not reached (an earlier step failed or the run stopped)
+10:05:53 NOT RUN  5: not reached (an earlier step failed or the run stopped)
+10:05:53 NOT RUN  6: not reached (an earlier step failed or the run stopped)
+10:05:53 NOT RUN  7: not reached (an earlier step failed or the run stopped)
+10:05:53 run end: 0/0 PASS, 7 NOT RUN
+PASS  r7k: a stored sign-in restored (auto_login not NO_CREDENTIAL) -> INVALID at once (not at the deadline), nothing tapped, one am start  rc=2 took=3.4s
+10:05:53 oa run arm=P apk=C:\work\gnlink-wt\old-apk-lane\.claude\oa_runs\pstart-store-20261030100553-40504\none.apk
+10:05:53   apk sha256=23878816e292bb09cd8bfa686e7cc625c19643f04a5fb62c53063fb2f12472d1
+10:05:53   adb client C:\work\gnlink-wt\old-apk-lane\automation\old_apk_lane\stubs\fake_ui_adb.cmd sha256=feb2733399223622 Android Debug Bridge version 1.0.41 (fake, oa_pick_test) serial=emulator-5554
+10:05:53   fixture: ready run=pstart-store-20261030100553-40504 hosts=a standby=none controlPort=18460 relay=127.0.0.1
+10:05:54   LOGCAT ENDED rc=0 -- no logcat from here (a gap, not an absence of events)
+10:05:54 install: rc=0 Performing Streamed Install
+Success
+10:05:54   pm clear com.remote60.androiddirect: rc=0 stdout='Success' stderr='' -> Success
+10:05:56   installed: versionCode=31 versionName=0.2.32
+10:05:56   installed base.apk sha256=23878816e292bb09 (the APK 23878816e292bb09)
+10:05:56   host oa-pc-a: udp bindPort=50000 tcp controlPort=18460
+10:05:56 NOT RUN  1 sign in: the PUBLISHED 0.2.32 signs in only to its fixed https server (b554e76 build.gradle.kts:6/50) -- not this lane's fixture; see arm S
+10:05:56   P start-up: am start (once, budget 6 s, per call <= 1 s): rc=0 
+10:05:56 INVALID  arm P precondition: not an empty sign-in store at 0.2 s (auto_login=['[auto_login] NO_CREDENTIAL'] sign_in_store=['[sign_in_store] saved id=oatest']) -- nothing tapped -- nothing of this arm is judged
+10:05:57 NOT RUN  2: not reached (an earlier step failed or the run stopped)
+10:05:57 NOT RUN  3: not reached (an earlier step failed or the run stopped)
+10:05:57 NOT RUN  4: not reached (an earlier step failed or the run stopped)
+10:05:57 NOT RUN  5: not reached (an earlier step failed or the run stopped)
+10:05:57 NOT RUN  6: not reached (an earlier step failed or the run stopped)
+10:05:57 NOT RUN  7: not reached (an earlier step failed or the run stopped)
+10:05:57 run end: 0/0 PASS, 7 NOT RUN
+PASS  r7k: NO_CREDENTIAL but a sign_in_store line -> INVALID at once (not at the deadline), nothing tapped, one am start  rc=2 took=3.4s
+PASS  r7k (source): the P start-up has no unbounded call left (no wait_log / ka.adb in p_startup)
+
+81 checks, 0 failed
+RESULT: PASS

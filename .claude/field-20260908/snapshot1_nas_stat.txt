@@ -1,0 +1,4 @@
+2026-09-08 10:07:17 NAS snapshot
+3905196 2026-09-08 10:07:16.557906843 +0900 /opt/gnlink/remote60-directory/logs/shotan/68f79d01-d6c4-4a4a-a3ae-69da5be54826/viewer.log
+15788 2026-09-08 09:59:47.144160467 +0900 /opt/gnlink/remote60-directory/logs/shotan/68f79d01-d6c4-4a4a-a3ae-69da5be54826/client.log
+14092347 2026-09-08 10:07:16.843909163 +0900 /opt/gnlink/remote60-directory/logs/shotan/8ec6ecb1-11fb-4db3-8127-aea0c5311225/host.log

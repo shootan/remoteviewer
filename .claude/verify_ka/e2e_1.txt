@@ -1,0 +1,79 @@
+[product client: StandbyLease + ClientSessionController at a real host]
+PASS  the fake directory starts
+FAIL  no scratch directory inside the repository: the build directory (C:\work\gnlink-wt\ka-verify-build\test-scratch) is not inside the repository (C:\work\gnlink-wt\ka-r3); no scratch root will be created anywhere else
+FAIL  a real GNLinkStream starts
+FAIL  the host registers
+PASS  A's and B's leases open (one socket each)
+FAIL  A parks (its StandbyHello admitted)  unsupported: no answer to StandbyHello; 
+FAIL  B parks, its own entry  unsupported: no answer to StandbyHello; 
+PASS  ...and NEITHER started a session
+FAIL  A's activation arguments: its lease's socket and the activation handshake
+FAIL  A's ClientSessionController connects THROUGH the activation (no Hello)  host is required | unsupported: no answer to StandbyHello; 
+FAIL  ...the host admitted it as the first session by activation
+FAIL  ...video reaches A's sink
+FAIL  ...and A's control works (its window list arrives)
+  -- B, parked, pings for 12 s; A must not notice --
+FAIL  B stays parked (its Pings answered), no entry lost  unsupported: no answer to StandbyHello; 
+PASS  NO new session, NO control-session end while B pinged
+FAIL  A is still connected
+  -- B takes over explicitly; A's session ends; A parks again; A takes it back --
+FAIL  B's activation arguments
+FAIL  B connects through ITS activation  host is required | unsupported: no answer to StandbyHello; 
+FAIL  ...a takeover: a new epoch for B
+FAIL  ...video reaches B
+PASS  A's session ends (the host moved on)  error
+FAIL  A's session over (its own operation)
+FAIL  A parks again on its lease's own socket: its entry answers its Pings  unsupported: no answer to StandbyHello; 
+FAIL  A takes it back (a larger generation)   | unsupported: no answer to StandbyHello; 
+FAIL  ...video reaches A again
+FAIL  no ordinary Hello made a session: the first by activation, every rollover by activation  first=0 epochs=0 byActivation=0
+  -- the app's StandbyRunner (a pump thread per PC): start, activate, session over, release --
+PASS  the runner starts a lease for the PC (its own thread)
+PASS  ...it waits for a capability (none of its own), nothing sent
+PASS  the app hands one in (Provide)
+FAIL  ...it parks without anyone pumping it here
+FAIL  TakeActivation + Connect: the runner's PC takes the session by activation (video)
+FAIL  ...while handed off the runner reports it so (the pump leaves the socket alone)
+FAIL  ...the runner takes the session-over of its operation
+FAIL  the host sees the session end (the grant ends with it)
+FAIL  session over: parked again by the runner's own pings
+  -- the product's activation of a session entry (standby_session_link.hpp: its gate + the link) --
+FAIL  an operation stale before its connect: not adopted, the arguments abandoned, the lease keeps its socket  standby_not_ready
+FAIL  Connect refused before its worker: abandoned (the handle closed by the lease), parked again  standby_not_ready
+FAIL  the entry's own operation: adopted, connected by activation, video  standby_not_ready | 
+FAIL  ...while it runs the lease is handed off (the pump leaves the socket to the session)
+FAIL  closed as the bridge closes it: the lease is parked again on its own socket (SessionOver after Disconnect)
+PASS  ...a second Over says nothing
+FAIL  ...the host sees that session end
+FAIL  ...and the lease stays parked by its own pings
+FAIL  Release: the lease is gone here and released at the host (one StandbyRelease)
+
+[product client through the REAL server.js relay: support from /api/hosts, standby connects, a lease each]
+FAIL  the real directory server starts (relay on, loopback)
+FAIL  no scratch directory inside the repository: the build directory (C:\work\gnlink-wt\ka-verify-build\test-scratch) is not inside the repository (C:\work\gnlink-wt\ka-r3); no scratch root will be created anywhere else
+FAIL  a real GNLinkStream starts against it
+FAIL  the host is online
+FAIL  a client signs in (the product's directory_login)  port out of range
+FAIL  standby support is read from /api/hosts (no side effect): supported, with a relay  port out of range
+PASS  two leases open
+FAIL  each standby connect reserved its own relay lease  no observe endpoint
+FAIL  A and B park THROUGH the relay, each its own entry  no capability now;  | no capability now;  target=:0
+FAIL  ...two relay leases bound and ready, no session
+FAIL  A's session through its relay lease, by activation   | no capability now; 
+FAIL  ...video through the relay
+FAIL  ...the relay marks A's lease active
+FAIL  B pings through its own lease: parked, A untouched  no capability now; 
+FAIL  B takes over through ITS relay lease (a new epoch, video)   | no capability now; 
+FAIL  A's relay session over (its own operation)
+FAIL  through the relay, A's lease after its session: still parked on the same socket -- no loss, no new connect  no capability now; 
+FAIL  ...and takes the session back through the same relay lease (video)   | no capability now; 
+
+[product client at an OLDER host: Unsupported, no Hello]
+PASS  the fake directory starts
+FAIL  no scratch directory inside the repository: the build directory (C:\work\gnlink-wt\ka-verify-build\test-scratch) is not inside the repository (C:\work\gnlink-wt\ka-r3); no scratch root will be created anywhere else
+FAIL  the older GNLinkStream starts
+PASS  a lease opens at the older host
+PASS  no answer: Unsupported (no automatic connect to it)  unsupported: no answer to StandbyHello; 
+PASS  ...and its session table untouched: no session, no Hello admission
+
+RESULT: FAILED  (65 checks, 51 failed)

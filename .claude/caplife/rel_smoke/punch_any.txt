@@ -1,0 +1,39 @@
+﻿a working address later in the list is still found immediately
+  ok   observe prepared the socket (127.0.0.1:60180)
+  ok   a candidate answered ()
+  ok   the reachable candidate was chosen
+  ok   the winner's kind is reported for the log
+  ok   found in 0ms, not after the dead ones
+every address blocked fails within the budget rather than hanging
+  ok   reported failure
+  ok   stayed within the budget (706ms)
+one unusable entry does not cost the others their chance
+  ok   the resolvable candidate still won ()
+  ok   chose the reachable address
+errors that come back at once do not make the rounds faster (150 ms cadence)
+  ok   nobody answered (no candidate answered)
+  ok   the budget ended it: 1502 ms of 1500
+  ok   rounds sent in 1.5 s: 10 (150 ms cadence: 10-11)
+a stream of unrelated and empty datagrams does not make the rounds faster
+  ok   a stranger is not a candidate: nobody answered (no candidate answered)
+  ok   the budget ended it: 1508 ms
+  ok   rounds sent in 1.5 s: 10 (10-11)
+an answer that comes later is taken when it comes, with errors around it
+  ok   the late candidate won ()
+  ok   taken at 623 ms (opens at 500)
+a stop ends the punch promptly, errors or not
+  ok   reported as cancelled (cancelled)
+  ok   within one interval of the stop: 313 ms (stop at 300)
+a TTL expiry on one path does not end the punch: the answering candidate is still taken
+  ok   the TTL report was actually delivered (13 times)
+  ok   the answering candidate was taken ()
+  ok   after the TTL reports, within a round: 199 ms
+a failure of the socket itself (WSAENOTSOCK) ends the punch at once
+  ok   reported as a receive failure with its code (punch receive failed (error 10038))
+  ok   at once, not after the budget: 14 ms
+TTL reports that keep coming do not speed up the rounds, and the budget/stop still hold
+  ok   the budget ended it (no candidate answered)
+  ok   on time: 1510 ms of 1500
+  ok   rounds in 1.5 s: 10 (10-11)
+  ok   a stop during them ends it: 312 ms (cancelled)
+punch_any_test: PASS

@@ -1,0 +1,1247 @@
+diff --git a/apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp b/apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp
+index 2ee98e4..3f0fa81 100644
+--- a/apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp
++++ b/apps/android_direct_client/app/src/main/cpp/android_video_decoder.cpp
+@@ -140,11 +140,15 @@ void AndroidVideoDecoderSink::RequestCodecResetLocked() {
+ 
+ void AndroidVideoDecoderSink::ClearInboxLocked() {
+   inbox_.Clear();
++  committedKeyValid_ = false;  // C r2
+ }
+ 
+ // apk-inbox C (D8): every ask made before this moment is moot -- the session drops it at its held / accepted point.
+ void AndroidVideoDecoderSink::InvalidateKeyAsksLocked() {
+   ++keyEpoch_;
++  committedKeyValid_ = false;  // C r2
++  coveredToken_ = 0;           // C r2 §8
++  coveredExhausted_ = false;
+   recovery_.Invalidate();
+   wantCodecUp_ = false;
+   wantSelectionAbort_ = false;
+@@ -161,10 +165,22 @@ bool AndroidVideoDecoderSink::RecoveryCandidateLocked() const {
+   return held && (held->header.flags & 1u) != 0 && remote60::native_poc::chain_seq_after(held->header.seq, loss);
+ }
+ 
+-// A loss of the chain the decoder saw itself (await-key, its pending slot): the episode, and the tail gap.
++// A loss of the chain the decoder saw itself (await-key, its pending slot) at `seq`.
++// C r2 (Codex N1): (b) an IDR after `seq` already went into this codec -- recovered, nothing opens; an IDR after it held
++// outside the inbox (the pending slot, going in now) -- the queue is its suffix: no trim, no gap, and the episode sees
++// it as the candidate; (a) otherwise the queued deltas before the next usable IDR are dropped (never handed out), or
++// everything and the tail gap when none is queued.
+ void AndroidVideoDecoderSink::NoteChainLossLocked(int cause, uint32_t seq) {
+   NoteKeyWantLocked(cause);
+-  inbox_.MarkLoss(seq);
++  if (committedKeyValid_ && remote60::native_poc::chain_seq_after(committedKeySeq_, seq)) {
++    ++lossAlreadyRecovered_;
++    return;
++  }
++  const auto* held = pendingFrame_.held();
++  const bool keyOutside =
++      (held && (held->header.flags & 1u) != 0 && remote60::native_poc::chain_seq_after(held->header.seq, seq)) ||
++      (inFlightKey_ && remote60::native_poc::chain_seq_after(inFlightKeySeq_, seq));
++  inbox_.MarkLoss(seq, keyOutside);
+   recovery_.OnLoss(remote60::native_poc::kKeyCauseRecovery, seq, steady_now_us());
+ }
+ 
+@@ -175,7 +191,31 @@ void AndroidVideoDecoderSink::NoteInboxOfferLocked(const remote60::native_poc::C
+   recovery_.OnLoss(remote60::native_poc::kKeyCauseRecovery, r.lossSeq, steady_now_us());
+ }
+ 
++bool AndroidVideoDecoderSink::AnyKeyPreservedLocked() const {
++  if (inFlightKey_ || inbox_.HoldsAnyKey()) return true;
++  const auto* held = pendingFrame_.held();
++  return held && (held->header.flags & 1u) != 0;
++}
++
+ void AndroidVideoDecoderSink::TickRecoveryLocked() {
++  // C r2 (Codex §8 (a)): the covered duty -- over when the gate's token moved (paid by a commit, re-armed, reset);
++  // exhausted once its final window passed with no usable IDR preserved (and the episode with it).
++  if (coveredToken_ != 0) {
++    if (gate_.OwedToken() != coveredToken_) {
++      coveredToken_ = 0;
++      coveredExhausted_ = false;
++    } else if (!coveredExhausted_ && steady_now_us() >= coveredDeadlineUs_ && !AnyKeyPreservedLocked()) {
++      coveredExhausted_ = true;
++      ++coveredExhaustedCount_;
++      recovery_.MarkExhausted();
++      char line[192];
++      std::snprintf(line, sizeof(line),
++                    "decoder: the owed IDR's asks are spent (token=%llu) and its final window passed -- exhausted; the "
++                    "next usable IDR (the host's periodic one) still decodes",
++                    static_cast<unsigned long long>(coveredToken_));
++      log_error(line);
++    }
++  }
+   recovery_.Tick(steady_now_us(), RecoveryCandidateLocked());
+   if (recovery_.exhausted() != recoveryExhaustedLogged_) {
+     recoveryExhaustedLogged_ = recovery_.exhausted();
+@@ -226,6 +266,11 @@ void AndroidVideoDecoderSink::WorkerMain() {
+     while (!inbox_.empty() && !workerStop_ && surfaceApplied_ == surfaceSeq_ && !CodecResetPendingLocked()) {
+       InboxFrame item;
+       inbox_.Pop(&item);
++      // C r2: defensive -- a delta past the open gap's loss point is not fed (the trim and the door keep it out)
++      if (inbox_.BeyondGap(item.frame.header.seq, (item.frame.header.flags & 1u) != 0)) {
++        ++beyondGapDrops_;
++        continue;
++      }
+       REMOTE60_LT({
+         ++ltPassFrames_;
+         if (item.enqueueUs) LtAge(ltAgePop_, LtNowUs() - item.enqueueUs);
+@@ -802,6 +847,25 @@ uint32_t AndroidVideoDecoderSink::DecoderKeyRequestValidCausesAs(uint64_t token,
+   return valid;
+ }
+ 
++// C r2 (Codex §8 (a)): the session's asks for the owed IDR `owedToken` are spent (the last one left or was dropped).
++// No new asks come of it (the episode stays covered: owed is the same IDR); the final window starts now.
++void AndroidVideoDecoderSink::OnDecoderKeyOwedExhaustedAs(uint64_t token, uint64_t owedToken, uint64_t /* session clock */) {
++  LockedState lock(this);
++  if (!OwnerLocked(token)) return;
++  if (owedToken == 0 || gate_.OwedToken() != owedToken) {
++    ++coveredStale_;  // re-armed / paid / another selection since: not this duty
++    return;
++  }
++  coveredToken_ = owedToken;
++  coveredDeadlineUs_ = steady_now_us() + remote60::native_poc::KeyRecoveryEpisode::kFinalWindowUs;
++  coveredExhausted_ = false;
++  char line[160];
++  std::snprintf(line, sizeof(line), "decoder: the owed IDR's asks are spent (token=%llu): a final %llu ms window, no new asks",
++                static_cast<unsigned long long>(owedToken),
++                static_cast<unsigned long long>(remote60::native_poc::KeyRecoveryEpisode::kFinalWindowUs / 1000));
++  log_info(line);
++}
++
+ // apk-inbox C: the control exchange for this request started -- the episode's attempt, on the sink's own clock.
+ void AndroidVideoDecoderSink::OnDecoderKeyRequestSentAs(uint64_t token, const remote60::native_poc::DecoderKeyRequest& r,
+                                                         uint64_t /* nowUs: the session's clock */) {
+@@ -1029,12 +1093,16 @@ std::string AndroidVideoDecoderSink::DebugStatus() {
+   status += " gapDrops=" + std::to_string(inbox_.gapDeltas());
+   // apk-inbox C: the chain inbox and the recovery episode
+   status += " chainSkipped=" + std::to_string(inbox_.skipped()) + " chainDup=" + std::to_string(inbox_.duplicates()) +
+-            " chainStale=" + std::to_string(inbox_.stale()) + " tailGap=" + std::to_string(inbox_.gapOpen() ? 1 : 0);
++            " chainStale=" + std::to_string(inbox_.stale()) + " tailGap=" + std::to_string(inbox_.gapOpen() ? 1 : 0) +
++            " chainTrim=" + std::to_string(inbox_.trimmed()) + " lossRecovered=" + std::to_string(lossAlreadyRecovered_) +
++            " beyondGap=" + std::to_string(beyondGapDrops_);
+   status += " recovery=" + std::string(recovery_.StateName()) + " episode=" + std::to_string(recovery_.id()) +
+             " asks=" + std::to_string(recovery_.attempts()) + " episodes=" + std::to_string(recovery_.opened()) +
+             " recClosed=" + std::to_string(recovery_.closed()) + " recExhausted=" + std::to_string(recovery_.exhausted()) +
+             " recWants=" + std::to_string(recovery_.wants()) + " recSent=" + std::to_string(recovery_.sent()) +
+             " recMoot=" + std::to_string(recoveryDroppedMoot_) + " keyTaken=" + std::to_string(keyRequestsTaken_) +
++            " covered=" + std::to_string(coveredToken_ != 0 ? 1 : 0) + " coveredExh=" + std::to_string(coveredExhausted_ ? 1 : 0) +
++            " coveredStale=" + std::to_string(coveredStale_) +
+             " keyEpoch=" + std::to_string(keyEpoch_);
+   status += " resetPending=" + std::to_string(CodecResetPendingLocked() ? 1 : 0);
+   status += " codecRetries=" + std::to_string(codecAutoRetries_);       // r4 N3
+@@ -1429,6 +1497,11 @@ bool AndroidVideoDecoderSink::TryQueueFrameLocked(remote60::native_poc::UdpH264A
+   if (queueingReplay_) RememberReplayPtsLocked(ptsUs);
+   lastInputQueueSteadyUs_ = steady_now_us();
+   if (isKey) codecAwaitsKey_ = false;  // keepalive r5 D1: this instance has its IDR
++  if (isKey) {  // C r2 (Codex N1-b): this codec's chain restarts here; a gap opened for a loss before it closes
++    committedKeyValid_ = true;
++    committedKeySeq_ = frame.header.seq;
++    inbox_.OnKeyCommitted(frame.header.seq);
++  }
+   // apk-inbox C (design r3 §2): the episode ends only here -- an IDR after the loss point committed to the codec.
+   if (isKey && recovery_.OnKeyCommitted(frame.header.seq)) {
+     char cline[160];
+@@ -1507,6 +1580,7 @@ void AndroidVideoDecoderSink::ResetCodecLocked() {
+   pendingFrame_.Reset();
+   pendingFrameCount_ = 0;
+   pendingFrameQueueRetryCount_ = 0;
++  committedKeyValid_ = false;  // C r2: what this codec took goes with it
+   bootstrapFrame_.reset();
+   lastInputQueueSteadyUs_ = 0;
+   bootstrapReplayCount_ = 0;
+diff --git a/apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp b/apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp
+index 68bf944..13143d2 100644
+--- a/apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp
++++ b/apps/android_direct_client/app/src/main/cpp/android_video_decoder.hpp
+@@ -135,6 +135,9 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
+   void OnDecoderKeyRequestSent(const remote60::native_poc::DecoderKeyRequest& request, uint64_t nowUs) override {
+     OnDecoderKeyRequestSentAs(kAnyBinding, request, nowUs);
+   }
++  void OnDecoderKeyOwedExhausted(uint64_t owedToken, uint64_t nowUs) override {
++    OnDecoderKeyOwedExhaustedAs(kAnyBinding, owedToken, nowUs);
++  }
+   bool DrainPresentationStats(remote60::native_poc::ClientPresentationStats* out) override {
+     return DrainPresentationStatsAs(kAnyBinding, out);
+   }
+@@ -175,6 +178,7 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
+   bool TakeDecoderKeyRequestAs(uint64_t token, remote60::native_poc::DecoderKeyRequest* out);
+   uint32_t DecoderKeyRequestValidCausesAs(uint64_t token, const remote60::native_poc::DecoderKeyRequest& request);
+   void OnDecoderKeyRequestSentAs(uint64_t token, const remote60::native_poc::DecoderKeyRequest& request, uint64_t nowUs);
++  void OnDecoderKeyOwedExhaustedAs(uint64_t token, uint64_t owedToken, uint64_t nowUs);
+   bool DrainPresentationStatsAs(uint64_t token, remote60::native_poc::ClientPresentationStats* out);
+   bool DrainDecodeStatsAs(uint64_t token, remote60::native_poc::ClientDecodeStats* out);
+   uint64_t DecodeGenerationAs(uint64_t token);
+@@ -390,6 +394,21 @@ class AndroidVideoDecoderSink : public remote60::native_poc::ClientEncodedFrameS
+   // The IDR the worker is handing to the codec right now (mu_ released around the codec calls): a candidate too.
+   bool inFlightKey_ = false;
+   uint32_t inFlightKeySeq_ = 0;
++  // C r2 (Codex N1-b): the last IDR this codec instance took (CommitQueue) -- a loss at a seq BEFORE it is already
++  // recovered (the pending slot's replaced delta, a late await-key note). Forgotten with the codec, the inbox, the asks.
++  bool committedKeyValid_ = false;
++  uint32_t committedKeySeq_ = 0;
++  uint64_t lossAlreadyRecovered_ = 0;  // losses noted behind a committed IDR (no episode, no gap)
++  // C r2 (Codex §8 (a)): the owed duty the session spent its asks on (covered) -- its token, the end of the final
++  // answer window, and whether it ran out with no usable IDR (coveredExhausted). Ends when the gate's token moves (paid,
++  // re-armed, reset). A stale token's notice changes nothing (coveredStale counts it).
++  uint64_t coveredToken_ = 0;
++  uint64_t coveredDeadlineUs_ = 0;
++  bool coveredExhausted_ = false;
++  uint64_t coveredStale_ = 0;
++  uint64_t coveredExhaustedCount_ = 0;
++  bool AnyKeyPreservedLocked() const;  // a usable IDR is in the inbox, the pending slot or going in
++  uint64_t beyondGapDrops_ = 0;        // the worker's defensive drop of a delta past the open gap (expected 0)
+   // One-shot causes outside the episode (r4 N3 codec up, mobile-abr r5 abort); each taken once, kept as its cause.
+   bool wantCodecUp_ = false;
+   bool wantSelectionAbort_ = false;
+diff --git a/apps/android_direct_client/app/src/main/cpp/entry_sink_adapter.hpp b/apps/android_direct_client/app/src/main/cpp/entry_sink_adapter.hpp
+index 0abc3a0..195c2fb 100644
+--- a/apps/android_direct_client/app/src/main/cpp/entry_sink_adapter.hpp
++++ b/apps/android_direct_client/app/src/main/cpp/entry_sink_adapter.hpp
+@@ -50,6 +50,9 @@ class EntrySinkAdapter : public remote60::native_poc::ClientEncodedFrameSink {
+   void OnDecoderKeyRequestSent(const remote60::native_poc::DecoderKeyRequest& request, uint64_t nowUs) override {
+     if (const uint64_t t = Token()) decoder_->OnDecoderKeyRequestSentAs(t, request, nowUs);
+   }
++  void OnDecoderKeyOwedExhausted(uint64_t owedToken, uint64_t nowUs) override {  // C r2 §8
++    if (const uint64_t t = Token()) decoder_->OnDecoderKeyOwedExhaustedAs(t, owedToken, nowUs);
++  }
+   bool DrainPresentationStats(remote60::native_poc::ClientPresentationStats* out) override {
+     const uint64_t t = Token();
+     return t != 0 && decoder_->DrainPresentationStatsAs(t, out);
+diff --git a/apps/native_poc/CMakeLists.txt b/apps/native_poc/CMakeLists.txt
+index 3581c81..157b530 100644
+--- a/apps/native_poc/CMakeLists.txt
++++ b/apps/native_poc/CMakeLists.txt
+@@ -1178,6 +1178,9 @@ set(REMOTE60_CHAIN_INBOX_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src" CACHE PATH
+     "decoder_chain_inbox.hpp the chain inbox test builds (negative runs point it at a mutated copy)")
+ add_executable(remote60_decoder_chain_inbox_test src/decoder_chain_inbox_test.cpp)
+ target_include_directories(remote60_decoder_chain_inbox_test PRIVATE ${REMOTE60_CHAIN_INBOX_DIR} src)
++# C r2: Codex's N1-a / N3 counterexamples with only the API r1 and r2 share -- built against 5fe90a9's header it FAILs.
++add_executable(remote60_decoder_chain_inbox_r2_contrast_test src/decoder_chain_inbox_r2_contrast_test.cpp)
++target_include_directories(remote60_decoder_chain_inbox_r2_contrast_test PRIVATE ${REMOTE60_CHAIN_INBOX_DIR} src)
+ 
+ # apk-inbox C: the boundaries C adds, on the APK sink itself against the stand-in NDK (order, oversize, a candidate
+ # lost again, the t0/1/3/7 schedule and exhaustion, D8 validity, the binding adapter, overload, a slow create). A PLAIN
+diff --git a/apps/native_poc/src/android_decoder_inbox_c_test.cpp b/apps/native_poc/src/android_decoder_inbox_c_test.cpp
+index 56ea251..7fa1259 100644
+--- a/apps/native_poc/src/android_decoder_inbox_c_test.cpp
++++ b/apps/native_poc/src/android_decoder_inbox_c_test.cpp
+@@ -498,6 +498,157 @@ int main() {
+     sink.SetSurface(env, nullptr);
+   }
+ 
++  std::puts("\n--- [C9] C r2 N1-b (Codex's product-sink sequence): a pending IDR replaces a delta, commits -- the next delta goes in");
++  {
++    AndroidVideoDecoderSink sink;
++    Rx rx{sink};
++    const uint64_t g = start(sink, rx, 33, 331);  // IDR1 (0x80) is in the codec
++    const size_t q0 = queued();
++    const uint64_t ep0 = field(sink.DebugStatus(), "episodes");
++    input_available(false);
++    rx.send(frame(g, false, 0xB2));  // delta2: no input buffer -> pending
++    wait_until([&] { return field(sink.DebugStatus(), "pending") == 1; }, 1000);
++    rx.send(frame(g, true, 0xB3));   // IDR3 replaces delta2 (the slot's loss: delta2)
++    std::this_thread::sleep_for(std::chrono::milliseconds(50));
++    const std::string mid = sink.DebugStatus();
++    input_available(true);
++    wait_until([&] { for (uint8_t t : tags_from(q0)) if (t == 0xB3) return true; return false; }, 1500);
++    rx.send(frame(g, false, 0xB4));  // delta4, IDR3's suffix
++    wait_until([&] { return tags_from(q0).size() >= 2; }, 1500);
++    const std::string st = sink.DebugStatus();
++    const auto t = tags_from(q0);
++    check("[C9] N1-b: the codec takes IDR3 then delta4 (fed 0xB3, 0xB4); no tail gap; no new episode after the commit",
++          t == std::vector<uint8_t>{0xB3, 0xB4} && field(st, "tailGap") == 0 && sfield(st, "recovery") == "idle" &&
++              field(st, "episodes") <= ep0 + 1 && field(st, "gapDrops") == 0,
++          "fed=" + std::to_string(t.size()) + " tailGap(mid)=" + std::to_string(field(mid, "tailGap")) + " tailGap=" +
++              std::to_string(field(st, "tailGap")) + " episodes " + std::to_string(ep0) + "->" +
++              std::to_string(field(st, "episodes")) + " gapDrops=" + std::to_string(field(st, "gapDrops")));
++    // a loss AFTER IDR3 keeps its gap
++    make_loss(sink, rx, g);
++    std::this_thread::sleep_for(std::chrono::milliseconds(150));  // the delta held in the dequeue goes in first
++    const size_t q1 = queued();
++    rx.send(frame(g, false, 0xB5));
++    std::this_thread::sleep_for(std::chrono::milliseconds(50));
++    const auto t1 = tags_from(q1);
++    check("[C9] a loss after IDR3 keeps its own gap: the next delta is refused, not fed",
++          field(sink.DebugStatus(), "tailGap") == 1 && std::find(t1.begin(), t1.end(), 0xB5) == t1.end(),
++          "tailGap=" + std::to_string(field(sink.DebugStatus(), "tailGap")) + " fed after=" + std::to_string(t1.size()));
++    sink.SetSurface(env, nullptr);
++  }
++  {
++    AndroidVideoDecoderSink sink;
++    Rx rx{sink};
++    const uint64_t g = start(sink, rx, 34, 341);
++    hold(fake_ndk::kHoldDequeueInput);
++    rx.send(frame(g, true, 0xC3));  // IDR going in (held in its dequeue)
++    wait_until(held_now, 2000);
++    for (int i = 0; i < 9; ++i) rx.send(frame(g, false, 0xC4));  // a loss after it: the gap opens past it
++    sink.OnVideoDiscontinuity();    // the codec reset before that IDR commits
++    let_go();
++    std::this_thread::sleep_for(std::chrono::milliseconds(150));
++    const size_t q1 = queued();
++    rx.send(frame(g, false, 0xC5));
++    std::this_thread::sleep_for(std::chrono::milliseconds(50));
++    check("[C9] a reset before the IDR commits does not clear the later loss's gap (the next delta refused)",
++          field(sink.DebugStatus(), "tailGap") == 1 && tags_from(q1).empty(),
++          "tailGap=" + std::to_string(field(sink.DebugStatus(), "tailGap")));
++    sink.SetSurface(env, nullptr);
++  }
++  std::puts("\n--- [C10] C r2 N1-a at the sink: the pending slot drops a delta while the codec keeps its references");
++  {
++    AndroidVideoDecoderSink sink;
++    Rx rx{sink};
++    const uint64_t g = start(sink, rx, 35, 351);
++    const size_t q0 = queued();
++    input_available(false);
++    rx.send(frame(g, false, 0xD1));  // d1: held for an input buffer (before any loss: valid)
++    wait_until([&] { return field(sink.DebugStatus(), "pending") == 1; }, 1000);
++    hold(fake_ndk::kHoldDequeueInput);
++    input_available(true);
++    wait_until(held_now, 2000);      // the worker's retry of d1 is now held in its dequeue
++    rx.send(frame(g, false, 0xD2));  // d2: the slot will drop it (a loss at d2)
++    rx.send(frame(g, false, 0xD3));  // d3: references d2 -- must never reach the codec
++    rx.send(frame(g, true, 0xD4));   // IDR4: the chain restarts here
++    rx.send(frame(g, false, 0xD5));  // d5: IDR4's suffix
++    input_available(false);          // the held dequeue answers "no buffer": d1 stays pending
++    let_go();
++    std::this_thread::sleep_for(std::chrono::milliseconds(150));
++    input_available(true);
++    wait_until([&] { return tags_from(q0).size() >= 3; }, 2000);
++    std::this_thread::sleep_for(std::chrono::milliseconds(100));
++    const auto t = tags_from(q0);
++    const std::string st = sink.DebugStatus();
++    // The pending slot's own rule (apk-0232 r2, unchanged by C) also acts here: while d1 is held, IDR4 replaces it and
++    // d5 (arriving while IDR4 is held) is dropped. What C r2 adds: the slot's loss at d2 TRIMS d3 out of the queue
++    // (chainTrim) -- it is never handed to the worker. (In this sequence the slot would drop d3 as well; the r1-vs-r2
++    // contrast of the trim itself is the pure test's Codex counterexample.)
++    check("[C10] N1-a: the loss at d2 trims d3 out of the queue; the codec's next input is IDR4, never d3",
++          !t.empty() && t.front() == 0xD4 && std::find(t.begin(), t.end(), 0xD3) == t.end() &&
++              st.find(" chainTrim=") != std::string::npos && field(st, "chainTrim") >= 1,  // an absent field is not a pass
++          "fed=" + [&] { std::string s; for (uint8_t x : t) s += std::to_string(x) + ","; return s; }() +
++              " chainTrim=" + std::to_string(field(st, "chainTrim")) + " tailGap=" + std::to_string(field(st, "tailGap")));
++    sink.SetSurface(env, nullptr);
++  }
++  std::puts("\n--- [C11] C r2 §8 (a): the owed duty's asks spent -- covered, a final window, exhausted; a late IDR clears it");
++  {
++    AndroidVideoDecoderSink sink;
++    Rx rx{sink};
++    const uint64_t g = start(sink, rx, 36, 361);
++    input_available(false);
++    rx.send(frame(g, true, 0xE1));  // an IDR of the answered generation, held for a buffer ...
++    wait_until([&] { return field(sink.DebugStatus(), "pending") == 1; }, 1000);
++    sink.OnVideoDiscontinuity();    // ... and lost with the codec: KeyLost -> owed
++    wait_until([&] { return field(sink.DebugStatus(), "pending") == 0; }, 1000);
++    input_available(true);
++    const uint64_t token = sink.KeyframeOwedFor();
++    sink.OnDecoderKeyOwedExhausted(token + 1000, 0);  // a stale notice (another duty)
++    const std::string s0 = sink.DebugStatus();
++    check("[C11] owed armed; a stale token's notice changes nothing", token != 0 && field(s0, "covered") == 0 &&
++          field(s0, "coveredStale") == 1);
++    sink.OnDecoderKeyOwedExhausted(token, 0);
++    DecoderKeyRequest r;
++    const bool asked = sink.TakeDecoderKeyRequest(&r);
++    const std::string s1 = sink.DebugStatus();
++    check("[C11] the current token's notice: covered, NOT yet exhausted (the final window), and no ask of the sink's own",
++          field(s1, "covered") == 1 && field(s1, "coveredExh") == 0 && !asked);
++    std::this_thread::sleep_for(std::chrono::milliseconds(4400));
++    const bool asked2 = sink.TakeDecoderKeyRequest(&r);
++    const std::string s2 = sink.DebugStatus();
++    check("[C11] after the 4 s final window with no usable IDR: covered-exhausted; still no ask; the gate still owes (not "
++          "falsely paid)", field(s2, "coveredExh") == 1 && !asked2 && sink.KeyframeOwedFor() == token);
++    DecoderKeyRequest pipe;
++    pipe.causes = kKeyCausePipeline;
++    check("[C11] covered-exhausted leaves an independent (pipeline) cause valid: it is not swallowed",
++          sink.DecoderKeyRequestValidCauses(pipe) == kKeyCausePipeline);
++    const size_t q0 = queued();
++    rx.send(frame(g, true, 0xE2));  // the host's late IDR
++    rx.send(frame(g, false, 0xE3));
++    wait_until([&] { return tags_from(q0).size() >= 2; }, 1500);
++    std::this_thread::sleep_for(std::chrono::milliseconds(50));
++    const std::string s3 = sink.DebugStatus();
++    check("[C11] the late IDR is fed (exhausted blocks nothing), pays the duty and ends the covered state",
++          tags_from(q0).size() >= 2 && tags_from(q0).front() == 0xE2 && sink.KeyframeOwedFor() == 0 &&
++              field(s3, "covered") == 0 && field(s3, "coveredExh") == 0);
++    sink.SetSurface(env, nullptr);
++  }
++  {
++    AndroidVideoDecoderSink sink;
++    Rx rx{sink};
++    const uint64_t g = start(sink, rx, 37, 371);
++    input_available(false);
++    rx.send(frame(g, true, 0xE4));
++    wait_until([&] { return field(sink.DebugStatus(), "pending") == 1; }, 1000);
++    sink.OnVideoDiscontinuity();
++    wait_until([&] { return field(sink.DebugStatus(), "pending") == 0; }, 1000);
++    input_available(true);
++    const uint64_t token = sink.KeyframeOwedFor();
++    sink.OnDecoderKeyOwedExhausted(token, 0);
++    sink.SetSurface(env, &surfaceA);  // a new surface: the duty is re-armed (a new token, the session's 8 again)
++    const std::string st = sink.DebugStatus();
++    check("[C11] a new surface re-arms the duty (new token): the covered state of the old one is gone",
++          sink.KeyframeOwedFor() != 0 && sink.KeyframeOwedFor() != token && field(st, "covered") == 0);
++    sink.SetSurface(env, nullptr);
++  }
+   std::printf("\nandroid_decoder_inbox_c_test: %d checks, %d failed\nRESULT: %s\n", gChecks, gFailures,
+               gFailures == 0 ? "PASS" : "FAIL");
+   return gFailures == 0 ? 0 : 1;
+diff --git a/apps/native_poc/src/android_decoder_inbox_session_test.cpp b/apps/native_poc/src/android_decoder_inbox_session_test.cpp
+index 39bec0d..3c6a6cb 100644
+--- a/apps/native_poc/src/android_decoder_inbox_session_test.cpp
++++ b/apps/native_poc/src/android_decoder_inbox_session_test.cpp
+@@ -126,6 +126,7 @@ struct FakeHost {
+   std::atomic<uint64_t> nextGeneration{7001};
+   std::atomic<int> idrWanted{0};
+   std::atomic<bool> ignoreKeyRequests{false};
++  std::atomic<bool> suppressIdr{false};  // C r2: no IDR at all (a selection's own included) until cleared
+   SocketHandle udp = kInvalidSocket;
+   sockaddr_in peer{};
+   std::atomic<bool> havePeer{false};
+@@ -257,7 +258,7 @@ struct FakeHost {
+       if (gen != 0 && Clock::now() >= nextVideo) {
+         nextVideo = Clock::now() + std::chrono::milliseconds(33);
+         int want = idrWanted.load();
+-        const bool key = want > 0 && idrWanted.compare_exchange_strong(want, want - 1);
++        const bool key = !suppressIdr.load() && want > 0 && idrWanted.compare_exchange_strong(want, want - 1);
+         const auto d = video_datagram(seq++, gen, key);
+         sendto(udp, reinterpret_cast<const char*>(d.data()), static_cast<int>(d.size()), 0,
+                reinterpret_cast<sockaddr*>(&peer), sizeof(peer));
+@@ -411,7 +412,10 @@ int main() {
+       r.host.ignoreKeyRequests = true;
+       std::atomic<int> fired{0};
+       r.c.SetTestKeyRequestHook([&](const char* point) {
+-        if (std::strcmp(point, "accepted") == 0 && fired.fetch_add(1) == 0) r.sink.Bind(22);  // this PC parked
++        if (std::strcmp(point, "accepted") == 0 && fired.fetch_add(1) == 0) {
++          r.sink.Bind(22);               // this PC parked ...
++          r.c.RequestWindowSelect(1001);  // ... and (C r2, Codex N2) a new pick on it at the same point
++        }
+       });
+       const uint64_t dropped0 = r.c.KeyRequestsDroppedStale();
+       const auto t0 = Clock::now();
+@@ -460,6 +464,185 @@ int main() {
+     r.Down();
+   }
+ 
++  std::puts("\n--- [S5] C r2 N2: a new pick + owner change right BEFORE the scheduler dequeues a published request");
++  {
++    Rig r;
++    const bool up = r.Up(51);
++    check("[S5] connected and ready", up);
++    if (up) {
++      r.host.ignoreKeyRequests = true;
++      std::atomic<int> state{0};  // 0 off, 1 armed (waiting for the want), 2 fired
++      std::atomic<bool> published{false};
++      r.c.SetTestKeyRequestHook([&](const char* point) {
++        if (std::strcmp(point, "publish") == 0 && state.load() == 1) published = true;  // sink-only work allowed here
++      });
++      r.c.SetTestPassBoundaryHook([&](bool) {
++        if (state.load() != 1) return;
++        // the control thread waits here (before its pass reaches NextAction) for the RX thread to publish the episode's
++        // request; then the pick and the owner change land between that publish and the dequeue
++        const auto t0 = Clock::now();
++        while (!published.load() && ms_between(t0, Clock::now()) < 3000) std::this_thread::sleep_for(std::chrono::milliseconds(2));
++        r.sink.Bind(52);
++        r.c.RequestWindowSelect(1001);
++        state = 2;
++      });
++      const uint64_t stale0 = r.c.KeyRequestsDroppedStale(), cancel0 = r.c.KeyRequestsDroppedCancelled();
++      const auto t0 = Clock::now();
++      state = 1;
++      r.Loss();
++      std::this_thread::sleep_for(std::chrono::milliseconds(2500));
++      const auto reqs = r.host.RequestsSinceMs(t0);
++      check("[S5] the published request was cancelled with its pending flag -- the host received NO key request",
++            state.load() == 2 && published.load() && reqs.empty(),
++            "published=" + std::to_string(published.load() ? 1 : 0) + " host requests=" + list(reqs) +
++                " droppedStale+" + std::to_string(r.c.KeyRequestsDroppedStale() - stale0) + " cancelled+" +
++                std::to_string(r.c.KeyRequestsDroppedCancelled() - cancel0));
++      r.c.SetTestPassBoundaryHook(nullptr);
++    }
++    r.Down();
++  }
++
++  std::puts("\n--- [S6] C r2 N2: a new valid request held WHILE the held check asks the sink -- not erased");
++  {
++    Rig r;
++    const bool up = r.Up(61);
++    check("[S6] connected and ready", up);
++    if (up) {
++      r.host.ignoreKeyRequests = true;
++      r.c.TestConfigureKeyframeLimiter(3000000, 1, 100);
++      std::this_thread::sleep_for(std::chrono::milliseconds(3500));
++      std::atomic<int> fired{0};
++      r.c.SetTestKeyRequestHook([&](const char* point) {
++        if (std::strcmp(point, "held") == 0 && fired.fetch_add(1) == 0) {
++          r.sink.Bind(62);                             // the held recovery ask becomes stale ...
++          r.c.TestRequestKey(n::kKeyCausePipeline);       // ... and a NEW valid one is held meanwhile (min interval)
++        }
++      });
++      const auto t0 = Clock::now();
++      r.Loss();
++      std::this_thread::sleep_for(std::chrono::milliseconds(6500));  // past the limiter's next interval
++      const auto reqs = r.host.RequestsSinceMs(t0);
++      check("[S6] the stale held ask is dropped but the pipeline ask held meanwhile is NOT erased: it goes once the "
++            "limiter allows (2 requests: the first, then the pipeline one)",
++            fired.load() >= 1 && reqs.size() == 2, "hook=" + std::to_string(fired.load()) + " host requests=" + list(reqs));
++    }
++    r.Down();
++  }
++
++  std::puts("\n--- [S7] C r2 N2: the owner changes INSIDE the publish (between the limiter and the descriptor)");
++  {
++    Rig r;
++    const bool up = r.Up(71);
++    check("[S7] connected and ready", up);
++    if (up) {
++      r.host.ignoreKeyRequests = true;
++      std::atomic<int> fired{0};
++      r.c.SetTestKeyRequestHook([&](const char* point) {
++        if (std::strcmp(point, "publish") == 0 && fired.fetch_add(1) == 0) r.sink.Bind(72);  // the sink only
++      });
++      const uint64_t stale0 = r.c.KeyRequestsDroppedStale();
++      const auto t0 = Clock::now();
++      r.Loss();
++      std::this_thread::sleep_for(std::chrono::milliseconds(2500));
++      const auto reqs = r.host.RequestsSinceMs(t0);
++      check("[S7] the request published as the owner changed carries its descriptor and is judged stale: not sent",
++            fired.load() >= 1 && reqs.empty() && r.c.KeyRequestsDroppedStale() > stale0,
++            "hook=" + std::to_string(fired.load()) + " host requests=" + list(reqs));
++    }
++    r.Down();
++  }
++
++  std::puts("\n--- [S8] C r2 §8 (a): the owed IDR's 8 asks spent -> the sink covered-exhausted, no more asks; a late IDR recovers");
++  {
++    Rig r;
++    const bool up = r.Up(81);
++    check("[S8] connected and ready", up);
++    if (up) {
++      r.host.ignoreKeyRequests = true;
++      // the new selection's IDR arrives, is held for an input buffer and goes with a codec reset (KeyLost): the
++      // selection is owed it, and the host sends no other IDR -- the session's owed asks (8) go unanswered
++      {
++        std::lock_guard<std::mutex> lk(fake_ndk::mu());
++        fake_ndk::controls().inputAvailable = false;
++      }
++      r.sink.PrepareForWindowSelectionAs(81, 2);
++      r.c.RequestWindowSelect(1001);
++      const bool heldIdr = wait_until([&] { return field(r.sink.DebugStatus(), "pending") == 1; }, 3000);
++      r.host.suppressIdr = true;
++      const auto t0 = Clock::now();  // every owed ask is after this (the duty arms at the loss below)
++      r.sink.OnVideoDiscontinuity();
++      wait_until([&] { return field(r.sink.DebugStatus(), "pending") == 0; }, 1000);
++      {
++        std::lock_guard<std::mutex> lk(fake_ndk::mu());
++        fake_ndk::controls().inputAvailable = true;
++      }
++      check("[S8] the selection's IDR was held and lost with the codec: the selection is owed it",
++            heldIdr && r.a.KeyframeOwedFor() != 0, "owed=" + std::to_string(r.a.KeyframeOwedFor()));
++      std::this_thread::sleep_for(std::chrono::milliseconds(9500));  // 8 owed asks, 1 s apart
++      const auto asks = r.host.RequestsSinceMs(t0);
++      const std::string mid = r.sink.DebugStatus();
++      std::this_thread::sleep_for(std::chrono::milliseconds(5500));  // the final window (4 s) and past it
++      const auto asks2 = r.host.RequestsSinceMs(t0);
++      const std::string st = r.sink.DebugStatus();
++      check("[S8] the owed asks stop at the session's 8 (limiter-queued); the sink is told: covered",
++            asks.size() >= 1 && asks.size() <= 8 && field(mid, "covered") == 1,
++            "host requests=" + std::to_string(asks.size()) + " covered=" + sfield(mid, "covered"));
++      check("[S8] after the final window: covered-exhausted, NO further request (no new episode budget)",
++            field(st, "coveredExh") == 1 && asks2.size() == asks.size() && field(st, "asks") == 0,
++            "coveredExh=" + sfield(st, "coveredExh") + " host requests " + std::to_string(asks.size()) + "->" +
++                std::to_string(asks2.size()));
++      const size_t q0 = queued_count();
++      r.host.suppressIdr = false;
++      r.host.idrWanted = 1;  // the host's late / periodic IDR
++      const bool decoded = wait_until([&] {
++        for (uint8_t t : queued_tags_from(q0))
++          if (t == idr_tag(r.host.generation.load())) return true;
++        return false;
++      }, 2000);
++      wait_until([&] { return field(r.sink.DebugStatus(), "covered") == 0; }, 1000);
++      check("[S8] the late IDR is decoded, pays the duty and ends the covered state", decoded &&
++            field(r.sink.DebugStatus(), "covered") == 0 && field(r.sink.DebugStatus(), "coveredExh") == 0);
++    }
++    r.Down();
++  }
++
++  std::puts("\n--- [S9] C r2 N2: a publish is ONE section -- the scheduler cannot take the action between the limiter and the descriptor");
++  {
++    Rig r;
++    const bool up = r.Up(91);
++    check("[S9] connected and ready", up);
++    if (up) {
++      r.host.ignoreKeyRequests = true;
++      // a publish from THIS (a third) thread -- not the control thread, whose own pass could never race its own
++      // scheduler. Held inside the publish up to 400 ms: one section -> the scheduler's take waits for us (nothing
++      // cancelled meanwhile); a split section -> the scheduler takes the action before its descriptor -> cancelled.
++      const auto me = std::this_thread::get_id();
++      std::atomic<int> fired{0};
++      std::atomic<uint64_t> cancelledDuring{0};
++      const uint64_t cancel0 = r.c.KeyRequestsDroppedCancelled();
++      r.c.SetTestKeyRequestHook([&](const char* point) {
++        if (std::strcmp(point, "publish") != 0 || std::this_thread::get_id() != me || fired.fetch_add(1) != 0) return;
++        const auto w0 = Clock::now();
++        while (r.c.KeyRequestsDroppedCancelled() == cancel0 && ms_between(w0, Clock::now()) < 400)
++          std::this_thread::sleep_for(std::chrono::milliseconds(2));
++        cancelledDuring = r.c.KeyRequestsDroppedCancelled() - cancel0;
++      });
++      const auto t0 = Clock::now();
++      const bool queued = r.c.TestRequestKey(n::kKeyCausePipeline);
++      std::this_thread::sleep_for(std::chrono::milliseconds(1500));
++      const auto reqs = r.host.RequestsSinceMs(t0);
++      check("[S9] a pipeline ask published from another thread goes WITH its descriptor: nothing cancelled while the "
++            "publish was open; the host got it",
++            queued && fired.load() == 1 && cancelledDuring.load() == 0 && r.c.KeyRequestsDroppedCancelled() == cancel0 &&
++                !reqs.empty(),
++            "queued=" + std::to_string(queued ? 1 : 0) + " hook=" + std::to_string(fired.load()) + " cancelledDuring=" +
++                std::to_string(cancelledDuring.load()) + " cancelled+" +
++                std::to_string(r.c.KeyRequestsDroppedCancelled() - cancel0) + " host requests=" + list(reqs));
++      r.c.SetTestKeyRequestHook(nullptr);
++    }
++    r.Down();
++  }
++
+   std::printf("\nandroid_decoder_inbox_session_test: %d checks, %d failed\nRESULT: %s\n", gChecks, gFailures,
+               gFailures == 0 ? "PASS" : "FAIL");
+   return gFailures == 0 ? 0 : 1;
+diff --git a/apps/native_poc/src/decoder_chain_inbox.hpp b/apps/native_poc/src/decoder_chain_inbox.hpp
+index 1ed6fc6..be91d11 100644
+--- a/apps/native_poc/src/decoder_chain_inbox.hpp
++++ b/apps/native_poc/src/decoder_chain_inbox.hpp
+@@ -8,8 +8,8 @@
+ // PopDelivery:906-915 takes the OLDEST assembly; :1058 ignores any packet not newer than the last delivered AU), so
+ // the sink sees strictly increasing `seq`. The duplicate / older-than-last checks here are DEFENSIVE: what a second
+ // path or a later change could feed in. Comparison: (int32_t)(b - a) > 0 means b is after a (wrap-safe within 2^31).
+-// A safety valve: kOrderResyncAfter such drops in a row are taken as a restarted sequence, not reordering -- the order
+-// starts over from the next AU (counted), so no unforeseen restart can blank the picture for good.
++// C r2 (Codex codex_apk_inbox_c_src_r1.md N3): no automatic re-ordering -- however many duplicate / older AUs come in a
++// row, they stay dropped; the order starts over only at an explicit reset (Clear: a new pick / binding / stream).
+ //
+ // THE INBOX (§1, §2). At most kMaxFrames frames and kMaxBytes bytes. Arriving frames:
+ //   * older than or equal to the last one admitted (same generation): dropped (stale / duplicate), counted;
+@@ -82,26 +82,18 @@ class ChainInbox {
+   ChainOfferResult Offer(T&& item) {
+     ChainOfferResult r;
+     const ChainAuInfo a = info_(item);
+-    if (haveLast_ && a.gen == lastGen_ && orderDropsInRow_ < kOrderResyncAfter) {
++    if (haveLast_ && a.gen == lastGen_) {
+       if (a.seq == lastSeq_) {
+         r.admit = ChainAdmit::Duplicate;
+         ++duplicates_;
+-        ++orderDropsInRow_;
+         return r;
+       }
+       if (!chain_seq_after(a.seq, lastSeq_)) {
+         r.admit = ChainAdmit::Stale;
+         ++stale_;
+-        ++orderDropsInRow_;
+         return r;
+       }
+     }
+-    if (haveLast_ && a.gen == lastGen_ && orderDropsInRow_ >= kOrderResyncAfter) {
+-      // the safety valve: so many in a row is no reordering -- the sequence restarted (not expected: the assembler
+-      // ignores anything not newer, and a stream reset clears this inbox). The order starts over from this AU.
+-      ++orderResyncs_;
+-    }
+-    orderDropsInRow_ = 0;
+     haveLast_ = true;
+     lastGen_ = a.gen;
+     lastSeq_ = a.seq;
+@@ -141,12 +133,8 @@ class ChainInbox {
+     bytes_ = 0;
+     gapOpen_ = false;
+     haveLast_ = false;
+-    orderDropsInRow_ = 0;
+   }
+ 
+-  // Duplicate / older AUs in a row after which the order is taken to have restarted (about a second at 30 fps).
+-  static constexpr uint32_t kOrderResyncAfter = 30;
+-
+   // A usable IDR newer than `afterSeq` is in the inbox (a candidate for the open episode).
+   bool HoldsKeyAfter(uint32_t afterSeq) const {
+     for (const T& t : items_) {
+@@ -157,12 +145,48 @@ class ChainInbox {
+   }
+ 
+   // A loss seen outside the inbox (the decoder's own: a codec that lost its references, a delta it could not take, a
+-  // frame its pending slot gave up): the tail gap opens after `seq` -- deltas are refused from here until a usable IDR.
+-  // Not if the inbox already holds an IDR after `seq`: the chain restarts there, and what follows it is that chain's.
+-  void MarkLoss(uint32_t seq) {
+-    if (HoldsKeyAfter(seq)) return;
+-    if (!gapOpen_ || chain_seq_after(seq, gapAfterSeq_)) gapAfterSeq_ = seq;
++  // frame its pending slot gave up) at `seq`. Everything queued is after `seq` (the worker takes in order).
++  // C r2 (Codex N1-a): the queued deltas up to the first IDR after `seq` reference what was lost -- they are DROPPED here
++  // (counted as lost), never handed out; the chain restarts at that IDR and its suffix is kept, no gap. With no IDR
++  // queued everything goes and the tail gap opens after the newest lost. C r2 (N1-b): `usableKeyOutside` -- an IDR after
++  // `seq` is held outside the inbox (the pending slot, going into the codec): the chain restarts there and what is
++  // queued is its suffix -- nothing dropped, no gap. -> the frames dropped.
++  size_t MarkLoss(uint32_t seq, bool usableKeyOutside = false) {
++    if (usableKeyOutside) return 0;
++    size_t dropped = 0;
++    uint32_t newest = seq;
++    while (!items_.empty()) {
++      const ChainAuInfo a = info_(items_.front());
++      if (a.key && chain_seq_after(a.seq, seq)) return dropped;
++      bytes_ -= (a.bytes <= bytes_ ? a.bytes : bytes_);
++      items_.pop_front();
++      ++dropped;
++      ++lost_;
++      ++trimmed_;
++      if (chain_seq_after(a.seq, newest)) newest = a.seq;
++    }
++    if (!gapOpen_ || chain_seq_after(newest, gapAfterSeq_)) gapAfterSeq_ = newest;
+     gapOpen_ = true;
++    return dropped;
++  }
++
++  // C r2 (Codex N1-b): an IDR went into the codec (CommitQueue). If it is after the loss the gap is open for, the chain
++  // restarted there -- the gap closes and the deltas after it are taken again. A loss after that IDR keeps its gap.
++  void OnKeyCommitted(uint32_t seq) {
++    if (gapOpen_ && chain_seq_after(seq, gapAfterSeq_)) gapOpen_ = false;
++  }
++
++  // C r2: a delta the worker took is newer than the open gap's loss point -- defensive (the trim and the door keep
++  // such a delta out of the inbox); the worker drops it instead of feeding it.
++  bool BeyondGap(uint32_t seq, bool key) const { return gapOpen_ && !key && chain_seq_after(seq, gapAfterSeq_); }
++  uint64_t trimmed() const { return trimmed_; }
++
++  // C r2: any IDR queued (the covered duty's final window: a usable IDR on its way).
++  bool HoldsAnyKey() const {
++    for (const T& t : items_) {
++      if (info_(t).key) return true;
++    }
++    return false;
+   }
+ 
+   size_t frames() const { return items_.size(); }
+@@ -176,7 +200,6 @@ class ChainInbox {
+   uint64_t gapDeltas() const { return gapDeltas_; }
+   uint64_t skipped() const { return skipped_; }
+   uint64_t lost() const { return lost_; }
+-  uint64_t orderResyncs() const { return orderResyncs_; }
+ 
+  private:
+   void NoteLoss(uint32_t seq, ChainOfferResult* r) {
+@@ -264,9 +287,7 @@ class ChainInbox {
+   bool haveLast_ = false;
+   uint64_t lastGen_ = 0;
+   uint32_t lastSeq_ = 0;
+-  uint64_t duplicates_ = 0, stale_ = 0, oversize_ = 0, gapDeltas_ = 0, skipped_ = 0, lost_ = 0;
+-  uint32_t orderDropsInRow_ = 0;
+-  uint64_t orderResyncs_ = 0;
++  uint64_t duplicates_ = 0, stale_ = 0, oversize_ = 0, gapDeltas_ = 0, skipped_ = 0, lost_ = 0, trimmed_ = 0;
+ };
+ 
+ class KeyRecoveryEpisode {
+@@ -348,6 +369,16 @@ class KeyRecoveryEpisode {
+     return true;
+   }
+ 
++  // C r2 (Codex §8 (a)): the owed duty that covered this episode is spent and its final window passed with no usable
++  // IDR preserved -- the episode is exhausted too (it never asked: owed was asking for the same IDR). true: it was open.
++  bool MarkExhausted() {
++    if (state_ != State::Open) return false;
++    state_ = State::Exhausted;
++    wantOut_ = false;
++    ++exhausted_;
++    return true;
++  }
++
+   // A new pick / binding / stream / surface, an abort: whatever was open or exhausted is moot.
+   void Invalidate() {
+     if (state_ != State::Idle) ++invalidated_;
+diff --git a/apps/native_poc/src/decoder_chain_inbox_r2_contrast_test.cpp b/apps/native_poc/src/decoder_chain_inbox_r2_contrast_test.cpp
+new file mode 100644
+index 0000000..9cac2eb
+--- /dev/null
++++ b/apps/native_poc/src/decoder_chain_inbox_r2_contrast_test.cpp
+@@ -0,0 +1,60 @@
++// apk-inbox C r2 (Codex codex_apk_inbox_c_src_r1.md N1-a, N3): the two pure counterexamples Codex measured on 5fe90a9,
++// written ONLY with what both the r1 and the r2 header have (Offer / Pop / one-argument MarkLoss / counts) -- so the same
++// file builds against 5fe90a9's decoder_chain_inbox.hpp (REMOTE60_CHAIN_INBOX_DIR) and must FAIL there, PASS on r2.
++// Tag: pure-logic.
++//
++//   remote60_decoder_chain_inbox_r2_contrast_test
++
++#include <cstdio>
++#include <string>
++
++// <> (not ""): the header from the include path -- REMOTE60_CHAIN_INBOX_DIR first (another source in the negative runs).
++#include <decoder_chain_inbox.hpp>
++
++using namespace remote60::native_poc;
++
++namespace {
++int gFailures = 0, gChecks = 0;
++void check(const std::string& name, bool cond, const std::string& detail = {}) {
++  ++gChecks;
++  std::printf("%s  %s%s%s\n", cond ? "PASS" : "FAIL", name.c_str(), detail.empty() ? "" : "  ", detail.c_str());
++  std::fflush(stdout);
++  if (!cond) ++gFailures;
++}
++struct Au {
++  uint64_t gen = 1;
++  uint32_t seq = 0;
++  bool key = false;
++  size_t bytes = 1000;
++};
++struct AuInfo {
++  ChainAuInfo operator()(const Au& a) const { return ChainAuInfo{a.gen, a.seq, a.key, a.bytes}; }
++};
++using Inbox = ChainInbox<Au, AuInfo>;
++}  // namespace
++
++int main() {
++  std::printf("decoder_chain_inbox_r2_contrast_test (Codex's N1-a / N3 counterexamples)\n");
++  {
++    Inbox in(8, 4u << 20, AuInfo{});
++    in.Offer(Au{1, 12, false});
++    in.Offer(Au{1, 13, false});
++    in.Offer(Au{1, 14, true});
++    in.MarkLoss(11);
++    Au first;
++    const bool popped = in.Pop(&first);
++    check("N1-a: delta12, delta13, IDR14 queued, a loss at 11 -> the first Pop is IDR14 (not the broken delta12)",
++          popped && first.seq == 14 && first.key, "first=" + std::to_string(first.seq) + " key=" + std::to_string(first.key));
++  }
++  {
++    Inbox in(8, 4u << 20, AuInfo{});
++    in.Offer(Au{1, 100, false});
++    int admitted = 0;
++    for (int i = 0; i < 40; ++i) admitted += in.Offer(Au{1, 99, false}).admit == ChainAdmit::Admitted ? 1 : 0;
++    check("N3: seq 100 then 40 x seq 99: none admitted (no automatic resync)", admitted == 0,
++          "admitted=" + std::to_string(admitted));
++  }
++  std::printf("\ndecoder_chain_inbox_r2_contrast_test: %d checks, %d failed\nRESULT: %s\n", gChecks, gFailures,
++              gFailures == 0 ? "PASS" : "FAIL");
++  return gFailures == 0 ? 0 : 1;
++}
+diff --git a/apps/native_poc/src/decoder_chain_inbox_test.cpp b/apps/native_poc/src/decoder_chain_inbox_test.cpp
+index 4010acd..86ad735 100644
+--- a/apps/native_poc/src/decoder_chain_inbox_test.cpp
++++ b/apps/native_poc/src/decoder_chain_inbox_test.cpp
+@@ -78,15 +78,18 @@ int main() {
+           seqs(drain(in)));
+   }
+   {
++    // C r2 (Codex N3): no automatic re-ordering. Codex's probe on 5fe90a9: seq 100, then seq 99 x31 -> the 31st Admitted.
+     Inbox in = make();
+     in.Offer(d(100));
+-    int dropped = 0;
+-    for (int i = 0; i < 29; ++i) dropped += in.Offer(d(5)).admit != ChainAdmit::Admitted ? 1 : 0;
+-    const bool stillDropped = in.Offer(d(6)).admit == ChainAdmit::Stale;  // the 30th in a row
+-    const bool resynced = in.Offer(d(7)).admit == ChainAdmit::Admitted && in.orderResyncs() == 1;
+-    const bool after = in.Offer(d(8)).admit == ChainAdmit::Admitted && in.Offer(d(8)).admit == ChainAdmit::Duplicate;
+-    check("safety valve: 30 older AUs in a row are dropped, then the order restarts from the next (counted), and is "
+-          "kept from there", dropped == 29 && stillDropped && resynced && after);
++    int admitted = 0;
++    for (int i = 0; i < 40; ++i) admitted += in.Offer(d(99)).admit == ChainAdmit::Admitted ? 1 : 0;
++    for (int i = 0; i < 40; ++i) admitted += in.Offer(d(100)).admit == ChainAdmit::Admitted ? 1 : 0;
++    check("N3: 40 older and 40 duplicate AUs in a row: every one dropped (no automatic resync)", admitted == 0 &&
++          in.stale() == 40 && in.duplicates() == 40, "admitted=" + std::to_string(admitted));
++    check("N3: normal increase goes on after them", in.Offer(d(101)).admit == ChainAdmit::Admitted);
++    in.Clear();  // an explicit reset (a new pick / binding / stream)
++    const bool fresh = in.Offer(k(5)).admit == ChainAdmit::Admitted && in.Offer(d(6)).admit == ChainAdmit::Admitted;
++    check("N3: after an explicit reset the order starts over at the new IDR", fresh);
+   }
+   {
+     Inbox in = make();
+@@ -197,6 +200,51 @@ int main() {
+           in.Offer(d(13)).admit == ChainAdmit::Admitted);
+   }
+ 
++  {
++    // C r2 (Codex N1-a): Codex's counterexample on 5fe90a9 -- delta12, delta13, IDR14 queued, MarkLoss(11): the first Pop
++    // was delta12 (key 0, gap 0): the broken suffix handed out ahead of the recovery IDR.
++    Inbox in = make();
++    in.Offer(d(12));
++    in.Offer(d(13));
++    in.Offer(k(14));
++    in.Offer(d(15));
++    const size_t dropped = in.MarkLoss(11);
++    Au first;
++    const bool popped = in.Pop(&first);
++    check("N1-a: a loss at 11 with delta12, delta13 queued before IDR14: they are dropped, the first Pop is IDR14, no gap",
++          dropped == 2 && popped && first.seq == 14 && first.key && !in.gapOpen() && seqs(drain(in)) == "15",
++          "dropped=" + std::to_string(dropped) + " first=" + std::to_string(first.seq));
++  }
++  {
++    Inbox in = make();
++    in.Offer(d(12));
++    in.Offer(d(13));
++    const size_t dropped = in.MarkLoss(11);
++    check("N1-a: no IDR queued after the loss: every queued delta dropped, the gap opens after the newest (13)",
++          dropped == 2 && in.frames() == 0 && in.gapOpen() && in.gapAfterSeq() == 13 &&
++              in.Offer(d(14)).admit == ChainAdmit::GapDelta);
++  }
++  {
++    Inbox in = make();
++    in.Offer(d(4));
++    in.Offer(d(5));
++    const size_t dropped = in.MarkLoss(2, true);
++    check("N1-b: a usable IDR (3) held outside the inbox: the queued 4, 5 are its suffix -- kept, no gap",
++          dropped == 0 && !in.gapOpen() && seqs(drain(in)) == "4,5");
++  }
++  {
++    Inbox in = make();
++    in.MarkLoss(2);
++    in.OnKeyCommitted(3);
++    const bool closed = !in.gapOpen() && in.Offer(d(4)).admit == ChainAdmit::Admitted;
++    Inbox later = make();
++    later.MarkLoss(2);
++    later.Offer(d(9));  // refused: the gap moves to 9
++    later.OnKeyCommitted(3);
++    check("N1-b: an IDR committed after the gap's loss point closes it (4 admitted); one committed BEFORE a later loss "
++          "(9) leaves that loss's gap", closed && later.gapOpen() && later.gapAfterSeq() == 9);
++  }
++
+   std::puts("\n--- episode: schedule");
+   {
+     KeyRecoveryEpisode e;
+diff --git a/apps/native_poc/src/native_video_client_session.cpp b/apps/native_poc/src/native_video_client_session.cpp
+index 67a195d..9a77adf 100644
+--- a/apps/native_poc/src/native_video_client_session.cpp
++++ b/apps/native_poc/src/native_video_client_session.cpp
+@@ -934,18 +934,19 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
+         owedSelection_ = owed;
+         owedAttempts_ = 0;
+         owedNextUs_ = 0;
++        owedExhaustToken_ = 0;  // C r2: another duty (or none)
+       }
+       constexpr uint32_t kOwedKeyMaxAttempts = 8;
+       constexpr uint64_t kOwedKeyRetryUs = 1000000;
+       if (owed != 0 && owedAttempts_ < kOwedKeyMaxAttempts && loopNowUs >= owedNextUs_) {
+-        const bool queued = keyframeRequests_.Request(2, loopNowUs).queued;
++        DecoderKeyRequest owedReq;  // apk-inbox C: rides with whatever else is pending (one send, both causes)
++        owedReq.causes = kKeyCauseOwed;
++        owedReq.owedToken = owed;
++        const bool queued = RequestKey(owedReq, loopNowUs);
+         REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Owed, queued));  // apk-decoder-inbox r1
+         if (queued) {
+-          DecoderKeyRequest owedReq;  // apk-inbox C: rides with whatever else is pending (one send, both causes)
+-          owedReq.causes = kKeyCauseOwed;
+-          owedReq.owedToken = owed;
+-          NoteKeyRequest(owedReq, true);
+           ++owedAttempts_;
++          if (owedAttempts_ == kOwedKeyMaxAttempts) owedExhaustToken_ = owed;  // C r2 §8: told once that ask is done
+           owedNextUs_ = loopNowUs + kOwedKeyRetryUs;
+           REMOTE60_LT(livenessTrace_.keyWantQueued.fetch_add(1, std::memory_order_relaxed));
+           std::fprintf(stderr, "[native-video-client-session] keyframe owed to selection %llu: asked (%u)\n",
+@@ -961,10 +962,14 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
+     if (!parking && decoderRekeyPending_.load(std::memory_order_acquire)) {
+       // apk-inbox C (D8, the HELD point): before the held request goes to the limiter again, the sink says which of its
+       // causes still hold. None: it is dropped here (a newer pick / binding / committed IDR made it moot).
++      // C r2 (Codex N2): the snapshot and its version; the sink is asked with no lock held; then, under the lock, only
++      // that same snapshot is acted on -- a request held meanwhile (version moved) stays for the next pass, whole.
+       DecoderKeyRequest held;
++      uint64_t heldVersion = 0;
+       {
+         std::lock_guard<std::mutex> lk(keyLedgerMu_);
+         held = keyHeld_;
++        heldVersion = keyHeldVersion_;
+       }
+ #ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+       if (!held.empty()) RunTestKeyHook("held");
+@@ -975,28 +980,35 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
+         valid = encodedFrameSink_->DecoderKeyRequestValidCauses(held);
+         REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkPass, now_us()));
+       }
+-      if (!held.empty() && valid == 0) {
+-        {
+-          std::lock_guard<std::mutex> lk(keyLedgerMu_);
+-          keyHeld_.Clear();
+-        }
+-        decoderRekeyPending_.store(false, std::memory_order_release);
+-        keyDroppedStale_.fetch_add(1, std::memory_order_relaxed);
+-        std::fprintf(stderr, "[native-video-client-session] held keyframe request dropped: no cause still valid\n");
+-      } else {
+-        const bool queued = keyframeRequests_.Request(2, loopNowUs).queued;
+-        REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Held, queued));  // apk-decoder-inbox r1
+-        if (queued) {
+-          held.causes = valid;
+-          {
+-            std::lock_guard<std::mutex> lk(keyLedgerMu_);
++      bool droppedNow = false, queuedNow = false, queuedTried = false;
++      {
++        std::lock_guard<std::mutex> lk(keyLedgerMu_);
++        if (keyHeldVersion_ == heldVersion) {
++          if (held.empty() || valid == 0) {
++            droppedNow = !held.empty();
+             keyHeld_.Clear();
+-            if (!held.empty()) keyAccepted_.Merge(held);
++            ++keyHeldVersion_;
++            decoderRekeyPending_.store(false, std::memory_order_release);
++          } else {
++            queuedTried = true;
++            queuedNow = keyframeRequests_.Request(2, loopNowUs).queued;
++            if (queuedNow) {
++              held.causes = valid;
++              keyAccepted_.Merge(held);
++              keyHeld_.Clear();
++              ++keyHeldVersion_;
++              decoderRekeyPending_.store(false, std::memory_order_release);
++            }
+           }
+-          decoderRekeyPending_.store(false, std::memory_order_release);
+-          std::fprintf(stderr, "[native-video-client-session] held keyframe request queued\n");
+         }
+       }
++      if (queuedTried) REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Held, queuedNow));  // apk-decoder-inbox r1
++      if (droppedNow) {
++        keyDroppedStale_.fetch_add(1, std::memory_order_relaxed);
++        std::fprintf(stderr, "[native-video-client-session] held keyframe request dropped: no cause still valid\n");
++      } else if (queuedNow) {
++        std::fprintf(stderr, "[native-video-client-session] held keyframe request queued\n");
++      }
+     }
+     // apk-inbox C: the sink's own wants on every pass -- a recovery retry falls due on the clock, not on a frame (the
+     // tail gap refuses the deltas that would otherwise have carried the ask).
+@@ -1006,21 +1018,30 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
+       const bool wanted = encodedFrameSink_->TakeDecoderKeyRequest(&want);
+       REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkPass, now_us()));
+       if (wanted) {
+-        const bool queued = keyframeRequests_.Request(2, loopNowUs).queued;
++        const bool queued = RequestKey(want, loopNowUs);
+         REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Held, queued));
+-        NoteKeyRequest(want, queued);
+       }
+     }
+     bool haveAction = false;
++    DecoderKeyRequest sentKey;  // C r2: taken with its KeyframeRequest action, in the same section
+     {
+       // r3 R1: the next action is taken and judged against the park in one step, under parkMu_ -- the lock
+       // every request path, BeginPark and ResumeFromPark take. A resume cannot fall between the loop's read
+       // of the park and its use: the request a resumed session makes is never dropped by the park before
+       // it. (Local work only: no network under this lock.)
+       std::lock_guard<std::mutex> lk(parkMu_);
+-      haveAction = controlScheduler_.NextAction(loopNowUs, metrics, &windowPanel_, &streamState_, &captureMode_,
+-                                                &keyframeRequests_, &runtimeTune_, &inputQueue_, &action,
+-                                                &desktopBackend_);
++      {
++        // C r2 (Codex N2): the limiter's pending flag is consumed (NextAction) and the accepted descriptor taken in ONE
++        // section of keyLedgerMu_ -- the pair RequestKey publishes together. Local work only.
++        std::lock_guard<std::mutex> lk2(keyLedgerMu_);
++        haveAction = controlScheduler_.NextAction(loopNowUs, metrics, &windowPanel_, &streamState_, &captureMode_,
++                                                  &keyframeRequests_, &runtimeTune_, &inputQueue_, &action,
++                                                  &desktopBackend_);
++        if (haveAction && action.kind == ControlOutboundActionKind::KeyframeRequest) {
++          sentKey = keyAccepted_;
++          keyAccepted_.Clear();
++        }
++      }
+       const bool parkingNow = park_.Inhibiting() || parkInhibit_.load(std::memory_order_acquire);
+       const bool streamResume = action.kind == ControlOutboundActionKind::StreamState &&
+                                 (action.streamState.flags & 0x1u) != 0;
+@@ -1074,23 +1095,31 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
+       // sink is asked (a short query, no lock held here) which causes still hold, right before the exchange starts.
+       // None: not sent (the limiter's token is spent; nothing is queued again for it). Legacy / pipeline causes and a
+       // request with no descriptor go as before.
+-      DecoderKeyRequest sentKey;
++      const DecoderKeyRequest takenKey = sentKey;  // C r2: as taken (the owed exhaustion is judged on it)
+       if (action.kind == ControlOutboundActionKind::KeyframeRequest) {
+-        {
+-          std::lock_guard<std::mutex> lk(keyLedgerMu_);
+-          sentKey = keyAccepted_;
+-          keyAccepted_.Clear();
++        if (sentKey.empty()) {
++          // C r2 (Codex N2): a KeyframeRequest with no descriptor was cancelled (a new pick / reset cleared the ledger
++          // between the limiter and here) -- never read as a legacy request, never sent.
++          keyDroppedCancelled_.fetch_add(1, std::memory_order_relaxed);
++          std::fprintf(stderr, "[native-video-client-session] keyframe request not sent: cancelled before the send\n");
++          didWork = true;
++          continue;
+         }
+ #ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
+-        if (!sentKey.empty()) RunTestKeyHook("accepted");
++        RunTestKeyHook("accepted");
+ #endif
+-        if (!sentKey.empty() && encodedFrameSink_) {
++        if (encodedFrameSink_) {
+           REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkSinkHook, now_us()));
+           sentKey.causes = encodedFrameSink_->DecoderKeyRequestValidCauses(sentKey);
+           REMOTE60_LT(livenessTrace_.Wk(LtPhase::WkPass, now_us()));
+           if (sentKey.empty()) {
+             keyDroppedStale_.fetch_add(1, std::memory_order_relaxed);
+             std::fprintf(stderr, "[native-video-client-session] keyframe request not sent: no cause still valid\n");
++            if ((takenKey.causes & kKeyCauseOwed) != 0 && owedExhaustToken_ != 0 &&
++                takenKey.owedToken == owedExhaustToken_) {
++              encodedFrameSink_->OnDecoderKeyOwedExhausted(owedExhaustToken_, now_us());  // C r2 §8: the last, dropped
++              owedExhaustToken_ = 0;
++            }
+             didWork = true;
+             continue;
+           }
+@@ -1102,6 +1131,10 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
+       if (exchanged && action.kind == ControlOutboundActionKind::KeyframeRequest && !sentKey.empty() &&
+           encodedFrameSink_) {
+         encodedFrameSink_->OnDecoderKeyRequestSent(sentKey, now_us());  // the retry clock starts at the send
++        if ((takenKey.causes & kKeyCauseOwed) != 0 && owedExhaustToken_ != 0 && takenKey.owedToken == owedExhaustToken_) {
++          encodedFrameSink_->OnDecoderKeyOwedExhausted(owedExhaustToken_, now_us());  // C r2 §8: the last, sent
++          owedExhaustToken_ = 0;
++        }
+       }
+       REMOTE60_LT({
+         const uint64_t t = now_us();
+@@ -1235,8 +1268,7 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
+             bool answerQueued = true;
+             DecoderKeyRequest answerWant;
+             if (encodedFrameSink_->TakeDecoderKeyRequest(&answerWant)) {
+-              answerQueued = keyframeRequests_.Request(2, now_us()).queued;
+-              NoteKeyRequest(answerWant, answerQueued);
++              answerQueued = RequestKey(answerWant, now_us());
+               REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Answer, answerQueued));  // apk-decoder-inbox r1
+             }
+             if (!answerQueued) {
+@@ -1460,23 +1492,35 @@ uint64_t ClientSessionController::WindowThumbnailVersion(uint64_t windowId) cons
+   return (it == thumbs_.end()) ? 0 : it->second.version;
+ }
+ 
+-// apk-inbox C (design r3 §4 D8): a key request the limiter took (accepted: it goes with the next KeyframeRequest
+-// action) or refused (held: the control loop asks the limiter again). Coalesced with what is already there.
+-void ClientSessionController::NoteKeyRequest(const DecoderKeyRequest& request, bool queued) {
+-  if (request.empty()) return;
++// apk-inbox C (design r3 §4 D8) / C r2 (Codex N2): one key request through the limiter and into the ledger in ONE
++// section -- taken (accepted: it goes with the next KeyframeRequest action) or refused (held: the control loop asks the
++// limiter again). Coalesced with what is already there. A request with no cause is not one: nothing is asked.
++bool ClientSessionController::RequestKey(const DecoderKeyRequest& request, uint64_t nowUs) {
++  if (request.empty()) return false;
+   std::lock_guard<std::mutex> lk(keyLedgerMu_);
++  const bool queued = keyframeRequests_.Request(2, nowUs).queued;
++#ifdef REMOTE60_CLIENT_SESSION_TEST_HOOKS
++  RunTestKeyHook("publish");  // inside the section: a test may change the SINK here (never this session)
++#endif
+   if (queued) {
+     keyAccepted_.Merge(request);
+   } else {
+     keyHeld_.Merge(request);
++    ++keyHeldVersion_;
+     decoderRekeyPending_.store(true, std::memory_order_release);
+   }
++  return queued;
+ }
+ 
++// C r2 (Codex N2): a new pick / reset -- the descriptors AND the limiter's pending flag go together, so no
++// KeyframeRequest action is left to be read as a request without a cause.
+ void ClientSessionController::ClearKeyLedger() {
+   std::lock_guard<std::mutex> lk(keyLedgerMu_);
+   keyHeld_.Clear();
+   keyAccepted_.Clear();
++  ++keyHeldVersion_;
++  (void)keyframeRequests_.ConsumePending(nullptr);
++  decoderRekeyPending_.store(false, std::memory_order_release);
+ }
+ 
+ void ClientSessionController::VideoReceiveMain() {
+@@ -1515,9 +1559,8 @@ void ClientSessionController::VideoReceiveMain() {
+     DecoderKeyRequest frameWant;
+     if (currentSink->TakeDecoderKeyRequest(&frameWant)) {
+       // r3 M1: refused by the limiter is not forgotten -- the control loop retries it.
+-      const bool frameQueued = keyframeRequests_.Request(2, now_us()).queued;
++      const bool frameQueued = RequestKey(frameWant, now_us());  // C r2: published with its causes, in one section
+       REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Frame, frameQueued));  // apk-decoder-inbox r1
+-      NoteKeyRequest(frameWant, frameQueued);  // apk-inbox C: held or accepted, with its causes
+       if (!frameQueued) {
+         decoderRekeyPending_.store(true, std::memory_order_release);
+         REMOTE60_LT(livenessTrace_.keyWantRefused.fetch_add(1, std::memory_order_relaxed));
+@@ -1529,13 +1572,10 @@ void ClientSessionController::VideoReceiveMain() {
+   };
+   callbacks.requestKeyframe = [&]() {
+     // KeyframeRequestState owns the time/token limiter, so repeated gaps cannot make an IDR storm.
+-    const bool pipeQueued = keyframeRequests_.Request(2, now_us()).queued;
++    DecoderKeyRequest pipe;  // apk-inbox C: rides with a pending sink request, never judged stale
++    pipe.causes = kKeyCausePipeline;
++    const bool pipeQueued = RequestKey(pipe, now_us());
+     REMOTE60_LT(livenessTrace_.KeyReq(LtKeyOrigin::Pipeline, pipeQueued));  // apk-decoder-inbox r1
+-    if (pipeQueued) {
+-      DecoderKeyRequest pipe;  // apk-inbox C: rides with a pending sink request, never judged stale
+-      pipe.causes = kKeyCausePipeline;
+-      NoteKeyRequest(pipe, true);
+-    }
+   };
+   callbacks.discontinuity = [&]() {
+     if (currentSink) currentSink->OnVideoDiscontinuity();
+diff --git a/apps/native_poc/src/native_video_client_session.hpp b/apps/native_poc/src/native_video_client_session.hpp
+index b3233ef..c216bb4 100644
+--- a/apps/native_poc/src/native_video_client_session.hpp
++++ b/apps/native_poc/src/native_video_client_session.hpp
+@@ -2,6 +2,7 @@
+ 
+ #include <cstddef>
+ #include <atomic>
++#include <chrono>
+ #include <cstdint>
+ #include <deque>
+ #include <functional>
+@@ -69,6 +70,11 @@ class ClientEncodedFrameSink {
+   }
+   virtual uint32_t DecoderKeyRequestValidCauses(const DecoderKeyRequest& request) { return request.causes; }
+   virtual void OnDecoderKeyRequestSent(const DecoderKeyRequest& /* request */, uint64_t /* nowUs */) {}
++  // C r2 (Codex codex_apk_inbox_c_src_r1.md §8 (a)): the session's asks for the owed IDR `owedToken` are used up (8 taken
++  // by the limiter -- queued, not "8 on the wire") and the last of them has left or been dropped. The sink records the
++  // duty as covered-and-spent: no recovery asks of its own on top, a final answer window, then exhausted -- a late IDR
++  // still decodes and ends it. A stale token (the duty re-armed or paid since) changes nothing.
++  virtual void OnDecoderKeyOwedExhausted(uint64_t /* owedToken */, uint64_t /* nowUs */) {}
+   virtual void OnWindowSelectionControlResult(const ControlWindowSelectedMessage& /* msg */) {}
+   // t-970r4zgo: the local selection a select request belongs to -- read when the request is
+   // queued (the Android sink: the generation PrepareForWindowSelection armed). 0 = not tracked.
+@@ -247,10 +253,19 @@ class ClientSessionController {
+     std::lock_guard<std::mutex> lk(testHookMu_);
+     testKeyHook_ = std::move(hook);
+   }
++  // ("publish", C r2: INSIDE the request's publish section, between the limiter taking it and its descriptor -- the
++  // hook may only call the sink, never this session.)
+   // TEST BUILD ONLY (apk-inbox C): the keyframe limiter's parameters, so a test can make it refuse (a HELD request).
+   void TestConfigureKeyframeLimiter(uint64_t minIntervalUs, uint64_t tokenRefillUs, uint32_t tokenCapacity) {
+     keyframeRequests_.Configure(minIntervalUs, tokenRefillUs, tokenCapacity);
+   }
++  // TEST BUILD ONLY (apk-inbox C r2): one key request with these causes, through the same section every path uses.
++  bool TestRequestKey(uint32_t causes) {
++    DecoderKeyRequest r;
++    r.causes = causes;
++    return RequestKey(r, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
++                                                     std::chrono::steady_clock::now().time_since_epoch()).count()));
++  }
+   // TEST BUILD ONLY (apk-0232 r2 N1): called when a queued desktop pick has just been turned local in the sink,
+   // before the panel and the tracked tag follow -- a test holds it there and makes a newer pick.
+   void SetTestAfterLocalSinkBeginHook(std::function<void(uint64_t tag)> hook) {
+@@ -272,13 +287,11 @@ class ClientSessionController {
+   uint64_t UdpHelloCount() const { return udpHelloCount_.load(std::memory_order_relaxed); }
+ 
+   // The viewer abandoned a switch (nativeAbortVideoSwitch): an IDR it was still owed is not asked for.
+-  void ClearPendingDecoderKeyframe() {
+-    decoderRekeyPending_.store(false, std::memory_order_release);
+-    std::lock_guard<std::mutex> lk(keyLedgerMu_);
+-    keyHeld_.Clear();
+-  }
++  void ClearPendingDecoderKeyframe() { ClearKeyLedger(); }  // C r2: the ledger and the limiter's pending together
+   // apk-inbox C (D8): requests not sent because no cause of theirs was valid any more (held / at the send point).
+   uint64_t KeyRequestsDroppedStale() const { return keyDroppedStale_.load(std::memory_order_relaxed); }
++  // C r2: KeyframeRequest actions whose descriptor was cancelled (a new pick / reset) -- not sent.
++  uint64_t KeyRequestsDroppedCancelled() const { return keyDroppedCancelled_.load(std::memory_order_relaxed); }
+   bool RequestRuntimeConfig(uint32_t bitrate, uint32_t fps);
+   bool RequestDesktopCaptureBackend(uint16_t backend);
+   // capture-lifecycle r1 (UA-2): what the host said runs for THIS connection's session (its answer to a
+@@ -488,12 +501,22 @@ class ClientSessionController {
+   // apk-inbox C (design r3 §4 D8): the descriptors of the key request HELD (refused by the limiter, decoderRekeyPending_)
+   // and of the one ACCEPTED (the limiter took it; the scheduler's next KeyframeRequest action sends it). Coalesced
+   // (DecoderKeyRequest::Merge); under keyLedgerMu_ (RX and control threads), never held across a sink call or a send.
++  // C r2 (Codex N2): the limiter's pending flag and the accepted descriptor are published together (RequestKey: the
++  // limiter's Request and the merge in ONE section of keyLedgerMu_) and consumed together (the scheduler's NextAction
++  // and the take, in one section). A KeyframeRequest action with no descriptor was cancelled (ClearKeyLedger consumes
++  // the pending flag too) -- it is not sent. keyHeldVersion_ moves with every change of keyHeld_: the held check returns
++  // only its own snapshot. Lock order: parkMu_ before keyLedgerMu_; the limiter's own lock inside; no sink call and no
++  // network under it.
+   std::mutex keyLedgerMu_;
+   DecoderKeyRequest keyHeld_;
+   DecoderKeyRequest keyAccepted_;
++  uint64_t keyHeldVersion_ = 0;
+   std::atomic<uint64_t> keyDroppedStale_{0};
+-  void NoteKeyRequest(const DecoderKeyRequest& request, bool queued);
++  std::atomic<uint64_t> keyDroppedCancelled_{0};
++  bool RequestKey(const DecoderKeyRequest& request, uint64_t nowUs);
+   void ClearKeyLedger();
++  // C r2 (§8 (a)): the owed duty whose 8th ask was taken; told to the sink once that ask has left or been dropped.
++  uint64_t owedExhaustToken_ = 0;
+   // r4 M1-A: asking for the IDR a selection is owed (ClientEncodedFrameSink::KeyframeOwedFor).
+   // Control-loop thread only.
+   uint64_t owedSelection_ = 0;

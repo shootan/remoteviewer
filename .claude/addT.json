@@ -1,0 +1,22 @@
+{
+  "repo_path": "D:/remote/remote",
+  "files": [
+    "apps/native_poc/CMakeLists.txt",
+    "apps/native_poc/installer/installer_main.cpp",
+    "apps/native_poc/src/install_registration.hpp",
+    "apps/native_poc/src/install_registration.cpp",
+    "apps/native_poc/src/install_registration_test.cpp",
+    "apps/native_poc/src/update_effects.hpp",
+    "apps/native_poc/src/update_effects.cpp",
+    "apps/native_poc/src/update_effects_test.cpp",
+    "apps/native_poc/src/update_registration_wiring.hpp",
+    "apps/native_poc/src/update_registration_wiring.cpp",
+    "apps/native_poc/src/update_registration_com_test.cpp",
+    "apps/native_poc/src/update_stop_process_test.cpp",
+    "apps/native_poc/src/updater_effects.cpp",
+    "apps/native_poc/src/updater_assembly_test.cpp",
+    "apps/native_poc/src/updater_scenarios_test.cpp",
+    "apps/native_poc/src/update_release_test.cpp",
+    "docs/history.md"
+  ]
+}

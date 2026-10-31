@@ -1,0 +1,402 @@
+﻿host_capture_lifecycle_ua_e2e_test (capture-lifecycle r1: UA-1 / UA-2)
+PASS  the host (test build) could be staged
+PASS  the launched host is isolated from the user's files, input injection off
+PASS  the host started (desktop capture, startup backend = its default)
+
+--- UA-1 (WGC): the shared session the Android app drives asks for WGC ---
+remote60_host_capture_lifecycle_ua_e2e_test.exe : [native-video-client-session] video receive nack=1 holdUs=120000 nonb
+locking=1
+At D:\remote\remote\.claude\caplife\r2_runs.ps1:26 char:74
++ ... out\e2e_$name.txt" 2>&1 } else { & $exe > "$out\e2e_$name.txt" 2>&1 }
++                                      ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([native-video-c...0 nonblocking=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+PASS  the shared session connects  connected window_list_received count=10 selected=desktop
+[native-video-client-session] udp recv drop sock=720 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=20 stop=0
+[native-video-host] h264 mft-identity role=decoder friendlyName="Microsoft H264 Video Decoder MFT" clsid={62CE7E72-4C71-4D20-B15D-452831A87D9D} vendorId=? hwUrl="?"
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  ...and decodes the desktop (the product decoder)  2 decoded, 0 failed
+PASS  UA-2 status: the host says it answers backend requests (pong 0x100000)
+PASS  it asks for WGC, and the host runs WGC for it
+PASS  UA-2 status: the request is answered (within the host's 250 ms, applied or said NotYetApplied)  applied
+PASS  UA-2 status: THE ANSWER SAYS what this session asked and what runs -- WGC, for this session only  requested=2 effective=2 active=2 flags=1
+[native-video-client-session] udp recv drop sock=720 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=20 sinceDatagramMs=27 stop=0
+[native-video-client-session] udp recv drop sock=720 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=45 sinceDatagramMs=34 stop=0
+PASS  UA-1 WGC #1: the host saw the input desktop go secure (a confirmed change, not one look)
+PASS  UA-1 WGC #1: ...and THE HOST REBUILT ITS WGC CAPTURE for the secure desktop  attempt=1 ok=1 active=wgc
+PASS  UA-1 WGC #1: A NEW IDR OF A CAPTURE MADE AFTER THE CHANGE IS DECODED (secure side; a real capture, not re-served)  362 ms after the edge
+PASS  UA-1 WGC #1: ...THE NEW ATTACHMENT'S FIRST FRAME WENT OUT AS THE NEW EPOCH'S KEY, AND WAS DECODED  desktopGen=1 adoptedCaptureUs=342505391885 hostFirstKey=1 decodedCaptureUs=342505391885
+[native-video-client-session] udp recv drop sock=720 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=65 sinceDatagramMs=20 stop=0
+[native-video-client-session] udp recv drop sock=720 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=87 sinceDatagramMs=30 stop=0
+PASS  UA-1 WGC #1: the host saw the input desktop come back to Default
+PASS  UA-1 WGC #1: ...and THE HOST REBUILT ITS WGC CAPTURE for Default again  attempt=1 ok=1 active=wgc
+PASS  UA-1 WGC #1: A NEW IDR OF A CAPTURE MADE AFTER THE RETURN IS DECODED (a real capture, not re-served)  374 ms after the edge
+PASS  UA-1 WGC #1: ...THE NEW ATTACHMENT'S FIRST FRAME WENT OUT AS THE NEW EPOCH'S KEY, AND WAS DECODED  desktopGen=2 adoptedCaptureUs=342507292053 hostFirstKey=1 decodedCaptureUs=342507292053
+[native-video-client-session] udp recv drop sock=720 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=107 sinceDatagramMs=63 stop=0
+[native-video-client-session] udp recv drop sock=720 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=128 sinceDatagramMs=18 stop=0
+PASS  UA-1 WGC #1: ...and the picture keeps coming (frames in the 2 s after)  25 frames
+PASS  UA-1 WGC #2: the host saw the input desktop go secure (a confirmed change, not one look)
+PASS  UA-1 WGC #2: ...and THE HOST REBUILT ITS WGC CAPTURE for the secure desktop  attempt=1 ok=1 active=wgc
+PASS  UA-1 WGC #2: A NEW IDR OF A CAPTURE MADE AFTER THE CHANGE IS DECODED (secure side; a real capture, not re-served)  396 ms after the edge
+PASS  UA-1 WGC #2: ...THE NEW ATTACHMENT'S FIRST FRAME WENT OUT AS THE NEW EPOCH'S KEY, AND WAS DECODED  desktopGen=3 adoptedCaptureUs=342509725305 hostFirstKey=1 decodedCaptureUs=342509725305
+[native-video-client-session] udp recv drop sock=720 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=148 sinceDatagramMs=62 stop=0
+[native-video-client-session] udp recv drop sock=720 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=172 sinceDatagramMs=30 stop=0
+PASS  UA-1 WGC #2: the host saw the input desktop come back to Default
+PASS  UA-1 WGC #2: ...and THE HOST REBUILT ITS WGC CAPTURE for Default again  attempt=1 ok=1 active=wgc
+PASS  UA-1 WGC #2: A NEW IDR OF A CAPTURE MADE AFTER THE RETURN IS DECODED (a real capture, not re-served)  342 ms after the edge
+PASS  UA-1 WGC #2: ...THE NEW ATTACHMENT'S FIRST FRAME WENT OUT AS THE NEW EPOCH'S KEY, AND WAS DECODED  desktopGen=4 adoptedCaptureUs=342511609220 hostFirstKey=1 decodedCaptureUs=342511609220
+[native-video-client-session] udp recv drop sock=720 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=194 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=720 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=215 sinceDatagramMs=29 stop=0
+PASS  UA-1 WGC #2: ...and the picture keeps coming (frames in the 2 s after)  21 frames
+PASS  UA-1 WGC: SAME CONNECTION throughout -- the session never left Connected; one session (epoch) at the host  1 session epoch(s)
+PASS  UA-2 status: a question is answered (still WGC for this session), and nothing was applied for it  active=2 applied=1
+    the shared session ended
+
+--- UA-2: the PC viewer connects next (it asks for no backend) ---
+PASS  the PC viewer's Hello is answered (a new session)
+[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=0.2.162 peerProcess=GNLinkStream peerVersion=unknown-awaiting-pong eventQpcUs=342515357211
+[native-video-client][control] seq=1 rttUs=1115 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=1 rttUs=1115 clockOffsetUs=-423 clientSendUs=342515357224 hostRecvUs=342515357358 hostSendUs=342515357358 clientRecvUs=342515358339 eventQpcUs=342515358400
+[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=0.2.162 peerProcess=GNLinkStream peerVersion=0.2.162 peerVersionSource=peer-report eventQpcUs=342515358569
+PASS  UA-2: THE HOST STARTED THE NEW SESSION FROM ITS OWN DEFAULT (the phone's WGC is not inherited)
+[native-video-client][telemetry] stage=assembly seq=126 gen=1 key=1 lastChunkRecvUs=342515537923 bytes=140958 fecRecovered=0 fecRecoveredChunks=0 reorder=0 droppedPrev=0 pending=0 eventQpcUs=342515537942
+[native-video-host] h264 mft-identity role=decoder friendlyName="Microsoft H264 Video Decoder MFT" clsid={62CE7E72-4C71-4D20-B15D-452831A87D9D} vendorId=? hwUrl="?"
+[native-video-client] H264 decoder backend=mft_enum_hw backendRequested=default(mft_auto) backendResolved=mft_enum_hw backendFallbackReason=default_policy hw=1 size=1920x1080
+[native-video-client][telemetry] stage=decode seq=126 gen=1 key=1 recvUs=342515537923 decodeStartUs=342515541110 decodeEndUs=342515557907 decodeUs=16797 r2dUs=3187 decodeQueueLagUs=0 pts=342515370336 eventQpcUs=342515557931
+[native-video-client][control] seq=2 rttUs=1575 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=2 rttUs=1575 clockOffsetUs=-656 clientSendUs=342515866855 hostRecvUs=342515866986 hostSendUs=342515866986 clientRecvUs=342515868430 eventQpcUs=342515868486
+[native-video-client][input-p0] windowUs=1009969 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=3 rttUs=1122 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=3 rttUs=1122 clockOffsetUs=-417 clientSendUs=342516382190 hostRecvUs=342516382334 hostSendUs=342516382334 clientRecvUs=342516383312 eventQpcUs=342516383365
+[native-video-client][bwe-observe] bwe=2535040 state=normal rate=increase goodputUnique=1690027 wireLoad=2097062 gradUs=-3 thrUs=6000 lossPm=0 appLimited=1 static=0 samples=12 sent=1
+[native-video-client] udp-assembly chunks=251 ingressDroppedTotal=0 completed=12 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 keyResync=0 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=1 waitForKey=0 catchup=0
+[native-video-client] recvFrames=13 decodedFrames=13 syntheticFrames=0 skippedQueued=0 avgLatencyUs=1537 maxLatencyUs=19985 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=1.77093 decodedRawMbps=280.533 decodeRatioX100=15841 size=1920x1080 statWindowUs=1161638 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=13 queueDepthMax=6 queueDepthH0=1 queueDepthH1=1 queueDepthH2=4 queueDepthH3=3 queueDepthH4p=4 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=0 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342516518791
+[native-video-client][control] seq=4 rttUs=1250 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=4 rttUs=1250 clockOffsetUs=-462 clientSendUs=342516895595 hostRecvUs=342516895758 hostSendUs=342516895758 clientRecvUs=342516896845 eventQpcUs=342516896902
+[native-video-client][input-p0] windowUs=1013158 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=5 rttUs=1229 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=5 rttUs=1229 clockOffsetUs=-423 clientSendUs=342517411355 hostRecvUs=342517411546 hostSendUs=342517411546 clientRecvUs=342517412584 eventQpcUs=342517412663
+[native-video-client][bwe-observe] bwe=2297443 state=normal rate=increase goodputUnique=1531629 wireLoad=1896206 gradUs=-2 thrUs=6000 lossPm=0 appLimited=1 static=0 samples=9 sent=1
+[native-video-client] udp-assembly chunks=202 ingressDroppedTotal=0 completed=9 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 keyResync=0 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=1 waitForKey=0 catchup=0
+[native-video-client] recvFrames=9 decodedFrames=9 syntheticFrames=0 skippedQueued=0 avgLatencyUs=0 maxLatencyUs=0 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=1.45213 decodedRawMbps=228.991 decodeRatioX100=15769 size=1920x1080 statWindowUs=985224 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=22 queueDepthMax=6 queueDepthH0=1 queueDepthH1=1 queueDepthH2=7 queueDepthH3=4 queueDepthH4p=9 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=0 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342517504059
+[native-video-client][control] seq=6 rttUs=911 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=6 rttUs=911 clockOffsetUs=-314 clientSendUs=342517925594 hostRecvUs=342517925735 hostSendUs=342517925735 clientRecvUs=342517926505 eventQpcUs=342517926547
+PASS  UA-2: ...and actually runs DXGI for the PC viewer
+PASS  UA-2: ...and the PC viewer shows the desktop (decoded frames)  31 frames
+[native-video-client][input-p0] windowUs=1014009 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client] udp-assembly chunks=267 ingressDroppedTotal=0 completed=10 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 keyResync=0 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=1 waitForKey=0 catchup=0
+[native-video-client][control] seq=7 rttUs=982 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=7 rttUs=982 clockOffsetUs=-403 clientSendUs=342518441241 hostRecvUs=342518441329 hostSendUs=342518441329 clientRecvUs=342518442223 eventQpcUs=342518442274
+[native-video-client][bwe-observe] bwe=2481348 state=normal rate=increase goodputUnique=2735057 wireLoad=3270482 gradUs=4 thrUs=6000 lossPm=0 appLimited=0 static=0 samples=10 sent=1
+[native-video-client][telemetry] stage=assembly seq=157 gen=1 key=1 lastChunkRecvUs=342518562227 bytes=147650 fecRecovered=0 fecRecoveredChunks=0 reorder=0 droppedPrev=0 pending=0 eventQpcUs=342518562244
+[native-video-client][telemetry] stage=decode seq=157 gen=1 key=1 recvUs=342518562227 decodeStartUs=342518562263 decodeEndUs=342518577941 decodeUs=15678 r2dUs=36 decodeQueueLagUs=84828 pts=342518388662 eventQpcUs=342518578099
+[native-video-client] recvFrames=10 decodedFrames=10 syntheticFrames=0 skippedQueued=0 avgLatencyUs=2169 maxLatencyUs=21693 avgDecodeTailUs=304 maxDecodeTailUs=3047 mbps=2.91512 decodedRawMbps=233.373 decodeRatioX100=8005 size=1920x1080 statWindowUs=1074139 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=32 queueDepthMax=6 queueDepthH0=1 queueDepthH1=2 queueDepthH2=10 queueDepthH3=7 queueDepthH4p=12 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=0 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342518578149
+[native-video-client][control] seq=8 rttUs=1141 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=8 rttUs=1141 clockOffsetUs=-389 clientSendUs=342518956617 hostRecvUs=342518956798 hostSendUs=342518956798 clientRecvUs=342518957758 eventQpcUs=342518957824
+[native-video-client][input-p0] windowUs=1000007 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=9 rttUs=1002 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=9 rttUs=1002 clockOffsetUs=-342 clientSendUs=342519458104 hostRecvUs=342519458263 hostSendUs=342519458263 clientRecvUs=342519459106 eventQpcUs=342519459164
+[native-video-client] udp-assembly chunks=268 ingressDroppedTotal=0 completed=12 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 keyResync=0 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=1 waitForKey=0 catchup=0
+[native-video-client][bwe-observe] bwe=2101462 state=normal rate=increase goodputUnique=1400975 wireLoad=1833361 gradUs=8 thrUs=6000 lossPm=0 appLimited=1 static=0 samples=12 sent=1
+[native-video-client] recvFrames=12 decodedFrames=12 syntheticFrames=0 skippedQueued=0 avgLatencyUs=1752 maxLatencyUs=21026 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=1.11267 decodedRawMbps=319.211 decodeRatioX100=28688 size=1920x1080 statWindowUs=942355 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=44 queueDepthMax=6 queueDepthH0=1 queueDepthH1=4 queueDepthH2=12 queueDepthH3=12 queueDepthH4p=15 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=1 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342519520482
+
+--- UA-1 (DXGI): the PC viewer's connection crosses a secure desktop ---
+[native-video-client] secure-desktop-active=1  (a Windows security prompt is on screen; it cannot be captured, so the picture is paused)
+[native-video-client][control] seq=10 rttUs=1133 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=10 rttUs=1133 clockOffsetUs=-454 clientSendUs=342519960702 hostRecvUs=342519960814 hostSendUs=342519960814 clientRecvUs=342519961835 eventQpcUs=342519961899
+[native-video-client][telemetry] stage=assembly seq=174 gen=1 key=1 lastChunkRecvUs=342520103997 bytes=140982 fecRecovered=0 fecRecoveredChunks=0 reorder=0 droppedPrev=0 pending=0 eventQpcUs=342520104029
+[native-video-client][telemetry] stage=decode seq=174 gen=1 key=1 recvUs=342520103997 decodeStartUs=342520104062 decodeEndUs=342520119025 decodeUs=14963 r2dUs=65 decodeQueueLagUs=124458 pts=342519943135 eventQpcUs=342520119178
+PASS  UA-1 DXGI #1: the host saw the input desktop go secure (a confirmed change, not one look)
+PASS  UA-1 DXGI #1: ...and DXGI fell back to WGC on the secure desktop  fallback_reason=dxgi_access_lost_secure_desktop
+PASS  UA-1 DXGI #1: A NEW IDR OF A CAPTURE MADE AFTER THE CHANGE IS DECODED (secure side; a real capture, not re-served)  231 ms after the edge
+[native-video-client][telemetry] stage=assembly seq=177 gen=1 key=1 lastChunkRecvUs=342520247716 bytes=91653 fecRecovered=0 fecRecoveredChunks=0 reorder=0 droppedPrev=1 pending=0 eventQpcUs=342520247729
+[native-video-client][telemetry] stage=decode seq=177 gen=1 key=1 recvUs=342520247716 decodeStartUs=342520247746 decodeEndUs=342520259563 decodeUs=11817 r2dUs=30 decodeQueueLagUs=198479 pts=342520141614 eventQpcUs=342520259725
+PASS  UA-1 DXGI #1: ...THE NEW ATTACHMENT'S FIRST FRAME WENT OUT AS THE NEW EPOCH'S KEY, AND WAS DECODED  desktopGen=5 adoptedCaptureUs=342520141614 hostFirstKey=1 decodedCaptureUs=342520171856
+[native-video-client] recvFrames=10 decodedFrames=10 syntheticFrames=0 skippedQueued=0 avgLatencyUs=830 maxLatencyUs=8304 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=2.81445 decodedRawMbps=285.743 decodeRatioX100=10152 size=1920x1080 statWindowUs=877274 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=54 queueDepthMax=6 queueDepthH0=1 queueDepthH1=5 queueDepthH2=17 queueDepthH3=13 queueDepthH4p=18 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=1 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342520397730
+[native-video-client] udp-assembly chunks=356 ingressDroppedTotal=0 completed=11 dropped=1 dropPm=83 malformed=0 reorder=0 keyReq=0 keyResync=1 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=0 waitForKey=0 catchup=0
+[native-video-client][input-p0] windowUs=1014387 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=11 rttUs=971 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=11 rttUs=971 clockOffsetUs=-328 clientSendUs=342520472765 hostRecvUs=342520472922 hostSendUs=342520472922 clientRecvUs=342520473736 eventQpcUs=342520473790
+[native-video-client][bwe-observe] bwe=2292265 state=normal rate=increase goodputUnique=2353201 wireLoad=2922956 gradUs=3 thrUs=6000 lossPm=83 appLimited=0 static=0 samples=12 sent=1
+[native-video-client][control] seq=12 rttUs=1369 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=12 rttUs=1369 clockOffsetUs=-511 clientSendUs=342520976645 hostRecvUs=342520976818 hostSendUs=342520976818 clientRecvUs=342520978014 eventQpcUs=342520978111
+[native-video-client][input-p0] windowUs=1008997 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client] udp-assembly chunks=162 ingressDroppedTotal=0 completed=9 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 keyResync=0 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=1 waitForKey=0 catchup=0
+[native-video-client][control] seq=13 rttUs=931 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=13 rttUs=931 clockOffsetUs=-350 clientSendUs=342521479256 hostRecvUs=342521479371 hostSendUs=342521479371 clientRecvUs=342521480187 eventQpcUs=342521480240
+[native-video-client] recvFrames=10 decodedFrames=10 syntheticFrames=0 skippedQueued=0 avgLatencyUs=0 maxLatencyUs=0 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=1.32015 decodedRawMbps=228.789 decodeRatioX100=17330 size=1920x1080 statWindowUs=1095662 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=64 queueDepthMax=6 queueDepthH0=1 queueDepthH1=5 queueDepthH2=19 queueDepthH3=17 queueDepthH4p=22 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=0 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342521493393
+[native-video-client][bwe-observe] bwe=2213298 state=normal rate=increase goodputUnique=1475532 wireLoad=1825365 gradUs=-1 thrUs=6000 lossPm=0 appLimited=1 static=0 samples=9 sent=1
+PASS  UA-1 DXGI #1: the host saw the input desktop come back to Default
+[native-video-client] secure-desktop-active=0  (picture resumes)
+[native-video-client][control] seq=14 rttUs=888 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=14 rttUs=888 clockOffsetUs=-335 clientSendUs=342521980567 hostRecvUs=342521980676 hostSendUs=342521980676 clientRecvUs=342521981455 eventQpcUs=342521981518
+[native-video-client][telemetry] stage=assembly seq=197 gen=1 key=1 lastChunkRecvUs=342522096199 bytes=134654 fecRecovered=0 fecRecoveredChunks=0 reorder=0 droppedPrev=0 pending=0 eventQpcUs=342522096213
+[native-video-client][telemetry] stage=decode seq=197 gen=1 key=1 recvUs=342522096199 decodeStartUs=342522096227 decodeEndUs=342522110983 decodeUs=14756 r2dUs=28 decodeQueueLagUs=71966 pts=342521942330 eventQpcUs=342522111146
+[native-video-client] udp-assembly chunks=312 ingressDroppedTotal=0 completed=11 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 keyResync=0 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=1 waitForKey=0 catchup=0
+[native-video-client] recvFrames=11 decodedFrames=11 syntheticFrames=0 skippedQueued=0 avgLatencyUs=97 maxLatencyUs=1067 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=2.3343 decodedRawMbps=304.84 decodeRatioX100=13059 size=1920x1080 statWindowUs=904548 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=75 queueDepthMax=6 queueDepthH0=1 queueDepthH1=5 queueDepthH2=23 queueDepthH3=22 queueDepthH4p=24 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=0 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342522397930
+[native-video-client][input-p0] windowUs=1006946 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=15 rttUs=1545 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=15 rttUs=1545 clockOffsetUs=-589 clientSendUs=342522486004 hostRecvUs=342522486187 hostSendUs=342522486187 clientRecvUs=342522487549 eventQpcUs=342522487626
+[native-video-client][bwe-observe] bwe=2407424 state=normal rate=increase goodputUnique=1899179 wireLoad=2374211 gradUs=5 thrUs=6000 lossPm=0 appLimited=0 static=0 samples=12 sent=1
+PASS  UA-1 DXGI #1: ...and THE HOST CLIMBED BACK TO DXGI once Default was back  desktop-backend-restored from=wgc to=dxgi
+PASS  UA-1 DXGI #1: A NEW IDR OF A CAPTURE MADE AFTER THE RETURN IS DECODED (a real capture, not re-served)  330 ms after the edge
+PASS  UA-1 DXGI #1: ...THE NEW ATTACHMENT'S FIRST FRAME WENT OUT AS THE NEW EPOCH'S KEY, AND WAS DECODED  desktopGen=6 adoptedCaptureUs=342521942330 hostFirstKey=1 decodedCaptureUs=342521942330
+[native-video-client][control] seq=16 rttUs=1175 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=16 rttUs=1175 clockOffsetUs=-409 clientSendUs=342522998667 hostRecvUs=342522998845 hostSendUs=342522998845 clientRecvUs=342522999842 eventQpcUs=342522999903
+[native-video-client][telemetry] stage=assembly seq=208 gen=1 key=1 lastChunkRecvUs=342523149881 bytes=135044 fecRecovered=0 fecRecoveredChunks=0 reorder=0 droppedPrev=0 pending=0 eventQpcUs=342523149896
+[native-video-client][telemetry] stage=decode seq=208 gen=1 key=1 recvUs=342523149881 decodeStartUs=342523149914 decodeEndUs=342523165067 decodeUs=15153 r2dUs=33 decodeQueueLagUs=86021 pts=342522990211 eventQpcUs=342523165210
+[native-video-client][input-p0] windowUs=1012481 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client] udp-assembly chunks=233 ingressDroppedTotal=0 completed=11 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 keyResync=0 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=1 waitForKey=0 catchup=0
+[native-video-client] recvFrames=11 decodedFrames=11 syntheticFrames=0 skippedQueued=0 avgLatencyUs=660 maxLatencyUs=7270 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=1.66152 decodedRawMbps=258.846 decodeRatioX100=15578 size=1920x1080 statWindowUs=1065277 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=86 queueDepthMax=6 queueDepthH0=1 queueDepthH1=5 queueDepthH2=27 queueDepthH3=26 queueDepthH4p=27 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=0 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342523463200
+[native-video-client][control] seq=17 rttUs=1360 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=17 rttUs=1360 clockOffsetUs=-489 clientSendUs=342523500525 hostRecvUs=342523500716 hostSendUs=342523500716 clientRecvUs=342523501885 eventQpcUs=342523501961
+[native-video-client][bwe-observe] bwe=2600043 state=normal rate=increase goodputUnique=1819303 wireLoad=2267541 gradUs=0 thrUs=6000 lossPm=0 appLimited=0 static=0 samples=11 sent=1
+[native-video-client][control] seq=18 rttUs=1002 hostQueueUs=1 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=18 rttUs=1002 clockOffsetUs=-392 clientSendUs=342524012572 hostRecvUs=342524012680 hostSendUs=342524012681 clientRecvUs=342524013574 eventQpcUs=342524013635
+[native-video-client] udp-assembly chunks=124 ingressDroppedTotal=0 completed=8 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 keyResync=0 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=1 waitForKey=0 catchup=0
+[native-video-client] recvFrames=8 decodedFrames=8 syntheticFrames=0 skippedQueued=0 avgLatencyUs=0 maxLatencyUs=0 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=1.10057 decodedRawMbps=220.326 decodeRatioX100=20019 size=1920x1080 statWindowUs=910197 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=94 queueDepthMax=6 queueDepthH0=1 queueDepthH1=5 queueDepthH2=28 queueDepthH3=30 queueDepthH4p=30 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=0 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342524373688
+[native-video-client][input-p0] windowUs=1014137 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=19 rttUs=1089 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=19 rttUs=1089 clockOffsetUs=-400 clientSendUs=342524514517 hostRecvUs=342524514661 hostSendUs=342524514661 clientRecvUs=342524515606 eventQpcUs=342524515671
+[native-video-client][bwe-observe] bwe=2387802 state=normal rate=increase goodputUnique=1591868 wireLoad=1960709 gradUs=4 thrUs=6000 lossPm=0 appLimited=1 static=0 samples=9 sent=1
+PASS  UA-1 DXGI #1: ...and the picture keeps coming (frames in the 2 s after)  21 frames
+[native-video-client][control] seq=20 rttUs=1138 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=20 rttUs=1138 clockOffsetUs=-383 clientSendUs=342525029188 hostRecvUs=342525029374 hostSendUs=342525029374 clientRecvUs=342525030326 eventQpcUs=342525030378
+[native-video-client] udp-assembly chunks=252 ingressDroppedTotal=0 completed=10 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 keyResync=0 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=1 waitForKey=0 catchup=0
+[native-video-client] recvFrames=10 decodedFrames=10 syntheticFrames=0 skippedQueued=0 avgLatencyUs=0 maxLatencyUs=0 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=1.88116 decodedRawMbps=250.415 decodeRatioX100=13311 size=1920x1080 statWindowUs=1001041 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=104 queueDepthMax=6 queueDepthH0=1 queueDepthH1=5 queueDepthH2=32 queueDepthH3=32 queueDepthH4p=34 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=0 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342525374467
+[native-video-client][input-p0] windowUs=1014502 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=21 rttUs=962 hostQueueUs=1 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=21 rttUs=962 clockOffsetUs=-360 clientSendUs=342525544891 hostRecvUs=342525545011 hostSendUs=342525545012 clientRecvUs=342525545853 eventQpcUs=342525545905
+[native-video-client][bwe-observe] bwe=2578926 state=normal rate=increase goodputUnique=1822863 wireLoad=2287258 gradUs=7 thrUs=6000 lossPm=0 appLimited=0 static=0 samples=11 sent=1
+[native-video-client] secure-desktop-active=1  (a Windows security prompt is on screen; it cannot be captured, so the picture is paused)
+[native-video-client][control] seq=22 rttUs=1206 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=22 rttUs=1206 clockOffsetUs=-365 clientSendUs=342526059857 hostRecvUs=342526060095 hostSendUs=342526060095 clientRecvUs=342526061063 eventQpcUs=342526061133
+PASS  UA-1 DXGI #2: the host saw the input desktop go secure (a confirmed change, not one look)
+PASS  UA-1 DXGI #2: ...and DXGI fell back to WGC on the secure desktop  fallback_reason=dxgi_access_lost_secure_desktop
+[native-video-client][telemetry] stage=assembly seq=240 gen=1 key=1 lastChunkRecvUs=342526227185 bytes=147568 fecRecovered=0 fecRecoveredChunks=0 reorder=0 droppedPrev=0 pending=0 eventQpcUs=342526227202
+[native-video-client][telemetry] stage=decode seq=240 gen=1 key=1 recvUs=342526227185 decodeStartUs=342526227222 decodeEndUs=342526242641 decodeUs=15419 r2dUs=37 decodeQueueLagUs=106718 pts=342526058696 eventQpcUs=342526242793
+PASS  UA-1 DXGI #2: A NEW IDR OF A CAPTURE MADE AFTER THE CHANGE IS DECODED (secure side; a real capture, not re-served)  221 ms after the edge
+[native-video-client][telemetry] stage=assembly seq=242 gen=1 key=1 lastChunkRecvUs=342526335800 bytes=79739 fecRecovered=0 fecRecoveredChunks=0 reorder=0 droppedPrev=1 pending=0 eventQpcUs=342526335815
+[native-video-client][telemetry] stage=decode seq=242 gen=1 key=1 recvUs=342526335800 decodeStartUs=342526335831 decodeEndUs=342526346363 decodeUs=10532 r2dUs=31 decodeQueueLagUs=132723 pts=342526191419 eventQpcUs=342526346490
+PASS  UA-1 DXGI #2: ...THE NEW ATTACHMENT'S FIRST FRAME WENT OUT AS THE NEW EPOCH'S KEY, AND WAS DECODED  desktopGen=7 adoptedCaptureUs=342526191419 hostFirstKey=1 decodedCaptureUs=342526191419
+[native-video-client] udp-assembly chunks=471 ingressDroppedTotal=0 completed=13 dropped=1 dropPm=71 malformed=0 reorder=0 keyReq=0 keyResync=1 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=1 waitForKey=0 catchup=0
+[native-video-client] recvFrames=13 decodedFrames=13 syntheticFrames=0 skippedQueued=0 avgLatencyUs=1258 maxLatencyUs=16359 avgDecodeTailUs=219 maxDecodeTailUs=2855 mbps=3.39015 decodedRawMbps=312.98 decodeRatioX100=9232 size=1920x1080 statWindowUs=1041208 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=117 queueDepthMax=6 queueDepthH0=1 queueDepthH1=6 queueDepthH2=38 queueDepthH3=34 queueDepthH4p=38 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=1 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342526415666
+[native-video-client][input-p0] windowUs=1012312 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=23 rttUs=1452 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=23 rttUs=1452 clockOffsetUs=-489 clientSendUs=342526571451 hostRecvUs=342526571688 hostSendUs=342526571688 clientRecvUs=342526572903 eventQpcUs=342526573020
+[native-video-client][bwe-observe] bwe=2785413 state=normal rate=increase goodputUnique=3115782 wireLoad=3842783 gradUs=5 thrUs=6000 lossPm=71 appLimited=0 static=0 samples=12 sent=1
+[native-video-client][control] seq=24 rttUs=1462 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=24 rttUs=1462 clockOffsetUs=-510 clientSendUs=342527088310 hostRecvUs=342527088531 hostSendUs=342527088531 clientRecvUs=342527089772 eventQpcUs=342527089883
+[native-video-client] udp-assembly chunks=154 ingressDroppedTotal=0 completed=10 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 keyResync=0 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=1 waitForKey=0 catchup=0
+[native-video-client] recvFrames=10 decodedFrames=10 syntheticFrames=0 skippedQueued=0 avgLatencyUs=0 maxLatencyUs=0 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=1.26135 decodedRawMbps=236.394 decodeRatioX100=18741 size=1920x1080 statWindowUs=1060414 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=127 queueDepthMax=6 queueDepthH0=1 queueDepthH1=6 queueDepthH2=41 queueDepthH3=37 queueDepthH4p=42 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=0 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342527476081
+[native-video-client][input-p0] windowUs=1000082 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=25 rttUs=1430 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=25 rttUs=1430 clockOffsetUs=-469 clientSendUs=342527604747 hostRecvUs=342527604993 hostSendUs=342527604993 clientRecvUs=342527606177 eventQpcUs=342527606247
+[native-video-client][bwe-observe] bwe=1862604 state=normal rate=increase goodputUnique=1241736 wireLoad=1572806 gradUs=-9 thrUs=6000 lossPm=0 appLimited=1 static=0 samples=10 sent=1
+PASS  UA-1 DXGI #2: the host saw the input desktop come back to Default
+[native-video-client] secure-desktop-active=0  (picture resumes)
+[native-video-client][control] seq=26 rttUs=989 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=26 rttUs=989 clockOffsetUs=-329 clientSendUs=342528117407 hostRecvUs=342528117572 hostSendUs=342528117572 clientRecvUs=342528118396 eventQpcUs=342528118467
+[native-video-client][telemetry] stage=assembly seq=262 gen=1 key=1 lastChunkRecvUs=342528268094 bytes=139178 fecRecovered=0 fecRecoveredChunks=0 reorder=0 droppedPrev=0 pending=0 eventQpcUs=342528268110
+[native-video-client][telemetry] stage=decode seq=262 gen=1 key=1 recvUs=342528268094 decodeStartUs=342528268130 decodeEndUs=342528281702 decodeUs=13572 r2dUs=36 decodeQueueLagUs=0 pts=342528108951 eventQpcUs=342528281890
+[native-video-client] recvFrames=11 decodedFrames=11 syntheticFrames=0 skippedQueued=0 avgLatencyUs=469 maxLatencyUs=5166 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=2.29742 decodedRawMbps=298.837 decodeRatioX100=13007 size=1920x1080 statWindowUs=922719 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=138 queueDepthMax=6 queueDepthH0=2 queueDepthH1=6 queueDepthH2=46 queueDepthH3=41 queueDepthH4p=43 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=1 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342528398907
+[native-video-client] udp-assembly chunks=312 ingressDroppedTotal=0 completed=12 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 keyResync=0 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=0 waitForKey=0 catchup=0
+[native-video-client][input-p0] windowUs=1014594 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=27 rttUs=1609 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=27 rttUs=1609 clockOffsetUs=-626 clientSendUs=342528619330 hostRecvUs=342528619508 hostSendUs=342528619508 clientRecvUs=342528620939 eventQpcUs=342528621007
+[native-video-client][bwe-observe] bwe=2014039 state=normal rate=increase goodputUnique=1960580 wireLoad=2428424 gradUs=4 thrUs=6000 lossPm=0 appLimited=0 static=0 samples=11 sent=1
+PASS  UA-1 DXGI #2: ...and THE HOST CLIMBED BACK TO DXGI once Default was back  desktop-backend-restored from=wgc to=dxgi
+PASS  UA-1 DXGI #2: A NEW IDR OF A CAPTURE MADE AFTER THE RETURN IS DECODED (a real capture, not re-served)  400 ms after the edge
+PASS  UA-1 DXGI #2: ...THE NEW ATTACHMENT'S FIRST FRAME WENT OUT AS THE NEW EPOCH'S KEY, AND WAS DECODED  desktopGen=8 adoptedCaptureUs=342528108951 hostFirstKey=1 decodedCaptureUs=342528108951
+[native-video-client][control] seq=28 rttUs=952 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=28 rttUs=952 clockOffsetUs=-356 clientSendUs=342529133981 hostRecvUs=342529134101 hostSendUs=342529134101 clientRecvUs=342529134933 eventQpcUs=342529135007
+[native-video-client][telemetry] stage=assembly seq=273 gen=1 key=1 lastChunkRecvUs=342529230393 bytes=135036 fecRecovered=0 fecRecoveredChunks=0 reorder=0 droppedPrev=0 pending=0 eventQpcUs=342529230406
+[native-video-client][telemetry] stage=decode seq=273 gen=1 key=1 recvUs=342529230393 decodeStartUs=342529230422 decodeEndUs=342529245491 decodeUs=15069 r2dUs=29 decodeQueueLagUs=98617 pts=342529069263 eventQpcUs=342529245623
+[native-video-client] udp-assembly chunks=232 ingressDroppedTotal=0 completed=11 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 keyResync=0 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=1 waitForKey=0 catchup=0
+[native-video-client] recvFrames=12 decodedFrames=12 syntheticFrames=0 skippedQueued=0 avgLatencyUs=720 maxLatencyUs=8642 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=1.7543 decodedRawMbps=296.313 decodeRatioX100=16890 size=1920x1080 statWindowUs=1015176 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=150 queueDepthMax=6 queueDepthH0=2 queueDepthH1=7 queueDepthH2=50 queueDepthH3=46 queueDepthH4p=45 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=1 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342529413961
+[native-video-client][input-p0] windowUs=1014923 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=29 rttUs=1191 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=29 rttUs=1191 clockOffsetUs=-395 clientSendUs=342529648005 hostRecvUs=342529648205 hostSendUs=342529648205 clientRecvUs=342529649196 eventQpcUs=342529649254
+[native-video-client][bwe-observe] bwe=2182994 state=normal rate=increase goodputUnique=1921648 wireLoad=2411852 gradUs=-4 thrUs=6000 lossPm=0 appLimited=0 static=0 samples=13 sent=1
+[native-video-client][control] seq=30 rttUs=1110 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=30 rttUs=1110 clockOffsetUs=-410 clientSendUs=342530160588 hostRecvUs=342530160733 hostSendUs=342530160733 clientRecvUs=342530161698 eventQpcUs=342530161773
+[native-video-client] udp-assembly chunks=153 ingressDroppedTotal=0 completed=9 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 keyResync=0 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=1 waitForKey=0 catchup=0
+[native-video-client] recvFrames=9 decodedFrames=9 syntheticFrames=0 skippedQueued=0 avgLatencyUs=0 maxLatencyUs=0 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=1.24314 decodedRawMbps=213.788 decodeRatioX100=17197 size=1920x1080 statWindowUs=1055287 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=159 queueDepthMax=6 queueDepthH0=2 queueDepthH1=7 queueDepthH2=52 queueDepthH3=48 queueDepthH4p=50 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=0 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342530469279
+[native-video-client][input-p0] windowUs=1010635 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=31 rttUs=1034 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=31 rttUs=1034 clockOffsetUs=-352 clientSendUs=342530673268 hostRecvUs=342530673433 hostSendUs=342530673433 clientRecvUs=342530674302 eventQpcUs=342530674361
+[native-video-client][bwe-observe] bwe=2357683 state=normal rate=increase goodputUnique=1750094 wireLoad=2160282 gradUs=-10 thrUs=6000 lossPm=0 appLimited=0 static=0 samples=9 sent=1
+PASS  UA-1 DXGI #2: ...and the picture keeps coming (frames in the 2 s after)  20 frames
+[native-video-client][control] seq=32 rttUs=1451 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=32 rttUs=1451 clockOffsetUs=-512 clientSendUs=342531187087 hostRecvUs=342531187300 hostSendUs=342531187300 clientRecvUs=342531188538 eventQpcUs=342531188660
+[native-video-client] udp-assembly chunks=242 ingressDroppedTotal=0 completed=9 dropped=0 dropPm=0 malformed=0 reorder=0 keyReq=0 keyResync=0 fecRecovered=0 simDropPm=0 simDropTotal=0 nackOn=1 nackSent=0 nackChunks=0 nackExhausted=0 pending=1 waitForKey=0 catchup=0
+[native-video-client] recvFrames=9 decodedFrames=9 syntheticFrames=0 skippedQueued=0 avgLatencyUs=0 maxLatencyUs=0 avgDecodeTailUs=0 maxDecodeTailUs=0 mbps=1.73095 decodedRawMbps=219.728 decodeRatioX100=12694 size=1920x1080 statWindowUs=1026761 statPublished=1 codedSize=1920x1088 congestionState=normal keyRetries=0 keyRetryDeferred=0 keyRetryEpisodes=0 keyWaitMaxUs=200872 congestionTransitions=0 congestionRecoveryCount=0 congestionRecoveryAvgUs=0 congestionRecoveryMaxUs=0 congestionRecoveryReq=0 staleDrops=0 holdLatestDrops=0 burstDrops=0 staleRefRecoveries=0 queueDepthSamples=168 queueDepthMax=6 queueDepthH0=2 queueDepthH1=7 queueDepthH2=54 queueDepthH3=50 queueDepthH4p=55 d3dPresentSuccess=0 d3dPresentFail=0 gdiFallbackPresented=0 gdiFallbackRateX1000=0 fallbackInitFail=0 fallbackRenderFail=0 fallbackNv12ConvertFail=0 paintCoalesced=0 overwriteBeforePresent=0 paintEnter=0 paintSelfHeal=0 invalidateFail=0 beginPaintFail=0 pacedHold=0 eventQpcUs=342531496024
+[native-video-client][input-p0] windowUs=1011662 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=33 rttUs=945 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=33 rttUs=945 clockOffsetUs=-348 clientSendUs=342531701155 hostRecvUs=342531701279 hostSendUs=342531701279 clientRecvUs=342531702100 eventQpcUs=342531702227
+[native-video-client][bwe-observe] bwe=2552283 state=normal rate=increase goodputUnique=1743120 wireLoad=2174176 gradUs=-5 thrUs=6000 lossPm=0 appLimited=0 static=0 samples=9 sent=1
+PASS  UA-1 DXGI: SAME CONNECTION throughout -- two sessions (epochs) at the host in all: the phone's, this one  2 session epoch(s)
+PASS  the host lived through it all
+    host| 10-26 15:38:09.550 [native-video-host] desktop_backend=dxgi capture=1920x1080
+
+    host| 10-26 15:38:09.705 [native-video-host] desktop_backend=dxgi capture-started=1 acquireTimeoutMs=8 acquireIdleSleepUs=2000 d3dMt=off
+
+    host| 10-26 15:38:09.706 [native-video-host][control] backend-owner epoch=1 requested=dxgi active=dxgi
+
+    host| 10-26 15:38:09.709 [native-video-host][desktop] input desktop <first look> -> Default desktopGen=0
+
+    host| 10-26 15:38:09.722 [native-video-host][desktop] adopted first frame attachment=2 desktopGen=0 captureUs=342503356195
+
+    host| 10-26 15:38:09.976 [native-video-host][control] desktop-backend-request seq=1 backend=wgc status=asked
+
+    host| 10-26 15:38:10.011 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 15:38:10.011 [native-video-host] capture-pipeline-flushed reason=desktop-backend-switch streamGen=1 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=9
+
+    host| 10-26 15:38:10.011 [native-video-host][control] desktop-backend-applied seq=1 requested=wgc active=wgc desktopActive=1
+
+    host| 10-26 15:38:10.015 [native-video-host][control] desktop-backend-status seq=1 requested=2 effective=2 active=2 flags=0x1
+
+    host| 10-26 15:38:10.039 [native-video-host][desktop] adopted first frame attachment=3 desktopGen=0 captureUs=342503675670
+
+    host| 10-26 15:38:11.726 [native-video-host][desktop] input desktop Default -> Winlogon desktopGen=1 cacheCleared=0
+
+    host| 10-26 15:38:11.726 [native-video-host][desktop] edge fence desktopGen=1
+
+    host| 10-26 15:38:11.742 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 15:38:11.742 [native-video-host][desktop] rebuild desktopGen=1 attempt=1 ok=1 active=wgc
+
+    host| 10-26 15:38:11.755 [native-video-host][desktop] adopted first frame attachment=4 desktopGen=1 captureUs=342505391885
+
+    host| 10-26 15:38:13.624 [native-video-host][desktop] input desktop Winlogon -> Default desktopGen=2 cacheCleared=0
+
+    host| 10-26 15:38:13.625 [native-video-host][desktop] edge fence desktopGen=2
+
+    host| 10-26 15:38:13.639 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 15:38:13.639 [native-video-host][desktop] rebuild desktopGen=2 attempt=1 ok=1 active=wgc
+
+    host| 10-26 15:38:13.654 [native-video-host][desktop] adopted first frame attachment=5 desktopGen=2 captureUs=342507292053
+
+    host| 10-26 15:38:16.048 [native-video-host][desktop] input desktop Default -> Winlogon desktopGen=3 cacheCleared=0
+
+    host| 10-26 15:38:16.048 [native-video-host][desktop] edge fence desktopGen=3
+
+    host| 10-26 15:38:16.064 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 15:38:16.064 [native-video-host][desktop] rebuild desktopGen=3 attempt=1 ok=1 active=wgc
+
+    host| 10-26 15:38:16.087 [native-video-host][desktop] adopted first frame attachment=6 desktopGen=3 captureUs=342509725305
+
+    host| 10-26 15:38:17.942 [native-video-host][desktop] input desktop Winlogon -> Default desktopGen=4 cacheCleared=0
+
+    host| 10-26 15:38:17.942 [native-video-host][desktop] edge fence desktopGen=4
+
+    host| 10-26 15:38:17.956 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 15:38:17.956 [native-video-host][desktop] rebuild desktopGen=4 attempt=1 ok=1 active=wgc
+
+    host| 10-26 15:38:17.970 [native-video-host][desktop] adopted first frame attachment=7 desktopGen=4 captureUs=342511609220
+
+    host| 10-26 15:38:20.179 [native-video-host][control] desktop-backend-status seq=2 requested=2 effective=2 active=2 flags=0x1
+
+    host| 10-26 15:38:21.723 [native-video-host][control] backend-owner epoch=2 requested=wgc active=wgc
+
+    host| 10-26 15:38:21.723 [native-video-host][control] desktop-backend-reset new-session epoch=2 requested=wgc -> host-default=dxgi effective=dxgi active=wgc
+
+    host| 10-26 15:38:24.728 [native-video-host] desktop_backend=dxgi capture-started=1 acquireTimeoutMs=8 acquireIdleSleepUs=2000 d3dMt=on
+
+    host| 10-26 15:38:24.728 [native-video-host] capture-pipeline-flushed reason=desktop-backend-restored streamGen=1 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=457
+
+    host| 10-26 15:38:24.728 [native-video-host] desktop-backend-restored from=wgc to=dxgi
+
+    host| 10-26 15:38:24.755 [native-video-host][desktop] adopted first frame attachment=8 desktopGen=4 captureUs=342518388662
+
+    host| 10-26 15:38:26.263 [native-video-host][test-seam] secure desktop shown: dxgi access lost (as on a real secure desktop)
+
+    host| 10-26 15:38:26.269 [native-video-host] fallback_reason=dxgi_access_lost_secure_desktop(test-seam)
+
+    host| 10-26 15:38:26.285 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 15:38:26.306 [native-video-host][desktop] adopted first frame attachment=9 desktopGen=4 captureUs=342519943135
+
+    host| 10-26 15:38:26.467 [native-video-host][desktop] input desktop Default -> Winlogon desktopGen=5 cacheCleared=0
+
+    host| 10-26 15:38:26.467 [native-video-host][desktop] edge fence desktopGen=5
+
+    host| 10-26 15:38:26.482 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 15:38:26.482 [native-video-host][desktop] rebuild desktopGen=5 attempt=1 ok=1 active=wgc
+
+    host| 10-26 15:38:26.503 [native-video-host][desktop] adopted first frame attachment=10 desktopGen=5 captureUs=342520141614
+
+    host| 10-26 15:38:28.272 [native-video-host][desktop] input desktop Winlogon -> Default desktopGen=6 cacheCleared=0
+
+    host| 10-26 15:38:28.272 [native-video-host][desktop] edge fence desktopGen=6
+
+    host| 10-26 15:38:28.287 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 15:38:28.287 [native-video-host][desktop] rebuild desktopGen=6 attempt=1 ok=1 active=wgc
+
+    host| 10-26 15:38:28.304 [native-video-host][desktop] adopted first frame attachment=11 desktopGen=6 captureUs=342521942330
+
+    host| 10-26 15:38:29.338 [native-video-host] desktop_backend=dxgi capture-started=1 acquireTimeoutMs=8 acquireIdleSleepUs=2000 d3dMt=on
+
+    host| 10-26 15:38:29.338 [native-video-host] capture-pipeline-flushed reason=desktop-backend-restored streamGen=1 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=599
+
+    host| 10-26 15:38:29.338 [native-video-host] desktop-backend-restored from=wgc to=dxgi
+
+    host| 10-26 15:38:29.358 [native-video-host][desktop] adopted first frame attachment=12 desktopGen=6 captureUs=342522990211
+
+    host| 10-26 15:38:32.389 [native-video-host][test-seam] secure desktop shown: dxgi access lost (as on a real secure desktop)
+
+    host| 10-26 15:38:32.395 [native-video-host] fallback_reason=dxgi_access_lost_secure_desktop(test-seam)
+
+    host| 10-26 15:38:32.407 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 15:38:32.421 [native-video-host][desktop] adopted first frame attachment=13 desktopGen=6 captureUs=342526058696
+
+    host| 10-26 15:38:32.523 [native-video-host][desktop] input desktop Default -> Winlogon desktopGen=7 cacheCleared=0
+
+    host| 10-26 15:38:32.523 [native-video-host][desktop] edge fence desktopGen=7
+
+    host| 10-26 15:38:32.538 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 15:38:32.538 [native-video-host][desktop] rebuild desktopGen=7 attempt=1 ok=1 active=wgc
+
+    host| 10-26 15:38:32.554 [native-video-host][desktop] adopted first frame attachment=14 desktopGen=7 captureUs=342526191419
+
+    host| 10-26 15:38:34.441 [native-video-host][desktop] input desktop Winlogon -> Default desktopGen=8 cacheCleared=0
+
+    host| 10-26 15:38:34.441 [native-video-host][desktop] edge fence desktopGen=8
+
+    host| 10-26 15:38:34.456 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 15:38:34.456 [native-video-host][desktop] rebuild desktopGen=8 attempt=1 ok=1 active=wgc
+
+    host| 10-26 15:38:34.471 [native-video-host][desktop] adopted first frame attachment=15 desktopGen=8 captureUs=342528108951
+
+    host| 10-26 15:38:35.411 [native-video-host] desktop_backend=dxgi capture-started=1 acquireTimeoutMs=8 acquireIdleSleepUs=2000 d3dMt=on
+
+    host| 10-26 15:38:35.411 [native-video-host] capture-pipeline-flushed reason=desktop-backend-restored streamGen=1 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=786
+
+    host| 10-26 15:38:35.411 [native-video-host] desktop-backend-restored from=wgc to=dxgi
+
+    host| 10-26 15:38:35.438 [native-video-host][desktop] adopted first frame attachment=16 desktopGen=8 captureUs=342529069263
+
+PASS  the scratch directory is cleaned up
+
+RESULT: ALL PASS  (54 checks, 0 failed)

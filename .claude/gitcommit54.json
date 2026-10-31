@@ -1,0 +1,4 @@
+{
+ "repo_path": "D:/remote/remote",
+ "message": "docs(update): the inline claim is true of both now, and gdi passed once\n\nTwo corrections to the record.\n\nThe \"not inline\" half was written when it was true of the client only, and\nthe host was still waiting on its UI thread. It is true of both now, and the\nentry says so along with the fact that it was false for the host when first\nwritten -- a line that was wrong for one of two places is worth leaving\nvisible.\n\nAnd gdi_capture_process failed in one full run and passed in the next, with\nnothing between them touching it. That supports the environment explanation\nwithout proving it, so it goes in as an observation: \"not always failing\" is\nwhere narrowing the cause starts.\n\nCo-Authored-By: Claude Opus 5 <noreply@anthropic.com>"
+}

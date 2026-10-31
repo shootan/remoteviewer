@@ -1,0 +1,68 @@
+﻿
+--- the target id: classified before it can be an HWND ---
+PASS  desktop (0)  window monitor=0
+PASS  a zero-extended HWND  window monitor=0
+PASS  a sign-extended HWND  window monitor=0
+PASS  monitor 0 (BASE|0) -- valid, not desktop  monitor monitor=0
+PASS  monitor 1  monitor monitor=1
+PASS  monitor 0xFFFFFFFF  monitor monitor=4294967295
+PASS  a reserved bit mixed in (0x7000000100000001) is NOT monitor 1  malformed monitor=0
+PASS  top nibble 7, other upper bits (0x7FFFFFFF00000002)  malformed monitor=0
+PASS  just below the namespace (0x6FFFFFFFFFFFFFFF)  window monitor=0
+PASS  just above it (0x8000000000000001) -- not taken for a monitor by '>= BASE'  window monitor=0
+PASS  encode(1) is the APK's MONITOR_ID_BASE + 1 (8070450532247928833)
+
+--- the host's resolution against the list THIS connection was sent ---
+PASS  monitor 1 -> the device listed as 1
+PASS  monitor 0 -> the device listed as 0
+PASS  monitor 5 (not listed): refused, no clamp to the last
+PASS  no list sent on this connection: refused
+PASS  malformed: refused as invalid_target, never looked up as a window
+PASS  an HWND: a window request, not refused here
+
+--- the selection gate: the answer to THIS selection, then its generation only ---
+PASS  before the answer nothing is admitted (old picture)
+PASS  ... not even the new generation's frame
+PASS  an answer to selection 6 (an earlier pick) is IGNORED and the gate stays shut
+PASS  the answer to selection 7 applies with streamGen 41
+PASS  the new generation's frame (41) dropped before the answer -> a fresh IDR is asked for
+PASS  after it: generation 41 passes
+PASS  an old-generation frame (40) does not
+PASS  a second answer for the same selection changes nothing
+PASS  no frame of the answered generation dropped: no extra IDR is asked for
+PASS  a failure answer leaves the gate shut (no frame admitted)
+PASS  no selection armed: frames pass
+PASS  an answer with nothing armed is ignored
+
+--- the panel: a monitor answer is a monitor selection ---
+PASS  ok, status window_selected (the APK's ack), selectedMonitorId 1, desktop mode (selectedId 0)  window_selected: DISPLAY2 mon=1 id=0
+PASS  the answer's target and generation are kept for the APK's log
+PASS  a later window list (selectedWindowId 0) does not undo the monitor selection
+PASS  an 'ok' answer naming a malformed target is not a success
+
+--- r3 M4: a screen pick goes out only against the list it was made from ---
+PASS  the same list fetched again keeps its revision
+PASS  another screen at the same index is a new revision
+PASS  a pick made against the current list is sent
+PASS  a pick queued, then a different list arrives before it is sent: NOT sent, said so  monitor_select_requested
+PASS  a window pick is not fenced by the monitor list
+
+--- r4 M1-A: the selection is owed its generation's IDR until one is admitted ---
+PASS  answered after its IDR was dropped: owed
+PASS  a delta of that generation passes but does not pay it
+PASS  an IDR of another generation is not admitted and does not pay it
+PASS  an IDR of that generation PASSING the gate does not pay it
+PASS  dropped by the decoder (no surface): still owed, same duty
+PASS  a surface arrives: still owed, the duty re-armed (new token)
+PASS  another generation delivered does not pay it
+PASS  an IDR of that generation DELIVERED to the decoder pays it
+PASS  one of that generation lost afterwards owes one again (new duty)
+PASS  abandoned (Reset): nothing owed
+PASS  its IDR not dropped before the answer: nothing owed
+
+--- r4 M2-A: an answer is shown only for the selection most recently requested ---
+PASS  A's late failure is not shown while B is the requested selection  monitor_select_requested
+PASS  B's own answer is shown
+PASS  an untracked answer (tag 0) is shown as before
+
+RESULT: ALL PASS  (52 checks, 0 failed)

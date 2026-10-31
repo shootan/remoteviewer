@@ -1,0 +1,171 @@
+screenshots: D:\remote\remote\.claude\worktrees\verify-c2-ef533f2\build-verify\apps\native_poc\Release\clip_bar_shots
+host port 64119 (picked at run time)
+PASS  a scratch directory inside the repository
+
+--- the clipboard boundary, on a private window station (the product's WndProc) ---
+PASS  a private window station for the clipboard child
+  child: PASS  the product's window procedure owns a window on the private station
+  child: PASS  an image copy is put on the private clipboard
+  child:       client: package ready 64x64 png=14586 textUtf16=0 sha=557985a9 buildMs=6
+  child: PASS  WM_CLIPBOARDUPDATE -> capture_local_clipboard -> the client packages it
+  child: PASS  a newer copy makes the image still being encoded void (nothing of it is offered)
+  child: PASS  an image copy over the read limit is put on the private clipboard
+  child:       client: copy not sent result=2 (text, if any, goes by text sync)
+  child:       client: outcome=7 detail=2
+  child: PASS  a new image the read refuses still makes the older image void
+  child: PASS  ...and says the new one was not sent (too large)
+  child:       client: package ready 2048x2048 png=14346199 textUtf16=0 sha=0a778987 buildMs=356
+  child: PASS  the echo of the viewer's own write does not void the image being encoded
+  child:       client: package refused result=2 (not sent; text, if any, goes by text sync)
+  child:       client: outcome=7 detail=2
+  child: PASS  an image over the size limit ends with 'not sent: too large'
+  child: CHILD RESULT: PASSED  (9 checks, 0 failed)
+PASS  the clipboard child exited 0  0
+PASS  the test host (ClipSink) and a never-answering helper could be staged
+PASS  a window of this process is up for the host to capture
+PASS  the host is started with input injection off
+PASS  the host gets a private window station (its own clipboard)  Service-0x0-27b9b$\Default
+PASS  the launched process is isolated from the user's files
+PASS  the host started
+PASS  the product's window procedure owns a window
+PASS  the viewer's Hello is answered
+PASS  the host acknowledged the bulk channel
+[clip-bar] created eventQpcUs=1906386923884
+PASS  the transfer bar exists (hidden until an image goes)
+PASS  video is arriving  139 media datagrams
+[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=0.2.142 peerProcess=GNLinkStream peerVersion=unknown-awaiting-pong eventQpcUs=1906387524718
+[native-video-client] secure-desktop-active=1  (a Windows security prompt is on screen; it cannot be captured, so the picture is paused)
+[native-video-client][control] seq=1 rttUs=388 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=1 rttUs=388 clockOffsetUs=-42 clientSendUs=1906387524758 hostRecvUs=1906387524910 hostSendUs=1906387524910 clientRecvUs=1906387525146 eventQpcUs=1906387525303
+[native-video-client][connection-version] localProcess=GNLinkViewer localVersion=0.2.142 peerProcess=GNLinkStream peerVersion=0.2.142 peerVersionSource=peer-report eventQpcUs=1906387525496
+PASS  the host says it takes images (Pong) and the bulk channel is up
+
+--- 5 MiB image: the bar while sending ---
+[native-video-client][clip-image] package ready 512x2560 png=4600527 textUtf16=0 sha=0a9d8808 buildMs=121
+[native-video-client][clip-image] accepted gen=1 window=2
+[clip-bar] phase=1 eventQpcUs=1906387679493
+[native-video-client][control] seq=2 rttUs=363 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=2 rttUs=363 clockOffsetUs=38 clientSendUs=1906388035854 hostRecvUs=1906388036074 hostSendUs=1906388036074 clientRecvUs=1906388036217 eventQpcUs=1906388036365
+[native-video-client][input-p0] windowUs=1006216 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=3 rttUs=238 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=3 rttUs=238 clockOffsetUs=42 clientSendUs=1906388545982 hostRecvUs=1906388546143 hostSendUs=1906388546143 clientRecvUs=1906388546220 eventQpcUs=1906388546295
+[native-video-client][control] seq=4 rttUs=261 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=4 rttUs=261 clockOffsetUs=-15 clientSendUs=1906389056675 hostRecvUs=1906389056790 hostSendUs=1906389056790 clientRecvUs=1906389056936 eventQpcUs=1906389057034
+[native-video-client][input-p0] windowUs=1006928 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=5 rttUs=248 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=5 rttUs=248 clockOffsetUs=-8 clientSendUs=1906389568589 hostRecvUs=1906389568705 hostSendUs=1906389568705 clientRecvUs=1906389568837 eventQpcUs=1906389568929
+[native-video-client][control] seq=6 rttUs=321 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=6 rttUs=321 clockOffsetUs=-30 clientSendUs=1906390077932 hostRecvUs=1906390078062 hostSendUs=1906390078062 clientRecvUs=1906390078253 eventQpcUs=1906390078347
+[native-video-client][input-p0] windowUs=1003280 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=7 rttUs=277 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=7 rttUs=277 clockOffsetUs=45 clientSendUs=1906390587549 hostRecvUs=1906390587733 hostSendUs=1906390587733 clientRecvUs=1906390587826 eventQpcUs=1906390587917
+[native-video-client][control] seq=8 rttUs=264 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=8 rttUs=264 clockOffsetUs=11 clientSendUs=1906391096316 hostRecvUs=1906391096459 hostSendUs=1906391096459 clientRecvUs=1906391096580 eventQpcUs=1906391096665
+[native-video-client][input-p0] windowUs=1005047 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=9 rttUs=205 hostQueueUs=1 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=9 rttUs=205 clockOffsetUs=-10 clientSendUs=1906391608259 hostRecvUs=1906391608351 hostSendUs=1906391608352 clientRecvUs=1906391608464 eventQpcUs=1906391608542
+PASS  the bar shows the transfer while it runs  원격 PC로 이미지 보내는 중 7% (0.3 / 4.4 MB) · 4초
+PASS  ...with a percentage, sizes and seconds
+PASS  ...and a Cancel button inside the bar  400,5-460,36
+PASS  the bar lies inside the viewer's client area (not off-window)
+PASS  the bar is above the viewer in z-order (the viewer cannot cover it)
+PASS  the bar is enabled and takes the mouse
+      info: the window at the Cancel button's screen point is the bar
+PASS  screenshot while sending  900x560 printViewer=1 bar=drawn printBar=1 png=12419 bytes
+[clip-bar] down x=200 y=20 onCancel=0 eventQpcUs=1906391717901
+[native-video-client][control] seq=10 rttUs=360 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=10 rttUs=360 clockOffsetUs=-53 clientSendUs=1906392121886 hostRecvUs=1906392122013 hostSendUs=1906392122013 clientRecvUs=1906392122246 eventQpcUs=1906392122341
+[native-video-client][input-p0] windowUs=1009920 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=11 rttUs=497 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=11 rttUs=497 clockOffsetUs=-72 clientSendUs=1906392633647 hostRecvUs=1906392633823 hostSendUs=1906392633823 clientRecvUs=1906392634144 eventQpcUs=1906392634255
+[native-video-client][control] seq=12 rttUs=225 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=12 rttUs=225 clockOffsetUs=3 clientSendUs=1906393147038 hostRecvUs=1906393147154 hostSendUs=1906393147154 clientRecvUs=1906393147263 eventQpcUs=1906393147347
+PASS  a click beside the button cancels nothing (negative control)
+
+--- 취소 ---
+[clip-bar] down x=430 y=20 onCancel=1 eventQpcUs=1906393533851
+[clip-bar] cancel clicked, callback present eventQpcUs=1906393534250
+[native-video-client][clip-image] user cancel requested active=1
+[native-video-client][clip-image] stopped here, cancel sent reason=9 bytes=4600527 served=622592 ms=5884 sha=0a9d8808
+[native-video-client][clip-image] cancel answered reason=9 hostState=6 hostReason=9 seqOk=1 idOk=1
+[native-video-client][clip-image] outcome=2 detail=9
+[native-video-client][input-p0] windowUs=1008481 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=13 rttUs=325 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=13 rttUs=325 clockOffsetUs=19 clientSendUs=1906393656787 hostRecvUs=1906393656969 hostSendUs=1906393656969 clientRecvUs=1906393657112 eventQpcUs=1906393657206
+[clip-bar] phase=3 outcome=2 detail=9 eventQpcUs=1906393688294
+PASS  Cancel stops the sending on this side at once  308 ms after the click
+PASS  ...and the HOST's answer settles it: cancelled, by the user  outcome=2 detail=9 after 308 ms
+PASS  the bar says it was cancelled, without a Cancel button  이미지 보내기를 취소했습니다
+PASS  screenshot after Cancel  900x560 printViewer=1 bar=drawn printBar=1 png=10448 bytes
+
+--- a small image after the cancel: the host takes it ---
+[native-video-client][clip-image] package ready 256x256 png=231203 textUtf16=0 sha=557fe4d0 buildMs=7
+[native-video-client][clip-image] accepted gen=2 window=2
+[clip-bar] phase=1 eventQpcUs=1906393935483
+[native-video-client][control] seq=14 rttUs=229 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=14 rttUs=229 clockOffsetUs=1 clientSendUs=1906394165123 hostRecvUs=1906394165239 hostSendUs=1906394165239 clientRecvUs=1906394165352 eventQpcUs=1906394165430
+[native-video-client][input-p0] windowUs=1003539 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=15 rttUs=326 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=15 rttUs=326 clockOffsetUs=-23 clientSendUs=1906394677110 hostRecvUs=1906394677250 hostSendUs=1906394677250 clientRecvUs=1906394677436 eventQpcUs=1906394677529
+[native-video-client][control] seq=16 rttUs=351 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=16 rttUs=351 clockOffsetUs=-40 clientSendUs=1906395188651 hostRecvUs=1906395188786 hostSendUs=1906395188786 clientRecvUs=1906395189002 eventQpcUs=1906395189149
+[native-video-client][input-p0] windowUs=1007141 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=17 rttUs=239 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=17 rttUs=239 clockOffsetUs=21 clientSendUs=1906395699367 hostRecvUs=1906395699508 hostSendUs=1906395699508 clientRecvUs=1906395699606 eventQpcUs=1906395699686
+[native-video-client][control] seq=18 rttUs=277 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=18 rttUs=277 clockOffsetUs=21 clientSendUs=1906396210527 hostRecvUs=1906396210687 hostSendUs=1906396210687 clientRecvUs=1906396210804 eventQpcUs=1906396210910
+[native-video-client][input-p0] windowUs=1003872 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=19 rttUs=227 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=19 rttUs=227 clockOffsetUs=0 clientSendUs=1906396718098 hostRecvUs=1906396718211 hostSendUs=1906396718211 clientRecvUs=1906396718325 eventQpcUs=1906396718422
+[native-video-client][clip-image] outcome=1 detail=0
+[native-video-client][clip-image] end state=4 reason=0 bytes=231203 served=231203 ms=3059 sha=557fe4d0 rateBps=1000000
+PASS  the next copy is published (both sides went idle after the cancel)
+[clip-bar] phase=3 outcome=1 detail=0 eventQpcUs=1906397182026
+PASS  the bar says where it went  이미지를 원격 PC 클립보드에 넣었습니다 (0.2 MB, 3초)
+PASS  screenshot after a published image  900x560 printViewer=1 bar=drawn printBar=1 png=12066 bytes
+[native-video-client][control] seq=20 rttUs=289 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=20 rttUs=289 clockOffsetUs=47 clientSendUs=1906397228036 hostRecvUs=1906397228228 hostSendUs=1906397228228 clientRecvUs=1906397228325 eventQpcUs=1906397228417
+[native-video-client][input-p0] windowUs=1005293 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=21 rttUs=309 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=21 rttUs=309 clockOffsetUs=24 clientSendUs=1906397739313 hostRecvUs=1906397739492 hostSendUs=1906397739492 clientRecvUs=1906397739622 eventQpcUs=1906397739759
+[native-video-client][control] seq=22 rttUs=319 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=22 rttUs=319 clockOffsetUs=42 clientSendUs=1906398251759 hostRecvUs=1906398251961 hostSendUs=1906398251961 clientRecvUs=1906398252078 eventQpcUs=1906398252158
+[native-video-client][input-p0] windowUs=1007032 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=23 rttUs=309 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=23 rttUs=309 clockOffsetUs=38 clientSendUs=1906398761805 hostRecvUs=1906398761998 hostSendUs=1906398761998 clientRecvUs=1906398762114 eventQpcUs=1906398762250
+[native-video-client][control] seq=24 rttUs=363 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=24 rttUs=363 clockOffsetUs=-18 clientSendUs=1906399273222 hostRecvUs=1906399273385 hostSendUs=1906399273385 clientRecvUs=1906399273585 eventQpcUs=1906399273680
+[native-video-client][input-p0] windowUs=1003988 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=25 rttUs=283 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=25 rttUs=283 clockOffsetUs=23 clientSendUs=1906399782630 hostRecvUs=1906399782795 hostSendUs=1906399782795 clientRecvUs=1906399782913 eventQpcUs=1906399782993
+[native-video-client][control] seq=26 rttUs=264 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=26 rttUs=264 clockOffsetUs=37 clientSendUs=1906400291627 hostRecvUs=1906400291796 hostSendUs=1906400291796 clientRecvUs=1906400291891 eventQpcUs=1906400291985
+[native-video-client][input-p0] windowUs=1006331 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=27 rttUs=346 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=27 rttUs=346 clockOffsetUs=47 clientSendUs=1906400803152 hostRecvUs=1906400803372 hostSendUs=1906400803372 clientRecvUs=1906400803498 eventQpcUs=1906400803622
+[native-video-client][control] seq=28 rttUs=770 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=28 rttUs=770 clockOffsetUs=-171 clientSendUs=1906401312944 hostRecvUs=1906401313158 hostSendUs=1906401313158 clientRecvUs=1906401313714 eventQpcUs=1906401313794
+[native-video-client][input-p0] windowUs=1008194 moveGen=0 moveCoalesced=0 moveSent=0 droppedTotal=0 moveRttAvgUs=0 moveRttMaxUs=0 moveQueueAgeAvgUs=0 moveQueueAgeMaxUs=0 transport=udp
+[native-video-client][control] seq=29 rttUs=324 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=29 rttUs=324 clockOffsetUs=-7 clientSendUs=1906401827324 hostRecvUs=1906401827479 hostSendUs=1906401827479 clientRecvUs=1906401827648 eventQpcUs=1906401827742
+[native-video-client][control] seq=30 rttUs=302 hostQueueUs=0 hostCapPid=0 hostCapProc=monitor hostCapRebind=0
+[native-video-client][telemetry] stage=clock pingSeq=30 rttUs=302 clockOffsetUs=40 clientSendUs=1906402336749 hostRecvUs=1906402336940 hostSendUs=1906402336940 clientRecvUs=1906402337051 eventQpcUs=1906402337152
+[clip-bar] phase=0 eventQpcUs=1906402431443
+PASS  the result line goes away by itself (about 5 s)
+PASS  the bar is destroyed with the viewer window
+PASS  the host is gone when the job closes
+PASS  host log: the transfer ended as cancelled by the USER (reason 9) on the host  1
+PASS  host log: exactly one image published (the small one)  1
+PASS  the test sink holds the published image and nothing of the cancelled one  2 files
+      host clip-image lines:
+        09-28 22:47:55.562 [native-video-host][clip-image] TEST SINK publisher (no clipboard)
+        09-28 22:47:56.345 [native-video-host][clip-image] offer id=21911 512x2560 png=4600527 textUtf16=0 sha=0a9d8808 verdict=0
+        09-28 22:48:02.230 [native-video-host][clip-image] end state=cancelled reason=9 at=cancel sha=0a9d8808 bytes=4600527 ms=5885
+        09-28 22:48:02.570 [native-video-host][clip-image] offer id=36629 256x256 png=231203 textUtf16=0 sha=557fe4d0 verdict=0
+        09-28 22:48:05.428 [native-video-host][clip-image] end state=published reason=0 at=publish sha=557fe4d0 bytes=231203 ms=2858
+PASS  the scratch run directory is removed (the host had exited: yes)
+      held back from the window procedure: 1 clipboard push(es), 0 host text apply(s)
+PASS  no host text arrived to apply (the station clipboard was emptied before the host started)
+PASS  the user's clipboard (WinSta0) did not move: 4473 -> 4473
+
+RESULT: ALL PASS  (48 checks, 0 failed)

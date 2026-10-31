@@ -1,0 +1,9 @@
+{
+  "patch_sha256": "23642cfce9327b43f0754b98dad421901bb0fe40577c8bd23d04c72432de5f03",
+  "files": {
+    "apps/native_poc/src/udp_control_channel.cpp": "8705e92bc3097f865c4b74653485c9e03cd62476a9d5835fe42d1e52f0ad8b00",
+    "apps/native_poc/src/udp_control_close_diag_test.cpp": "eae00e2cfbc42291e7887b3eccfe5982132367b3e30e52455997ff5c863482ab"
+  },
+  "product_header_tokens_equal": true,
+  "product_cpp_tokens_equal_after_early_return_brace_normalization": true
+}

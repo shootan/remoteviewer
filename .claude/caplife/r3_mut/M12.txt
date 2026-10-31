@@ -1,0 +1,172 @@
+﻿host_capture_lifecycle_ua_e2e_test (capture-lifecycle r1: UA-1 / UA-2)
+PASS  the host (test build) could be staged
+PASS  the launched host is isolated from the user's files, input injection off
+PASS  the host started (desktop capture, startup backend = its default)
+
+--- r3 (N1-a): the rebuild after the edge fails after its detach ---
+remote60_host_capture_lifecycle_ua_e2e_test.exe : [native-video-client-session] video receive nack=1 holdUs=120000 nonb
+locking=1
+At D:\remote\remote\.claude\caplife\r3_mutants.ps1:31 char:25
++ ... unt -gt 0) { & "$rel\$($m[2]).exe" @a > "$out\$name.txt" 2>&1 } else  ...
++                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([native-video-c...0 nonblocking=1:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+PASS  the shared session connects  connected window_list_received count=11 selected=desktop
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=1 sinceDatagramMs=35 stop=0
+[native-video-host] h264 mft-identity role=decoder friendlyName="Microsoft H264 Video Decoder MFT" clsid={62CE7E72-4C71-4D20-B15D-452831A87D9D} vendorId=? hwUrl="?"
+[native-video-client-session] video delivered=1 keyReq=0 gapsBehindKey=0 nacks=0 stuckGiveUps=0 discontinuities=0
+PASS  ...and decodes the desktop
+PASS  it asks for WGC (a capture that keeps giving frames of this live desktop), and the host runs it
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=19 sinceDatagramMs=57 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=44 sinceDatagramMs=94 stop=0
+PASS  (1) the host saw the input desktop go secure
+PASS  (1) THE MEDIA FENCE CAME AT THE EDGE, before any rebuild
+PASS  (1) the 1st attempt failed AFTER its detach (the injected restart failure)  1 injected
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=70 sinceDatagramMs=186 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=90 sinceDatagramMs=97 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=113 sinceDatagramMs=156 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=135 sinceDatagramMs=20 stop=0
+FAIL  (1) THE SAME GENERATION'S 2nd ATTEMPT SUCCEEDED (a failed detach is not 'rebuilt')
+PASS  (1) ...and the picture comes back on the same connection
+PASS  (1) back to Default: rebuilt
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=153 sinceDatagramMs=25 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=177 sinceDatagramMs=25 stop=0
+PASS  (2) the host saw the input desktop go secure (a NEW edge)
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=202 sinceDatagramMs=90 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=233 sinceDatagramMs=90 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=264 sinceDatagramMs=62 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=295 sinceDatagramMs=60 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=326 sinceDatagramMs=61 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=356 sinceDatagramMs=61 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=387 sinceDatagramMs=61 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=417 sinceDatagramMs=60 stop=0
+FAIL  (2) 3 attempts failed after their detach, then the rebuild gave up  gaveUp=0 attempt3=0 injected=5
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=447 sinceDatagramMs=62 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=477 sinceDatagramMs=61 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=507 sinceDatagramMs=30 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=540 sinceDatagramMs=189 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=571 sinceDatagramMs=182 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=602 sinceDatagramMs=186 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=633 sinceDatagramMs=182 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=665 sinceDatagramMs=158 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=696 sinceDatagramMs=123 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=727 sinceDatagramMs=125 stop=0
+FAIL  (2) NOTHING MORE FOR 10 s: no 4th attempt, the generic retry did not take over (3 restarts in all)  6 restarts tried
+PASS  (2) NOTHING OF THE OLD ATTACHMENT REACHES THE VIEWER after the edge (0 pictures from fence+500 ms)  0 pictures; fenceUs=346339284146
+PASS  (2) the session is still up (no reconnect)
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=757 sinceDatagramMs=123 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=787 sinceDatagramMs=122 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=818 sinceDatagramMs=92 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=849 sinceDatagramMs=93 stop=0
+FAIL  (2) back to Default (file gone): THAT edge's rebuild succeeded
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=879 sinceDatagramMs=92 stop=0
+[native-video-client-session] udp recv drop sock=756 class=2 n=-1 errValid=1 err=10035 empty=0 truncated=0 reset=0 retr
+y=909 sinceDatagramMs=94 stop=0
+PASS  (2) THE PICTURE COMES BACK on the same connection
+PASS  the host lived through it all
+    host| 10-26 16:41:56.444 [native-video-host] desktop_backend=dxgi capture=1920x1080
+
+    host| 10-26 16:41:56.609 [native-video-host] desktop_backend=dxgi capture-started=1 acquireTimeoutMs=8 acquireIdleSleepUs=2000 d3dMt=off
+
+    host| 10-26 16:41:56.615 [native-video-host][control] backend-owner epoch=1 requested=dxgi active=dxgi
+
+    host| 10-26 16:41:56.621 [native-video-host][desktop] input desktop <first look> -> Default desktopGen=0
+
+    host| 10-26 16:41:56.625 [native-video-host][desktop] adopted first frame attachment=2 desktopGen=0 captureUs=346330255975
+
+    host| 10-26 16:41:56.905 [native-video-host][control] desktop-backend-request seq=1 backend=wgc status=asked
+
+    host| 10-26 16:41:56.947 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 16:41:56.947 [native-video-host] capture-pipeline-flushed reason=desktop-backend-switch streamGen=1 selectedId=0 targetHwnd=0x0 pid=0 process=monitor title=<empty> version=10
+
+    host| 10-26 16:41:56.947 [native-video-host][control] desktop-backend-applied seq=1 requested=wgc active=wgc desktopActive=1
+
+    host| 10-26 16:41:56.948 [native-video-host][control] desktop-backend-status seq=1 requested=2 effective=2 active=2 flags=0x1
+
+    host| 10-26 16:41:56.974 [native-video-host][desktop] adopted first frame attachment=3 desktopGen=0 captureUs=346330611562
+
+    host| 10-26 16:41:59.136 [native-video-host][desktop] input desktop Default -> Winlogon desktopGen=1 cacheCleared=0
+
+    host| 10-26 16:41:59.136 [native-video-host][desktop] edge fence desktopGen=1 atUs=346332776999
+
+    host| 10-26 16:41:59.138 [stream-test-seam] capture restart failed (injected)
+
+    host| 10-26 16:41:59.138 [native-video-host][desktop] rebuild desktopGen=1 attempt=1 ok=0 active=wgc
+
+    host| 10-26 16:41:59.659 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 16:41:59.689 [native-video-host][desktop] adopted first frame attachment=5 desktopGen=1 captureUs=346333326582
+
+    host| 10-26 16:42:03.385 [native-video-host][desktop] input desktop Winlogon -> Default desktopGen=2 cacheCleared=0
+
+    host| 10-26 16:42:03.385 [native-video-host][desktop] edge fence desktopGen=2 atUs=346337026042
+
+    host| 10-26 16:42:03.403 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 16:42:03.404 [native-video-host][desktop] rebuild desktopGen=2 attempt=1 ok=1 active=wgc
+
+    host| 10-26 16:42:03.422 [native-video-host][desktop] adopted first frame attachment=6 desktopGen=2 captureUs=346337060042
+
+    host| 10-26 16:42:05.643 [native-video-host][desktop] input desktop Default -> Winlogon desktopGen=3 cacheCleared=0
+
+    host| 10-26 16:42:05.643 [native-video-host][desktop] edge fence desktopGen=3 atUs=346339284146
+
+    host| 10-26 16:42:05.645 [stream-test-seam] capture restart failed (injected)
+
+    host| 10-26 16:42:05.645 [native-video-host][desktop] rebuild desktopGen=3 attempt=1 ok=0 active=wgc
+
+    host| 10-26 16:42:06.147 [stream-test-seam] capture restart failed (injected)
+
+    host| 10-26 16:42:07.150 [stream-test-seam] capture restart failed (injected)
+
+    host| 10-26 16:42:09.154 [stream-test-seam] capture restart failed (injected)
+
+    host| 10-26 16:42:13.157 [stream-test-seam] capture restart failed (injected)
+
+    host| 10-26 16:42:21.158 [stream-test-seam] capture restart failed (injected)
+
+    host| 10-26 16:42:23.813 [native-video-host][desktop] input desktop Winlogon -> Default desktopGen=4 cacheCleared=0
+
+    host| 10-26 16:42:23.813 [native-video-host][desktop] edge fence desktopGen=4 atUs=346357454316
+
+    host| 10-26 16:42:29.176 [native-video-host] desktop_backend=wgc capture-started=1
+
+    host| 10-26 16:42:29.207 [native-video-host][desktop] adopted first frame attachment=13 desktopGen=4 captureUs=346362845619
+
+PASS  the scratch directory is cleaned up
+
+RESULT: FAILED  (21 checks, 4 failed)

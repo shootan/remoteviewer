@@ -1,0 +1,18 @@
+{
+  "config": "C:\\Users\\shota\\.codex\\config.toml",
+  "backup": "C:\\Users\\shota\\.codex\\config.toml.before-remote-C-20261031-210507.bak",
+  "changed_servers": [
+    "git",
+    "fs_remote"
+  ],
+  "new_repository": "C:/work/remote",
+  "toml_validation": "PASS",
+  "only_two_MCP_path_arguments_changed": true,
+  "running_session_reload": "Existing tool connections still use D; fresh connections using updated config verified on C",
+  "product_work_still_stopped": true,
+  "fresh_connections": {
+    "git_C_main_status": "PASS",
+    "filesystem_allowed_directory": "C:/work/remote"
+  },
+  "migration_records_commit": "60cb21f58f982f2f872d7080035704cb5ed238dd"
+}
