@@ -1,0 +1,26 @@
+16:12:18 km run apk=C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km-fixture.apk
+16:12:51 booted (cold) in 32 s
+16:12:56 install: Performing Streamed Install
+Success
+16:13:10 tapped loginIdInput at 540,522 text='ID'
+16:13:21 tapped loginPasswordInput at 540,675 text='Password'
+16:13:26 tapped loginButton at 540,849 text='Sign In'
+16:13:33 PASS  1 signed in; both PCs listed
+16:13:36 tapped card:km-pc-a at 442,480 text='km-pc-a'
+16:13:46 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+16:13:47 PASS  2 A new connect: selection -> first frame  902 ms
+16:13:49   screenshot C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km_r2\avd\2_viewer_A.png
+16:13:49   A handle=1 counters=('1', '1', '1', '1', '1')
+16:13:55 tapped viewerMenuButton at 2310,775 text='메뉴'
+16:14:03 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+16:14:05 PASS  3: PC 목록 -> HOSTS, the PC on screen parked and confirmed
+16:14:11 PASS  3 A's card says kept, with its own 끊기  '화면 전송 중지 · 5:00 남음 · 누르면 바로 열립니다'
+16:14:11   screenshot C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km_r2\avd\3_hosts_A_kept.png
+16:14:13 tapped card:km-pc-b at 442,915 text='km-pc-b'
+16:14:45 FAIL  4 B new connect (A kept): the target is shown
+16:14:45   screenshot C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km_r2\avd\4_viewer_B.png
+16:14:45 PASS  4 B is a different entry; A was not ended by it  A=1 B=2
+16:14:51   logcat decoder bindings: decoder bound binding=1 | decoder unbound
+16:14:51 PASS  every new codec's first input is an IDR (key=1)  1 codecs, first inputs ['1']
+16:14:51 timing {'A_connect_targets_ms': 3675, 'A_first_select_ms': 902, 'B_connect_targets_ms': 3675, 'B_first_select_ms': None}
+16:14:51 run end: 6/7 PASS

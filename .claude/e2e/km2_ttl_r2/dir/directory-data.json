@@ -1,0 +1,152 @@
+{
+  "accounts": {
+    "katest": {
+      "id": "katest",
+      "salt": "036cc16d9d309fd2a57ae0ce9c79850b",
+      "hash": "3cac7e4eb59a3d12d5dc2659408f1f47e6852dbb48ce128f3a77e72c4f4a480e",
+      "status": "active",
+      "createdAt": 1792141332221,
+      "updatedAt": 1792141332221,
+      "approvedAt": 1792141332221,
+      "memo": "",
+      "lastLoginAt": 1792141407395
+    }
+  },
+  "hosts": {
+    "ecacff9317dca56e": {
+      "hostId": "ecacff9317dca56e",
+      "accountId": "katest",
+      "machineId": "km2-fixture-machine-a",
+      "hostName": "km-pc-a",
+      "tokenHash": "594827a0aff3be48ac37694cd74d623890cd2dd25408220b2671fefd0f0167da",
+      "lastSeen": 1792141583588,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 50083,
+      "wireIp": "127.0.0.1",
+      "wirePort": 50083,
+      "localIps": [
+        "192.168.0.76",
+        "172.24.16.1",
+        "172.30.80.1"
+      ],
+      "localUdpPort": 50083,
+      "alternateUdpPort": 0
+    },
+    "0c101e47a1ad1436": {
+      "hostId": "0c101e47a1ad1436",
+      "accountId": "katest",
+      "machineId": "km2-fixture-machine-b",
+      "hostName": "km-pc-b",
+      "tokenHash": "ba43450dc7720c3e746318c53678d077c726507d4b0ed7842f1038f3a3410309",
+      "lastSeen": 1792141602070,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 50084,
+      "wireIp": "127.0.0.1",
+      "wirePort": 50084,
+      "localIps": [
+        "192.168.0.76",
+        "172.24.16.1",
+        "172.30.80.1"
+      ],
+      "localUdpPort": 50084,
+      "alternateUdpPort": 0
+    },
+    "fbe72ee35dd5790e": {
+      "hostId": "fbe72ee35dd5790e",
+      "accountId": "katest",
+      "machineId": "km2-fixture-machine-c",
+      "hostName": "km-pc-c",
+      "tokenHash": "ed48e636bcaa52d074cb1c69fd9276f2b1b7be972554af3ee1e324aa99f8a042",
+      "lastSeen": 1792141598422,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 55102,
+      "wireIp": "127.0.0.1",
+      "wirePort": 55102,
+      "localIps": [
+        "192.168.0.76",
+        "172.24.16.1",
+        "172.30.80.1"
+      ],
+      "localUdpPort": 55102,
+      "alternateUdpPort": 0
+    },
+    "a57b73e7171330e0": {
+      "hostId": "a57b73e7171330e0",
+      "accountId": "katest",
+      "machineId": "km2-fixture-machine-d",
+      "hostName": "km-pc-d",
+      "tokenHash": "00df71fd762d27c3b0ea31c79c70c3f3fdd36f9570ff419bddabadae71bd8061",
+      "lastSeen": 1792141599080,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 55103,
+      "wireIp": "127.0.0.1",
+      "wirePort": 55103,
+      "localIps": [
+        "192.168.0.76",
+        "172.24.16.1",
+        "172.30.80.1"
+      ],
+      "localUdpPort": 55103,
+      "alternateUdpPort": 0
+    },
+    "d5907c3741a5df06": {
+      "hostId": "d5907c3741a5df06",
+      "accountId": "katest",
+      "machineId": "km2-fixture-machine-x",
+      "hostName": "km-pc-x",
+      "tokenHash": "687c4eed4f3152c56d86c6da826482fe572892dc675cd366f5cdcf9922948fc5",
+      "lastSeen": 1792141599262,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 55104,
+      "wireIp": "127.0.0.1",
+      "wirePort": 55104,
+      "localIps": [
+        "192.168.0.76",
+        "172.24.16.1",
+        "172.30.80.1"
+      ],
+      "localUdpPort": 55104,
+      "alternateUdpPort": 0
+    },
+    "2a8a3a18d231c95c": {
+      "hostId": "2a8a3a18d231c95c",
+      "accountId": "katest",
+      "machineId": "km2-fixture-machine-old",
+      "hostName": "km-pc-old",
+      "tokenHash": "ea01e7f43c2af77cf03d87df1b7ea14eb7eba658a36f773c15923e4fc3fb23f2",
+      "lastSeen": 1792141600105,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 55105,
+      "wireIp": "127.0.0.1",
+      "wirePort": 55105,
+      "localIps": [
+        "192.168.0.76",
+        "172.24.16.1",
+        "172.30.80.1"
+      ],
+      "localUdpPort": 55105,
+      "alternateUdpPort": 0
+    }
+  },
+  "devices": {
+    "17a237048a3b9f8f147d85d52bc4a14e": {
+      "deviceId": "17a237048a3b9f8f147d85d52bc4a14e",
+      "accountId": "katest",
+      "kind": "android",
+      "label": "Google sdk_gphone64_x86_64",
+      "credHash": "3bef284e9bbf7f1747b27cc88c17b5c3891e89f654161a2cb128e530f5075216",
+      "prevCredHash": "",
+      "prevValidUntil": 0,
+      "prevUsesLeft": 0,
+      "issued": [
+        "3bef284e9bbf7f1747b27cc88c17b5c3891e89f654161a2cb128e530f5075216"
+      ],
+      "revokeHash": "06cd8305a339213e2ecc7ec280999ceda0b9f43ccd1890e2109074ced12756f7",
+      "createdAt": 1792141407395,
+      "lastUsedAt": 1792141407395,
+      "expiresAt": 1799917407395,
+      "revokedAt": 0,
+      "revokedWhy": ""
+    }
+  }
+}

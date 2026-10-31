@@ -1,0 +1,23 @@
+17:28:33 km2 run apk=C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km2-fixture.apk
+17:29:11 booted (cold) in 38 s
+17:29:16 install: Performing Streamed Install
+Success
+17:29:29 tapped loginIdInput at 540,522 text='ID'
+17:29:37 tapped loginPasswordInput at 540,675 text='Password'
+17:29:42 tapped loginButton at 540,849 text='Sign In'
+17:30:01 PASS  P1 signed in; six PCs listed
+17:30:16   cost nothing_kept_list: {'rx_Bps': 39200, 'tx_Bps': 6268, 'threads': 28, 'rss_kB': 78740, 'pss_kB': 32631}
+17:30:19 tapped card:km-pc-a at 442,480 text='km-pc-a'
+17:30:27 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+17:30:29 PASS  P2 A new: selection -> first frame  699 ms
+17:30:36 tapped viewerMenuButton at 2310,775 text='메뉴'
+17:30:43 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+17:30:46 PASS  P2: PC 목록 -> HOSTS, parked and confirmed
+17:30:47   /connect held 6000 ms
+17:30:50 tapped card:km-pc-b at 442,915 text='km-pc-b'
+17:30:53 tapped card:km-pc-a at 291,686 text='km-pc-a'
+17:31:03 PASS  P3 M2: B (still connecting) superseded by the tap on A  B handle=2
+17:31:03 PASS  P3 A resumed at once (its own connection), not after B's timeout  3055 ms to the targets
+17:31:03 PASS  P3 B's late answer adopts nothing (no punch / native connect / start for B)  stale lines: [directory_connect_stale] handle=2 op=2 step=before_native_connect
+17:31:09 cost {'nothing_kept_list': {'rx_Bps': 39200, 'tx_Bps': 6268, 'threads': 28, 'rss_kB': 78740, 'pss_kB': 32631}}
+17:31:09 run end: 6/6 PASS

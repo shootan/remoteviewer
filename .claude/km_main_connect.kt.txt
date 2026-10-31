@@ -1,0 +1,241 @@
+    /**
+     * Address exchange, then punch, then the ordinary session. The address probe has to run on
+     * the media socket, so it lives in native code; only the HTTP call happens here.
+     *
+     * keepalive-multi r1: a PC already kept is reused (its own connection); otherwise a new entry is reserved in the
+     * native table -- the limit is counted and, if needed, the parked PC used longest ago marked to close, in that
+     * same step -- and connected beside the kept ones. A failed connect ends only its own entry.
+     */
+    private fun connectToDirectoryHost(host: DirectoryClient.Host) {
+        if (directoryBusy) return
+        val account = DirectoryClient.sessionAccount()
+        val origin = directoryOrigin()
+        val key = SessionPark.entryKey(origin, account, host.hostId)
+        // a kept PC decides first -- before "offline", since the list's online flag lags the connection this
+        // phone already holds.
+        keepTick()
+        val k = kept.values.firstOrNull { !it.manual && it.key == key }
+        val ne = k?.let { nativeEntries[it.handle] }
+        when (val tap = SessionPark.onHostTap(k, ne, account, origin, anyParkConfirming())) {
+            is SessionPark.Tap.Reuse -> {
+                if (resumeKept(tap.handle)) return
+                // refused at the moment of adoption (its limit, its pause): ended -- this tap connects anew, once
+            }
+            SessionPark.Tap.Wait -> {
+                // r2 K4 / multi §3: kept (the latest tap wins) and carried out when the park settles (keepTick).
+                val previous = heldTap
+                heldTap = connectIntents.scheduleFallback(account, origin, host.hostId)
+                diagnosticsLog.log(if (previous == null) "park_tap_held" else "park_tap_replaced",
+                    "tapped=${host.hostId} previous=${previous?.hostId.orEmpty()}")
+                return
+            }
+            is SessionPark.Tap.Discard -> {
+                diagnosticsLog.log("park_discard", "handle=${tap.handle} reason=${tap.reason} tapped=${host.hostId}")
+                NativeSessionBridge.nativeEnd(tap.handle, tap.reason)
+                forgetKept(tap.handle)
+            }
+            SessionPark.Tap.Connect -> Unit
+        }
+        if (!host.online) {
+            hostsStatusText.text = getString(R.string.hosts_offline_detail)
+            return
+        }
+        val url = DirectoryClient.directoryUrl
+        val token = DirectoryClient.session()
+        if (url.isEmpty() || token.isEmpty()) {
+            currentScene = UiScene.LOGIN
+            renderStatus()
+            return
+        }
+
+        // multi r1: the lifecycle epoch this tap belongs to -- a sign-out / refused session / network change after
+        // it makes everything it started stale, and the native table refuses its reservation outright.
+        val epoch = NativeSessionBridge.nativeEpoch()
+        val reservation = NativeSessionBridge.nativeReserve(key, false, epoch)
+        if (reservation.size < 3 || reservation[0] != 1L) {
+            diagnosticsLog.log("keep_reserve_refused",
+                "host=${host.hostId} kind=${reservation.getOrNull(0)} handle=${reservation.getOrNull(1)} kept=${kept.size}")
+            if (reservation.getOrNull(0) == 0L) {
+                // a live entry the screen did not know (it never forgets one it made): shown as it is
+                val h = reservation[1]
+                if (kept[h] == null) kept[h] = SessionPark.Kept(h, host.hostId, host.hostName, account, origin, manual = false)
+                if (!anyParkConfirming() && resumeKept(h)) return
+            }
+            hostsStatusText.text = getString(R.string.hosts_keep_refused)
+            return
+        }
+        val handle = reservation[1]
+        val victim = reservation[2]
+        kept[handle] = SessionPark.Kept(handle, host.hostId, host.hostName, account, origin, manual = false)
+        connectingHandle = handle
+
+        setDirectoryBusy(true)
+        directoryConnectingName = host.hostName
+        hostsStatusText.text = getString(R.string.hosts_connecting, host.hostName)
+        diagnosticsLog.log("directory_connect",
+            "host=${host.hostName} id=${host.hostId} handle=$handle victim=$victim kept=${kept.size} " +
+                NativeSessionBridge.nativeSessionCounters(handle))
+        startTargetsReadyWatch("connect", SystemClock.elapsedRealtime())
+        // r2 K2, per PC: this connect owns its entry only while it is that entry's current operation and the
+        // lifecycle epoch has not moved. A sign-out, this PC's disconnect, a refused session or leaving the app makes
+        // it stale: it stops at the next step, and if its native connect already ran it closes only the connection
+        // it made. Another PC's connect never makes it stale.
+        val op = entryOps.begin(handle)
+        var madeGeneration = 0L
+        fun stillMine(step: String): Boolean {
+            if (entryOps.isCurrent(handle, op) && NativeSessionBridge.nativeEpoch() == epoch) return true
+            diagnosticsLog.log("directory_connect_stale", "handle=$handle op=$op step=$step")
+            return false
+        }
+        // a stale operation gives its own entry back (off the UI thread is fine: the table's teardown is detached)
+        fun dropOwnEntry(reason: String) {
+            NativeSessionBridge.nativeFail(handle, reason)
+            runOnUiThread {
+                if (kept[handle] != null && activeHandle != handle) forgetKept(handle)
+                if (connectingHandle == handle) connectingHandle = 0L
+            }
+        }
+
+        val observeToken = DirectoryClient.newObserveToken()
+
+        directoryExecutor.execute {
+            try {
+                // A run that resumed from a stored session never saw a login response, so it asks
+                // the health route -- which needs no session and carries the same value.
+                // The decision lives in DirectoryClient, where it can be exercised without a
+                // server. Here it is only applied.
+                if (!stillMine("before_observe")) {
+                    dropOwnEntry("stale_operation")
+                    return@execute
+                }
+                val target = DirectoryClient.resolveObserveTarget(url, directoryObserveEndpoint)
+                if (target is DirectoryClient.ObserveTarget.Refused) {
+                    throw DirectoryClient.DirectoryException(target.message)
+                }
+                val ready = target as DirectoryClient.ObserveTarget.Ready
+                directoryObserveEndpoint = ready.advertised
+                val directoryHost = ready.host
+                val observePort = ready.port
+                if (ready.advertised.hostRejected) {
+                    diagnosticsLog.log("directory_observe_host_rejected", "using $directoryHost")
+                }
+
+                val observe = {
+                    val seen = NativeSessionBridge.nativeDirectoryObserve(
+                        handle, directoryHost, observePort, observeToken, op
+                    )
+                    if (seen.isEmpty()) {
+                        throw DirectoryClient.DirectoryException(
+                            NativeSessionBridge.nativeDirectoryLastError(handle).ifEmpty { "주소 확인 실패" }
+                        )
+                    }
+                    diagnosticsLog.log("directory_observed", seen)
+                }
+                observe()
+
+                // One retry, and only when the directory says it has no observation for us. That
+                // is a state this end can repair -- send another from the same socket -- and it is
+                // not an authentication failure, so the session stays and nothing signs out. A
+                // loop here would spin against a server refusing for a reason the phone cannot
+                // fix, with the user waiting on it.
+                val connected = try {
+                    DirectoryClient.connect(url, token, host.hostId, observeToken)
+                } catch (e: DirectoryClient.DirectoryException) {
+                    if (e.status != 409 || !e.serverError.startsWith("observation")) throw e
+                    diagnosticsLog.log("directory_reobserve", e.serverError)
+                    observe()
+                    DirectoryClient.connect(url, token, host.hostId, observeToken)
+                }
+                diagnosticsLog.log("directory_target", connected.candidates.joinToString(" "))
+
+                // r2 K2: no punch / Hello for an operation that is no longer the user's.
+                if (!stillMine("before_native_connect")) {
+                    dropOwnEntry("stale_operation")
+                    return@execute
+                }
+                // r3 R2-a: the native side checks this operation again after the punch and adopts the session
+                // only while it is current; what comes back is the generation THIS call made (0 = none).
+                madeGeneration = NativeSessionBridge.nativeDirectoryConnectAny(
+                    handle, connected.candidates.toTypedArray(), 4000, connected.punchToken, op
+                )
+                val started = madeGeneration != 0L
+                if (!started && !entryOps.isCurrent(handle, op)) {
+                    diagnosticsLog.log("directory_connect_stale",
+                        "handle=$handle op=$op step=native ${NativeSessionBridge.nativeSessionCounters(handle)}")
+                    dropOwnEntry("stale_operation")
+                    return@execute
+                }
+                // Which address won matters when something goes wrong later: "private" means the
+                // traffic never left the LAN, and a fallback with no answer explains a slow start.
+                val chosenCandidate = NativeSessionBridge.nativeDirectoryChosenCandidate(handle)
+                diagnosticsLog.log("directory_chosen", chosenCandidate)
+                val pathKind = parseChosenCandidateKind(chosenCandidate)
+                if (!started) {
+                    throw DirectoryClient.DirectoryException(
+                        NativeSessionBridge.nativeDirectoryLastError(handle).ifEmpty { "연결을 시작하지 못했습니다" }
+                    )
+                }
+                runOnUiThread {
+                    if (!stillMine("adopt")) {
+                        // r2 K2 / r4 S1: stale -- the connection this operation made is closed only if it is
+                        // still the one running, compared and closed in ONE native step with every adoption
+                        // (off the UI thread: it may wait for this entry's Connect). Nothing of another PC, and
+                        // nothing newer here (busy state, scene, another connect), is touched.
+                        val gen = madeGeneration
+                        Thread {
+                            val closed = NativeSessionBridge.nativeCloseIfOwn(handle, op, gen)
+                            diagnosticsLog.log("directory_connect_dropped", "handle=$handle op=$op closedOwn=$closed gen=$gen")
+                            dropOwnEntry("stale_operation")
+                        }.start()
+                        return@runOnUiThread
+                    }
+                    connectingHandle = 0L
+                    setDirectoryBusy(false)
+                    directoryConnectingName = ""
+                    // up: the eviction its reservation made (if the limit needed one) happens now
+                    for (evicted in NativeSessionBridge.nativeCommit(handle)) {
+                        val gone = kept[evicted]
+                        forgetKept(evicted)
+                        diagnosticsLog.log("keep_end", "handle=$evicted host=${gone?.hostName.orEmpty()} reason=lru")
+                        if (gone != null) {
+                            hostsStatusText.text = getString(R.string.hosts_keep_ended, gone.hostName,
+                                SessionPark.endedReasonText("lru"))
+                        }
+                    }
+                    if (!activateKept(handle)) {
+                        // another PC still on screen / confirming: should not happen from the list; this one ends
+                        diagnosticsLog.log("keep_activate_refused", "handle=$handle")
+                        NativeSessionBridge.nativeEnd(handle, "activate_refused")
+                        forgetKept(handle)
+                        renderStatus()
+                        return@runOnUiThread
+                    }
+                    connectionPathKind = pathKind
+                    connectFlowActive = true
+                    pendingRuntimeConfigSync = true
+                    pendingDesktopBackendSync = true
+                    desiredStreamActive = false
+                    lastAppliedStreamActive = null
+                    clipboardResumeHold = false
+                    clearPendingSelection()
+                    currentScene = UiScene.TARGETS
+                    NativeSessionBridge.nativeRequestWindowList(activeBinding)
+                    hostListAdapter.notifyDataSetChanged()
+                    renderStatus()
+                }
+            } catch (e: Exception) {
+                diagnosticsLog.log("directory_connect_failed", "handle=$handle op=$op ${e.message.orEmpty()}")
+                val mine = entryOps.isCurrent(handle, op) && NativeSessionBridge.nativeEpoch() == epoch
+                // a failed connect gives back its own entry only: nothing kept is evicted for it (multi §3)
+                dropOwnEntry("connect_failed")
+                runOnUiThread {
+                    if (!mine) return@runOnUiThread  // r2 K2: not this screen's any more
+                    setDirectoryBusy(false)
+                    directoryConnectingName = ""
+                    hostsStatusText.text = getString(R.string.hosts_connect_failed, e.message.orEmpty())
+                    renderStatus()
+                }
+            }
+        }
+    }
+

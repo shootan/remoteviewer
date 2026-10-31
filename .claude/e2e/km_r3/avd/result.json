@@ -1,0 +1,28 @@
+{
+ "results": [
+  [
+   "1 signed in; both PCs listed",
+   true,
+   ""
+  ],
+  [
+   "2 A new connect: selection -> first frame",
+   true,
+   "560 ms"
+  ],
+  [
+   "3: PC \ubaa9\ub85d -> HOSTS, the PC on screen parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "every new codec's first input is an IDR (key=1)",
+   true,
+   "1 codecs, first inputs ['1']"
+  ]
+ ],
+ "timing": {
+  "A_connect_targets_ms": 3061,
+  "A_first_select_ms": 560
+ }
+}

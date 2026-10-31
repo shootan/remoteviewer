@@ -1,0 +1,93 @@
+17:34:14 km2 run apk=C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km2-fixture.apk
+17:34:47 booted (cold) in 33 s
+17:34:52 install: Performing Streamed Install
+Success
+17:35:07 tapped loginIdInput at 540,522 text='ID'
+17:35:15 tapped loginPasswordInput at 540,675 text='Password'
+17:35:21 tapped loginButton at 540,849 text='Sign In'
+17:35:37 PASS  P1 signed in; six PCs listed
+17:35:53   cost nothing_kept_list: {'rx_Bps': 45086, 'tx_Bps': 8915, 'threads': 29, 'rss_kB': 71660, 'pss_kB': 32801}
+17:35:56 tapped card:km-pc-a at 442,480 text='km-pc-a'
+17:36:06 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+17:36:07 PASS  P2 A new: selection -> first frame  695 ms
+17:36:18 tapped viewerMenuButton at 2310,775 text='메뉴'
+17:36:23 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+17:36:25 PASS  P2: PC 목록 -> HOSTS, parked and confirmed
+17:36:26   /connect held 6000 ms
+17:36:28 tapped card:km-pc-b at 442,915 text='km-pc-b'
+17:36:32 tapped card:km-pc-a at 291,686 text='km-pc-a'
+17:36:41 PASS  P3 M2: B (still connecting) superseded by the tap on A  B handle=2
+17:36:41 PASS  P3 A resumed at once (its own connection), not after B's timeout  2150 ms to the targets
+17:36:41 PASS  P3 B's late answer adopts nothing (no punch / native connect / start for B)  stale lines: [directory_connect_stale] handle=2 op=2 step=before_native_connect
+17:36:46 tapped listHostsButton at 670,241 text='PC 목록'
+17:36:48 PASS  P3: PC 목록 -> HOSTS, parked and confirmed
+17:36:51 tapped card:km-pc-c at 442,1138 text='km-pc-c'
+17:36:55 tapped card:km-pc-b at 442,915 text='km-pc-b'
+17:37:12 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+17:37:13 PASS  P4 B (newest) connects after its held answer: selection -> first frame  419 ms
+17:37:14   /connect held 0 ms
+17:37:15 PASS  P4 M2: C superseded, B is the one adopted, A untouched  C=3 B=4
+17:37:25 tapped viewerMenuButton at 2310,775 text='메뉴'
+17:37:31 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+17:37:33 PASS  P4: PC 목록 -> HOSTS, parked and confirmed
+17:37:38 PASS  P4 A and B kept  ['a', 'b']
+17:37:40 tapped card:km-pc-old at 442,1592 text='km-pc-old'
+17:37:51 PASS  P5 old host: connects, says it cannot be kept, no PC 목록
+17:37:53 tapped listDisconnectButton at 922,241 text='Disconnect'
+17:38:01 PASS  P5 연결 해제 of the old host ends it only; A and B still kept  ['a', 'b']
+17:38:10   other device on B: exit=0 RESULT: PASS
+17:38:20 PASS  P6 B taken by another device: B ends (peer_lost), no reconnect, A kept  ['a']
+17:38:22 tapped card:km-pc-b at 442,919 text='km-pc-b'
+17:38:32 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+17:38:33 PASS  P7 B new again: selection -> first frame  547 ms
+17:38:41 tapped viewerMenuButton at 2310,775 text='메뉴'
+17:38:47 tapped viewerMenuViewButton at 1927,489 text='크게 보기'
+17:38:57 tapped viewerMenuButton at 2310,775 text='메뉴'
+17:39:03 tapped viewerQualityBestButton at 2221,865 text='최고화질 · 6000'
+17:39:05 PASS  P7 크게보기 on B
+17:39:13 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+17:39:15 PASS  P7 B: PC 목록 -> HOSTS, parked and confirmed
+17:39:18 tapped card:km-pc-c at 442,1146 text='km-pc-c'
+17:39:26 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+17:39:26 PASS  P7 C new: selection -> first frame  192 ms
+17:39:31 PASS  P7 C's viewer opens at full view (B's 크게보기 stayed with B)
+17:39:41 tapped viewerMenuButton at 2310,775 text='메뉴'
+17:39:46 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+17:39:49 PASS  P7 C: PC 목록 -> HOSTS, parked and confirmed
+17:39:54 PASS  P7 A, B, C kept (the limit)  ['a', 'b', 'c']
+17:40:00 tapped card:km-pc-x at 442,1823 text='km-pc-x'
+17:40:07 PASS  P8 M1: X started but never established -> given back, 0 evicted  [directory_connect_started] handle=8 op=15 gen=1 | [directory_connect_failed] handle=8 op=15 step=establish udp hello ack failed evicted=0 kept=3
+17:40:12 PASS  P8 A, B, C still kept  ['a', 'b', 'c']
+17:40:14 tapped card:km-pc-d at 442,1377 text='km-pc-d'
+17:40:19 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+17:40:45 FAIL  P9 D new (direct): selection -> first frame within 25 s
+17:40:45 FAIL  P9 D took the DIRECT path  []
+17:40:45 FAIL  P9 M1: D established -> exactly ONE eviction, and it is A (used longest ago)  []
+17:40:55 tapped viewerMenuButton at 2310,775 text='메뉴'
+17:40:59 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+17:41:02 PASS  P9: PC 목록 -> HOSTS, parked and confirmed
+17:41:07 PASS  P9 B, C, D kept  ['b', 'c', 'd']
+17:41:27   cost three_kept_list: {'rx_Bps': 2640, 'tx_Bps': 1886, 'threads': 45, 'rss_kB': 123140, 'pss_kB': 58956}
+17:41:27   /connect held 8000 ms
+17:41:30 tapped card:km-pc-a at 442,684 text='km-pc-a'
+17:41:50 PASS  P11 leaving the app ends everything (new epoch), the held connect adopts nothing  kept after=[]
+17:41:53 tapped card:km-pc-a at 442,480 text='km-pc-a'
+17:41:56 tapped hostsLogoutButton at 922,241 text='Sign out'
+17:42:08 PASS  P12 sign-out during a held connect: nothing adopted, login screen
+17:42:08   /connect held 0 ms
+17:42:13 tapped loginIdInput at 540,522 text='katest'
+17:42:16 tapped loginPasswordInput at 540,675 text='Password'
+17:42:19 tapped loginButton at 540,849 text='Sign In'
+17:42:36 PASS  P13 signed in again; nothing kept  []
+17:42:38 tapped card:km-pc-c at 442,926 text='km-pc-c'
+17:42:46 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+17:42:47 PASS  P13 C new: selection -> first frame  536 ms
+17:42:58 tapped viewerMenuButton at 2310,775 text='메뉴'
+17:43:03 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+17:43:05 PASS  P13: PC 목록 -> HOSTS, parked and confirmed
+17:43:08 tapped card:km-pc-d at 442,1361 text='km-pc-d'
+17:43:14 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+17:43:15 PASS  P13 D new: selection -> first frame  536 ms
+17:43:24 PASS  P13 the network goes: everything ends (the PC on screen too)  [keep_end_all] reason=network_lost epoch=4 kept=2
+17:43:31 cost {'nothing_kept_list': {'rx_Bps': 45086, 'tx_Bps': 8915, 'threads': 29, 'rss_kB': 71660, 'pss_kB': 32801}, 'three_kept_list': {'rx_Bps': 2640, 'tx_Bps': 1886, 'threads': 45, 'rss_kB': 123140, 'pss_kB': 58956}}
+17:43:31 run end: 32/35 PASS

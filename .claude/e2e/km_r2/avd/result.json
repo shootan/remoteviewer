@@ -1,0 +1,45 @@
+{
+ "results": [
+  [
+   "1 signed in; both PCs listed",
+   true,
+   ""
+  ],
+  [
+   "2 A new connect: selection -> first frame",
+   true,
+   "902 ms"
+  ],
+  [
+   "3: PC \ubaa9\ub85d -> HOSTS, the PC on screen parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "3 A's card says kept, with its own \ub04a\uae30",
+   true,
+   "'\ud654\uba74 \uc804\uc1a1 \uc911\uc9c0 \u00b7 5:00 \ub0a8\uc74c \u00b7 \ub204\ub974\uba74 \ubc14\ub85c \uc5f4\ub9bd\ub2c8\ub2e4'"
+  ],
+  [
+   "4 B new connect (A kept): the target is shown",
+   false,
+   ""
+  ],
+  [
+   "4 B is a different entry; A was not ended by it",
+   true,
+   "A=1 B=2"
+  ],
+  [
+   "every new codec's first input is an IDR (key=1)",
+   true,
+   "1 codecs, first inputs ['1']"
+  ]
+ ],
+ "timing": {
+  "A_connect_targets_ms": 3675,
+  "A_first_select_ms": 902,
+  "B_connect_targets_ms": 3675,
+  "B_first_select_ms": null
+ }
+}

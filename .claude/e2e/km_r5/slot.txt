@@ -1,0 +1,6 @@
+﻿slot km_r5 start 2026-10-16T16:34:25 (qwinsta: >console                   shotan                    1  Active)
+  other workers' test hosts running: 1 C:\work\gnlink-wt\fix-catchup-only\.claude\m11runs\c11on_6m60_r2\GNLinkStream.exe
+  fixture apk 647fa32fa7af468962d760d382e78853f5b152438bcdd4bf128bbfc121dd909d
+  avd exit=0 16:38:41 run end: 20/20 PASS
+  route exit=0 route_A: on-screen host_a 2 inputs ['config 6000000'] | parked host_b nothing  -> PASS route_B: on-screen host_b 2 inputs [] | parked host_a nothing  -> PASS ROUTE: PASS
+slot km_r5 done 2026-10-16T16:38:43

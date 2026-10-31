@@ -1,0 +1,14 @@
+17:31:33 km2 run apk=C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km2-fixture.apk
+17:32:07 booted (cold) in 34 s
+17:32:13 install: Performing Streamed Install
+Success
+17:32:37 tapped loginIdInput at 540,522 text='ID'
+17:32:43 tapped loginPasswordInput at 540,675 text='Password'
+17:32:48 tapped loginButton at 540,849 text='Sign In'
+17:33:06 PASS  P1 signed in; six PCs listed
+17:33:22   cost nothing_kept_list: {'rx_Bps': 38751, 'tx_Bps': 7966, 'threads': 29, 'rss_kB': 87064, 'pss_kB': 34744}
+17:33:24 tapped card:km-pc-a at 442,480 text='km-pc-a'
+17:33:33 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+17:33:35 PASS  P2 A new: selection -> first frame  80 ms
+17:33:47 cost {'nothing_kept_list': {'rx_Bps': 38751, 'tx_Bps': 7966, 'threads': 29, 'rss_kB': 87064, 'pss_kB': 34744}}
+17:33:47 run end: 2/2 PASS

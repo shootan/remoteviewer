@@ -1,0 +1,2 @@
+﻿qwinsta: >console                   shotan                    1  Active
+exit=0

@@ -1,0 +1,61 @@
+16:21:53 km run apk=C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km-fixture.apk
+16:22:26 booted (cold) in 32 s
+16:22:32 install: Performing Streamed Install
+Success
+16:22:50 tapped loginIdInput at 540,522 text='ID'
+16:22:57 tapped loginPasswordInput at 540,675 text='Password'
+16:23:03 tapped loginButton at 540,849 text='Sign In'
+16:23:12 PASS  1 signed in; both PCs listed
+16:23:15 tapped card:km-pc-a at 442,480 text='km-pc-a'
+16:23:24 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+16:23:27 PASS  2 A new connect: selection -> first frame  1695 ms
+16:23:30   screenshot C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km_r4\avd\2_viewer_A.png
+16:23:30   A handle=1 counters=('1', '1', '1', '1', '1')
+16:23:36 tapped viewerMenuButton at 2310,775 text='메뉴'
+16:23:42 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+16:23:44 PASS  3: PC 목록 -> HOSTS, the PC on screen parked and confirmed
+16:23:49 PASS  3 A's card says kept, with its own 끊기  '화면 전송 중지 · 5분 남음 · 누르면 바로 열립니다'
+16:23:50   screenshot C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km_r4\avd\3_hosts_A_kept.png
+16:23:52 tapped card:km-pc-b at 442,915 text='km-pc-b'
+16:24:00 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+16:24:02 PASS  4 B new connect (A kept): selection -> first frame  687 ms
+16:24:03   screenshot C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km_r4\avd\4_viewer_B.png
+16:24:03 PASS  4 B is a different entry; A was not ended by it  A=1 B=2
+16:24:08 tapped viewerMenuButton at 2310,775 text='메뉴'
+16:24:15 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+16:24:18 PASS  5: PC 목록 -> HOSTS, the PC on screen parked and confirmed
+16:24:28 PASS  5 A and B both kept (each card with its own 끊기)  A='화면 전송 중지 · 5분 남음 · 누르면 바로 열립니다' B='화면 전송 중지 · 5분 남음 · 누르면 바로 열립니다'
+16:24:28   screenshot C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km_r4\avd\5_hosts_both_kept.png
+16:24:30 tapped card:km-pc-a at 291,686 text='km-pc-a'
+16:24:32 PASS  6 A again: park_reuse of A's own entry, no new connect / observe / punch / Hello for it  ('1', '1', '1', '1', '1') -> ('1', '1', '1', '1', '1')
+16:24:37 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+16:24:38 PASS  6 A reused: selection -> first frame  632 ms
+16:24:40   screenshot C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km_r4\avd\6_viewer_A_again.png
+16:24:45 tapped viewerMenuButton at 2310,775 text='메뉴'
+16:24:51 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+16:24:54 PASS  7: PC 목록 -> HOSTS, the PC on screen parked and confirmed
+16:24:56 tapped card:km-pc-b at 291,917 text='km-pc-b'
+16:24:58 PASS  7 B again: park_reuse of B's own entry, its counters unchanged  ('1', '1', '1', '1', '1') -> ('1', '1', '1', '1', '1')
+16:25:02 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+16:25:04 PASS  7 B reused: selection -> first frame  578 ms
+16:25:05   screenshot C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km_r4\avd\7_viewer_B_again.png
+16:25:10 tapped viewerMenuButton at 2310,775 text='메뉴'
+16:25:15 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+16:25:18 PASS  8: PC 목록 -> HOSTS, the PC on screen parked and confirmed
+16:25:20 tapped A's 끊기 at 880,717
+16:25:26 PASS  8 A's 끊기 ends A only; B still kept
+16:25:26   screenshot C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km_r4\avd\8_hosts_A_ended.png
+16:25:28 tapped card:km-pc-b at 291,913 text='km-pc-b'
+16:25:30 PASS  9 B still a reuse after A ended  ('1', '1', '1', '1', '1') -> ('1', '1', '1', '1', '1')
+16:25:35 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+16:25:36 PASS  9 B reused again: selection -> first frame  90 ms
+16:25:42 tapped viewerMenuButton at 2310,775 text='메뉴'
+16:25:48 tapped viewerMenuDisconnectButton at 1927,352 text='연결 해제'
+16:25:53 tapped android:id/button1 at 1825,676 text='연결 해제'
+16:25:55 PASS  10 연결 해제 -> HOSTS
+16:25:57 tapped hostsLogoutButton at 922,241 text='Sign out'
+16:26:00 PASS  10 sign-out -> the login screen
+16:26:01   logcat decoder bindings: decoder bound binding=1 | decoder unbound | decoder bound binding=2 | decoder unbound | decoder bound binding=3 | decoder unbound | decoder bound binding=4 | decoder unbound | decoder bound binding=5 | decoder unbound
+16:26:01 PASS  every new codec's first input is an IDR (key=1)  5 codecs, first inputs ['1', '1', '1', '1', '1']
+16:26:01 timing {'A_connect_targets_ms': 4113, 'A_first_select_ms': 1695, 'B_connect_targets_ms': 3604, 'B_first_select_ms': 687, 'A_reuse_targets_ms': 318, 'A_reuse_select_ms': 632, 'B_reuse_targets_ms': 680, 'B_reuse_select_ms': 578}
+16:26:01 run end: 20/20 PASS

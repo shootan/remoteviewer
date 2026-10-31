@@ -1,0 +1,87 @@
+{
+ "results": [
+  [
+   "T1 signed in",
+   true,
+   ""
+  ],
+  [
+   "T1 the TEST policy is in force (45 s)",
+   true,
+   ""
+  ],
+  [
+   "T2 A new: selection -> first frame",
+   true,
+   "1103 ms"
+  ],
+  [
+   "T2 A: PC \ubaa9\ub85d -> HOSTS, parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "T3 B new: selection -> first frame",
+   true,
+   "670 ms"
+  ],
+  [
+   "T3 B: PC \ubaa9\ub85d -> HOSTS, parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "T4 A reused: selection -> first frame",
+   true,
+   "611 ms"
+  ],
+  [
+   "T5 B (parked) expired on its own limit while A was in use",
+   false,
+   "no keep_end for B"
+  ],
+  [
+   "T5 A (on screen) untouched",
+   true,
+   ""
+  ],
+  [
+   "T6 A: PC \ubaa9\ub85d -> HOSTS, parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "T6 A kept, B not",
+   false,
+   "[]"
+  ],
+  [
+   "T6 B again: selection -> first frame",
+   true,
+   "683 ms"
+  ],
+  [
+   "T6 B after its expiry is a NEW connection (new handle), not a reuse",
+   true,
+   "2 -> 4"
+  ],
+  [
+   "T6 B: PC \ubaa9\ub85d -> HOSTS, parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "T7 A reused after its FIRST park would have expired (re-activation started a new limit)",
+   false,
+   "first park 287 s ago, second 84 s ago"
+  ]
+ ],
+ "marks": {
+  "A_park1": 1792141004.95338,
+  "B_park": 1792141085.705201,
+  "A_active": 1792141099.9721053,
+  "after_B_deadline": 1792141140.1061928,
+  "A_park2": 1792141206.9993079,
+  "A_reuse2": 1792141291.4649885
+ }
+}

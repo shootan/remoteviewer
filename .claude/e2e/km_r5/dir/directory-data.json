@@ -1,0 +1,76 @@
+{
+  "accounts": {
+    "katest": {
+      "id": "katest",
+      "salt": "03f6aee91cecb1041415dceddeb4b410",
+      "hash": "c24593add05f3e8b8c134acc29109d3a98563666afd6da249831b362939b1aeb",
+      "status": "active",
+      "createdAt": 1792136066329,
+      "updatedAt": 1792136066329,
+      "approvedAt": 1792136066329,
+      "memo": "",
+      "lastLoginAt": 1792136135955
+    }
+  },
+  "hosts": {
+    "b5d3228835dfc05a": {
+      "hostId": "b5d3228835dfc05a",
+      "accountId": "katest",
+      "machineId": "km-fixture-machine-a",
+      "hostName": "km-pc-a",
+      "tokenHash": "5d33cc45b5f07465308302e6bdc85c95cbc05aa4805b545d016806f81e09d37c",
+      "lastSeen": 1792136305935,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 59035,
+      "wireIp": "127.0.0.1",
+      "wirePort": 59035,
+      "localIps": [
+        "192.168.0.76",
+        "172.24.16.1",
+        "172.30.80.1"
+      ],
+      "localUdpPort": 59035,
+      "alternateUdpPort": 0
+    },
+    "f9a74f15b14b060f": {
+      "hostId": "f9a74f15b14b060f",
+      "accountId": "katest",
+      "machineId": "km-fixture-machine-b",
+      "hostName": "km-pc-b",
+      "tokenHash": "574607df31d34409df332457db52d099a9278f78af85ffae37b690e891df9d21",
+      "lastSeen": 1792136317484,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 59036,
+      "wireIp": "127.0.0.1",
+      "wirePort": 59036,
+      "localIps": [
+        "192.168.0.76",
+        "172.24.16.1",
+        "172.30.80.1"
+      ],
+      "localUdpPort": 59036,
+      "alternateUdpPort": 0
+    }
+  },
+  "devices": {
+    "40a06ff980bbf65657d231fe8069c501": {
+      "deviceId": "40a06ff980bbf65657d231fe8069c501",
+      "accountId": "katest",
+      "kind": "android",
+      "label": "Google sdk_gphone64_x86_64",
+      "credHash": "2a1d51c986bf14164feafa93f97d35594d6f59df74046f04f20befe74791ebba",
+      "prevCredHash": "",
+      "prevValidUntil": 0,
+      "prevUsesLeft": 0,
+      "issued": [
+        "2a1d51c986bf14164feafa93f97d35594d6f59df74046f04f20befe74791ebba"
+      ],
+      "revokeHash": "463b4e1ada2b908017cd330f0583ef3cb308129b770d4edf5e03437302bd1771",
+      "createdAt": 1792136135955,
+      "lastUsedAt": 1792136135955,
+      "expiresAt": 1799912135955,
+      "revokedAt": 1792136319034,
+      "revokedWhy": "signed out"
+    }
+  }
+}

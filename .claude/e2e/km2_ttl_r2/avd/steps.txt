@@ -1,0 +1,40 @@
+18:02:21 km2 TTL run apk=C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km2-ttl-fixture.apk
+18:02:54 booted (cold) in 33 s
+18:02:59 install: Performing Streamed Install
+Success
+18:03:12 tapped loginIdInput at 540,522 text='ID'
+18:03:21 tapped loginPasswordInput at 540,675 text='Password'
+18:03:26 tapped loginButton at 540,849 text='Sign In'
+18:03:43 PASS  T1 signed in
+18:03:43 PASS  T1 the TEST policy is in force (45 s)
+18:03:46 tapped card:km-pc-a at 442,480 text='km-pc-a'
+18:03:54 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+18:03:56 PASS  T2 A new: selection -> first frame  1269 ms
+18:04:08 tapped viewerMenuButton at 2310,775 text='메뉴'
+18:04:15 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+18:04:18 PASS  T2 A: PC 목록 -> HOSTS, parked and confirmed
+18:04:22 tapped card:km-pc-b at 442,915 text='km-pc-b'
+18:04:30 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+18:04:31 PASS  T3 B new: selection -> first frame  724 ms
+18:04:42 tapped viewerMenuButton at 2310,775 text='메뉴'
+18:04:48 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+18:04:51 PASS  T3 B: PC 목록 -> HOSTS, parked and confirmed
+18:04:54 tapped card:km-pc-a at 291,686 text='km-pc-a'
+18:04:59 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+18:05:00 PASS  T4 A reused: selection -> first frame  469 ms
+18:05:45 PASS  T5 B (parked) expired on its own limit while A was in use  ttl
+18:05:45 PASS  T5 A (on screen) untouched
+18:05:55 tapped viewerMenuButton at 2310,775 text='메뉴'
+18:06:01 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+18:06:03 PASS  T6 A: PC 목록 -> HOSTS, parked and confirmed
+18:06:08 PASS  T6 A kept, B not  ['a']
+18:06:10 tapped card:km-pc-b at 442,915 text='km-pc-b'
+18:06:18 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+18:06:19 PASS  T6 B again: selection -> first frame  541 ms
+18:06:20 PASS  T6 B after its expiry is a NEW connection (new handle), not a reuse  2 -> 3
+18:06:30 tapped viewerMenuButton at 2310,775 text='메뉴'
+18:06:37 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+18:06:40 PASS  T6 B: PC 목록 -> HOSTS, parked and confirmed
+18:06:43 tapped card:km-pc-a at 291,686 text='km-pc-a'
+18:06:45 PASS  T7 A reused after its FIRST park would have expired (re-activation started a new limit)  first park 142 s ago, second 37 s ago
+18:06:46 run end: 15/15 PASS

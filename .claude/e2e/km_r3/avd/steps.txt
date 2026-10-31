@@ -1,0 +1,20 @@
+16:16:29 km run apk=C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km-fixture.apk
+16:17:03 booted (cold) in 33 s
+16:17:09 install: Performing Streamed Install
+Success
+16:17:26 tapped loginIdInput at 540,522 text='ID'
+16:17:33 tapped loginPasswordInput at 540,675 text='Password'
+16:17:40 tapped loginButton at 540,849 text='Sign In'
+16:17:46 PASS  1 signed in; both PCs listed
+16:17:49 tapped card:km-pc-a at 442,480 text='km-pc-a'
+16:17:57 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+16:17:58 PASS  2 A new connect: selection -> first frame  560 ms
+16:18:00   screenshot C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km_r3\avd\2_viewer_A.png
+16:18:00   A handle=1 counters=('1', '1', '1', '1', '1')
+16:18:06 tapped viewerMenuButton at 2310,775 text='메뉴'
+16:18:13 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+16:18:22 PASS  3: PC 목록 -> HOSTS, the PC on screen parked and confirmed
+16:20:52   logcat decoder bindings: decoder bound binding=1 | decoder unbound
+16:20:52 PASS  every new codec's first input is an IDR (key=1)  1 codecs, first inputs ['1']
+16:20:52 timing {'A_connect_targets_ms': 3061, 'A_first_select_ms': 560}
+16:20:52 run end: 4/4 PASS

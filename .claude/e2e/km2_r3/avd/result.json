@@ -1,0 +1,214 @@
+{
+ "results": [
+  [
+   "P1 signed in; six PCs listed",
+   true,
+   ""
+  ],
+  [
+   "P2 A new: selection -> first frame",
+   true,
+   "695 ms"
+  ],
+  [
+   "P2: PC \ubaa9\ub85d -> HOSTS, parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "P3 M2: B (still connecting) superseded by the tap on A",
+   true,
+   "B handle=2"
+  ],
+  [
+   "P3 A resumed at once (its own connection), not after B's timeout",
+   true,
+   "2150 ms to the targets"
+  ],
+  [
+   "P3 B's late answer adopts nothing (no punch / native connect / start for B)",
+   true,
+   "stale lines: [directory_connect_stale] handle=2 op=2 step=before_native_connect"
+  ],
+  [
+   "P3: PC \ubaa9\ub85d -> HOSTS, parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "P4 B (newest) connects after its held answer: selection -> first frame",
+   true,
+   "419 ms"
+  ],
+  [
+   "P4 M2: C superseded, B is the one adopted, A untouched",
+   true,
+   "C=3 B=4"
+  ],
+  [
+   "P4: PC \ubaa9\ub85d -> HOSTS, parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "P4 A and B kept",
+   true,
+   "['a', 'b']"
+  ],
+  [
+   "P5 old host: connects, says it cannot be kept, no PC \ubaa9\ub85d",
+   true,
+   ""
+  ],
+  [
+   "P5 \uc5f0\uacb0 \ud574\uc81c of the old host ends it only; A and B still kept",
+   true,
+   "['a', 'b']"
+  ],
+  [
+   "P6 B taken by another device: B ends (peer_lost), no reconnect, A kept",
+   true,
+   "['a']"
+  ],
+  [
+   "P7 B new again: selection -> first frame",
+   true,
+   "547 ms"
+  ],
+  [
+   "P7 \ud06c\uac8c\ubcf4\uae30 on B",
+   true,
+   ""
+  ],
+  [
+   "P7 B: PC \ubaa9\ub85d -> HOSTS, parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "P7 C new: selection -> first frame",
+   true,
+   "192 ms"
+  ],
+  [
+   "P7 C's viewer opens at full view (B's \ud06c\uac8c\ubcf4\uae30 stayed with B)",
+   true,
+   ""
+  ],
+  [
+   "P7 C: PC \ubaa9\ub85d -> HOSTS, parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "P7 A, B, C kept (the limit)",
+   true,
+   "['a', 'b', 'c']"
+  ],
+  [
+   "P8 M1: X started but never established -> given back, 0 evicted",
+   true,
+   "[directory_connect_started] handle=8 op=15 gen=1 | [directory_connect_failed] handle=8 op=15 step=establish udp hello ack failed evicted=0 kept=3"
+  ],
+  [
+   "P8 A, B, C still kept",
+   true,
+   "['a', 'b', 'c']"
+  ],
+  [
+   "P9 D new (direct): selection -> first frame within 25 s",
+   false,
+   ""
+  ],
+  [
+   "P9 D took the DIRECT path",
+   false,
+   "[]"
+  ],
+  [
+   "P9 M1: D established -> exactly ONE eviction, and it is A (used longest ago)",
+   false,
+   "[]"
+  ],
+  [
+   "P9: PC \ubaa9\ub85d -> HOSTS, parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "P9 B, C, D kept",
+   true,
+   "['b', 'c', 'd']"
+  ],
+  [
+   "P11 leaving the app ends everything (new epoch), the held connect adopts nothing",
+   true,
+   "kept after=[]"
+  ],
+  [
+   "P12 sign-out during a held connect: nothing adopted, login screen",
+   true,
+   ""
+  ],
+  [
+   "P13 signed in again; nothing kept",
+   true,
+   "[]"
+  ],
+  [
+   "P13 C new: selection -> first frame",
+   true,
+   "536 ms"
+  ],
+  [
+   "P13: PC \ubaa9\ub85d -> HOSTS, parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "P13 D new: selection -> first frame",
+   true,
+   "536 ms"
+  ],
+  [
+   "P13 the network goes: everything ends (the PC on screen too)",
+   true,
+   "[keep_end_all] reason=network_lost epoch=4 kept=2"
+  ]
+ ],
+ "marks": {
+  "P3_start": 1792139786.6412573,
+  "P3_end": 1792139801.7944722,
+  "P4_start": 1792139809.3204195,
+  "P4_end": 1792139835.9865382,
+  "P6_start": 1792139881.2604735,
+  "P6_end": 1792139900.3420196,
+  "P7_B_settings": 1792139914.4361157,
+  "P7_C_start": 1792139956.5690482,
+  "P7_C_shown": 1792139971.9473915,
+  "P8_start": 1792139998.17041,
+  "P8_end": 1792140012.082771,
+  "P9_end": 1792140045.5811496,
+  "P11_start": 1792140087.8414946,
+  "P11_end": 1792140110.8743818,
+  "P12_start": 1792140110.8743825,
+  "P12_end": 1792140128.9564188,
+  "P13_net": 1792140196.6187
+ },
+ "cost": {
+  "nothing_kept_list": {
+   "rx_Bps": 45086,
+   "tx_Bps": 8915,
+   "threads": 29,
+   "rss_kB": 71660,
+   "pss_kB": 32801
+  },
+  "three_kept_list": {
+   "rx_Bps": 2640,
+   "tx_Bps": 1886,
+   "threads": 45,
+   "rss_kB": 123140,
+   "pss_kB": 58956
+  }
+ }
+}

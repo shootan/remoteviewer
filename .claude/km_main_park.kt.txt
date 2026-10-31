@@ -1,0 +1,346 @@
+    /** 연결 해제 of the PC on screen: that connection ends for real; the PCs kept on the list stay (multi r1 §6). */
+    private fun disconnectSession(reason: String) {
+        val handle = activeHandle
+        cancelActiveViewerTouch("disconnect")
+        hideViewerKeyboard("disconnect")
+        desiredStreamActive = false
+        pendingRuntimeConfigSync = false
+        lastAppliedStreamActive = null
+        if (handle != 0L) {
+            entryOps.invalidate(handle)  // r2 K2: nothing of this PC's connect adopts anything after this
+            NativeSessionBridge.nativeEnd(handle, reason)
+            forgetKept(handle)
+            diagnosticsLog.log("keep_end", "handle=$handle reason=$reason kept=${kept.size}")
+        }
+        clearActive()
+        connectFlowActive = false
+        clearPendingSelection()
+        resetViewerObservability()
+        currentScene = homeScene()
+        if (currentScene == UiScene.HOSTS) loadHosts("disconnect")
+        renderStatus()
+    }
+
+    // ------------------------------------------------------------------ keepalive-multi r1: the kept PCs
+    //
+    // The rules are SessionPark's, the connections the native table's (session_table.hpp); here they are applied.
+    // "PC 목록" parks the PC on screen; tapping a kept PC goes back to it on its own connection; another PC is
+    // connected beside the kept ones (up to the policy's limit -- the native table closes the parked PC used
+    // longest ago). One PC ends on its own (its 끊기 / 연결 해제, peer lost, its park limit, a failed pause);
+    // sign-out, a refused session, leaving the app and the network changing end the kept ones.
+
+    /** The PC on screen now; every screen action reads [activeBinding] when it is taken. */
+    private fun clearActive() {
+        activeHandle = 0L
+        activeBinding = 0L
+        directoryHostKey = ""
+        directoryHostName = ""
+    }
+
+    private fun forgetKept(handle: Long) {
+        kept.remove(handle)
+        entryOps.drop(handle)
+        if (connectingHandle == handle) connectingHandle = 0L
+        if (kept.values.none { it.parkedAtMs != 0L }) unwatchParkNetwork()
+    }
+
+    /** Puts a kept PC on screen: its binding from the native table. false = refused (it was ended there). */
+    private fun activateKept(handle: Long): Boolean {
+        val k = kept[handle] ?: return false
+        val binding = NativeSessionBridge.nativeActivate(handle)
+        if (binding == 0L) return false
+        activeHandle = handle
+        activeBinding = binding
+        directoryHostKey = if (k.manual) "" else k.hostId
+        directoryHostName = k.hostName
+        kept[handle] = k.copy(parkedAtMs = 0L, confirmLogged = false)
+        return true
+    }
+
+    /** Every PC kept and the one on screen end (sign-out, refused session, exit, disconnect all): a new epoch. */
+    private fun endAllKept(reason: String) {
+        heldTap = null
+        for (h in entryOps.handles()) entryOps.invalidate(h)
+        val epoch = NativeSessionBridge.nativeEndAll(reason)
+        diagnosticsLog.log("keep_end_all", "reason=$reason epoch=$epoch kept=${kept.size}")
+        kept.clear()
+        nativeEntries = emptyMap()
+        connectingHandle = 0L
+        unwatchParkNetwork()
+        if (activeHandle != 0L) {
+            desiredStreamActive = false
+            pendingRuntimeConfigSync = false
+            lastAppliedStreamActive = null
+            connectFlowActive = false
+            clearPendingSelection()
+            resetViewerObservability()
+        }
+        clearActive()
+        hostListAdapter.notifyDataSetChanged()
+    }
+
+    /** The parked PCs (not the one on screen) end, and a connect on its way stops: leaving the app (0.2.30 rule). */
+    private fun endParkedKept(reason: String) {
+        heldTap = null
+        for ((h, k) in kept.toList()) {
+            if (h == activeHandle) continue
+            entryOps.invalidate(h)
+            if (h == connectingHandle) NativeSessionBridge.nativeFail(h, reason) else NativeSessionBridge.nativeEnd(h, reason)
+            forgetKept(h)
+            diagnosticsLog.log("keep_end", "handle=$h host=${k.hostName} reason=$reason")
+        }
+        connectingHandle = 0L
+        unwatchParkNetwork()
+        hostListAdapter.notifyDataSetChanged()
+    }
+
+    private fun anyParkConfirming(): Boolean = nativeEntries.values.any { it.parkPhase.confirming }
+
+    /** The native table now (it takes sessions that ended on their own off first). */
+    private fun readNativeEntries(): Pair<Map<Long, SessionPark.NativeEntry>, List<Pair<Long, String>>> {
+        val entries = HashMap<Long, SessionPark.NativeEntry>()
+        val ended = ArrayList<Pair<Long, String>>()
+        try {
+            val root = JSONObject(NativeSessionBridge.nativeEntriesJson())
+            val arr = root.optJSONArray("entries") ?: JSONArray()
+            for (i in 0 until arr.length()) {
+                val o = arr.getJSONObject(i)
+                val h = o.optLong("handle")
+                entries[h] = SessionPark.NativeEntry(
+                    handle = h,
+                    key = o.optString("key"),
+                    phase = o.optString("phase"),
+                    parkPhase = SessionPark.NativePhase.of(o.optInt("parkPhase", 0)),
+                    alive = o.optBoolean("alive"),
+                    generation = o.optLong("generation"),
+                    remainingMs = o.optLong("remainingMs"),
+                    parkEpisode = o.optLong("parkEpisode"),
+                )
+            }
+            val endedArr = root.optJSONArray("ended") ?: JSONArray()
+            for (i in 0 until endedArr.length()) {
+                val o = endedArr.getJSONObject(i)
+                ended.add(o.optLong("handle") to o.optString("reason"))
+            }
+        } catch (t: Throwable) {
+            diagnosticsLog.log("keep_table_parse_failed", t.javaClass.simpleName)
+        }
+        return entries to ended
+    }
+
+    /** Whether "PC 목록" is offered for the PC on screen. */
+    private fun parkAllowedHere(): Boolean = activeHandle != 0L && SessionPark.canPark(
+        directoryHostKey, kept[activeHandle]?.manual ?: true, DirectoryClient.sessionAccount(), DirectoryClient.session(),
+        NativeSessionBridge.nativeGetStatus(activeHandle).startsWith("connected"),
+    ) && NativeSessionBridge.nativeHostHonorsStreamPause(activeHandle)  // r2 K5: an older host gets 연결 해제 only
+
+    private fun parkToHostList(origin: String) {
+        val handle = activeHandle
+        if (handle == 0L) return
+        if (!parkAllowedHere()) {
+            diagnosticsLog.log("park_refused", "origin=$origin host=$directoryHostKey manual=${kept[handle]?.manual} " +
+                "hostHonorsPause=${NativeSessionBridge.nativeHostHonorsStreamPause(handle)}")
+            // r2 K5 / multi §5: this PC cannot be kept (an older host without the pause, a manual connection) --
+            // it ends; the PCs already kept stay.
+            disconnectSession("pause_unsupported")
+            return
+        }
+        diagnosticsLog.log("park_tap", "origin=$origin scene=$currentScene host=$directoryHostName handle=$handle")
+        // Leaving the viewer as Targets does, first: what a finger or the key panel holds goes up now, so
+        // its release is queued before the park drops everything that is not a release.
+        dismissViewerLogDialog()
+        closeViewerSheets("park")
+        releaseViewerModifiers()
+        cancelActiveViewerTouch("park")
+        hideViewerKeyboard("park")
+        viewerKeyPanel?.hide()
+        if (selectionStage != SelectionStage.IDLE) {
+            NativeSessionBridge.nativeAbortVideoSwitch(activeBinding)
+        } else {
+            NativeSessionBridge.nativeResetVideoStream(activeBinding)
+        }
+        clearPendingSelection()
+        resetViewerObservability()
+        resetViewerOrientationState()
+        desiredStreamActive = false
+        // multi r1: its binding goes first (no frame of it reaches the decoder from here), then its own park.
+        if (!NativeSessionBridge.nativeBeginPark(handle)) {
+            diagnosticsLog.log("park_refused", "origin=$origin reason=native_begin handle=$handle")
+            disconnectSession("pause_failed")
+            return
+        }
+        // The native side pauses the stream itself and refuses stream requests while parked.
+        lastAppliedStreamActive = false
+        val now = SystemClock.elapsedRealtime()
+        val k = (kept[handle] ?: return).copy(parkedAtMs = now, parkEpisode = ++parkEpisodeCounter, confirmLogged = false)
+        kept[handle] = k
+        diagnosticsLog.log("park_begin",
+            "episode=${k.parkEpisode} host=${k.hostName} id=${k.hostId} handle=$handle kept=${kept.size} " +
+                NativeSessionBridge.nativeSessionCounters(handle))
+        clearActive()
+        connectFlowActive = false
+        watchParkNetwork()
+        hostsStatusText.text = ""
+        currentScene = UiScene.HOSTS
+        hostListAdapter.notifyDataSetChanged()
+        renderStatus()
+    }
+
+    /** Every status tick: what the native table says about each kept PC; a held tap once nothing is confirming. */
+    private fun keepTick() {
+        if (kept.isEmpty() && heldTap == null) {
+            nativeEntries = emptyMap()
+            return
+        }
+        val (entries, ended) = readNativeEntries()
+        nativeEntries = entries
+        val now = SystemClock.elapsedRealtime()
+        val identity = SessionPark.Identity(DirectoryClient.sessionAccount(), directoryOrigin(),
+            DirectoryClient.session().isNotEmpty())
+        var changed = false
+        for ((h, k) in kept.toList()) {
+            if (h == connectingHandle) continue  // its own connect path settles it
+            val ne = entries[h]
+            if (ne == null || ne.phase == "closing") {
+                // ended by the native side: its park limit, a failed pause, its peer gone, or evicted
+                val reason = ended.lastOrNull { it.first == h }?.second ?: "ended"
+                forgetKept(h)
+                changed = true
+                diagnosticsLog.log("keep_end", "handle=$h host=${k.hostName} reason=$reason")
+                if (h == activeHandle) {
+                    clearActive()
+                } else {
+                    hostsStatusText.text = getString(R.string.hosts_keep_ended, k.hostName, SessionPark.endedReasonText(reason))
+                }
+                continue
+            }
+            if (h != activeHandle && !k.manual) {
+                val why = SessionPark.endReason(k, identity)
+                if (why != null) {
+                    NativeSessionBridge.nativeEnd(h, why)
+                    forgetKept(h)
+                    changed = true
+                    diagnosticsLog.log("keep_end", "handle=$h host=${k.hostName} reason=$why")
+                    continue
+                }
+            }
+            if (!k.confirmLogged && k.parkedAtMs != 0L && ne.parkPhase == SessionPark.NativePhase.PARKED) {
+                kept[h] = k.copy(confirmLogged = true)
+                changed = true
+                diagnosticsLog.log("park_confirmed",
+                    "episode=${k.parkEpisode} handle=$h ms=${now - k.parkedAtMs} " +
+                        "released=${NativeSessionBridge.nativeParkReleasedCount(h)} " +
+                        "dropped=${NativeSessionBridge.nativeParkDroppedActionCount(h)}")
+            }
+        }
+        if (changed) hostListAdapter.notifyDataSetChanged()
+        // r2 K4 / multi §3: the latest tap made while a park was confirming is carried out once it settled --
+        // under the epoch, account, directory and app lifetime it was made in.
+        val held = heldTap
+        if (held != null && !anyParkConfirming()) {
+            heldTap = null
+            val host = directoryHosts.firstOrNull { it.hostId == held.hostId }
+            if (!connectIntents.fallbackRuns(held, DirectoryClient.sessionAccount(), directoryOrigin(), host != null)) {
+                diagnosticsLog.log("park_tap_cancelled",
+                    "host=${held.hostId} epoch=${held.epoch}->${NativeSessionBridge.nativeEpoch()} listed=${host != null}")
+            } else {
+                diagnosticsLog.log("park_tap_resumed", "host=${held.hostId}")
+                connectToDirectoryHost(host!!)
+            }
+        }
+    }
+
+    /** The same PC again: its target list on its own connection. false = the native side refused (it is ended). */
+    private fun resumeKept(handle: Long): Boolean {
+        val t0 = SystemClock.elapsedRealtime()
+        val k = kept[handle] ?: return false
+        if (!activateKept(handle)) {
+            diagnosticsLog.log("park_resume_refused", "handle=$handle host=${k.hostName}")
+            forgetKept(handle)
+            return false
+        }
+        // What the phone holds now is not news to the PC: copied while parked, it does not travel. If it
+        // cannot be read, nothing is pushed until the clipboard really changes (r2 §7). What the PC sent while
+        // parked was dropped by its resume.
+        val baseline = readLocalClipboardText()
+        if (baseline.isNullOrEmpty()) {
+            clipboardResumeHold = true
+        } else {
+            clipboardResumeHold = false
+            NativeSessionBridge.nativeSeedClipboardBaseline(activeBinding, baseline)
+        }
+        diagnosticsLog.log("park_reuse",
+            "episode=${k.parkEpisode} heldMs=${if (k.parkedAtMs != 0L) t0 - k.parkedAtMs else -1L} host=${k.hostName} " +
+                NativeSessionBridge.nativeSessionCounters(handle))
+        connectFlowActive = true
+        // the user's current quality / capture settings go to THIS PC (multi §5: settings are tagged with it)
+        pendingRuntimeConfigSync = true
+        pendingDesktopBackendSync = true
+        desiredStreamActive = false
+        lastAppliedStreamActive = false
+        clearPendingSelection()
+        currentScene = UiScene.TARGETS
+        startTargetsReadyWatch("reuse", t0)
+        NativeSessionBridge.nativeRequestWindowList(activeBinding)
+        hostListAdapter.notifyDataSetChanged()
+        renderStatus()
+        return true
+    }
+
+    private fun readLocalClipboardText(): String? = try {
+        clipboardManager.primaryClip?.takeIf { it.itemCount > 0 }
+            ?.getItemAt(0)?.coerceToText(this)?.toString()
+    } catch (t: Throwable) {
+        null
+    }
+
+    /** The list's summary line: how many PCs are kept (each card says its own state), and 모두 끊기. */
+    private fun renderKeepBanner() {
+        val parkedCount = kept.keys.count { it != activeHandle }
+        if (parkedCount == 0) {
+            hostsParkBanner.visibility = View.GONE
+            return
+        }
+        hostsParkBanner.visibility = View.VISIBLE
+        val text = getString(R.string.hosts_keep_banner, parkedCount, keepPolicy.maxHosts)
+        if (hostsParkText.text.toString() != text) hostsParkText.text = text
+    }
+
+    /** The network the PCs were kept on; another one (or none) ends them. */
+    private fun watchParkNetwork() {
+        if (parkNetworkCallback != null) return
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
+        parkNetwork = cm.activeNetwork
+        val callback = object : ConnectivityManager.NetworkCallback() {
+            override fun onAvailable(network: Network) {
+                if (parkNetwork != null && network != parkNetwork) end("network_changed")
+            }
+            override fun onLost(network: Network) {
+                if (network == parkNetwork) end("network_lost")
+            }
+            private fun end(reason: String) = runOnUiThread {
+                if (parkNetworkCallback !== this) return@runOnUiThread
+                // multi §6: a confirmed network change ends the kept PCs; with none on screen it is the whole
+                // lifecycle (a new epoch: nothing started before it is carried out).
+                if (activeHandle == 0L) endAllKept(reason) else endParkedKept(reason)
+                renderStatus()
+            }
+        }
+        try {
+            cm.registerDefaultNetworkCallback(callback)
+            parkNetworkCallback = callback
+        } catch (t: Throwable) {
+            diagnosticsLog.log("park_network_watch_failed", t.javaClass.simpleName)
+        }
+    }
+
+    private fun unwatchParkNetwork() {
+        val cb = parkNetworkCallback ?: return
+        parkNetworkCallback = null
+        parkNetwork = null
+        try {
+            (getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager)?.unregisterNetworkCallback(cb)
+        } catch (_: Throwable) {
+        }
+    }
+

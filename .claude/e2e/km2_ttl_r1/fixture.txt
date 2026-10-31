@@ -1,0 +1,12 @@
+﻿fixture km2_ttl_r1 start 2026-10-16T17:53:34 (qwinsta: >console                   shotan                    1  Active)
+  directory node pid 15144 :18310 / proxy pid 43812 :18320
+  harness 2963bbe92bf4e835867d56808b52640f96b902ff208ef7a0eb9c7b6846bdbb36 test host 7207c99ed026b7784ca2f0ea433e502ceb8512ffd423db6d521c6d2e86ee3feb
+  host km-pc-a harness pid 26668 ready: ready old=0
+  host km-pc-b harness pid 24620 ready: ready old=0
+  host km-pc-c harness pid 18396 ready: ready old=0
+  host km-pc-d harness pid 46400 ready: ready old=0
+  host km-pc-x harness pid 44812 ready: ready old=0
+  host km-pc-old harness pid 40068 ready: ready old=1
+  directory hosts: km-pc-a=ecae010207348e8b/km2-fixture-machine-a km-pc-b=6ea1a1bcf7db336d/km2-fixture-machine-b km-pc-c=4d6ca598772ae471/km2-fixture-machine-c km-pc-d=9aec2130bc590c02/km2-fixture-machine-d km-pc-x=8d91ba58c59cf7b1/km2-fixture-machine-x km-pc-old=d39f1c03cf35d86a/km2-fixture-machine-old
+  km-pc-d record: localIps=192.168.0.76,172.24.16.1,172.30.80.1 localUdpPort=63727 publicUdpPort=63727
+  direct forwarder for km-pc-d: 192.168.0.76:63727 -> 127.0.0.1:63727 (pid 38580)

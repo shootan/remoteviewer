@@ -1,0 +1,5 @@
+16:10:47 km run apk=C:\work\gnlink-wt\feat-keepalive-multi\.claude\e2e\km-fixture.apk
+16:11:21 booted (cold) in 34 s
+16:11:26 install: Performing Streamed Install
+Success
+16:11:42 tapped loginIdInput at 540,522 text='ID'

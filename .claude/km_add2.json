@@ -1,0 +1,1 @@
+{"repo_path": "C:/work/gnlink-wt/feat-keepalive-multi", "files": ["apps/native_poc/src/session_registry.hpp", "apps/native_poc/src/session_registry_test.cpp", "apps/native_poc/src/connect_op_gate.hpp", "apps/native_poc/src/connect_op_gate_test.cpp", "apps/native_poc/CMakeLists.txt"]}

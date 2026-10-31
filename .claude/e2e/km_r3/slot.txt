@@ -1,0 +1,5 @@
+﻿slot km_r3 start 2026-10-16T16:16:22 (qwinsta: >console                   shotan                    1  Active)
+  other workers' test hosts running: 0 
+  fixture apk e525d120460647d3be0b0178e5d26bb70d74a46802df1f295d9c66f5e1a0058f
+  avd exit=1 16:20:52 run end: 4/4 PASS
+slot km_r3 done 2026-10-16T16:20:53

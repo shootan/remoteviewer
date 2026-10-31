@@ -1,0 +1,6 @@
+﻿slot km2_r1 start 2026-10-16T17:28:23 (qwinsta: >console                   shotan                    1  Active)
+  runner m11runs.log last: 17:24:07 slot requested: 癤우옉?낆슜2 keepalive-multi r2 build 2026-10-16T17:20:48 -- waiting
+  other workers' test hosts running: 0 
+  apk km2-fixture.apk 528570ab16b3e7aa8afcf76c5b7dba346b1dbd9cdfaf73e9b7d44395a0c16414
+  avd exit=1 17:31:09 run end: 6/6 PASS
+slot km2_r1 done 2026-10-16T17:31:11

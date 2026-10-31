@@ -1,0 +1,118 @@
+{
+ "results": [
+  [
+   "1 signed in; both PCs listed",
+   true,
+   ""
+  ],
+  [
+   "2 A new connect: selection -> first frame",
+   true,
+   "1292 ms"
+  ],
+  [
+   "3: PC \ubaa9\ub85d -> HOSTS, the PC on screen parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "3 A's card says kept, with its own \ub04a\uae30",
+   true,
+   "'\ud654\uba74 \uc804\uc1a1 \uc911\uc9c0 \u00b7 5\ubd84 \ub0a8\uc74c \u00b7 \ub204\ub974\uba74 \ubc14\ub85c \uc5f4\ub9bd\ub2c8\ub2e4'"
+  ],
+  [
+   "4 B new connect (A kept): selection -> first frame",
+   true,
+   "733 ms"
+  ],
+  [
+   "4 B is a different entry; A was not ended by it",
+   true,
+   "A=1 B=2"
+  ],
+  [
+   "5: PC \ubaa9\ub85d -> HOSTS, the PC on screen parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "5 A and B both kept (each card with its own \ub04a\uae30)",
+   true,
+   "A='\ud654\uba74 \uc804\uc1a1 \uc911\uc9c0 \u00b7 5\ubd84 \ub0a8\uc74c \u00b7 \ub204\ub974\uba74 \ubc14\ub85c \uc5f4\ub9bd\ub2c8\ub2e4' B='\ud654\uba74 \uc804\uc1a1 \uc911\uc9c0 \u00b7 5\ubd84 \ub0a8\uc74c \u00b7 \ub204\ub974\uba74 \ubc14\ub85c \uc5f4\ub9bd\ub2c8\ub2e4'"
+  ],
+  [
+   "6 A again: park_reuse of A's own entry, no new connect / observe / punch / Hello for it",
+   true,
+   "('1', '1', '1', '1', '1') -> ('1', '1', '1', '1', '1')"
+  ],
+  [
+   "6 A reused: selection -> first frame",
+   true,
+   "872 ms"
+  ],
+  [
+   "7: PC \ubaa9\ub85d -> HOSTS, the PC on screen parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "7 B again: park_reuse of B's own entry, its counters unchanged",
+   true,
+   "('1', '1', '1', '1', '1') -> ('1', '1', '1', '1', '1')"
+  ],
+  [
+   "7 B reused: selection -> first frame",
+   true,
+   "456 ms"
+  ],
+  [
+   "8: PC \ubaa9\ub85d -> HOSTS, the PC on screen parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "8 A's \ub04a\uae30 ends A only; B still kept",
+   true,
+   ""
+  ],
+  [
+   "9 B still a reuse after A ended",
+   true,
+   "('1', '1', '1', '1', '1') -> ('1', '1', '1', '1', '1')"
+  ],
+  [
+   "9 B reused again: selection -> first frame",
+   true,
+   "488 ms"
+  ],
+  [
+   "10 \uc5f0\uacb0 \ud574\uc81c -> HOSTS",
+   true,
+   ""
+  ],
+  [
+   "10 sign-out -> the login screen",
+   true,
+   ""
+  ],
+  [
+   "every new codec's first input is an IDR (key=1)",
+   true,
+   "5 codecs, first inputs ['1', '1', '1', '1', '1']"
+  ]
+ ],
+ "timing": {
+  "A_connect_targets_ms": 3661,
+  "A_first_select_ms": 1292,
+  "B_connect_targets_ms": 4177,
+  "B_first_select_ms": 733,
+  "A_reuse_targets_ms": 734,
+  "A_reuse_select_ms": 872,
+  "route_A_start": 1792136228.4016328,
+  "route_A_end": 1792136244.7407906,
+  "B_reuse_targets_ms": 651,
+  "B_reuse_select_ms": 456,
+  "route_B_start": 1792136266.6706288,
+  "route_B_end": 1792136268.7359438
+ }
+}

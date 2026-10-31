@@ -1,0 +1,6 @@
+﻿fixture km_r4 start 2026-10-16T16:21:47 (qwinsta: >console                   shotan                    1  Active)
+  directory node pid 27556 :18310 / proxy pid 45624 :18320
+  harness 2963bbe92bf4e835867d56808b52640f96b902ff208ef7a0eb9c7b6846bdbb36 test host 7207c99ed026b7784ca2f0ea433e502ceb8512ffd423db6d521c6d2e86ee3feb
+  host km-pc-a harness pid 10900 ready: ready
+  host km-pc-b harness pid 20140 ready: ready
+  directory hosts: km-pc-a=4f492a728577a955/km-fixture-machine-a km-pc-b=1b312e8e161cb39d/km-fixture-machine-b

@@ -1,0 +1,6 @@
+﻿slot km2_ttl_r1 start 2026-10-16T17:53:33 (qwinsta: >console                   shotan                    1  Active)
+  runner m11runs.log last: 17:24:07 slot requested: 癤우옉?낆슜2 keepalive-multi r2 build 2026-10-16T17:20:48 -- waiting
+  other workers' test hosts running: 0 
+  apk km2-ttl-fixture.apk 216bb6628ea552295b8f48a9a1c66b6a28de985ad70220fd6cc8e0e3f17237b6
+  avd exit=1 18:01:36 run end: 12/15 PASS
+slot km2_ttl_r1 done 2026-10-16T18:01:37

@@ -1,0 +1,47 @@
+{
+ "results": [
+  [
+   "P1 signed in; six PCs listed",
+   true,
+   ""
+  ],
+  [
+   "P2 A new: selection -> first frame",
+   true,
+   "699 ms"
+  ],
+  [
+   "P2: PC \ubaa9\ub85d -> HOSTS, parked and confirmed",
+   true,
+   ""
+  ],
+  [
+   "P3 M2: B (still connecting) superseded by the tap on A",
+   true,
+   "B handle=2"
+  ],
+  [
+   "P3 A resumed at once (its own connection), not after B's timeout",
+   true,
+   "3055 ms to the targets"
+  ],
+  [
+   "P3 B's late answer adopts nothing (no punch / native connect / start for B)",
+   true,
+   "stale lines: [directory_connect_stale] handle=2 op=2 step=before_native_connect"
+  ]
+ ],
+ "marks": {
+  "P3_start": 1792139447.5625439,
+  "P3_end": 1792139463.9823155
+ },
+ "cost": {
+  "nothing_kept_list": {
+   "rx_Bps": 39200,
+   "tx_Bps": 6268,
+   "threads": 28,
+   "rss_kB": 78740,
+   "pss_kB": 32631
+  }
+ }
+}
