@@ -1,0 +1,1 @@
+connected=1 frames=180 firstMs=38 still=1

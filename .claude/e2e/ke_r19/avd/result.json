@@ -1,0 +1,262 @@
+{
+ "results": [
+  [
+   "E1 signed in; four PCs listed",
+   true,
+   ""
+  ],
+  [
+   "E1 OFF: the app prepares nothing on its own",
+   true,
+   "[preconnect_off] reason=login why=auto_prepare_off recent=0"
+  ],
+  [
+   "E2 A (ordinary connect): selection -> first frame",
+   true,
+   "3678 ms"
+  ],
+  [
+   "E2 PC \ubaa9\ub85d: the session ends, the FIRST transition (a new lease, its directory requests logged)",
+   true,
+   "[standby_capability] host=0483254caef6dc7f inc=1 ok=true relay=reserved aim=relay"
+  ],
+  [
+   "E2 A shows \ub300\uae30 \uc911 (a confirmed entry on a live lease)",
+   true,
+   "('\ub300\uae30 \uc911', '\ub300\uae30 \uc5f0\uacb0 \uc788\uc74c \u00b7 \ub204\ub974\uba74 \uc5fd\ub2c8\ub2e4', True)"
+  ],
+  [
+   "E3 A by activation: selection -> first frame",
+   true,
+   "3819 ms"
+  ],
+  [
+   "E3 activation of THAT lease: no directory connect / observe / punch",
+   true,
+   "[standby_activate] host=ke-pc-a id=0483254caef6dc7f handle=2 op=4 handle=2 gen=0 connects=0 hellos=0 observes=0 punches=0 staleRefused=0 staleClosed=0"
+  ],
+  [
+   "E4 PC \ubaa9\ub85d after an activation: back to the same lease (no new lease, no capability fetch)",
+   true,
+   "('\ub300\uae30 \uc911', '\ub300\uae30 \uc5f0\uacb0 \uc788\uc74c \u00b7 \ub204\ub974\uba74 \uc5fd\ub2c8\ub2e4', True)"
+  ],
+  [
+   "E5 a backend request (GDI) is made on A's session",
+   true,
+   "[desktop_backend_tap] backend=gdi connected=true active=3 | [desktop_backend_request] backend=gdi scope=connection"
+  ],
+  [
+   "E5 B (ordinary): selection -> first frame",
+   true,
+   "3317 ms"
+  ],
+  [
+   "E5 A again by activation: selection -> first frame",
+   true,
+   "4337 ms"
+  ],
+  [
+   "E5 M1: A again is a NEW session -- its backend state starts with no request, nothing re-sent",
+   true,
+   "[desktop_backend_ui] state=CHECKING lit=none asked=none window=false scoped=false enabled=true seq=0 sentSeq=0"
+  ],
+  [
+   "E6 B by activation: selection -> first frame",
+   true,
+   "3468 ms"
+  ],
+  [
+   "E6 A by activation: selection -> first frame",
+   true,
+   "3123 ms"
+  ],
+  [
+   "E6 B by activation: selection -> first frame",
+   true,
+   "3944 ms"
+  ],
+  [
+   "E6 steady reuse B -> A -> B: 3 activations, no directory connect, no capability fetch",
+   true,
+   "activations=3"
+  ],
+  [
+   "E7 another device used A: no automatic re-take (no activation, no connect), A still stands by",
+   true,
+   "('\ub300\uae30 \uc911', '\ub300\uae30 \uc5f0\uacb0 \uc788\uc74c \u00b7 \ub204\ub974\uba74 \uc5fd\ub2c8\ub2e4', True)"
+  ],
+  [
+   "E7 the user's tap takes A by activation: selection -> first frame",
+   true,
+   "3307 ms"
+  ],
+  [
+   "E7g A by activation (on screen): selection -> first frame",
+   true,
+   "3152 ms"
+  ],
+  [
+   "E7g another device took A while it was on screen: the session ended, NO automatic re-take, A stands by",
+   true,
+   "('\ub300\uae30 \uc911', '\ub300\uae30 \uc5f0\uacb0 \uc788\uc74c \u00b7 \ub204\ub974\uba74 \uc5fd\ub2c8\ub2e4', True) | [keep_end] handle=10 host=ke-pc-a reason=peer_lost"
+  ],
+  [
+   "E7b A by activation: selection -> first frame",
+   true,
+   "3361 ms"
+  ],
+  [
+   "E7b Ctrl held, then PC \ubaa9\ub85d: the key up reached the host BEFORE that session ended (the host's own input log), the session ended through the fence",
+   true,
+   "[list_return_fence] handle=11 begin | [list_return_end] handle=11 how=fenced released=0 dropped=0"
+  ],
+  [
+   "E7b the fence paused the old picture before the end: A stands by, its card claims no cleanup of the PC (\"\ub300\uae30 \uc5f0\uacb0 \uc788\uc74c \u00b7 \ub204\ub974\uba74 \uc5fd\ub2c8\ub2e4\")",
+   true,
+   "('\ub300\uae30 \uc911', '\ub300\uae30 \uc5f0\uacb0 \uc788\uc74c \u00b7 \ub204\ub974\uba74 \uc5fd\ub2c8\ub2e4', True) settling seen=None | [standby_back] host=0483254caef6dc7f strays=0 tail=false"
+  ],
+  [
+   "E7c A by activation: its targets",
+   true,
+   ""
+  ],
+  [
+   "E7c B (the newest tap): selection -> first frame",
+   true,
+   "3274 ms"
+  ],
+  [
+   "E7c N1: A's held tap is superseded by the newer tap on B -- A never activates afterwards",
+   true,
+   "[tap_held_superseded] held=0483254caef6dc7f by=579252d6eecb19fb | [park_tap_resumed] host=579252d6eecb19fb"
+  ],
+  [
+   "E7e C (ordinary): selection -> first frame",
+   true,
+   "3821 ms"
+  ],
+  [
+   "E7e B by activation during C's first transition: selection -> first frame",
+   true,
+   "3263 ms"
+  ],
+  [
+   "E7e a tap during C's first transition: B opens by activation, C's lease is not disturbed",
+   true,
+   ""
+  ],
+  [
+   "E7e ...and C's first transition completes: C stands by",
+   true,
+   "('\ub300\uae30 \uc911', '\ub300\uae30 \uc5f0\uacb0 \uc788\uc74c \u00b7 \ub204\ub974\uba74 \uc5fd\ub2c8\ub2e4', True)"
+  ],
+  [
+   "E7d A by activation: its targets",
+   true,
+   ""
+  ],
+  [
+   "E7d N1: A's held tap, then A's \ub04a\uae30 -- the held tap never runs, A is released and not made again",
+   true,
+   "('ONLINE', 'My PCs', False) | [tap_held_dropped] host=0483254caef6dc7f why=disconnect | [standby_release] host=0483254caef6dc7f reason=user_disconnect"
+  ],
+  [
+   "E7f old host (ordinary): selection -> first frame",
+   true,
+   "3258 ms"
+  ],
+  [
+   "E7f \ub04a\uae30 during a first transition: the lease released, nothing provided after it, not made again",
+   true,
+   "[standby_start] host=5aee38407d457c49 inc=4 reason=first_transition leases=2 | [standby_provided] host=5aee38407d457c49 inc=4 ok=true | [standby_release] host=5aee38407d457c49 reason=user_disconnect | [standby_capability] host=5aee38407d457c49 inc=4 ok=true relay=reserved aim=relay"
+  ],
+  [
+   "E8 old host (ordinary connect): selection -> first frame",
+   true,
+   "2978 ms"
+  ],
+  [
+   "E8 the older host answers no StandbyHello: unanswered -> its lease released, said so (not taken for old)",
+   true,
+   "('ONLINE', 'My PCs', False)"
+  ],
+  [
+   "E8 old host again (ordinary): selection -> first frame",
+   true,
+   "3005 ms"
+  ],
+  [
+   "E8 again: the ordinary connect; PC \ubaa9\ub85d tries again (an unanswered lease is not taken for an older host) -> unanswered again, released; nothing kept",
+   true,
+   ""
+  ],
+  [
+   "E9 \ub04a\uae30 on B: its lease released, its card is an ordinary one, not made again",
+   true,
+   "('ONLINE', 'My PCs', False)"
+  ],
+  [
+   "E10 C (ordinary): selection -> first frame",
+   true,
+   "3297 ms"
+  ],
+  [
+   "E10 C stands by before leaving",
+   true,
+   ""
+  ],
+  [
+   "E10 leaving the app releases every lease; back in front (OFF): nothing prepared",
+   true,
+   "[standby_release_all] reason=app_stopped leases=1"
+  ],
+  [
+   "E11 C (ordinary): selection -> first frame",
+   true,
+   "3392 ms"
+  ],
+  [
+   "E11 sign-out with a lease: released",
+   true,
+   "[standby_release_all] reason=sign_out leases=1"
+  ],
+  [
+   "E12 signed in again (OFF)",
+   true,
+   ""
+  ],
+  [
+   "E12 ON: the recent PCs are prepared on their own (C, old, A -- not B, no longer recent); A and C READY, the older host unanswered and released; the screen untouched",
+   true,
+   "{'a': ('\ub300\uae30 \uc911', '\ub300\uae30 \uc5f0\uacb0 \uc788\uc74c \u00b7 \ub204\ub974\uba74 \uc5fd\ub2c8\ub2e4', True), 'b': ('ONLINE', 'My PCs', False), 'c': ('\ub300\uae30 \uc911', '\ub300\uae30 \uc5f0\uacb0 \uc788\uc74c \u00b7 \ub204\ub974\uba74 \uc5fd\ub2c8\ub2e4', True), 'old': ('ONLINE', 'My PCs', False)}"
+  ],
+  [
+   "E12 A by activation (prepared on its own): selection -> first frame",
+   true,
+   "3753 ms"
+  ],
+  [
+   "E12 the tap activates the prepared lease",
+   true,
+   ""
+  ]
+ ],
+ "marks": {
+  "E2": 1793138783.6072347,
+  "E3": 1793138840.9236228,
+  "E5": 1793138892.416003,
+  "E6": 1793139048.5489495,
+  "E7": 1793139202.6804085,
+  "E7g": 1793139278.608309,
+  "E7b": 1793139323.8980322,
+  "E7c": 1793139425.2731807,
+  "E7e": 1793139490.0453572,
+  "E7d": 1793139588.4803326,
+  "E7f": 1793139611.1813476,
+  "E8": 1793139669.6903117,
+  "E9": 1793139779.9945693,
+  "E10": 1793139789.288133,
+  "E11": 1793139854.5793903,
+  "E12": 1793139919.9011395
+ }
+}

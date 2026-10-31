@@ -1,0 +1,40 @@
+--- control: every host ready, the AVD passes
+PASS  control: a/b/c started, the AVD started, rc 0, no pid file  rc=0 started=abc avd=True
+--- host b's harness ends at once (staging / launch / guard failure)
+PASS  b exit2: no AVD, c never started, rc != 0  rc=2 started=ab avd=False
+--- host b writes a 'failed' readiness
+PASS  b failed readiness: no AVD, c never started, rc != 0  rc=2 started=ab
+--- host b writes another run's readiness
+PASS  b foreign readiness: no AVD, c never started, rc != 0  rc=2 started=ab
+--- host b never says ready (readiness timeout, 5 s)
+PASS  b silent: no AVD, c never started, rc != 0  rc=2 started=ab
+--- the directory dies at once (fixture failure before any host)
+PASS  node dies: no host, no AVD, rc != 0  rc=2 started=
+--- host c fails late (after the readiness, during the AVD), the AVD itself passes
+PASS  c late INVALID: the AVD ran and passed, the bundle still fails (rc 3)  rc=3 avd=True
+--- host a ignores its stop: ended by the fixture's own handle, and that is a failure
+PASS  a nostop: killed by its handle, the bundle fails (rc 3)  rc=3
+--- the AVD fails, every host fine
+PASS  AVD rc 1, fixture fine: the bundle says the AVD (rc 1)  rc=1
+--- G1: b writes a valid readiness, then dies at once
+FAIL  G1 b ready-then-dead: not taken as ready -- c never started, no AVD, rc != 0, nothing left  rc=3 started=abc left=0
+--- G1: a dies while c is being prepared (c slow to be ready)
+FAIL  G1 a dead before the fixture readiness: no fixture_ready, no AVD, rc != 0, nothing left  rc=3 started=abc left=0
+--- G1: c writes a valid readiness, then dies at once
+FAIL  G1 c ready-then-dead: no AVD, rc != 0, nothing left  rc=3 left=0
+--- G2: host b's launch throws (its harness path does not exist): node and a still ended
+PASS  G2 launch throw: no AVD, rc != 0, a and node ended by the fixture (fixture_result), nothing left  rc=2 left=0
+--- G2: the fixture crashes right after its readiness (no cleanup of its own): its job ends the rest
+PASS  G2 fixture crash: residual ended by the job (confirmed), the bundle fails (rc 3), nothing left  rc=3 left=0 job_run: child_exit=9 residual=4 forced=0 ended_confirmed=1
+--- G2: two harnesses ignore their stop: each ended by its handle
+PASS  G2 two nostop: both killed by their handles, c stopped, rc 3, nothing left  rc=3 left=0
+--- G2: stopping a throws (one cleanup error): b, c and node still ended
+PASS  G2 one cleanup error: a killed after its error, b c node ended, rc 3, nothing left  rc=3 left=0
+--- a run folder is never reused: the fixture refuses a root that already holds a host
+PASS  stale root: the fixture refuses (exit 2), starts nothing  exit=2
+--- a root outside the anchor is refused
+PASS  a root not directly under the anchor: refused (exit 2)  exit=2
+
+18 checks, 3 failed
+RESULT: FAIL
+job_run: child_exit=1 residual=0 forced=0 ended_confirmed=1

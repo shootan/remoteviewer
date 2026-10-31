@@ -1,0 +1,6 @@
+03:40:41 ke run apk_off=C:\work\gnlink-wt\feat-apk-0233\.claude\e2e\ke-off.apk apk_on=C:\work\gnlink-wt\feat-apk-0233\.claude\e2e\ke-on.apk
+03:40:45 install: Performing Streamed Install
+Success
+03:41:32 FAIL  E1 signed in; four PCs listed
+03:41:36 FAIL  E1 OFF: the app prepares nothing on its own
+03:41:39 run end: 0/2 PASS

@@ -1,0 +1,21 @@
+01:28:46 ke run apk_off=C:\work\gnlink-wt\feat-apk-0233\.claude\e2e\ke-off.apk apk_on=C:\work\gnlink-wt\feat-apk-0233\.claude\e2e\ke-on.apk
+01:28:49 install: Performing Streamed Install
+Success
+01:29:12 tapped loginIdInput at 540,522 text='ID'
+01:29:22 tapped loginPasswordInput at 540,675 text='Password'
+01:29:26 tapped loginButton at 540,849 text='Sign In'
+01:29:37 PASS  E1 signed in; four PCs listed
+01:29:41 PASS  E1 OFF: the app prepares nothing on its own  [preconnect_off] reason=login why=auto_prepare_off recent=0
+01:29:43 tapped card:ke-pc-a at 442,480 text='ke-pc-a'
+01:29:52 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+01:29:58 PASS  E2 A (ordinary connect): selection -> first frame  4313 ms
+01:30:15 tapped viewerMenuButton at 2310,775 text='메뉴'
+01:30:24 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+01:31:09 PASS  E2 PC 목록: the session ends, the FIRST transition (a new lease, its directory requests logged)  [standby_capability] host=4f36dd50f1f02a31 inc=1 ok=true relay=reserved aim=relay
+01:31:09 FAIL  E2 A shows 대기 중 (a confirmed entry on a live lease)  ('ONLINE', 'My PCs', False)
+01:31:11 tapped card:ke-pc-a at 442,532 text='ke-pc-a'
+01:31:21 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+01:31:26 PASS  E3 A by activation: selection -> first frame  3385 ms
+01:31:27 FAIL  E3 activation of THAT lease: no directory connect / observe / punch
+01:31:42 tapped viewerMenuButton at 2310,775 text='메뉴'
+01:31:49 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'

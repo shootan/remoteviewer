@@ -1,0 +1,110 @@
+{
+  "accounts": {
+    "ketest": {
+      "id": "ketest",
+      "salt": "926821a2513dd6f910809363feb8417f",
+      "hash": "7cc2ace55171d936a02fb3d9c050e12c8df7289c96bcadfc5c695d471c57a782",
+      "status": "active",
+      "createdAt": 1793132138268,
+      "updatedAt": 1793132138268,
+      "approvedAt": 1793132138268,
+      "memo": "",
+      "lastLoginAt": 1793132650558
+    }
+  },
+  "hosts": {
+    "5a3a89f894b1bb8f": {
+      "hostId": "5a3a89f894b1bb8f",
+      "accountId": "ketest",
+      "machineId": "ke-fixture-machine-a",
+      "hostName": "ke-pc-a",
+      "tokenHash": "51d9695b58593a504c1b22c953c7f9aebc80b7ffca6b2feb1486b3bc647db5a6",
+      "lastSeen": 1793133077430,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 49727,
+      "wireIp": "127.0.0.1",
+      "wirePort": 49727,
+      "localIps": [
+        "192.168.0.76",
+        "172.22.224.1"
+      ],
+      "localUdpPort": 49727,
+      "alternateUdpPort": 0
+    },
+    "87db89ea5ed53125": {
+      "hostId": "87db89ea5ed53125",
+      "accountId": "ketest",
+      "machineId": "ke-fixture-machine-b",
+      "hostName": "ke-pc-b",
+      "tokenHash": "dcf07c0fbd3f772de6592f1e03f0748d0d9dcb071d83ae43dc2edb727fc646d7",
+      "lastSeen": 1793133075037,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 49728,
+      "wireIp": "127.0.0.1",
+      "wirePort": 49728,
+      "localIps": [
+        "192.168.0.76",
+        "172.22.224.1"
+      ],
+      "localUdpPort": 49728,
+      "alternateUdpPort": 0
+    },
+    "bd7b7c6320c46230": {
+      "hostId": "bd7b7c6320c46230",
+      "accountId": "ketest",
+      "machineId": "ke-fixture-machine-c",
+      "hostName": "ke-pc-c",
+      "tokenHash": "bc5f5910446dfc3d3212eaaa88659e667ac0338cc1acb735be360b8e4b475740",
+      "lastSeen": 1793133069628,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 49729,
+      "wireIp": "127.0.0.1",
+      "wirePort": 49729,
+      "localIps": [
+        "192.168.0.76",
+        "172.22.224.1"
+      ],
+      "localUdpPort": 49729,
+      "alternateUdpPort": 0
+    },
+    "54baba6721c1a05a": {
+      "hostId": "54baba6721c1a05a",
+      "accountId": "ketest",
+      "machineId": "8ec6ecb1-11fb-4db3-8127-aea0c5311225",
+      "hostName": "ke-pc-old",
+      "tokenHash": "916d64729db924a425e5fc20ab657ad4092b028264427cd4bc4b22dbe3aa0b29",
+      "lastSeen": 1793133077118,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 49730,
+      "wireIp": "127.0.0.1",
+      "wirePort": 49730,
+      "localIps": [
+        "192.168.0.76",
+        "172.22.224.1"
+      ],
+      "localUdpPort": 49730,
+      "alternateUdpPort": 0
+    }
+  },
+  "devices": {
+    "4cd75e34920eadb4da9ec358dcf0aa1c": {
+      "deviceId": "4cd75e34920eadb4da9ec358dcf0aa1c",
+      "accountId": "ketest",
+      "kind": "android",
+      "label": "Google sdk_gphone64_x86_64",
+      "credHash": "94abb31655138c0ab942482e6ce5652018549d28dc44f15a421f89f2a9ea9d71",
+      "prevCredHash": "",
+      "prevValidUntil": 0,
+      "prevUsesLeft": 0,
+      "issued": [
+        "94abb31655138c0ab942482e6ce5652018549d28dc44f15a421f89f2a9ea9d71"
+      ],
+      "revokeHash": "beea29db22edba90726c3ba631f90d70d5edf3e104b35104c6af30c10389f508",
+      "createdAt": 1793132171487,
+      "lastUsedAt": 1793132171487,
+      "expiresAt": 1800908171487,
+      "revokedAt": 0,
+      "revokedWhy": ""
+    }
+  }
+}

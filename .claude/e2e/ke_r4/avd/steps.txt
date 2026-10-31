@@ -1,0 +1,25 @@
+01:56:02 ke run apk_off=C:\work\gnlink-wt\feat-apk-0233\.claude\e2e\ke-off.apk apk_on=C:\work\gnlink-wt\feat-apk-0233\.claude\e2e\ke-on.apk
+01:56:04 install: Performing Streamed Install
+Success
+01:56:16 tapped loginIdInput at 540,522 text='ID'
+01:56:20 tapped loginPasswordInput at 540,675 text='Password'
+01:56:24 tapped loginButton at 540,849 text='Sign In'
+01:56:34 PASS  E1 signed in; four PCs listed
+01:56:38 PASS  E1 OFF: the app prepares nothing on its own  [preconnect_off] reason=login why=auto_prepare_off recent=0
+01:56:40 tapped card:ke-pc-a at 442,480 text='ke-pc-a'
+01:56:49 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+01:56:53 PASS  E2 A (ordinary connect): selection -> first frame  3166 ms
+01:57:06 tapped viewerMenuButton at 2310,775 text='메뉴'
+01:57:13 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+01:57:20 PASS  E2 PC 목록: the session ends, the FIRST transition (a new lease, its directory requests logged)  [standby_capability] host=8b5df86f560117ef inc=1 ok=true relay=reserved aim=relay
+01:57:20 PASS  E2 A shows 대기 중 (a confirmed entry on a live lease)  ('대기 중', '대기 연결 준비됨 · 누르면 바로 열립니다', True)
+01:57:22 tapped card:ke-pc-a at 324,686 text='ke-pc-a'
+01:57:28 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+01:57:31 PASS  E3 A by activation: selection -> first frame  2351 ms
+01:57:32 PASS  E3 activation of THAT lease: no directory connect / observe / punch  [standby_activate] host=ke-pc-a id=8b5df86f560117ef handle=2 op=4 handle=2 gen=0 connects=0 hellos=0 observes=0 punches=0 staleRefused=0 staleClosed=0
+01:57:45 tapped viewerMenuButton at 2310,775 text='메뉴'
+01:57:52 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+01:57:58 PASS  E4 PC 목록 after an activation: back to the same lease (no new lease, no capability fetch)  ('대기 중', '대기 연결 준비됨 · 누르면 바로 열립니다', True)
+01:58:01 tapped card:ke-pc-a at 324,686 text='ke-pc-a'
+01:58:43 FAIL  E5 a backend request (GDI) is made on A's session
+01:59:00 run end: 8/9 PASS

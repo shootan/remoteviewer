@@ -1,0 +1,35 @@
+02:04:52 ke run apk_off=C:\work\gnlink-wt\feat-apk-0233\.claude\e2e\ke-off.apk apk_on=C:\work\gnlink-wt\feat-apk-0233\.claude\e2e\ke-on.apk
+02:04:54 install: Performing Streamed Install
+Success
+02:05:03 tapped loginIdInput at 540,522 text='ID'
+02:05:07 tapped loginPasswordInput at 540,675 text='Password'
+02:05:11 tapped loginButton at 540,849 text='Sign In'
+02:05:21 PASS  E1 signed in; four PCs listed
+02:05:25 PASS  E1 OFF: the app prepares nothing on its own  [preconnect_off] reason=login why=auto_prepare_off recent=0
+02:05:27 tapped card:ke-pc-a at 442,480 text='ke-pc-a'
+02:05:36 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+02:05:40 PASS  E2 A (ordinary connect): selection -> first frame  3154 ms
+02:05:53 tapped viewerMenuButton at 2310,775 text='메뉴'
+02:06:01 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+02:06:09 PASS  E2 PC 목록: the session ends, the FIRST transition (a new lease, its directory requests logged)  [standby_capability] host=2e661d2ee7164dcd inc=1 ok=true relay=reserved aim=relay
+02:06:09 PASS  E2 A shows 대기 중 (a confirmed entry on a live lease)  ('대기 중', '대기 연결 준비됨 · 누르면 바로 열립니다', True)
+02:06:11 tapped card:ke-pc-a at 324,686 text='ke-pc-a'
+02:06:16 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+02:06:20 PASS  E3 A by activation: selection -> first frame  2901 ms
+02:06:21 PASS  E3 activation of THAT lease: no directory connect / observe / punch  [standby_activate] host=ke-pc-a id=2e661d2ee7164dcd handle=2 op=4 handle=2 gen=0 connects=0 hellos=0 observes=0 punches=0 staleRefused=0 staleClosed=0
+02:06:34 tapped viewerMenuButton at 2310,775 text='메뉴'
+02:06:43 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+02:06:49 PASS  E4 PC 목록 after an activation: back to the same lease (no new lease, no capability fetch)  ('대기 중', '대기 연결 준비됨 · 누르면 바로 열립니다', True)
+02:06:52 tapped card:ke-pc-a at 324,686 text='ke-pc-a'
+02:06:59 tapped listSettingsButton at 879,404 text='Settings'
+02:07:07 tapped settingsDesktopBackendGdiButton at 852,1023 text='GDI'
+02:07:09 PASS  E5 a backend request (GDI) is made on A's session  [desktop_backend_tap] backend=gdi connected=true active=3 | [desktop_backend_request] backend=gdi scope=connection
+02:07:14 tapped listHostsButton at 670,241 text='PC 목록'
+02:07:19 tapped card:ke-pc-b at 442,915 text='ke-pc-b'
+02:07:49 FAIL  E5 B (ordinary): the target is shown
+02:07:54 tapped listHostsButton at 670,241 text='PC 목록'
+02:08:03 tapped card:ke-pc-a at 324,686 text='ke-pc-a'
+02:08:36 FAIL  E5 A again by activation: the target is shown
+02:08:39 PASS  E5 M1: A again is a NEW session -- its backend state starts with no request, nothing re-sent  [desktop_backend_ui] state=IDLE lit=DXGI asked=none window=true scoped=true enabled=true seq=1 sentSeq=0
+02:08:44 tapped listHostsButton at 670,241 text='PC 목록'
+02:08:52 tapped card:ke-pc-b at 324,917 text='ke-pc-b'

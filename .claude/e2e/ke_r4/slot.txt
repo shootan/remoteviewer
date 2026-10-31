@@ -1,0 +1,4 @@
+﻿slot ke_r4 start 2026-10-28T01:55:53 (qwinsta: >console                   shotan                    1  Active)
+  apk off 698d29db0d84c5dcaef6961d4b8113b9f514e8e2d897b1742cd6a24e1cdb149f on de1fbf3aa772e683fbd8b5c9fa88df8dcc6d791bf758d1b3ec15a16612bb9af7
+  avd exit=1 01:59:00 run end: 8/9 PASS
+slot ke_r4 done 2026-10-28T01:59:01

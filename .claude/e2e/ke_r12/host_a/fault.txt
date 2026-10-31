@@ -1,0 +1,1 @@
+pong_delay_ms=2000

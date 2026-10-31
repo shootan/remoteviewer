@@ -1,0 +1,25 @@
+--- control: every host ready, the AVD passes
+PASS  control: a/b/c started, the AVD started, rc 0, no pid file  rc=0 started=abc avd=True
+--- host b's harness ends at once (staging / launch / guard failure)
+PASS  b exit2: no AVD, c never started, rc != 0  rc=2 started=ab avd=False
+--- host b writes a 'failed' readiness
+PASS  b failed readiness: no AVD, c never started, rc != 0  rc=2 started=ab
+--- host b writes another run's readiness
+PASS  b foreign readiness: no AVD, c never started, rc != 0  rc=2 started=ab
+--- host b never says ready (readiness timeout, 5 s)
+PASS  b silent: no AVD, c never started, rc != 0  rc=2 started=ab
+--- the directory dies at once (fixture failure before any host)
+PASS  node dies: no host, no AVD, rc != 0  rc=2 started=
+--- host c fails late (after the readiness, during the AVD), the AVD itself passes
+FAIL  c late INVALID: the AVD ran and passed, the bundle still fails (rc 3)  rc=0 avd=True
+--- host a ignores its stop: ended by the fixture's own handle, and that is a failure
+FAIL  a nostop: killed by its handle, the bundle fails (rc 3)  rc=0
+--- the AVD fails, every host fine
+PASS  AVD rc 1, fixture fine: the bundle says the AVD (rc 1)  rc=1
+--- a run folder is never reused: the fixture refuses a root that already holds a host
+PASS  stale root: the fixture refuses (exit 2), starts nothing  exit=2
+--- a root outside the anchor is refused
+PASS  a root not directly under the anchor: refused (exit 2)  exit=2
+
+11 checks, 2 failed
+RESULT: FAIL

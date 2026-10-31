@@ -1,0 +1,90 @@
+{
+  "accounts": {
+    "ketest": {
+      "id": "ketest",
+      "salt": "72952d984aded3c5a9355c3f5751e6da",
+      "hash": "eb66daa4a695b2ce18670de9af31ff5537951965b73ec6c4edf2000785720104",
+      "status": "active",
+      "createdAt": 1793117014067,
+      "updatedAt": 1793117014067,
+      "approvedAt": 1793117014067,
+      "memo": "",
+      "lastLoginAt": null
+    }
+  },
+  "hosts": {
+    "f0ae0dfe99aed899": {
+      "hostId": "f0ae0dfe99aed899",
+      "accountId": "ketest",
+      "machineId": "ke-fixture-machine-a",
+      "hostName": "ke-pc-a",
+      "tokenHash": "45105cfcf2eeceb3be5496b4a6f3c4e0813819bd7cf893ea39cf006f7b9f8ce2",
+      "lastSeen": 1793117654224,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 59790,
+      "wireIp": "127.0.0.1",
+      "wirePort": 59790,
+      "localIps": [
+        "192.168.0.76",
+        "172.22.224.1"
+      ],
+      "localUdpPort": 59790,
+      "alternateUdpPort": 0
+    },
+    "af9298bd31f65a02": {
+      "hostId": "af9298bd31f65a02",
+      "accountId": "ketest",
+      "machineId": "ke-fixture-machine-b",
+      "hostName": "ke-pc-b",
+      "tokenHash": "9ee8de1ceb3cd394e35ff7088937ff7db21970bfb982a2023565d8fd6a1d0418",
+      "lastSeen": 1793117654579,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 59791,
+      "wireIp": "127.0.0.1",
+      "wirePort": 59791,
+      "localIps": [
+        "192.168.0.76",
+        "172.22.224.1"
+      ],
+      "localUdpPort": 59791,
+      "alternateUdpPort": 0
+    },
+    "1a3a94c9a4bee12a": {
+      "hostId": "1a3a94c9a4bee12a",
+      "accountId": "ketest",
+      "machineId": "ke-fixture-machine-c",
+      "hostName": "ke-pc-c",
+      "tokenHash": "bc0872553732aaf833b8a2317a677ecc0cd11c20d120d89465d670bf30e6586c",
+      "lastSeen": 1793117654955,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 59794,
+      "wireIp": "127.0.0.1",
+      "wirePort": 59794,
+      "localIps": [
+        "192.168.0.76",
+        "172.22.224.1"
+      ],
+      "localUdpPort": 59794,
+      "alternateUdpPort": 0
+    },
+    "646844be7cb31942": {
+      "hostId": "646844be7cb31942",
+      "accountId": "ketest",
+      "machineId": "8ec6ecb1-11fb-4db3-8127-aea0c5311225",
+      "hostName": "ke-pc-old",
+      "tokenHash": "1c26fe63e50acdb14f7aa3a4f6ccb51b300bee0be0009898fedf41b3a0916040",
+      "lastSeen": 1793117655502,
+      "publicIp": "127.0.0.1",
+      "publicUdpPort": 59797,
+      "wireIp": "127.0.0.1",
+      "wirePort": 59797,
+      "localIps": [
+        "192.168.0.76",
+        "172.22.224.1"
+      ],
+      "localUdpPort": 59797,
+      "alternateUdpPort": 0
+    }
+  },
+  "devices": {}
+}

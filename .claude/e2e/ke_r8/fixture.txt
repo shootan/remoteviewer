@@ -1,0 +1,8 @@
+﻿fixture ke_r8 start 2026-10-28T03:40:32 (qwinsta: >console                   shotan                    1  Active)
+  directory node pid 38032 :18410 (server.js b329e22249e87aec)
+  harness 38ddf6cdf51ffb334fd44ea417dfa9ea90b543c8605a00cb4820dcdb55986150 test host eef2f0d1d3e8844dd4259ae8ca1e6aca1aeece672caa77a70218d29aca2b20c1 old host b6ed8984e202255cad56f83dabb8bd164f1c023865aa94c925b56943f80a3af8
+  host ke-pc-a (GNLinkStreamPinnedSelectTest.exe) harness pid 26344 ready: ready
+  host ke-pc-b (GNLinkStreamPinnedSelectTest.exe) harness pid 30304 ready: ready
+  host ke-pc-c (GNLinkStreamPinnedSelectTest.exe) harness pid 24980 ready: ready
+  host ke-pc-old (GNLinkStreamPinnedOld.exe) harness pid 29740 ready: ready
+  directory hosts: ke-pc-a=a083320d512a3df7 ke-pc-b=29aa29fbe8f3805c ke-pc-c=be970b6247a0abf3 ke-pc-old=3c0bfb82fdb72837

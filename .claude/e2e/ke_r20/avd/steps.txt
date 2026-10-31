@@ -1,0 +1,135 @@
+07:55:38 ke run apk_off=C:\work\gnlink-wt\feat-apk-0233\.claude\e2e\ke-off.apk apk_on=C:\work\gnlink-wt\feat-apk-0233\.claude\e2e\ke-on.apk
+07:55:40 install: Performing Streamed Install
+Success
+07:55:54 tapped loginIdInput at 540,522 text='ID'
+07:55:59 tapped loginPasswordInput at 540,675 text='Password'
+07:56:03 tapped loginButton at 540,849 text='Sign In'
+07:56:15 PASS  E1 signed in; four PCs listed
+07:56:19 PASS  E1 OFF: the app prepares nothing on its own  [preconnect_off] reason=login why=auto_prepare_off recent=0
+07:56:21 tapped card:ke-pc-a at 442,480 text='ke-pc-a'
+07:56:34 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+07:56:39 PASS  E2 A (ordinary connect): selection -> first frame  4258 ms
+07:57:02 tapped viewerMenuButton at 2310,775 text='메뉴'
+07:57:12 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+07:57:20 PASS  E2 PC 목록: the session ends, the FIRST transition (a new lease, its directory requests logged)  [standby_capability] host=fab6a7234252c0a6 inc=1 ok=true relay=reserved aim=relay
+07:57:20 PASS  E2 A shows 대기 중 (a confirmed entry on a live lease)  ('대기 중', '대기 연결 있음 · 누르면 엽니다', True)
+07:57:22 tapped card:ke-pc-a at 324,686 text='ke-pc-a'
+07:57:31 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+07:57:35 PASS  E3 A by activation: selection -> first frame  3017 ms
+07:57:36 PASS  E3 activation of THAT lease: no directory connect / observe / punch  [standby_activate] host=ke-pc-a id=fab6a7234252c0a6 handle=2 op=4 handle=2 gen=0 connects=0 hellos=0 observes=0 punches=0 staleRefused=0 staleClosed=0
+07:57:56 tapped viewerMenuButton at 2310,775 text='메뉴'
+07:58:08 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+07:58:16 PASS  E4 PC 목록 after an activation: back to the same lease (no new lease, no capability fetch)  ('대기 중', '이전 연결 정리 중일 수 있음 · 누르면 다시 엽니다', True)
+07:58:19 tapped card:ke-pc-a at 324,686 text='ke-pc-a'
+07:58:27 tapped listSettingsButton at 879,404 text='Settings'
+07:58:35 tapped settingsDesktopBackendGdiButton at 852,1023 text='GDI'
+07:58:38 PASS  E5 a backend request (GDI) is made on A's session  [desktop_backend_tap] backend=gdi connected=true active=3 | [desktop_backend_request] backend=gdi scope=connection
+07:58:43 tapped listHostsButton at 670,241 text='PC 목록'
+07:58:49 tapped card:ke-pc-b at 442,915 text='ke-pc-b'
+07:59:05 tapped listWindowsButton at 201,404 text='Windows'
+07:59:10 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+07:59:15 PASS  E5 B (ordinary): selection -> first frame  3401 ms
+07:59:34 tapped viewerMenuButton at 2310,775 text='메뉴'
+07:59:45 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+07:59:54 tapped card:ke-pc-a at 324,686 text='ke-pc-a'
+08:00:02 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+08:00:07 PASS  E5 A again by activation: selection -> first frame  4040 ms
+08:00:11 PASS  E5 M1: A again is a NEW session -- its backend state starts with no request, nothing re-sent  [desktop_backend_ui] state=CHECKING lit=none asked=none window=false scoped=false enabled=true seq=0 sentSeq=0
+08:00:29 tapped viewerMenuButton at 2310,775 text='메뉴'
+08:00:39 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+08:00:48 tapped card:ke-pc-b at 324,917 text='ke-pc-b'
+08:00:56 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+08:01:02 PASS  E6 B by activation: selection -> first frame  4470 ms
+08:01:20 tapped viewerMenuButton at 2310,775 text='메뉴'
+08:01:31 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+08:01:41 tapped card:ke-pc-a at 324,686 text='ke-pc-a'
+08:01:50 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+08:01:54 PASS  E6 A by activation: selection -> first frame  2259 ms
+08:02:14 tapped viewerMenuButton at 2310,775 text='메뉴'
+08:02:24 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+08:02:33 tapped card:ke-pc-b at 324,917 text='ke-pc-b'
+08:02:41 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+08:02:44 PASS  E6 B by activation: selection -> first frame  2525 ms
+08:03:04 tapped viewerMenuButton at 2310,775 text='메뉴'
+08:03:14 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+08:03:21 PASS  E6 steady reuse B -> A -> B: 3 activations, no directory connect, no capability fetch  activations=3
+08:03:29   other device on A: exit=0
+08:03:40 PASS  E7 another device used A: no automatic re-take (no activation, no connect), A still stands by  ('대기 중', '대기 연결 있음 · 누르면 엽니다', True)
+08:03:43 tapped card:ke-pc-a at 324,686 text='ke-pc-a'
+08:03:51 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+08:03:54 PASS  E7 the user's tap takes A by activation: selection -> first frame  2184 ms
+08:04:14 tapped viewerMenuButton at 2310,775 text='메뉴'
+08:04:25 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+08:04:35 tapped card:ke-pc-a at 324,686 text='ke-pc-a'
+08:04:43 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+08:04:46 PASS  E7g A by activation (on screen): selection -> first frame  1500 ms
+08:04:55   other device on A (active): exit=0
+08:05:15 PASS  E7g another device took A while it was on screen: the session ended, NO automatic re-take, A stands by  ('대기 중', '대기 연결 있음 · 누르면 엽니다', True) | [keep_end] handle=10 host=ke-pc-a reason=peer_lost
+08:05:18 tapped card:ke-pc-a at 324,686 text='ke-pc-a'
+08:05:26 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+08:05:29 PASS  E7b A by activation: selection -> first frame  1445 ms
+08:05:40 tapped viewerKeyboardButton at 2310,304 text='키보드'
+08:05:52 tapped viewerKeyboardTabPcKeys at 575,335 text='PC keys'
+08:06:05 tapped text:Ctrl at 246,1020 text='Ctrl'
+08:06:35 tapped viewerMenuButton at 2310,775 text='메뉴'
+08:06:44 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+08:06:59 PASS  E7b Ctrl held, then PC 목록: the key up reached the host BEFORE that session ended (the host's own input log), the session ended through the fence  [list_return_fence] handle=11 begin | [list_return_end] handle=11 how=fenced released=0 dropped=0
+08:07:02 PASS  E7b the fence paused the old picture before the end: A stands by, its card claims no cleanup of the PC ("대기 연결 있음 · 누르면 엽니다")  ('대기 중', '대기 연결 있음 · 누르면 엽니다', True) settling seen=None | [standby_back] host=fab6a7234252c0a6 strays=25 punches=0 tail=false
+08:07:08 tapped card:ke-pc-a at 324,686 text='ke-pc-a'
+08:07:11 PASS  E7c A by activation: its targets
+08:07:11   host a fault: pong_delay_ms=2000
+08:07:15 tapped listHostsButton at 670,241 text='PC 목록'
+08:07:15   fast tap A (to be held) at 324,686
+08:07:16   fast tap B (the newest) at 324,917
+08:07:16   host a fault: (none)
+08:07:26 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+08:07:30 PASS  E7c B (the newest tap): selection -> first frame  2072 ms
+08:07:40 PASS  E7c N1: A's held tap is superseded by the newer tap on B -- A never activates afterwards  [tap_held_superseded] held=fab6a7234252c0a6 by=afdbf10af500d36a | [park_tap_resumed] host=afdbf10af500d36a
+08:08:04 tapped viewerMenuButton at 2310,775 text='메뉴'
+08:08:14 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+08:08:25 tapped card:ke-pc-c at 442,1146 text='ke-pc-c'
+08:08:39 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+08:08:42 PASS  E7e C (ordinary): selection -> first frame  1677 ms
+08:09:03 tapped viewerMenuButton at 2310,775 text='메뉴'
+08:09:12 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+08:09:19 tapped card:ke-pc-b at 324,917 text='ke-pc-b'
+08:09:28 tapped tcard:remote60 mobile abr at 284,1029 text='remote60 mobile abr…'
+08:09:32 PASS  E7e B by activation during C's first transition: selection -> first frame  1487 ms
+08:09:33 PASS  E7e a tap during C's first transition: B opens by activation, C's lease is not disturbed
+08:09:51 tapped viewerMenuButton at 2310,775 text='메뉴'
+08:10:02 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+08:10:14 PASS  E7e ...and C's first transition completes: C stands by  ('대기 중', '대기 연결 있음 · 누르면 엽니다', True)
+08:10:19 tapped card:ke-pc-a at 324,686 text='ke-pc-a'
+08:10:22 PASS  E7d A by activation: its targets
+08:10:22   host a fault: pong_delay_ms=2000
+08:10:25 tapped listHostsButton at 670,241 text='PC 목록'
+08:10:25   fast tap A (to be held) at 324,686
+08:10:26   fast tap A 끊기 at 880,717
+08:10:26   host a fault: (none)
+08:10:37 PASS  E7d N1: A's held tap, then A's 끊기 -- the held tap never runs, A is released and not made again  ('ONLINE', 'My PCs', False) | [tap_held_dropped] host=fab6a7234252c0a6 why=disconnect | [standby_release] host=fab6a7234252c0a6 reason=user_disconnect
+08:10:43 tapped card:ke-pc-old at 442,1373 text='ke-pc-old'
+08:10:54 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+08:10:57 PASS  E7f old host (ordinary): selection -> first frame  1787 ms
+08:11:13 tapped viewerMenuButton at 2310,775 text='메뉴'
+08:11:22 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+08:11:25   fast tap old 끊기 at 880,1404
+08:11:35 PASS  E7f 끊기 during a first transition: the lease released, nothing provided after it, not made again  [standby_start] host=d2932ebd246f47c9 inc=4 reason=first_transition leases=2 | [standby_release] host=d2932ebd246f47c9 reason=user_disconnect | [standby_capability] host=d2932ebd246f47c9 inc=4 ok=false relay=reserved aim=relay stale
+08:11:37 tapped card:ke-pc-old at 442,1365 text='ke-pc-old'
+08:11:49 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+08:11:51 PASS  E8 old host (ordinary connect): selection -> first frame  359 ms
+08:12:11 tapped viewerMenuButton at 2310,775 text='메뉴'
+08:12:22 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+08:12:31 PASS  E8 the older host answers no StandbyHello: unanswered -> its lease released, said so (not taken for old)  ('ONLINE', 'My PCs', False)
+08:12:34 tapped card:ke-pc-old at 442,1413 text='ke-pc-old'
+08:12:46 tapped tcard:remote60 mobile abr at 284,1088 text='remote60 mobile abr…'
+08:12:49 PASS  E8 old host again (ordinary): selection -> first frame  1724 ms
+08:13:08 tapped viewerMenuButton at 2310,775 text='메뉴'
+08:13:18 tapped viewerMenuHostsButton at 1927,215 text='PC 목록 (연결 유지)'
+08:13:25 PASS  E8 again: the ordinary connect; PC 목록 tries again (an unanswered lease is not taken for an older host) -> unanswered again, released; nothing kept
+08:13:27 tapped 끊기 of ke-pc-b
+08:13:34 PASS  E9 끊기 on B: its lease released, its card is an ordinary one, not made again  ('ONLINE', 'My PCs', False)
+08:13:42 tapped card:ke-pc-c at 442,930 text='ke-pc-c'
+08:13:48 PASS  E7h a: C (ordinary) -- its targets
+08:13:48   host c fault: pong_delay_ms=2000
+08:13:51 tapped listHostsButton at 670,241 text='PC 목록'
+08:13:52 run end: 40/40 PASS

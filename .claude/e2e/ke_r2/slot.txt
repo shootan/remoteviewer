@@ -1,0 +1,4 @@
+﻿slot ke_r2 start 2026-10-28T01:28:37 (qwinsta: >console                   shotan                    1  Active)
+  apk off 5aea52a763d04d60e376ef3a59b3a4122cb42eb69b91ad8dc0afea0d26313736 on 8860fbc88c43cf44bbe763e259cfdf28ad0256718ad24373eaffd55724791617
+  avd exit=-1 
+slot ke_r2 done 2026-10-28T01:32:00
