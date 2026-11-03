@@ -615,9 +615,18 @@ bool ClientSessionController::QueueInputEvent(uint16_t kind, int32_t x, int32_t 
   // r5 G8: a host at the logon screen is sent navigation keys only -- never a character in plaintext.
   const HostRoleGate::Role role = hostRole_.Load();  // r11 U5: one word, a pair that was true together
   if (!prelogin::ViewerMaySendInputEvent(prelogin::EffectiveHostFlags(role.known, role.flags), kind, keyCode)) {
+    if (input_guard::IsCharacterDown(kind, keyCode)) queueEnterGuard_.OnCharacterDropped(now_us() / 1000);  // lk-abcd A
     preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
+  // lk-abcd A: an Enter right after held-back characters does not go -- nor its up (the phone's unlock sequence
+  // is Enter, text, Enter: with the text held back, that Enter submitted an empty password field).
+  if (keyCode == input_guard::kVkReturn &&
+      ((kind == 5 && queueEnterGuard_.HoldEnterDown(now_us() / 1000)) || (kind == 6 && queueEnterGuard_.HoldEnterUp()))) {
+    preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+  if (input_guard::IsCharacterDown(kind, keyCode)) queueEnterGuard_.OnCharacterDelivered();
 
   inputQueue_.Enqueue(make_control_input_event(inputQueue_, kind, buttons, x, y, wheelDelta,
                                                keyCode, now_us()));
@@ -634,9 +643,11 @@ bool ClientSessionController::QueueInputText(const uint16_t* text, size_t count)
   // r5 G8: no text at all to a host at the logon screen (a password goes by "Windows 로그인").
   const HostRoleGate::Role role = hostRole_.Load();
   if (!prelogin::ViewerMaySendText(prelogin::EffectiveHostFlags(role.known, role.flags))) {
+    if (count > 0) queueEnterGuard_.OnCharacterDropped(now_us() / 1000);  // lk-abcd A
     preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
     return false;
   }
+  if (count > 0) queueEnterGuard_.OnCharacterDelivered();
   return enqueue_control_input_text(inputQueue_, text, count, now_us()) > 0;
 }
 
@@ -841,6 +852,7 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
     return;
   }
 
+  input_guard::EnterAfterDropGuard sendEnterGuard;  // lk-abcd A: this connection's last look before sending
   while (!stopRequested_.load(std::memory_order_acquire)) {
     bool didWork = false;
     const uint64_t loopNowUs = now_us();
@@ -965,9 +977,18 @@ void ClientSessionController::WorkerMain(ClientSessionConnectArgs args) {
       // r7 H6: the last look before an input leaves (queued before the role was known, or before it changed).
       const HostRoleGate::Role role = hostRole_.Load();  // r11 U5
       if (!prelogin::ViewerMaySendAction(prelogin::EffectiveHostFlags(role.known, role.flags), action)) {
+        if (input_guard::ActionIsCharacter(action)) sendEnterGuard.OnCharacterDropped(now_us() / 1000);  // lk-abcd A
         preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
+      // lk-abcd A: an Enter right after characters held back at this last look is held back too, with its up.
+      if (action.kind == ControlOutboundActionKind::InputEvent && action.inputEvent.keyCode == input_guard::kVkReturn &&
+          ((action.inputEvent.kind == 5 && sendEnterGuard.HoldEnterDown(now_us() / 1000)) ||
+           (action.inputEvent.kind == 6 && sendEnterGuard.HoldEnterUp()))) {
+        preloginInputHeldBack_.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      if (input_guard::ActionIsCharacter(action)) sendEnterGuard.OnCharacterDelivered();
       // r9: a host KNOWN to be at the logon screen closes the link on anything outside its allowlist (the
       // same definition, prelogin_control_allowlist.hpp): such a request is not sent at all.
       if (role.known && (role.flags & kCaptureFlagPreloginV1) != 0 &&

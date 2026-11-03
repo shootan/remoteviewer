@@ -17,15 +17,23 @@
 // user's own ("Default") -- an unknown state is not taken as "unlocked" (Codex contract 1). A UAC prompt on a
 // session that is known NOT to be locked is unaffected: it is a secure desktop too, and typing there stays as
 // it was. Never decided on "secure desktop" alone.
+//
+// lk-abcd D (user decision 2026-11-03): plaintext at the lock screen is ALLOWED now -- kRefuse below is false,
+// so nothing is refused by this rule. The rule itself is kept (and tested with refuse=true): every Refuse*
+// takes whether the policy refuses at all, and the callers pass kRefuse.
 
 #include <cstdint>
 
+#include "logon_plaintext_policy.hpp"
 #include "prelogin_input_filter.hpp"
 
 namespace remote60::native_poc::lock_input {
 
 constexpr uint16_t kKeyDown = 5;  // ControlInputEvent / SecureInputMessage eventKind
 constexpr uint16_t kKeyUp = 6;
+
+// Does the product refuse plaintext characters at a locked session? (logon_plaintext_policy.hpp)
+constexpr bool kRefuse = !logon_plaintext::kAcceptAtLockScreen;
 
 // The session is (or must be treated as) at its lock screen.
 inline bool TreatAsLocked(bool lockKnown, bool locked, bool inputDesktopIsDefault) {
@@ -40,16 +48,17 @@ inline bool IsCharacterKey(uint16_t eventKind, uint32_t keyCode) {
 }
 
 // One input event (pointer, wheel or key) to a session in this state: refused?
-inline bool RefuseEvent(bool treatAsLocked, uint16_t eventKind, uint32_t keyCode) {
-  return treatAsLocked && IsCharacterKey(eventKind, keyCode);
+// `refuse` is the policy (callers pass kRefuse): false refuses nothing.
+inline bool RefuseEvent(bool refuse, bool treatAsLocked, uint16_t eventKind, uint32_t keyCode) {
+  return refuse && treatAsLocked && IsCharacterKey(eventKind, keyCode);
 }
 
 // Text (InputText) to a session in this state: refused?
-inline bool RefuseText(bool treatAsLocked) { return treatAsLocked; }
+inline bool RefuseText(bool refuse, bool treatAsLocked) { return refuse && treatAsLocked; }
 
 // A host-IME physical key (by its virtual key) to a session in this state: refused? A key up passes.
-inline bool RefusePhysicalKey(bool treatAsLocked, bool down, uint16_t vk) {
-  return treatAsLocked && down && !prelogin::IsPreloginNavKeyAllowed(vk);
+inline bool RefusePhysicalKey(bool refuse, bool treatAsLocked, bool down, uint16_t vk) {
+  return refuse && treatAsLocked && down && !prelogin::IsPreloginNavKeyAllowed(vk);
 }
 
 }  // namespace remote60::native_poc::lock_input

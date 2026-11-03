@@ -17,6 +17,20 @@ uint32_t host_flags(ViewerState& ctx) {
   return remote60::native_poc::prelogin::EffectiveHostFlags(ctx.session.hostRoleKnown.load(std::memory_order_acquire),
                                                            ctx.session.hostCaptureFlags.load(std::memory_order_relaxed));
 }
+// lk-abcd A: the Enter guard (enter_after_drop_guard.hpp) of this window's input. A character held back arms it;
+// a character that goes ends its window; an Enter inside it is held back with its up.
+bool is_character_down(uint16_t kind, uint32_t keyCode) {
+  return remote60::native_poc::input_guard::IsCharacterDown(kind, keyCode);
+}
+void character_held_back(ViewerState& ctx) { ctx.input.enterGuard.OnCharacterDropped(GetTickCount64()); }
+// True when this Enter (down or up) must not leave.
+bool enter_held(ViewerState& ctx, bool down, uint32_t vk) {
+  if (vk != VK_RETURN) return false;
+  if (!down) return ctx.input.enterGuard.HoldEnterUp();
+  if (!ctx.input.enterGuard.HoldEnterDown(GetTickCount64())) return false;
+  ctx.session.preloginInputHeldBack.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
 void held_back_at_logon(ViewerState& ctx) {
   ctx.session.preloginInputHeldBack.fetch_add(1, std::memory_order_relaxed);
   // Said only when the host is KNOWN to be at the logon screen -- not for the moment before its first pong.
@@ -61,9 +75,12 @@ bool enqueue_physical_key(ViewerState& ctx, bool down, uint16_t vk, uint16_t sca
   if (kInputPolicyForceBlock) return false;
   if (!ctx.session.inputEnabled.load()) return false;
   if (!remote60::native_poc::prelogin::ViewerMaySendPhysicalKey(host_flags(ctx), vk)) {
+    if (down) character_held_back(ctx);  // lk-abcd A
     held_back_at_logon(ctx);
     return false;
   }
+  if (enter_held(ctx, down, vk)) return false;  // lk-abcd A
+  if (down && is_character_down(remote60::native_poc::prelogin::kInputKindKeyDown, vk)) ctx.input.enterGuard.OnCharacterDelivered();
   QueuedControlInputMessage msg{};
   msg.type = MessageType::ControlPhysicalKey;
   msg.physicalKey.header.magic = remote60::native_poc::kMagic;
@@ -84,9 +101,11 @@ void enqueue_input_text_units(ViewerState& ctx, const uint16_t* text, size_t cou
   if (kInputPolicyForceBlock) return;
   if (!ctx.session.inputEnabled.load()) return;
   if (!remote60::native_poc::prelogin::ViewerMaySendText(host_flags(ctx))) {
+    if (count > 0) character_held_back(ctx);  // lk-abcd A
     held_back_at_logon(ctx);
     return;
   }
+  if (count > 0) ctx.input.enterGuard.OnCharacterDelivered();
   // Chunking and sequencing are the shared enqueue_control_input_text (F-09), the same code the
   // Android session runs.
   (void)remote60::native_poc::enqueue_control_input_text(ctx.control.inputQueue, text, count,
@@ -222,9 +241,16 @@ void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, 
     if (kind == remote60::native_poc::prelogin::kInputKindKeyDown && keyCode < 256) {
       ctx.input.forwardedKeyDown[keyCode].store(false, std::memory_order_relaxed);
     }
+    if (is_character_down(kind, keyCode)) character_held_back(ctx);  // lk-abcd A
     held_back_at_logon(ctx);
     return;
   }
+  // lk-abcd A: an Enter right after held-back characters does not go (nor its up).
+  if ((kind == remote60::native_poc::prelogin::kInputKindKeyDown || kind == remote60::native_poc::prelogin::kInputKindKeyUp) &&
+      enter_held(ctx, kind == remote60::native_poc::prelogin::kInputKindKeyDown, keyCode)) {
+    return;  // its up still comes here (forwardedKeyDown stays set) and is held by the guard
+  }
+  if (is_character_down(kind, keyCode)) ctx.input.enterGuard.OnCharacterDelivered();
   uint16_t buttons = ctx.input.mouseButtons.load();
   if (!fence_mouse_for_host(ctx, kind, keyCode, &buttons)) return;
   // The message is the shared make_control_input_event (F-09); only the live button state and

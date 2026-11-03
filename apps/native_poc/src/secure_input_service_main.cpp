@@ -30,6 +30,7 @@
 #include "secure_input_diag_budget.hpp"
 #include "logon_ui_target.hpp"  // lockscreen-cred r1: the lock-screen agent's target and typing
 #include "lock_input_policy.hpp"  // lockscreen-cred r1 (A6): no plaintext characters to a locked session
+#include "enter_after_drop_guard.hpp"  // lk-abcd A
 #include "lock_cred_channel.hpp"  // lockscreen-cred r1: the service <-> agent private pipe
 #include "trusted_service_pipe.hpp"  // lockscreen-cred r1: the agent checks its server
 
@@ -726,6 +727,7 @@ bool session_is_locked(uint32_t session, bool* known) {
 // is -- or must be treated as -- locked is not forwarded. Counted; said for the first 16, then every
 // 200th (no key code, no text).
 std::atomic<uint64_t> gLockedPlaintextRefused{0};
+std::atomic<uint64_t> gLockedPlaintextRefusedAtMs{0};  // lk-abcd A: when the latest one was (GetTickCount64)
 // r2 (Codex L3): asked of the session the message will ACTUALLY go to (`targetSession`, resolved the way the
 // forward resolves it -- a requester that is not active falls back to the console), and asked again by the
 // agent itself right before it injects (agent_refuses_locked_plaintext): a message that passed here and then
@@ -734,12 +736,28 @@ bool locked_plaintext_refused(const SecureInputMessage& message, uint32_t target
                               const char* where) {
   namespace li = remote60::native_poc::lock_input;
   const bool text = message.kind == static_cast<uint16_t>(SecureInputKind::InputText);
+  // lk-abcd A: an Enter down right after characters this rule refused is refused too -- on its own it would
+  // submit the lock screen's field without them (2026-10-31: an empty password, five times, account locked).
+  if (!text && message.eventKind == li::kKeyDown && message.keyCode == remote60::native_poc::input_guard::kVkReturn) {
+    const uint64_t last = gLockedPlaintextRefusedAtMs.load(std::memory_order_acquire);
+    const uint64_t now = GetTickCount64();
+    if (last != 0 && now >= last && now - last <= remote60::native_poc::input_guard::EnterAfterDropGuard::kWindowMs) {
+      diag("secure input: Enter refused at the %s: characters just before it were refused (session=%u)", where,
+           targetSession);
+      return true;
+    }
+    return false;
+  }
   if (!text && !li::IsCharacterKey(message.eventKind, message.keyCode)) return false;  // pointer, nav, key up
   bool known = false;
   const bool locked = targetSession != kInvalidSessionId && session_is_locked(targetSession, &known);
   const bool defaultDesktop = _wcsicmp(desktopName.c_str(), L"Default") == 0;
   const bool treat = targetSession == kInvalidSessionId || li::TreatAsLocked(known, locked, defaultDesktop);
-  if (!(text ? li::RefuseText(treat) : li::RefuseEvent(treat, message.eventKind, message.keyCode))) return false;
+  // lk-abcd D (user decision 2026-11-03): li::kRefuse is false -- plaintext at the lock screen is typed. The rule
+  // stays for the policy turned back.
+  if (!(text ? li::RefuseText(li::kRefuse, treat) : li::RefuseEvent(li::kRefuse, treat, message.eventKind, message.keyCode)))
+    return false;
+  gLockedPlaintextRefusedAtMs.store(GetTickCount64(), std::memory_order_release);
   const uint64_t n = gLockedPlaintextRefused.fetch_add(1, std::memory_order_relaxed) + 1;
   if (n <= 16 || n % 200 == 0) {  // bounded: the first few, then every 200th
     diag("secure input: plaintext %s to a locked session refused at the %s (session=%u lockKnown=%d locked=%d desktopDefault=%d total=%llu)",
@@ -926,6 +944,7 @@ void unlock_pipe_loop() {
 using namespace remote60::native_poc::prelogin;
 
 HANDLE gPreloginWorker = nullptr;  // GNLinkStream.exe --prelogin, SYSTEM, console input desktop
+HANDLE gPreloginWorkerJob = nullptr;  // lk-abcd B: that worker's own kill-on-close Job (closed with it)
 DWORD gPreloginWorkerSession = 0xFFFFFFFFu;  // the console session that worker was launched for (S5 identity)
 HANDLE gUserHostProcess = nullptr; // GNLinkHost.exe --tray, launched for the logged-on user at handoff
 DWORD gUserHostSession = 0xFFFFFFFFu;        // the session that host was launched for (S5 identity)
@@ -940,23 +959,33 @@ std::atomic<uint64_t> gUserHostLaunchTime{0};
 // Per-launch readiness nonce (G9): the service injects this into the user Host it starts, and ONLY that
 // host can signal the ready event the service waits on -- a foreign/stale GNLinkStream cannot.
 std::wstring gUserHostReadyNonce;
-// All launched children join this Job with KILL_ON_JOB_CLOSE, so a SYSTEM worker can never outlive the
-// service: if the service process dies for any reason, closing its last handle to the job kills them
-// (Codex S5 lifetime boundary). Created lazily on the first launch.
-HANDLE gChildJob = nullptr;
-
-HANDLE ensure_child_job() {
-  if (gChildJob) return gChildJob;
+// Every launched child joins a kill-on-close Job of ITS OWN, so a SYSTEM worker can never outlive the
+// service: if the service process dies for any reason, closing its handle to the job kills the child
+// (Codex S5 lifetime boundary).
+//
+// lk-abcd B: this used to be ONE process-wide Job created on the first launch and reused. After a logout the
+// console moves to a new session (2, 3, ...), and every worker launch there was aborted "job=0" -- the old Job
+// still held (or had held) the session-1 worker, and the processes of a job must all be in the job's session
+// (AssignProcessToJobObject docs: "All processes within a job must run within the same session as the job").
+// That is the documented rule, not yet seen here: the Win32 code is now logged (below), so the next session-2
+// launch on the machine confirms or refutes it. start_agent / type_lock_cred, which make a new Job per launch, worked in
+// the same session. So a Job per launch, owned with the child and closed with it -- and the Win32 error of a
+// failed Job step is now written down instead of guessed at.
+HANDLE create_kill_on_close_job(DWORD* win32) {
+  *win32 = 0;
   HANDLE job = CreateJobObjectW(nullptr, nullptr);
-  if (!job) return nullptr;
+  if (!job) {
+    *win32 = GetLastError();
+    return nullptr;
+  }
   JOBOBJECT_EXTENDED_LIMIT_INFORMATION info{};
   info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
   if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &info, sizeof(info))) {
+    *win32 = GetLastError();
     CloseHandle(job);
     return nullptr;
   }
-  gChildJob = job;
-  return gChildJob;
+  return job;
 }
 
 std::wstring sibling_exe_path(const wchar_t* name) {
@@ -1120,9 +1149,12 @@ void bind_service_admin_primitives(remote60::native_poc::prelogin::AdminPrimitiv
 
 // Launch a SYSTEM child in `sessionId` on `desktopName` (winsta0\<desktop>). Mirrors start_agent's token
 // handling but takes no inherited pipe; the child runs the full product engine. Returns the process
-// handle (caller owns) or nullptr.
+// handle (caller owns) or nullptr; *jobOut is the child's own kill-on-close Job (caller owns -- closing it
+// ends the child), nullptr when the launch failed.
 HANDLE launch_system_child_in_session(DWORD sessionId, const std::wstring& desktopName,
-                                      const std::wstring& exe, const wchar_t* args, const wchar_t* environment) {
+                                      const std::wstring& exe, const wchar_t* args, const wchar_t* environment,
+                                      HANDLE* jobOut) {
+  *jobOut = nullptr;
   if (exe.empty()) return nullptr;
   HANDLE serviceToken = nullptr;
   HANDLE childToken = nullptr;
@@ -1149,23 +1181,45 @@ HANDLE launch_system_child_in_session(DWORD sessionId, const std::wstring& deskt
   ok = CreateProcessAsUserW(childToken, nullptr, command, nullptr, nullptr, FALSE,
                             CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
                             const_cast<wchar_t*>(environment), nullptr, &startup, &proc) != FALSE;
+  if (!ok) {
+    const DWORD createErr = GetLastError();
+    CloseHandle(childToken);
+    diag("prelogin: child launch failed: CreateProcessAsUser win32 %lu (session=%lu)", static_cast<unsigned long>(createErr),
+         static_cast<unsigned long>(sessionId));
+    return nullptr;
+  }
   CloseHandle(childToken);
-  if (!ok) return nullptr;
-  // G9: NEVER resume a child we could not bind to the kill-on-close Job. ensure_child_job() or the
+  // G9: NEVER resume a child we could not bind to the kill-on-close Job. Creating the Job or the
   // assignment failing means the lifetime boundary is absent -- an un-jobbed SYSTEM worker would outlive
   // the service. Terminate the still-suspended child and report failure instead of adopting it.
-  HANDLE job = ensure_child_job();
-  const bool jobAssigned = (job != nullptr) && (AssignProcessToJobObject(job, proc.hProcess) != FALSE);
-  const bool resumed = jobAssigned && (ResumeThread(proc.hThread) != static_cast<DWORD>(-1));
+  DWORD jobErr = 0;
+  DWORD assignErr = 0;
+  DWORD resumeErr = 0;
+  HANDLE job = create_kill_on_close_job(&jobErr);
+  bool jobAssigned = false;
+  if (job) {
+    jobAssigned = AssignProcessToJobObject(job, proc.hProcess) != FALSE;
+    if (!jobAssigned) assignErr = GetLastError();
+  }
+  bool resumed = false;
+  if (jobAssigned) {
+    resumed = ResumeThread(proc.hThread) != static_cast<DWORD>(-1);
+    if (!resumed) resumeErr = GetLastError();
+  }
   const ChildLaunchDisposition disp = DecideChildAdoption(/*createdSuspended=*/true, jobAssigned, resumed);
   CloseHandle(proc.hThread);
   if (disp != ChildLaunchDisposition::Adopt) {
     (void)TerminateProcess(proc.hProcess, 0);
     (void)WaitForSingleObject(proc.hProcess, 1000);
     CloseHandle(proc.hProcess);
-    diag("prelogin: child launch aborted (job=%d resume=%d) -> terminated, not adopted", jobAssigned, resumed);
+    if (job) CloseHandle(job);
+    diag("prelogin: child launch aborted (job=%d resume=%d; win32 create-job %lu assign %lu resume %lu; session=%lu) -> "
+         "terminated, not adopted",
+         jobAssigned, resumed, static_cast<unsigned long>(jobErr), static_cast<unsigned long>(assignErr),
+         static_cast<unsigned long>(resumeErr), static_cast<unsigned long>(sessionId));
     return nullptr;
   }
+  *jobOut = job;
   return proc.hProcess;
 }
 
@@ -1179,6 +1233,16 @@ void stop_child(HANDLE* h) {
     }
     CloseHandle(*h);
     *h = nullptr;
+  }
+}
+
+// lk-abcd B: the pre-login worker and its Job end together -- every stop goes through here, so no site can
+// close the process and keep (or reuse) the Job of another session.
+void stop_prelogin_worker() {
+  stop_child(&gPreloginWorker);
+  if (gPreloginWorkerJob) {
+    CloseHandle(gPreloginWorkerJob);  // kill-on-close: anything still in it ends now
+    gPreloginWorkerJob = nullptr;
   }
 }
 
@@ -1202,7 +1266,7 @@ void ensure_prelogin_worker(DWORD consoleSession) {
     diag("prelogin: worker exited rc=%lu after %llu ms; next start in %llu ms", rc,
          static_cast<unsigned long long>(now - launchedAt), static_cast<unsigned long long>(wait));
   }
-  stop_child(&gPreloginWorker);  // dead handle, or a different-session child -> never reuse
+  stop_prelogin_worker();  // dead handle, or a different-session child -> never reuse
   if (!backoff.MayLaunch(now)) return;
   // r6 V1: the worker gets the product's streaming switches in an explicit environment (the same
   // values GNLinkHost gives its child) -- the service's own environment has none of them, and without
@@ -1217,18 +1281,30 @@ void ensure_prelogin_worker(DWORD consoleSession) {
     static DWORD lastLogFolder = 0xFFFFFFFFu;
     remote60::native_poc::prelogin::HeldChain logChain;
     const std::wstring logPath = remote60::native_poc::prelogin::ProductWorkerLogPath();
+    // lk-abcd C: the log folder (the private level) refused for its DACL -- 2026-11-03: one user's full-control
+    // ACE on C:\ProgramData\GNLink\logs, owner Administrators, kept prelogin_worker.log unwritten since 10-22 -- is
+    // reset to SYSTEM + Administrators when it is a trusted-owned directory, not a reparse point, under ancestors
+    // that passed (HoldRecordChainRepairingPrivate). Only tightened, never loosened; what it took away is said.
+    std::vector<std::wstring> repaired;
     const DWORD lf = logPath.empty() ? ERROR_PATH_NOT_FOUND
-                                     : remote60::native_poc::prelogin::HoldRecordChain(
+                                     : remote60::native_poc::prelogin::HoldRecordChainRepairingPrivate(
                                            logPath, /*create=*/true, remote60::native_poc::prelogin::OwnerIsSystemOrAdministrators,
-                                           &logChain);
+                                           &logChain, &repaired);
+    if (!repaired.empty()) {
+      std::wstring list;
+      for (const std::wstring& sid : repaired) list += (list.empty() ? L"" : L", ") + sid;
+      diag("prelogin: worker log folder repaired: DACL reset to SYSTEM+Administrators; removed grants for %ls", list.c_str());
+    }
     if (lf != lastLogFolder) {
-      diag("prelogin: worker log folder %s (win32 %lu%s%ls)", lf == 0 ? "ok" : "REFUSED", static_cast<unsigned long>(lf),
-           lf == 0 ? "" : " at ", lf == 0 ? L"" : logChain.failedAt.c_str());
+      // lk-abcd C: and WHY -- the principal or the step (10-22..11-03 it said only "win32 5 at <folder>").
+      diag("prelogin: worker log folder %s (win32 %lu%s%ls%s%ls)", lf == 0 ? "ok" : "REFUSED", static_cast<unsigned long>(lf),
+           lf == 0 ? "" : " at ", lf == 0 ? L"" : logChain.failedAt.c_str(), lf == 0 ? "" : ": ",
+           lf == 0 ? L"" : logChain.failedWhy.c_str());
       lastLogFolder = lf;
     }
   }
   gPreloginWorker = launch_system_child_in_session(consoleSession, L"Winlogon", sibling_exe_path(L"GNLinkStream.exe"),
-                                                    args.c_str(), environment.data());
+                                                    args.c_str(), environment.data(), &gPreloginWorkerJob);
   gPreloginWorkerSession = gPreloginWorker ? consoleSession : 0xFFFFFFFFu;
   launchedAt = now;
   if (!gPreloginWorker) backoff.OnLaunchFailed(now);
@@ -1543,18 +1619,18 @@ void prelogin_reconcile_loop() {
         if (gPreloginWorker && GetTickCount64() - gLogonSeenMs >= kWorkerAfterLogonMs) {
           diag("prelogin: logged on %llus without a handoff: the pre-login worker is stopped",
                static_cast<unsigned long long>(kWorkerAfterLogonMs / 1000));
-          stop_child(&gPreloginWorker);
+          stop_prelogin_worker();
         }
         break;
       case SupervisorAction::None:
-        if (out.handoff == HandoffAction::CompleteHandoff) stop_child(&gPreloginWorker);
+        if (out.handoff == HandoffAction::CompleteHandoff) stop_prelogin_worker();
         break;
       case SupervisorAction::StopAll:
       case SupervisorAction::EnterUnsupportedUser:
       case SupervisorAction::EnterFault:
       case SupervisorAction::HoldNoCredential:
       case SupervisorAction::HoldNoConsole:
-        stop_child(&gPreloginWorker);
+        stop_prelogin_worker();
         break;
       case SupervisorAction::RetryTransient:
         break;  // keep any healthy child
@@ -1566,7 +1642,7 @@ void prelogin_reconcile_loop() {
         topoGen, [] { return gRunning.load(std::memory_order_acquire); },
         [] { return gSessionTopologyGeneration.load(std::memory_order_acquire); }, [](uint32_t ms) { Sleep(ms); });
   }
-  stop_child(&gPreloginWorker);
+  stop_prelogin_worker();
   // r14 L3: the service stopping does not stop the user's Host -- it is only no longer watched (a new
   // service adopts it, r11 U4).
   if (gUserHostProcess) {

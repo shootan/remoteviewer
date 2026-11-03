@@ -6,6 +6,12 @@
 // (REMOTE60_SIS_TEST_FAKE_LOCK=1). Control: the same messages to a run whose session is not locked are not
 // refused there. Navigation keys, key ups and the pointer are never refused.
 //
+// lk-abcd D (user decision 2026-11-03): plaintext at the lock screen is ALLOWED now (lock_input::kRefuse is false),
+// so the locked run expects NO refusal -- text, the letter and the Enter after them all go on toward the agent.
+// The refusal rule itself (refuse=true) is the unit test's (lock_input_policy_test), and the "Enter after a
+// refused character" hold is enter_after_drop_guard_test's; this run shows the product service code, on a real
+// process and pipe, no longer refuses at a locked session.
+//
 // Not shown here: the input AGENT's own last look (it needs a SYSTEM token moved into a session -- the field
 // check), and a console fallback (one session only).
 
@@ -121,7 +127,8 @@ std::string probe(Service& s) {
   SecureInputMessage mouse = key(1, 0);
   mouse.x = 5;
   mouse.y = 5;
-  for (const SecureInputMessage& m : {text(L"pw"), key(5, 'Q'), key(6, 'Q'), key(5, VK_TAB), key(6, VK_TAB), mouse}) {
+  for (const SecureInputMessage& m : {text(L"pw"), key(5, 'Q'), key(6, 'Q'), key(5, VK_TAB), key(6, VK_TAB), mouse,
+                                      key(5, VK_RETURN), key(6, VK_RETURN)}) {
     DWORD n = 0;
     WriteFile(h, &m, sizeof(m), &n, nullptr);
   }
@@ -142,14 +149,13 @@ int main() {
     s.Stop();
     const int textRefused = count_of(log, "plaintext text to a locked session refused at the service");
     const int keyRefused = count_of(log, "plaintext key to a locked session refused at the service");
-    DWORD mine = 0;
-    ProcessIdToSessionId(GetCurrentProcessId(), &mine);
+    const int enterRefused = count_of(log, "Enter refused at the service");
     check("locked: the service started (product code, test build) and served the pipe", up && log.find("control pipe connected") != std::string::npos);
-    check("locked: the text was refused at the service -- for THIS session (the target), lock known and locked",
-          textRefused == 1 && log.find("session=" + std::to_string(mine) + " lockKnown=1 locked=1") != std::string::npos,
-          "text=" + std::to_string(textRefused));
-    check("locked: the letter DOWN was refused; its up, Tab and the pointer were not (2 refusals in all)",
-          keyRefused == 1 && textRefused + keyRefused == 2, "key=" + std::to_string(keyRefused));
+    check("lk-abcd D: locked: the text is NOT refused at the service (plaintext at the lock screen is allowed)",
+          textRefused == 0, "text=" + std::to_string(textRefused));
+    check("lk-abcd D: locked: the letter down is NOT refused either", keyRefused == 0, "key=" + std::to_string(keyRefused));
+    check("lk-abcd A: locked: the Enter after them is not refused (nothing before it was)", enterRefused == 0,
+          "enter=" + std::to_string(enterRefused));
   }
   {
     Service s;

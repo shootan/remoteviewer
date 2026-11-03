@@ -53,6 +53,8 @@
 #include "prelogin_control_allowlist.hpp"
 #include "prelogin_input_filter.hpp"
 #include "lock_input_policy.hpp"
+#include "enter_after_drop_guard.hpp"
+#include "logon_plaintext_policy.hpp"
 #include "prelogin_reboot_gate.hpp"
 #include "prelogin_cred_host.hpp"
 #include "prelogin_admin_pipe.hpp"
@@ -695,6 +697,30 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
                 << " refused: the session is at its lock screen (use \"Windows 로그인\") total=" << n << "\n";
     }
   };
+  // lk-abcd A: one guard for this control session's input stream (this loop is its only user). A character
+  // that does not land arms it; an Enter (key event or physical key) inside its window is then held back.
+  remote60::native_poc::input_guard::EnterAfterDropGuard enterGuard;
+  auto enter_guard_holds = [&](uint16_t kind, uint32_t keyCode) {
+    if (keyCode != remote60::native_poc::input_guard::kVkReturn) return false;
+    bool held = false;
+    if (kind == 5) held = enterGuard.HoldEnterDown(static_cast<uint64_t>(qpc_now_us()) / 1000);
+    else if (kind == 6) held = enterGuard.HoldEnterUp();
+    if (held && kind == 5) {
+      std::cout << "[native-video-host][input][enter-guard] Enter held back: a character just before it was not "
+                   "delivered (it would submit an incomplete field) total="
+                << enterGuard.HeldTotal() << "\n";
+    }
+    return held;
+  };
+  auto enter_guard_note_key = [&](uint16_t kind, uint32_t keyCode, bool delivered) {
+    if (!remote60::native_poc::lock_input::IsCharacterKey(kind, keyCode)) return;
+    if (delivered) enterGuard.OnCharacterDelivered();
+    else enterGuard.OnCharacterDropped(static_cast<uint64_t>(qpc_now_us()) / 1000);
+  };
+  auto enter_guard_note_text = [&](bool delivered) {
+    if (delivered) enterGuard.OnCharacterDelivered();
+    else enterGuard.OnCharacterDropped(static_cast<uint64_t>(qpc_now_us()) / 1000);
+  };
   auto note_physical_secure_drop = [&]() {
     const uint64_t n = physicalSecureDropTotal.fetch_add(1, std::memory_order_relaxed) + 1;
     if (n == 1 || n % 200 == 0) {
@@ -895,6 +921,9 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
         // the reboot confirm popup keys its "no connect until login" warning on.
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginEnabledV1;
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagPreloginSasV1;  // r9 R5: Ctrl+Alt+Del here
+        // lk-abcd D: this worker takes keys and text at the logon screen (its allowlist admits ControlInputText).
+        if (remote60::native_poc::logon_plaintext::kAcceptAtPrelogin)
+          pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagLogonPlaintextV1;
       } else if (durable_prelogin_enabled()) {
         // r5 G11: a logged-in host says so too when the service has pre-login access on, so the restart
         // popup does not warn "no connect until someone logs in" for a PC that will be reachable.
@@ -919,6 +948,10 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
           pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagLockCredRetryV1;
         // capture-lifecycle r1 (UA-2): a backend asked for is this session's, and a request may ask its answer (90).
         pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagDesktopBackendStatusV1;
+        // lk-abcd D: at its lock screen this host (and its service) takes keys and text -- said always, so a viewer
+        // that sees the lock screen appear already knows (the bit means "if I am at the lock screen").
+        if (remote60::native_poc::logon_plaintext::kAcceptAtLockScreen)
+          pong.captureTargetFlags |= remote60::native_poc::kCaptureFlagLogonPlaintextV1;
         if (offered != lockCredAdvertised) {
           lockCredAdvertised = offered;
           std::cout << "[native-video-host][lock-cred] advertised=" << (offered ? 1 : 0) << " lockKnown=" << own.lockKnown
@@ -1207,8 +1240,9 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       };
       // lockscreen-cred r1: a down this host refuses is said (K3 drop / A6 lock), never with its key. The lock
       // rule is checked on its own, not only through the desktop gate, so it holds if that gate ever changes.
-      auto down_allowed = [&]() {
+      auto down_allowed_unguarded = [&]() {
         if (!args.preloginMode && remote60::native_poc::lock_input::RefusePhysicalKey(
+                                      remote60::native_poc::lock_input::kRefuse,
                                       remote60::native_poc::own_session_treat_as_locked(), true, k.vk)) {
           note_lock_refusal("physical key");
           return false;
@@ -1218,6 +1252,14 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
           return false;
         }
         return gate_open();
+      };
+      // lk-abcd A: a physical Enter is held back like a key-event Enter after a dropped character; a physical
+      // character that is not injected (the K3 secure-desktop drop, a closed gate) arms the guard.
+      auto down_allowed = [&]() {
+        if (enter_guard_holds(5, k.vk)) return false;
+        const bool allowed = down_allowed_unguarded();
+        if (!allowed) enter_guard_note_key(5, k.vk, false);
+        return allowed;
       };
       if (physMakeOnly) {
         // Dedicated Hangul/Hanja key: a single make, never tracked and never released, so the host
@@ -1231,10 +1273,15 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
         continue;
       }
       if (k.down != 0) {
-        if (down_allowed() && inject_physical_scan_key(k.scanCode, true, physExt)) {
-          physicalDown.insert(physKey);
+        if (down_allowed()) {
+          const bool injected = inject_physical_scan_key(k.scanCode, true, physExt);
+          if (injected) physicalDown.insert(physKey);
+          enter_guard_note_key(5, k.vk, injected);  // lk-abcd A (a non-character changes nothing)
         }
       } else {
+        // lk-abcd A: the up of a physical Enter whose down the guard held ends that hold (the up itself is not
+        // injected: its down never was, below).
+        if (k.vk == remote60::native_poc::input_guard::kVkReturn) (void)enter_guard_holds(6, k.vk);
         // Release only a key we actually injected as down (gate or no gate, so nothing sticks). An
         // unmatched up -- e.g. a down that failed the gate or SendInput -- is dropped, never injected.
         // (Codex 3rd review.)
@@ -1299,8 +1346,11 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       // navigation keys may be injected as plaintext; a character/chord key is dropped here (never
       // injected) so credentials cannot leak into a field as cleartext -- they come via the sealed path.
       // The event is still acknowledged below so the viewer's strict request/response loop is not stalled.
+      // lk-abcd D (user decision 2026-11-03): typing at the logon screen is allowed -- this filter is off while
+      // logon_plaintext::kAcceptAtPrelogin holds (it is kept for the policy turned back).
       const bool preloginBlockedKey =
-          args.preloginMode && (input.kind == 5 || input.kind == 6) &&
+          !remote60::native_poc::logon_plaintext::kAcceptAtPrelogin && args.preloginMode &&
+          (input.kind == 5 || input.kind == 6) &&
           !remote60::native_poc::prelogin::IsPreloginNavKeyAllowed(input.keyCode);
       if (preloginBlockedKey) {
         // r5 G8: which key it was is not written down -- it may be a character of a password.
@@ -1311,9 +1361,15 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       // (or its lock state is unknown off the Default desktop) -- whatever the viewer believed, however late
       // the key arrives. Navigation keys, key ups and the pointer pass; a UAC prompt on an unlocked session
       // is untouched. Acknowledged below like any other (the ack is a receipt, not an injection).
-      const bool lockBlockedKey = !args.preloginMode && remote60::native_poc::lock_input::IsCharacterKey(input.kind, input.keyCode) &&
-                                  remote60::native_poc::own_session_treat_as_locked();
+      const bool lockBlockedKey = !args.preloginMode &&
+                                  remote60::native_poc::lock_input::RefuseEvent(
+                                      remote60::native_poc::lock_input::kRefuse,
+                                      remote60::native_poc::own_session_treat_as_locked(), input.kind, input.keyCode);
       if (lockBlockedKey) note_lock_refusal("key");
+      // lk-abcd A: an Enter right after a character this stream did not deliver is held back (with its up), so
+      // it cannot submit a field that is missing those characters (enter_after_drop_guard.hpp).
+      const bool enterHeld = enter_guard_holds(input.kind, input.keyCode);
+      bool keyInjected = false;
       // An up for a key or button the host already released itself at a Serve() exit: injecting
       // it again would be a second up for one keystroke. Acknowledged like any other. (RV-01)
       const bool releaseAlreadyDone =
@@ -1322,7 +1378,8 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       if (releaseAlreadyDone) {
         std::cout << "[native-video-host][input] up already released by the host seq=" << input.seq
                   << " kind=" << input.kind << " key=" << input.keyCode << "\n";
-      } else if (inputRouter.injectionEnabled && !preloginBlockedKey && !lockBlockedKey && !prelogin_not_serving()) {
+      } else if (inputRouter.injectionEnabled && !preloginBlockedKey && !lockBlockedKey && !enterHeld &&
+                 !prelogin_not_serving()) {
         const bool desktopMode =
             !inputRouter.targetCriteria.enabled() &&
             (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
@@ -1463,6 +1520,7 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
             }
           }
         }
+        keyInjected = injectResult == InputInjectResult::Injected;
         if (injectAccounted) {
           // Already tallied on the secure path; nothing more to record.
         } else if (injectResult == InputInjectResult::Injected) {
@@ -1543,6 +1601,9 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
           p0hLastEmitUs = p0NowUs;
         }
       }
+      // lk-abcd A: what happened to a character key is what the guard is told -- dropped (any reason: a policy,
+      // the secure path not taking it, an injection that failed) or delivered.
+      if (!releaseAlreadyDone) enter_guard_note_key(input.kind, input.keyCode, keyInjected);
       const uint64_t inputHandledUs = qpc_now_us();
       const bool inputAckSent = send_input_ack(input.seq);
       if (input.kind != 1 || inputHandledUs - inputReceivedUs >= 100000ULL) {
@@ -1563,9 +1624,15 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
       const uint64_t textReceivedUs = qpc_now_us();
       std::string resolvedTarget;
       // lockscreen-cred r1 (Codex A6): no text to the own session while it is at its lock screen.
-      const bool lockBlockedText = !args.preloginMode && remote60::native_poc::own_session_treat_as_locked();
+      // lk-abcd D: off while the policy accepts plaintext at the lock screen (lock_input::kRefuse is false).
+      const bool lockBlockedText = !args.preloginMode && remote60::native_poc::lock_input::RefuseText(
+                                                              remote60::native_poc::lock_input::kRefuse,
+                                                              remote60::native_poc::own_session_treat_as_locked());
       if (lockBlockedText) note_lock_refusal("text");
-      if (inputRouter.injectionEnabled && !lockBlockedText) {
+      bool textInjected = false;
+      // lk-abcd D: text now reaches a pre-login worker too -- under the same rule as its key events: only while
+      // the input desktop is the logon desktop it serves (r9 W2 / r10 T2).
+      if (inputRouter.injectionEnabled && !lockBlockedText && !prelogin_not_serving()) {
         const bool desktopMode =
             !inputRouter.targetCriteria.enabled() &&
             (capture.selectedWindowId.load(std::memory_order_acquire) == 0);
@@ -1580,6 +1647,7 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
           injectResult = apply_input_text_message(text, capture.targetHwnd, desktopMode,
                                                   &inputRouter.desktopState, &resolvedTarget);
         }
+        textInjected = injectResult == InputInjectResult::Injected;
         if (injectResult == InputInjectResult::Injected) {
           const uint64_t n = inputRouter.events.fetch_add(1) + 1;
           if (args.inputLogEvery > 0 && (n % args.inputLogEvery) == 0) {
@@ -1614,6 +1682,8 @@ void ControlSessionServer::Serve(ControlLink& link, bool linkDirectoryAuthentica
           }
         }
       }
+      // lk-abcd A: text that did not land (any reason) arms the Enter guard; text that did ends its window.
+      if (text.utf16Count > 0) enter_guard_note_text(textInjected);
       const uint64_t textHandledUs = qpc_now_us();
       const bool textAckSent = send_input_ack(text.seq);
       std::cout << "[native-video-host][input-timing] seq=" << text.seq

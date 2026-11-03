@@ -23,6 +23,7 @@ using remote60::native_poc::ControlOutboundActionKind;
 using remote60::native_poc::kCaptureFlagPreloginV1;
 using remote60::native_poc::kCaptureFlagLockCredV1;
 using remote60::native_poc::kCaptureFlagSecureDesktopActive;
+using remote60::native_poc::kCaptureFlagLogonPlaintextV1;
 
 namespace {
 int gChecks = 0, gFailures = 0;
@@ -85,6 +86,29 @@ int main() {
   const uint32_t uac = pl::EffectiveHostFlags(true, kCaptureFlagSecureDesktopActive);
   check("lockscreen-cred: a UAC prompt alone (secure desktop, no 0x40000): characters and text still go",
         !pl::HostAtLogonScreen(uac) && pl::ViewerMaySendAction(uac, key(5, 'Q')) && pl::ViewerMaySendAction(uac, text));
+
+  // lk-abcd D (user decision 2026-11-03): a host that says it takes plaintext at its logon screens (0x200000) is
+  // sent characters and text there; every case above is a host that does not say so, and keeps the old rule.
+  std::printf("\n[lk-abcd D: a host that takes plaintext at the logon screen (kCaptureFlagLogonPlaintextV1)]\n");
+  const uint32_t lockPlain = pl::EffectiveHostFlags(
+      true, kCaptureFlagLockCredV1 | kCaptureFlagSecureDesktopActive | kCaptureFlagLogonPlaintextV1);
+  const uint32_t preloginPlain = pl::EffectiveHostFlags(true, kCaptureFlagPreloginV1 | kCaptureFlagLogonPlaintextV1);
+  check("lk-abcd D: lock screen + 0x200000: a character and text go",
+        pl::HostAtLogonScreen(lockPlain) && pl::ViewerMaySendAction(lockPlain, key(5, 'Q')) &&
+            pl::ViewerMaySendAction(lockPlain, text));
+  check("lk-abcd D: pre-login + 0x200000: a character and text go",
+        pl::HostAtLogonScreen(preloginPlain) && pl::ViewerMaySendAction(preloginPlain, key(5, 'Q')) &&
+            pl::ViewerMaySendAction(preloginPlain, text));
+  check("lk-abcd D: ...but never a host-IME physical letter to a pre-login host (not on its allowlist)",
+        !pl::ViewerMaySendAction(preloginPlain, phys));
+  check("lk-abcd D: a lock-screen host with 0x200000 may take a physical letter (it routes by the VK path anyway)",
+        pl::ViewerMaySendAction(lockPlain, phys));
+  check("lk-abcd D: an unknown role is not the plaintext host: still held back (the bit is the host's, not assumed)",
+        !pl::ViewerMaySendAction(pl::EffectiveHostFlags(false, 0), key(5, 'Q')) &&
+            !pl::ViewerMaySendAction(pl::EffectiveHostFlags(false, kCaptureFlagLogonPlaintextV1), text));
+  check("lk-abcd D: the logon screen without 0x200000 (an older host): still held back",
+        !pl::ViewerMaySendAction(pl::EffectiveHostFlags(true, kCaptureFlagLockCredV1), text) &&
+            !pl::ViewerMaySendAction(pl::EffectiveHostFlags(true, kCaptureFlagPreloginV1), key(5, 'Q')));
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

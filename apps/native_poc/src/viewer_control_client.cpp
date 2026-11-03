@@ -3,6 +3,7 @@
 
 #include "prelogin_control_allowlist.hpp"
 #include "prelogin_input_gate.hpp"
+#include "enter_after_drop_guard.hpp"
 #include "viewer_control_client.hpp"
 
 #include <iostream>
@@ -708,6 +709,7 @@ void ControlClient::Run() {
   // lockscreen-cred r1: a typed lock-screen credential this connection is following to its unlock (0 = none).
   // lockscreen-cred r1: key downs the last look held back on this connection (their ups are not sent).
   bool heldDownAtSend[256] = {};
+  remote60::native_poc::input_guard::EnterAfterDropGuard sendEnterGuard;  // lk-abcd A: this connection's last look
   uint32_t lockCredPollRequestId = 0;
   ctx.session.lockCredPending.store(false, std::memory_order_release);  // a new connection follows nothing yet
   uint64_t lockCredPollNextUs = 0;
@@ -1059,9 +1061,19 @@ void ControlClient::Run() {
             action.inputEvent.keyCode < 256) {
           heldDownAtSend[action.inputEvent.keyCode] = true;
         }
+        // lk-abcd A: a character held back here arms the send-side Enter guard.
+        if (remote60::native_poc::input_guard::ActionIsCharacter(action)) sendEnterGuard.OnCharacterDropped(GetTickCount64());
         ctx.session.preloginHeldBackAtSend.fetch_add(1, std::memory_order_relaxed);
         continue;
       }
+      // lk-abcd A: an Enter right after characters held back here is held back too (its up by heldDownAtSend).
+      if (action.kind == ControlOutboundActionKind::InputEvent && action.inputEvent.kind == 5 &&
+          action.inputEvent.keyCode == VK_RETURN && sendEnterGuard.HoldEnterDown(GetTickCount64())) {
+        heldDownAtSend[VK_RETURN] = true;
+        ctx.session.preloginHeldBackAtSend.fetch_add(1, std::memory_order_relaxed);
+        continue;
+      }
+      if (remote60::native_poc::input_guard::ActionIsCharacter(action)) sendEnterGuard.OnCharacterDelivered();
       if (action.kind == ControlOutboundActionKind::InputEvent && action.inputEvent.keyCode < 256 &&
           (action.inputEvent.kind == 5 || action.inputEvent.kind == 6)) {
         const bool heldDown = heldDownAtSend[action.inputEvent.keyCode];

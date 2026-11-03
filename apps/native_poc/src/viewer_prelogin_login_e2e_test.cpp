@@ -18,6 +18,13 @@
 //     request is answered locally without one prelogin-cred message reaching the host.
 // (An unlock-purpose blob refused by the receiver is in prelogin_cred_host_test.)
 //
+// lk-abcd D (user decision 2026-11-03): plaintext keys and text ARE typed at the logon and lock screens now. The
+// host advertises kCaptureFlagLogonPlaintextV1 (0x200000) and the viewer sends characters to it; the steps that
+// used to show characters held back now show them typed -- into this test's own EDIT, brought to the front first
+// (a step whose foreground cannot be held fails rather than type anywhere else). An unknown role (before the
+// first pong) still holds characters back, and lk-abcd A's Enter guard is shown there: text held back, then
+// Enter -- the Enter is held back too.
+//
 // What differs from the product, said once:
 //   * The host is GNLinkStreamMigrationTest (the product's sources; REMOTE60_STREAM_TEST_SEAM swaps the
 //     server for a loopback fake directory, and lets the receiver's "is the input target the logon UI"
@@ -1205,35 +1212,72 @@ int wmain(int argc, wchar_t** argv) {
     const std::u16string early = u"Hx";
     const bool earlyText = phone.QueueInputText(reinterpret_cast<const uint16_t*>(early.data()), early.size());
     const bool earlyKey = phone.QueueInputEvent(5, 0, 0, 0, 'Q', 0);
-    // lockscreen-cred r1 (Codex A6): a key UP is a release, never held back -- it goes, and the worker's own
-    // filter drops it (its down never reached the host). Nothing is typed by it.
+    // lockscreen-cred r1 (Codex A6): a key UP is a release, never held back -- it goes. (lk-abcd D: the worker no
+    // longer drops it either; a release of a key that is not down types nothing.)
     const bool earlyKeyUp = phone.QueueInputEvent(6, 0, 0, 0, 'Q', 0);
+    // lk-abcd A: the 2026-10-31 sequence's tail -- text held back, then Enter: the Enter is held back too, with its
+    // up (on its own it would submit the field without the text).
+    const bool earlyEnterDown = phone.QueueInputEvent(5, 0, 0, 0, VK_RETURN, 0);
+    const bool earlyEnterUp = phone.QueueInputEvent(6, 0, 0, 0, VK_RETURN, 0);
     const uint64_t heldEarly = phone.PreloginInputHeldBack();
     check("...and sees the host at the logon screen (0x2000)",
           wait_until([&] { return (phone.HostCaptureFlags() & kCaptureFlagPreloginV1) != 0; }, 8000));
     Sleep(1500);
     check("H6: typed before the first pong (the role not known yet)", roleUnknown, std::to_string(phone.HostCaptureFlags()));
-    check("H6: ...the text and the character key DOWN were not queued (unknown = the logon screen), 2 held back",
-          !earlyText && !earlyKey && heldEarly == 2, std::to_string(heldEarly));
+    check("H6: ...the text and the character key DOWN were not queued (unknown = the logon screen)", !earlyText && !earlyKey);
     check("lockscreen-cred: ...its key UP was queued (a release passes)", earlyKeyUp);
-    check("H6: ...and after the prelogin pong no character DOWN reached the host (only that release, dropped by its filter)",
-          host.Count("dropped non-navigation key") == 1 && host.Count("first pong delayed 3000 ms") == 1,
+    check("lk-abcd A: ...THE ENTER RIGHT AFTER THE HELD-BACK TEXT WAS NOT QUEUED, nor its up (4 held back in all)",
+          !earlyEnterDown && !earlyEnterUp && heldEarly == 4, std::to_string(heldEarly));
+    check("lk-abcd D: ...after the prelogin pong the worker drops nothing any more (its filter is off), and the pong was late",
+          host.Count("dropped non-navigation key") == 0 && host.Count("first pong delayed 3000 ms") == 1,
           std::to_string(host.Count("dropped non-navigation key")));
+    check("lk-abcd D: THE PRE-LOGIN PONG ADVERTISES 0x200000 (plaintext typed at the logon screen)",
+          (phone.HostCaptureFlags() & kCaptureFlagLogonPlaintextV1) != 0, std::to_string(phone.HostCaptureFlags()));
+    // lk-abcd D: at a logon screen that takes plaintext, the phone's text and a letter are TYPED -- here into
+    // this test's own EDIT, in front with the focus (never anywhere else: a foreground not held fails the step).
     const std::u16string text(kSecret.begin(), kSecret.end());
-    const bool textQueued = phone.QueueInputText(reinterpret_cast<const uint16_t*>(text.data()), text.size());
-    const bool letterQueued = phone.QueueInputEvent(5, 0, 0, 0, 'P', 0);
-    const bool letterUpQueued = phone.QueueInputEvent(6, 0, 0, 0, 'P', 0);
+    targets.Clear();
+    targets.FocusOn(targets.edit);
+    const bool front = bring_front(targets.main);
+    check("lk-abcd D: the test's own EDIT is in front with the focus (else nothing below is sent)", front);
+    bool textQueued = false, letterQueued = false, letterUpQueued = false;
+    if (front) {
+      textQueued = phone.QueueInputText(reinterpret_cast<const uint16_t*>(text.data()), text.size());
+      letterQueued = phone.QueueInputEvent(5, 0, 0, 0, 'P', 0);
+      letterUpQueued = phone.QueueInputEvent(6, 0, 0, 0, 'P', 0);
+    }
+    const uint64_t heldBeforeTyping = phone.PreloginInputHeldBack();
+    const std::wstring expectTyped = kSecret + L"p";
+    wait_until([&] { return Targets::text(targets.edit) == expectTyped; }, 8000);
+    check("lk-abcd D: text and a letter are queued for a host at the logon screen that takes them",
+          textQueued && letterQueued && letterUpQueued);
+    check("lk-abcd D: THE TEXT AND THE LETTER WERE TYPED INTO THE FOCUSED FIELD, byte for byte (host --prelogin, SendInput)",
+          Targets::text(targets.edit) == expectTyped, hexw(Targets::text(targets.edit)));
+    check("lk-abcd D: ...nothing into the decoy, and the session held nothing back",
+          Targets::text(targets.decoyEdit).empty() && phone.PreloginInputHeldBack() == heldBeforeTyping);
+    check("lk-abcd D: ...and the worker dropped no key", host.Count("dropped non-navigation key") == 0,
+          std::to_string(host.Count("dropped non-navigation key")));
+    // lk-abcd A: the phone's whole unlock sequence (Enter, text, Enter) to a host that takes the text: the Enter is
+    // not held back -- the text before it was delivered.
+    const bool front2 = bring_front(targets.main);
+    targets.Clear();
+    bool seqQueued = false;
+    if (front2) {
+      const std::u16string pw = u"ok1";
+      seqQueued = phone.QueueInputEvent(5, 0, 0, 0, VK_RETURN, 0) && phone.QueueInputEvent(6, 0, 0, 0, VK_RETURN, 0);
+      Sleep(600);
+      seqQueued = seqQueued && phone.QueueInputText(reinterpret_cast<const uint16_t*>(pw.data()), pw.size());
+      Sleep(250);
+      seqQueued = seqQueued && phone.QueueInputEvent(5, 0, 0, 0, VK_RETURN, 0) && phone.QueueInputEvent(6, 0, 0, 0, VK_RETURN, 0);
+    }
+    wait_until([&] { return Targets::text(targets.edit) == L"ok1"; }, 8000);
+    check("lk-abcd A: the unlock sequence (Enter, text, Enter) is queued whole and the text lands -- no Enter held",
+          front2 && seqQueued && Targets::text(targets.edit) == L"ok1" && host.Count("[enter-guard]") == 0,
+          hexw(Targets::text(targets.edit)));
     const bool tabQueued = phone.QueueInputEvent(5, 0, 0, 0, VK_TAB, 0) && phone.QueueInputEvent(6, 0, 0, 0, VK_TAB, 0);
     const bool moveQueued = phone.QueueInputEvent(1, 10, 10, 0, 0, 0);
-    Sleep(2000);
-    check("G8: text is not queued for a host at the logon screen", !textQueued);
-    check("...nor a character key down", !letterQueued);
-    check("lockscreen-cred: ...while its key up (a release) is", letterUpQueued);
-    check("...and the session counted what it held back (2)", phone.PreloginInputHeldBack() - heldEarly == 2,
-          std::to_string(phone.PreloginInputHeldBack() - heldEarly));
+    Sleep(1000);
     check("...while a navigation key and the pointer still go", tabQueued && moveQueued);
-    check("...and no character down reached the host (the two releases only, dropped by its filter)",
-          host.Count("dropped non-navigation key") == 2, std::to_string(host.Count("dropped non-navigation key")));
     // r9 R5: Ctrl+Alt+Del from the shared session (the Android app's). Nobody serves this run's admin pipe, so
     // the worker's delegation cannot reach a service: Failed, ERROR_SERVICE_NOT_ACTIVE -- the request went the
     // whole way to it and the answer came back.
@@ -1506,14 +1550,21 @@ int wmain(int argc, wchar_t** argv) {
         SendMessageW(viewerWindow, WM_KEYDOWN, vk, 1);
         SendMessageW(viewerWindow, WM_KEYUP, vk, 0xC0000001);
       }
+      // lk-abcd A (PC): Enter right after those held-back characters -- held back too, down and up.
+      const uint64_t heldBeforeEnter = ctx.session.preloginInputHeldBack.load();
+      SendMessageW(viewerWindow, WM_KEYDOWN, VK_RETURN, 1);
+      SendMessageW(viewerWindow, WM_KEYUP, VK_RETURN, 0xC0000001);
+      const uint64_t enterHeld = ctx.session.preloginInputHeldBack.load() - heldBeforeEnter;
       const bool pong = wait_until([&] { return (ctx.session.hostCaptureFlags.load() & kCaptureFlagPreloginV1) != 0; }, 8000);
       Sleep(1500);
       check("H6 (PC): keys typed before the first pong (the role not known yet)", roleUnknown && pong,
             std::to_string(ctx.session.hostCaptureFlags.load()));
       // lockscreen-cred r1: the two downs are held back and forgotten, so their ups are not sent either (a
       // release goes only for a down that went) -- 2 edges counted, none sent.
-      check("H6 (PC): ...held back at the keyboard (2 downs; their ups never sent), none sent",
-            ctx.session.preloginInputHeldBack.load() - heldBefore == 2 && ctx.session.inputEventsSent.load() == sentBefore,
+      check("lk-abcd A (PC): THE ENTER AFTER THE HELD-BACK CHARACTERS WAS HELD BACK TOO (its down; its up by the guard)",
+            enterHeld == 1, std::to_string(enterHeld));
+      check("H6 (PC): ...held back at the keyboard (2 downs + the Enter; no up sent), none sent",
+            ctx.session.preloginInputHeldBack.load() - heldBefore == 3 && ctx.session.inputEventsSent.load() == sentBefore,
             std::to_string(ctx.session.preloginInputHeldBack.load() - heldBefore) + " held, " +
                 std::to_string(ctx.session.inputEventsSent.load() - sentBefore) + " sent");
       check("H6 (PC): ...no notice yet (the role was not known), and the host received none of them",
@@ -2280,8 +2331,8 @@ int wmain(int argc, wchar_t** argv) {
     check("...the host's result line: stage 1 (RejectedPolicy), a second time", host.Count(" stage=1 win32=0") == 2);
 
 
-    // ---- 4. r5 G8: typing at the logon screen goes nowhere -- it is not even sent
-    std::cout << "\n--- 4. r5 G8: characters typed in the viewer are not sent to a host at the logon screen ---\n";
+    // ---- 4. lk-abcd D (was r5 G8): typing at the logon screen is TYPED -- into the focused field
+    std::cout << "\n--- 4. lk-abcd D: characters typed in the viewer reach a host at the logon screen that takes them ---\n";
     {
       {
         std::lock_guard<std::mutex> lock(ctx.frameBuf.frame.mu);
@@ -2292,58 +2343,59 @@ int wmain(int argc, wchar_t** argv) {
       const uint64_t sentBefore = ctx.session.inputEventsSent.load();
       const uint64_t heldBefore = ctx.session.preloginInputHeldBack.load();
       const int droppedBefore = host.Count("dropped non-navigation key");
-      std::wstring notice;
-      std::thread op4([&] {
-        HWND b = wait_window(kPreloginResultClass, nullptr, 8000);
-        if (b) {
-          notice = result_box_text(b);
-          save_capture(b, L"typing_held_back_notice");
-          close_result(b);
+      targets.Clear();
+      targets.FocusOn(targets.edit);
+      const bool front = bring_front(targets.main);
+      check("lk-abcd D: the test's own EDIT is in front with the focus (else nothing below is typed)", front);
+      if (front) {
+        for (WPARAM vk : {static_cast<WPARAM>('P'), static_cast<WPARAM>('W'), static_cast<WPARAM>('7')}) {
+          SendMessageW(viewerWindow, WM_KEYDOWN, vk, 1);
+          SendMessageW(viewerWindow, WM_KEYUP, vk, 0xC0000001);
         }
-      });
-      for (WPARAM vk : {static_cast<WPARAM>('P'), static_cast<WPARAM>('W'), static_cast<WPARAM>('7')}) {
-        SendMessageW(viewerWindow, WM_KEYDOWN, vk, 1);
-        SendMessageW(viewerWindow, WM_KEYUP, vk, 0xC0000001);
       }
-      pump_until([&] { return !notice.empty(); }, 10000);
-      join_pumping(op4);
-      SendMessageW(viewerWindow, WM_KEYDOWN, VK_TAB, 1);  // a navigation key still goes
-      SendMessageW(viewerWindow, WM_KEYUP, VK_TAB, 0xC0000001);
-      pump_until([] { return false; }, 1500);
+      pump_until([&] { return Targets::text(targets.edit) == L"pw7"; }, 8000);
+      const bool noNotice = wait_window(kPreloginResultClass, nullptr, 1000) == nullptr;
       const uint64_t held = ctx.session.preloginInputHeldBack.load() - heldBefore;
       const uint64_t sent = ctx.session.inputEventsSent.load() - sentBefore;
-      // lockscreen-cred r1: the three downs are held back and forgotten, so their ups are not sent either (a
-      // release goes only for a down that went) -- 3 edges counted.
-      check("G8: the character keys were held back in the viewer (3 downs; their ups never sent), not sent", held == 3,
-            std::to_string(held));
-      check("...the window said so once, pointing at \"Windows 로그인\"",
-            notice.find(L"보내지 않았습니다") != std::wstring::npos && notice.find(L"Windows 로그인") != std::wstring::npos,
-            utf8(notice));
-      check("...a navigation key (Tab) still went (2 edges)", sent == 2, std::to_string(sent));
-      check("...and the host dropped nothing: no character key ever reached it",
-            host.Count("dropped non-navigation key") == droppedBefore);
+      check("lk-abcd D: THE CHARACTER KEYS WERE TYPED INTO THE FOCUSED FIELD (\"pw7\")",
+            Targets::text(targets.edit) == L"pw7", hexw(Targets::text(targets.edit)));
+      check("lk-abcd D: ...sent as 6 edges, none held back", sent == 6 && held == 0,
+            std::to_string(sent) + " sent, " + std::to_string(held) + " held");
+      check("lk-abcd D: ...no \"held back\" notice window, and the host dropped nothing",
+            noNotice && host.Count("dropped non-navigation key") == droppedBefore);
+      check("lk-abcd D: ...nothing into the decoy or the user-name field",
+            Targets::text(targets.decoyEdit).empty() && Targets::text(targets.userEdit).empty());
+      targets.Clear();
     }
 
-    // ---- 4b. r7 H6: an input already in the queue is looked at again right before it leaves
-    std::cout << "\n--- 4b. r7 H6: a character key already queued (before the role was known) is not sent ---\n";
+    // ---- 4b. r7 H6: an input already in the queue is looked at again right before it leaves -- by the host's
+    // answer: lk-abcd D, this host takes plaintext at its logon screen, so the last look lets it go and it is typed.
+    // (The last look holding back for a host that does not say so is prelogin_input_gate_test's, on the same
+    // ViewerMaySendAction the control thread asks.)
+    std::cout << "\n--- 4b. lk-abcd D: a character key already queued is sent by the last look, and typed ---\n";
     {
       // The keyboard's gate is passed by putting the key straight into the send queue with the product's
-      // own message builder and enqueue (what the gate itself calls) -- a key that got in while the host
-      // looked like a desktop. The control thread's last look must hold it back.
+      // own message builder and enqueue (what the gate itself calls).
       const uint64_t atSendBefore = ctx.session.preloginHeldBackAtSend.load();
       const uint64_t sentBefore = ctx.session.inputEventsSent.load();
       const int droppedBefore = host.Count("dropped non-navigation key");
-      for (uint16_t kind : {static_cast<uint16_t>(5), static_cast<uint16_t>(6)}) {
-        remote60::native_poc::viewer::enqueue_control_input_message(
-            ctx, remote60::native_poc::make_control_input_event(ctx.control.inputQueue, kind, 0, 0, 0, 0, 'K', qpc_now_us()));
+      targets.Clear();
+      targets.FocusOn(targets.edit);
+      const bool front = bring_front(targets.main);
+      check("lk-abcd D: the test's own EDIT is in front with the focus (else nothing below is sent)", front);
+      if (front) {
+        for (uint16_t kind : {static_cast<uint16_t>(5), static_cast<uint16_t>(6)}) {
+          remote60::native_poc::viewer::enqueue_control_input_message(
+              ctx, remote60::native_poc::make_control_input_event(ctx.control.inputQueue, kind, 0, 0, 0, 0, 'K', qpc_now_us()));
+        }
       }
-      pump_until([&] { return ctx.session.preloginHeldBackAtSend.load() - atSendBefore >= 2; }, 5000);
-      pump_until([] { return false; }, 1000);
-      check("H6: both edges were held back at the send (the last look), none sent",
-            ctx.session.preloginHeldBackAtSend.load() - atSendBefore == 2 && ctx.session.inputEventsSent.load() == sentBefore,
-            std::to_string(ctx.session.preloginHeldBackAtSend.load() - atSendBefore) + " held at send, " +
-                std::to_string(ctx.session.inputEventsSent.load() - sentBefore) + " sent");
-      check("...and the host never saw them", host.Count("dropped non-navigation key") == droppedBefore);
+      pump_until([&] { return Targets::text(targets.edit) == L"k"; }, 5000);
+      check("lk-abcd D: the last look let both edges go (none held at the send) and the key was typed (\"k\")",
+            ctx.session.preloginHeldBackAtSend.load() == atSendBefore && ctx.session.inputEventsSent.load() - sentBefore == 2 &&
+                Targets::text(targets.edit) == L"k",
+            std::to_string(ctx.session.inputEventsSent.load() - sentBefore) + " sent, edit=" + hexw(Targets::text(targets.edit)));
+      check("...and the host dropped nothing", host.Count("dropped non-navigation key") == droppedBefore);
+      targets.Clear();
     }
 
     // ---- 5. r5 G11: the remote restart's answer is shown, not only logged
@@ -2552,29 +2604,30 @@ int wmain(int argc, wchar_t** argv) {
       close_result(box);
     };
 
-    // ---- A5: a character typed in the viewer is held back, and the window says where to go instead
-    std::cout << "\n--- A5: a character at the lock screen ---\n";
+    // ---- lk-abcd D (was A5/A6): a character typed in the viewer at the lock screen is TYPED -- the host says it
+    // takes plaintext there (0x200000), the viewer sends it, the host does not refuse it.
+    std::cout << "\n--- lk-abcd D: a character at the lock screen ---\n";
+    check("lk-abcd D: THE LOCK-SCREEN PONG ADVERTISES 0x200000 (plaintext typed at the lock screen)",
+          (flags() & kCaptureFlagLogonPlaintextV1) != 0, std::to_string(flags()));
     targets.Clear();
+    targets.FocusOn(targets.edit);
     const uint64_t sentBefore = ctx.session.inputEventsSent.load();
-    std::wstring notice;
-    std::thread opn([&] { take_box(&notice, L"lock_screen_typing_notice"); });
-    SendMessageW(viewerWindow, WM_KEYDOWN, 'Q', 1);
-    SendMessageW(viewerWindow, WM_KEYUP, 'Q', 0xC0000001);
-    pump_until([&] { return !notice.empty(); }, 10000);
-    join_pumping(opn);
-    check("A5: THE VIEWER HELD THE CHARACTER BACK AND SAID WHERE TO GO (the button, Ctrl+Alt+U)",
-          notice.find(L"Windows 로그인") != std::wstring::npos && notice.find(L"Ctrl+Alt+U") != std::wstring::npos,
-          utf8(notice));
-    check("...nothing of it was sent (its up neither: its down never went)", ctx.session.inputEventsSent.load() == sentBefore,
-          std::to_string(ctx.session.inputEventsSent.load() - sentBefore));
-    // A6, the host's half: whatever character DID reach the host (none, unless the viewer's hold above is
-    // broken -- the E1 mutant) is refused there and typed nowhere.
-    Sleep(500);
-    const uint64_t charsSent = ctx.session.inputEventsSent.load() - sentBefore;
-    check("A6 (host): a character that reached the host would be refused there -- nothing typed anywhere",
-          Targets::text(targets.edit).empty() && Targets::text(targets.userEdit).empty() && Targets::text(targets.decoyEdit).empty() &&
-              (charsSent == 0 || host.Count("[input][lock] plaintext key refused") >= 1),
-          "sent=" + std::to_string(charsSent) + " hostRefusals=" + std::to_string(host.Count("[input][lock] plaintext key refused")));
+    const bool front = bring_front(targets.main);
+    check("lk-abcd D: the test's own EDIT is in front with the focus (else nothing below is typed)", front);
+    if (front) {
+      SendMessageW(viewerWindow, WM_KEYDOWN, 'Q', 1);
+      SendMessageW(viewerWindow, WM_KEYUP, 'Q', 0xC0000001);
+    }
+    pump_until([&] { return Targets::text(targets.edit) == L"q"; }, 8000);
+    const bool noNotice = wait_window(kPreloginResultClass, nullptr, 1500) == nullptr;
+    check("lk-abcd D: THE CHARACTER WAS TYPED INTO THE FOCUSED FIELD AT THE LOCK SCREEN (\"q\"), its 2 edges sent",
+          Targets::text(targets.edit) == L"q" && ctx.session.inputEventsSent.load() - sentBefore == 2,
+          hexw(Targets::text(targets.edit)) + " sent=" + std::to_string(ctx.session.inputEventsSent.load() - sentBefore));
+    check("lk-abcd D: ...no \"held back\" notice, the host refused nothing, nothing into the other fields",
+          noNotice && host.Count("[input][lock] plaintext key refused") == 0 && Targets::text(targets.userEdit).empty() &&
+              Targets::text(targets.decoyEdit).empty(),
+          "hostRefusals=" + std::to_string(host.Count("[input][lock] plaintext key refused")));
+    targets.Clear();
 
     // ---- cancel: said, nothing sent
     std::cout << "\n--- cancel ---\n";

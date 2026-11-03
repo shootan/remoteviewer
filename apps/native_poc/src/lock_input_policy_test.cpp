@@ -19,6 +19,7 @@ void check(const char* what, bool ok) {
 }
 constexpr uint32_t kA = 'A', kDigit1 = '1', kSpace = 0x20, kBack = 0x08, kTab = 0x09, kEnter = 0x0D, kLeft = 0x25,
                    kShift = 0x10, kCtrl = 0x11;
+constexpr bool kOld = true;  // the lockscreen-cred A6 rule (refuse), as it was before lk-abcd D
 }  // namespace
 
 int main() {
@@ -30,28 +31,39 @@ int main() {
   check("unknown off the Default desktop: treated as the lock screen (unknown is not 'unlocked')", li::TreatAsLocked(false, false, false));
   check("unknown on the Default desktop: not the lock screen", !li::TreatAsLocked(false, false, true));
 
-  std::printf("\n[what is a character there]\n");
+  std::printf("\n[what is a character there -- the rule as it was (refuse=true), kept for a policy turned back]\n");
   const bool locked = true;
-  check("letter down: refused", li::RefuseEvent(locked, li::kKeyDown, kA));
-  check("digit down: refused", li::RefuseEvent(locked, li::kKeyDown, kDigit1));
-  check("space down: refused", li::RefuseEvent(locked, li::kKeyDown, kSpace));
-  check("backspace down: refused (not on the navigation list)", li::RefuseEvent(locked, li::kKeyDown, kBack));
-  check("Ctrl down: refused (chords are not navigation)", li::RefuseEvent(locked, li::kKeyDown, kCtrl));
-  check("a key code beyond 16 bits: refused", li::RefuseEvent(locked, li::kKeyDown, 0x10041));
+  check("letter down: refused", li::RefuseEvent(kOld, locked, li::kKeyDown, kA));
+  check("digit down: refused", li::RefuseEvent(kOld, locked, li::kKeyDown, kDigit1));
+  check("space down: refused", li::RefuseEvent(kOld, locked, li::kKeyDown, kSpace));
+  check("backspace down: refused (not on the navigation list)", li::RefuseEvent(kOld, locked, li::kKeyDown, kBack));
+  check("Ctrl down: refused (chords are not navigation)", li::RefuseEvent(kOld, locked, li::kKeyDown, kCtrl));
+  check("a key code beyond 16 bits: refused", li::RefuseEvent(kOld, locked, li::kKeyDown, 0x10041));
   check("Tab / Enter / Left / Shift down: pass (navigation, and Enter submits)",
-        !li::RefuseEvent(locked, li::kKeyDown, kTab) && !li::RefuseEvent(locked, li::kKeyDown, kEnter) &&
-            !li::RefuseEvent(locked, li::kKeyDown, kLeft) && !li::RefuseEvent(locked, li::kKeyDown, kShift));
-  check("a letter's key UP: passes (releasing a key is never refused -- no stuck key)", !li::RefuseEvent(locked, li::kKeyUp, kA));
-  check("pointer and wheel (kinds 1-4): pass", !li::RefuseEvent(locked, 1, 0) && !li::RefuseEvent(locked, 2, 1) &&
-                                                   !li::RefuseEvent(locked, 3, 1) && !li::RefuseEvent(locked, 4, 0));
-  check("text: refused", li::RefuseText(locked));
+        !li::RefuseEvent(kOld, locked, li::kKeyDown, kTab) && !li::RefuseEvent(kOld, locked, li::kKeyDown, kEnter) &&
+            !li::RefuseEvent(kOld, locked, li::kKeyDown, kLeft) && !li::RefuseEvent(kOld, locked, li::kKeyDown, kShift));
+  check("a letter's key UP: passes (releasing a key is never refused -- no stuck key)", !li::RefuseEvent(kOld, locked, li::kKeyUp, kA));
+  check("pointer and wheel (kinds 1-4): pass", !li::RefuseEvent(kOld, locked, 1, 0) && !li::RefuseEvent(kOld, locked, 2, 1) &&
+                                                   !li::RefuseEvent(kOld, locked, 3, 1) && !li::RefuseEvent(kOld, locked, 4, 0));
+  check("text: refused", li::RefuseText(kOld, locked));
   check("host-IME physical letter down: refused; its up passes; Enter passes",
-        li::RefusePhysicalKey(locked, true, 'A') && !li::RefusePhysicalKey(locked, false, 'A') &&
-            !li::RefusePhysicalKey(locked, true, static_cast<uint16_t>(kEnter)));
+        li::RefusePhysicalKey(kOld, locked, true, 'A') && !li::RefusePhysicalKey(kOld, locked, false, 'A') &&
+            !li::RefusePhysicalKey(kOld, locked, true, static_cast<uint16_t>(kEnter)));
 
   std::printf("\n[controls: not at the lock screen nothing is refused]\n");
   check("letter down, text, physical letter on an unlocked session: all pass",
-        !li::RefuseEvent(false, li::kKeyDown, kA) && !li::RefuseText(false) && !li::RefusePhysicalKey(false, true, 'A'));
+        !li::RefuseEvent(kOld, false, li::kKeyDown, kA) && !li::RefuseText(kOld, false) && !li::RefusePhysicalKey(kOld, false, true, 'A'));
+
+  std::printf("\n[lk-abcd D: the product policy (user decision 2026-11-03) refuses nothing at the lock screen]\n");
+  check("the product policy is 'accept' (kRefuse is false)", !li::kRefuse);
+  check("at a locked session under the product policy: letter, digit, space, backspace and Ctrl downs pass",
+        !li::RefuseEvent(li::kRefuse, locked, li::kKeyDown, kA) && !li::RefuseEvent(li::kRefuse, locked, li::kKeyDown, kDigit1) &&
+            !li::RefuseEvent(li::kRefuse, locked, li::kKeyDown, kSpace) &&
+            !li::RefuseEvent(li::kRefuse, locked, li::kKeyDown, kBack) && !li::RefuseEvent(li::kRefuse, locked, li::kKeyDown, kCtrl));
+  check("...text passes", !li::RefuseText(li::kRefuse, locked));
+  check("...a host-IME physical letter passes", !li::RefusePhysicalKey(li::kRefuse, locked, true, 'A'));
+  check("...and unknown-off-Default (treated as locked) passes too",
+        !li::RefuseText(li::kRefuse, li::TreatAsLocked(false, false, false)));
 
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;

@@ -16,6 +16,7 @@
 #include "client_park_state.hpp"
 #include "client_telemetry_window.hpp"
 #include "client_host_role_gate.hpp"
+#include "enter_after_drop_guard.hpp"
 #include "native_video_client_shared_core.hpp"
 #include "udp_control_channel.hpp"
 
@@ -381,6 +382,8 @@ class ClientSessionController {
   // that, so the picture stops; saying so beats a frozen rectangle nobody can explain.
   std::atomic<bool> hostSecureDesktopActive_{false};
   std::atomic<uint64_t> preloginInputHeldBack_{0};  // r5 G8: inputs not sent to a host at the logon screen
+  // lk-abcd A: characters held back at queue time (under parkMu_) make the Enter right after them held back too.
+  input_guard::EnterAfterDropGuard queueEnterGuard_;
   // r7 H6 / r10 / r11 U5: what the host is (the pong's flags, and whether a pong of this session said so) and
   // the window-list request asked before that -- one state, changed by one transition at a time.
   HostRoleGate hostRole_;

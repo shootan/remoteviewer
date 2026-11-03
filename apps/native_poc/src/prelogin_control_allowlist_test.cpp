@@ -42,8 +42,14 @@ int main() {
   expect(MessageType::ControlRebootRequest, true, "ControlRebootRequest(84, inbound)");
   expect(MessageType::ControlRebootReply, true, "ControlRebootReply(85, outbound)");
 
-  std::printf("[NEGATIVE: characters/raw key must NOT be plaintext in prelogin]\n");
-  expect(MessageType::ControlInputText, false, "ControlInputText(char text)");
+  // lk-abcd D (user decision 2026-11-03): text at the logon screen is accepted -- it follows the policy constant,
+  // so turning the policy back also turns this back.
+  std::printf("[lk-abcd D: plaintext text at the logon screen follows the policy (accepted)]\n");
+  expect(MessageType::ControlInputText, remote60::native_poc::logon_plaintext::kAcceptAtPrelogin,
+         "ControlInputText(char text) == kAcceptAtPrelogin");
+  expect(MessageType::ControlInputText, true, "ControlInputText(char text): accepted under the 2026-11-03 policy");
+
+  std::printf("[NEGATIVE: raw key / host IME must NOT be accepted in prelogin]\n");
   expect(MessageType::ControlPhysicalKey, false, "ControlPhysicalKey(raw vk/scan)");
   expect(MessageType::ControlImeStateRequest, false, "ControlImeStateRequest");
   expect(MessageType::ControlImeStateResponse, false, "ControlImeStateResponse");

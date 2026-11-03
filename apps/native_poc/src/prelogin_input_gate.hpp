@@ -11,6 +11,9 @@
 //
 // The PC viewer (viewer_input_forward.cpp) and the shared session the Android app drives
 // (native_video_client_session.cpp) both ask here, so the two cannot disagree.
+//
+// lk-abcd D (user decision 2026-11-03): a host that advertises kCaptureFlagLogonPlaintextV1 takes plaintext at
+// its logon screens, and is sent it. The rule above now applies only to a host that does not say so.
 
 #include <cstdint>
 
@@ -33,12 +36,24 @@ inline bool HostAtLogonScreen(uint32_t hostCaptureFlags) {
 // role is treated as the logon screen (characters held back), not as a logged-in desktop. What the gates
 // below are given is this.
 inline uint32_t EffectiveHostFlags(bool roleKnown, uint32_t hostCaptureFlags) {
-  return roleKnown ? hostCaptureFlags : (hostCaptureFlags | kCaptureFlagPreloginV1);
+  // lk-abcd D: and an unknown role has not said it takes plaintext -- a bit left from an earlier connection is
+  // not this host's answer.
+  return roleKnown ? hostCaptureFlags
+                   : ((hostCaptureFlags | kCaptureFlagPreloginV1) & ~kCaptureFlagLogonPlaintextV1);
+}
+
+// lk-abcd D (user decision 2026-11-03): characters are held back only for a host at a logon screen that has NOT
+// said it takes plaintext there (kCaptureFlagLogonPlaintextV1) -- an older host, or a role not yet known (the
+// unknown role carries no bits of its own). A host that says it does gets keys and text as on a desktop.
+// HostAtLogonScreen itself is unchanged: it also chooses the key ROUTE (viewer_input_forward.cpp, the
+// virtual-key path at a logon screen), not only this gate.
+inline bool ViewerHoldsCharactersBack(uint32_t hostCaptureFlags) {
+  return HostAtLogonScreen(hostCaptureFlags) && (hostCaptureFlags & kCaptureFlagLogonPlaintextV1) == 0;
 }
 
 // May this ControlInputEvent be sent to a host with these capability bits?
 inline bool ViewerMaySendInputEvent(uint32_t hostCaptureFlags, uint16_t kind, uint32_t keyCode) {
-  if (!HostAtLogonScreen(hostCaptureFlags)) return true;
+  if (!ViewerHoldsCharactersBack(hostCaptureFlags)) return true;
   if (kind != kInputKindKeyDown && kind != kInputKindKeyUp) return true;  // pointer / wheel
   // lockscreen-cred r1 (Codex A6): a key UP goes -- it releases a key whose down reached the host before the
   // screen changed (the viewer sends an up only for a down it sent); holding it back would leave it stuck.
@@ -47,11 +62,13 @@ inline bool ViewerMaySendInputEvent(uint32_t hostCaptureFlags, uint16_t kind, ui
 }
 
 // May text (ControlInputText, a physical scan key for the host IME) be sent at all?
-inline bool ViewerMaySendText(uint32_t hostCaptureFlags) { return !HostAtLogonScreen(hostCaptureFlags); }
+inline bool ViewerMaySendText(uint32_t hostCaptureFlags) { return !ViewerHoldsCharactersBack(hostCaptureFlags); }
 
-// A host-IME physical key (by its virtual key).
+// A host-IME physical key (by its virtual key). A pre-login host never takes ControlPhysicalKey (its allowlist),
+// whatever it says about plaintext -- and the viewer routes keys by virtual key at a logon screen anyway.
 inline bool ViewerMaySendPhysicalKey(uint32_t hostCaptureFlags, uint16_t vk) {
-  return !HostAtLogonScreen(hostCaptureFlags) || IsPreloginNavKeyAllowed(vk);
+  if ((hostCaptureFlags & kCaptureFlagPreloginV1) != 0 && !IsPreloginNavKeyAllowed(vk)) return false;
+  return !ViewerHoldsCharactersBack(hostCaptureFlags) || IsPreloginNavKeyAllowed(vk);
 }
 
 // r7 H6: the same rules on an outbound control action, right before it is sent (a ControlOutboundAction

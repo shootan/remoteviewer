@@ -2733,6 +2733,18 @@ add_executable(remote60_lock_input_policy_test
 )
 target_include_directories(remote60_lock_input_policy_test PRIVATE src)
 
+# lk-abcd A: the Enter after a dropped character is held back (enter_after_drop_guard.hpp). Pure.
+add_executable(remote60_enter_after_drop_guard_test
+  src/enter_after_drop_guard_test.cpp
+)
+target_include_directories(remote60_enter_after_drop_guard_test PRIVATE src)
+
+# lk-abcd D: old/new viewers x old/new hosts at a logon screen -- the link stays up, each does what it should. Pure.
+add_executable(remote60_logon_plaintext_compat_test
+  src/logon_plaintext_compat_test.cpp
+)
+target_include_directories(remote60_logon_plaintext_compat_test PRIVATE src)
+
 # lockscreen-cred r1 (codex_lockcred_agent_r1.md): the service <-> agent private pipe, on real pipes and
 # processes; it also starts the built GNLinkInputService.exe as a would-be agent (it must refuse).
 add_executable(remote60_lock_cred_channel_test

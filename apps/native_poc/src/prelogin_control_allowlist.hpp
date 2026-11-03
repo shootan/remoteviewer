@@ -17,6 +17,7 @@
 //
 // Pure: depends only on the MessageType enum.
 
+#include "logon_plaintext_policy.hpp"
 #include "poc_protocol.hpp"
 
 namespace remote60::native_poc::prelogin {
@@ -50,6 +51,12 @@ inline bool IsControlAllowedInPrelogin(MessageType t) {
     //     here -- characters must travel the sealed credential path. ---
     case MessageType::ControlInputEvent:
     case MessageType::ControlInputAck:
+      return true;
+    // lk-abcd D (user decision 2026-11-03): plaintext text is accepted at the logon screen too
+    // (logon_plaintext_policy.hpp). A viewer sends it only to a host that advertises
+    // kCaptureFlagLogonPlaintextV1 -- an older host still closes the link on it.
+    case MessageType::ControlInputText:
+      return logon_plaintext::kAcceptAtPrelogin;
     // --- sealed credential path (the ONLY way characters/credentials enter prelogin) ---
     case MessageType::ControlUnlockChallengeRequest:
     case MessageType::ControlUnlockChallenge:

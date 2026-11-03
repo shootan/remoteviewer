@@ -16,6 +16,7 @@
 // gInputMacro, initialisers unchanged (viewer split refactor Phase 1-8).
 
 #include "viewer_common.hpp"
+#include "enter_after_drop_guard.hpp"
 
 namespace remote60::native_poc::viewer {
 
@@ -47,6 +48,9 @@ struct InputState {
   // reaches the host.
   std::atomic<uint64_t> moveGeneratedCount{0};
   remote60::native_poc::InputMacro macro;
+  // lk-abcd A: characters held back for a host at a logon screen (an older host) make the Enter right after
+  // them held back too -- UI thread only, like everything here.
+  remote60::native_poc::input_guard::EnterAfterDropGuard enterGuard;
 };
 
 }  // namespace remote60::native_poc::viewer

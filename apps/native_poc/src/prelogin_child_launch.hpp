@@ -3,7 +3,7 @@
 // Prelogin child-launch adoption gate (prelogin-service r6 G9).
 //
 // Codex G9: the service created the SYSTEM worker / user Host CREATE_SUSPENDED and then IGNORED the result
-// of ensure_child_job()/AssignProcessToJobObject before ResumeThread. A child that could not be bound to
+// of the Job creation/AssignProcessToJobObject before ResumeThread (lk-abcd B: a Job per launch now). A child that could not be bound to
 // the kill-on-close Job must NEVER be resumed -- otherwise the comment's "never outlives the service" is a
 // lie: an un-jobbed SYSTEM worker survives service stop. The gate below makes that decision pure and
 // testable; the launcher calls it and terminates the suspended child unless it is fully bound.

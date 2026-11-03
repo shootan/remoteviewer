@@ -149,6 +149,38 @@ int main() {
   check("an inherit-only CREATOR OWNER entry (it applies to children) is not a right here",
         rule(L"O:SYD:(A;;FA;;;SY)(A;;FA;;;BA)(A;OICIIO;GA;;;CO)", anc));
 
+  // lk-abcd C: the refusal says why. The 2026-11-03 product case: C:\ProgramData\GNLink\logs owned by
+  // Administrators, protected DACL SY+BA full + ONE named user full -- refused as "win32 5" with no principal.
+  std::printf("\n--- lk-abcd C: why it was refused ---\n");
+  {
+    const std::wstring me = my_sid_string();
+    std::wstring why;
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    const std::wstring logsLike = L"O:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;FA;;;" + me + L")";
+    ConvertStringSecurityDescriptorToSecurityDescriptorW(logsLike.c_str(), SDDL_REVISION_1, &sd, nullptr);
+    const bool refused = !pl::SecurityDescriptorAcceptable(sd, priv, pl::OwnerIsSystemOrAdministrators, &why);
+    LocalFree(sd);
+    std::wprintf(L"      why=\"%ls\"\n", why.c_str());
+    check("the logs-folder shape (BA owner, SY+BA+one user full, protected): refused, naming that user's SID",
+          refused && why.find(me) != std::wstring::npos && why.find(L"private level") != std::wstring::npos);
+    why.clear();
+    ConvertStringSecurityDescriptorToSecurityDescriptorW(L"O:BUD:P(A;;FA;;;SY)(A;;FA;;;BA)", SDDL_REVISION_1, &sd, nullptr);
+    const bool ownerRefused = !pl::SecurityDescriptorAcceptable(sd, priv, pl::OwnerIsSystemOrAdministrators, &why);
+    LocalFree(sd);
+    check("an untrusted owner: refused, naming the owner (S-1-5-32-545)",
+          ownerRefused && why == L"owner S-1-5-32-545");
+    why.clear();
+    ConvertStringSecurityDescriptorToSecurityDescriptorW(L"O:SY", SDDL_REVISION_1, &sd, nullptr);
+    const bool noDacl = !pl::SecurityDescriptorAcceptable(sd, priv, pl::OwnerIsSystemOrAdministrators, &why);
+    LocalFree(sd);
+    check("no DACL: refused as \"no DACL\"", noDacl && why == L"no DACL");
+    why = L"untouched";
+    ConvertStringSecurityDescriptorToSecurityDescriptorW(L"O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)", SDDL_REVISION_1, &sd, nullptr);
+    const bool accepted = pl::SecurityDescriptorAcceptable(sd, priv, pl::OwnerIsSystemOrAdministrators, &why);
+    LocalFree(sd);
+    check("accepted: the reason is left alone", accepted && why == L"untouched");
+  }
+
   std::printf("\n--- real folders ---\n");
   remote60::native_poc::e2e::StagingDir staging;
   if (!staging.Create(L"store_chain")) {
@@ -261,6 +293,102 @@ int main() {
                           nullptr, nullptr, mineDacl, nullptr);
     LocalFree(open);
   }
+  // ---- lk-abcd C: the private level reset (HoldRecordChainRepairingPrivate), on folders of this test only
+  const auto dacl_of = [](const std::wstring& path) {
+    PSECURITY_DESCRIPTOR sd = nullptr;
+    PACL dacl = nullptr;
+    std::wstring sddl;
+    if (GetNamedSecurityInfoW(path.c_str(), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, &dacl, nullptr, &sd) ==
+        ERROR_SUCCESS) {
+      LPWSTR str = nullptr;
+      if (ConvertSecurityDescriptorToStringSecurityDescriptorW(sd, SDDL_REVISION_1, DACL_SECURITY_INFORMATION, &str, nullptr)) {
+        sddl = str;
+        LocalFree(str);
+      }
+      LocalFree(sd);
+    }
+    return sddl;
+  };
+  const auto give_back = [&](const std::wstring& path) {  // this user owns it: put its own DACL back for cleanup
+    PSECURITY_DESCRIPTOR open = nullptr;
+    ConvertStringSecurityDescriptorToSecurityDescriptorW(privateSddl.c_str(), SDDL_REVISION_1, &open, nullptr);
+    BOOL present = FALSE, defaulted = FALSE;
+    PACL d = nullptr;
+    GetSecurityDescriptorDacl(open, &present, &d, &defaulted);
+    SetNamedSecurityInfoW(const_cast<wchar_t*>(path.c_str()), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, nullptr, nullptr, d,
+                          nullptr);
+    LocalFree(open);
+  };
+  std::printf("\n--- lk-abcd C: the worker-log folder shape, reset to the private DACL ---\n");
+  {
+    // The 2026-11-03 product shape, on this test's folders: a trusted-owned log folder whose protected DACL
+    // also gives one more principal (here BUILTIN\Users) full control.
+    const std::wstring root = staging.path() + L"repair";
+    const std::wstring logs = root + L"\\GNLink\\logs";
+    const std::wstring logPath = logs + L"\\prelogin_worker.log";
+    check("a chain whose log folder gives Users full control",
+          make_dir(root, ancestorSddl) && make_dir(root + L"\\GNLink", ancestorSddl) &&
+              make_dir(logs, privateSddl + L"(A;OICI;FA;;;BU)"));
+    pl::HeldChain held;
+    const DWORD plain = pl::HoldRecordChain(logPath, false, trustMe, &held);
+    check("NEGATIVE CONTROL: the plain hold refuses it (at the log folder) and changes nothing",
+          plain == ERROR_ACCESS_DENIED && held.failedAt == logs && dacl_of(logs).find(L";;;BU)") != std::wstring::npos,
+          std::to_string(plain));
+    std::vector<std::wstring> removed;
+    const DWORD rc = pl::HoldRecordChainRepairingPrivate(logPath, false, trustMe, &held, &removed);
+    const std::wstring after = dacl_of(logs);
+    std::wprintf(L"      after=\"%ls\"\n", after.c_str());
+    check("lk-abcd C: THE REPAIRING HOLD RESETS THE LOG FOLDER AND HOLDS THE CHAIN", rc == 0, std::to_string(rc));
+    // SetSecurityInfo marks a DACL it sets auto-inherited (AI); the entries are what matter.
+    check("...the folder's DACL is now exactly SYSTEM + Administrators, protected",
+          after == L"D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)" || after == L"D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)",
+          std::string(after.begin(), after.end()));
+    check("...and what it took away is named: this user (trusted by this test's rule, so not listed) kept nothing, "
+          "Users (S-1-5-32-545) is the one removed grant",
+          removed.size() == 1 && removed[0] == L"S-1-5-32-545");
+    held.Release();
+    // What was taken away is real: this user is neither SYSTEM nor Administrators (the service is SYSTEM), and
+    // now cannot even list the folder -- the hold's own open is refused.
+    std::vector<std::wstring> again;
+    const DWORD second = pl::HoldRecordChainRepairingPrivate(logPath, false, trustMe, &held, &again);
+    check("...after it, this (non-SYSTEM, non-admin) user cannot open the folder any more (win32 5) -- nothing re-granted",
+          second == ERROR_ACCESS_DENIED && again.empty(), std::to_string(second));
+    held.Release();
+    give_back(logs);
+  }
+  {
+    // An ancestor that fails is never repaired around: the product rule does not trust this user's GNLink.
+    const std::wstring root = staging.path() + L"repair-anc";
+    const std::wstring logs = root + L"\\GNLink\\logs";
+    check("a chain owned by this user, its log folder loose too",
+          make_dir(root, ancestorSddl) && make_dir(root + L"\\GNLink", ancestorSddl) &&
+              make_dir(logs, privateSddl + L"(A;OICI;FA;;;BU)"));
+    pl::HeldChain held;
+    std::vector<std::wstring> removed;
+    const DWORD rc =
+        pl::HoldRecordChainRepairingPrivate(logs + L"\\prelogin_worker.log", false, pl::OwnerIsSystemOrAdministrators, &held, &removed);
+    check("lk-abcd C NEGATIVE: an untrusted ANCESTOR is refused there -- the log folder is not touched",
+          rc == ERROR_ACCESS_DENIED && held.failedAt != logs && removed.empty() &&
+              dacl_of(logs).find(L";;;BU)") != std::wstring::npos,
+          std::to_string(rc) + " at " + std::string(held.failedAt.begin(), held.failedAt.end()));
+  }
+  {
+    // A log folder that is a junction is refused, not followed, and its target is not reset.
+    const std::wstring target = staging.path() + L"repair-target";
+    const std::wstring root = staging.path() + L"repair-junction";
+    check("a loose folder elsewhere, and a chain whose log folder is a junction to it",
+          make_dir(target, privateSddl + L"(A;OICI;FA;;;BU)") && make_dir(root, ancestorSddl) &&
+              make_dir(root + L"\\GNLink", ancestorSddl) && make_junction(root + L"\\GNLink\\logs", target));
+    pl::HeldChain held;
+    std::vector<std::wstring> removed;
+    const DWORD rc = pl::HoldRecordChainRepairingPrivate(root + L"\\GNLink\\logs\\prelogin_worker.log", false, trustMe, &held,
+                                                         &removed);
+    check("lk-abcd C NEGATIVE: a junction log folder is refused, nothing removed, its target's DACL unchanged",
+          rc == ERROR_ACCESS_DENIED && removed.empty() && dacl_of(target).find(L";;;BU)") != std::wstring::npos,
+          std::to_string(rc));
+    RemoveDirectoryW((root + L"\\GNLink\\logs").c_str());  // the junction itself, not its target
+  }
+
   LocalFree(mine);
   check("the scratch directory is cleaned up", staging.Remove(), staging.why());
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
