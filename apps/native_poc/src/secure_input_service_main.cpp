@@ -31,6 +31,7 @@
 #include "logon_ui_target.hpp"  // lockscreen-cred r1: the lock-screen agent's target and typing
 #include "lock_input_policy.hpp"  // lockscreen-cred r1 (A6): no plaintext characters to a locked session
 #include "enter_after_drop_guard.hpp"  // lk-abcd A
+#include "prelogin_child_token.hpp"  // lk-abcd r2 (Codex R2)
 #include "lock_cred_channel.hpp"  // lockscreen-cred r1: the service <-> agent private pipe
 #include "trusted_service_pipe.hpp"  // lockscreen-cred r1: the agent checks its server
 
@@ -214,6 +215,13 @@ std::wstring current_executable_path() {
 }
 
 bool start_agent(DWORD sessionId, const std::wstring& desktopName) {
+#ifdef REMOTE60_SIS_TEST_SEAM
+  // lk-abcd r2 (Codex R3), TEST BUILD ONLY: no input agent is ever started by the lifecycle test build.
+  if (remote60::native_poc::sis_test::Active()) {
+    diag("sis-test: agent start refused (input effects off) session=%lu", static_cast<unsigned long>(sessionId));
+    return false;
+  }
+#endif
   stop_agent();
   HANDLE readPipe = nullptr;
   HANDLE writePipe = nullptr;
@@ -510,6 +518,26 @@ DWORD logon_only_target_session(uint32_t requester, uint32_t consoleGenerationAt
 // at connect. Called with gAgentMu held (the agent is shared by every connection).
 remote60::native_poc::ForwardOutcome forward_to_agent(const SecureInputMessage& message, uint32_t requester,
                                                       uint32_t consoleGenerationAtConnect) {
+#ifdef REMOTE60_SIS_TEST_SEAM
+  // lk-abcd r2 (Codex R3), TEST BUILD ONLY: the input effect boundary. The product's routing (ForwardSecureInput,
+  // both target resolutions) runs as it is; only its three effects are replaced -- no agent is ensured or
+  // started, and the "write to the agent" is a RECORD in the diag: what would have reached the agent (kind, event,
+  // key code, text length -- never the text). Nothing reaches an OS input API, whatever this user's privileges.
+  if (remote60::native_poc::sis_test::Active()) {
+    return remote60::native_poc::ForwardSecureInput(
+        message, [requester] { return static_cast<uint32_t>(target_session(requester)); },
+        [requester, consoleGenerationAtConnect] {
+          return static_cast<uint32_t>(logon_only_target_session(requester, consoleGenerationAtConnect));
+        },
+        [](uint32_t) { return true; }, [](uint32_t) { return false; },
+        [](const SecureInputMessage& m) {
+          const bool text = m.kind == static_cast<uint16_t>(SecureInputKind::InputText);
+          diag("sis-test input sink: %s event=%u key=0x%x textCount=%u", text ? "text" : "event",
+               static_cast<unsigned>(m.eventKind), static_cast<unsigned>(m.keyCode), static_cast<unsigned>(m.textCount));
+          return true;
+        });
+  }
+#endif
   return remote60::native_poc::ForwardSecureInput(
       message, [requester] { return static_cast<uint32_t>(target_session(requester)); },
       [requester, consoleGenerationAtConnect] {
@@ -755,7 +783,15 @@ bool locked_plaintext_refused(const SecureInputMessage& message, uint32_t target
   const bool treat = targetSession == kInvalidSessionId || li::TreatAsLocked(known, locked, defaultDesktop);
   // lk-abcd D (user decision 2026-11-03): li::kRefuse is false -- plaintext at the lock screen is typed. The rule
   // stays for the policy turned back.
-  if (!(text ? li::RefuseText(li::kRefuse, treat) : li::RefuseEvent(li::kRefuse, treat, message.eventKind, message.keyCode)))
+  bool refuse = li::kRefuse;
+#ifdef REMOTE60_SIS_TEST_SEAM
+  // lk-abcd r2 (Codex R3), TEST BUILD ONLY: the negative control -- the refusal rule as it was (refuse=true), so the
+  // test can show its sink checks fail when the policy does not let the characters through.
+  if (remote60::native_poc::sis_test::Active() &&
+      !remote60::native_poc::sis_test::Env(L"REMOTE60_SIS_TEST_REFUSE_LOCKED_PLAINTEXT").empty())
+    refuse = true;
+#endif
+  if (!(text ? li::RefuseText(refuse, treat) : li::RefuseEvent(refuse, treat, message.eventKind, message.keyCode)))
     return false;
   gLockedPlaintextRefusedAtMs.store(GetTickCount64(), std::memory_order_release);
   const uint64_t n = gLockedPlaintextRefused.fetch_add(1, std::memory_order_relaxed) + 1;
@@ -1155,20 +1191,20 @@ HANDLE launch_system_child_in_session(DWORD sessionId, const std::wstring& deskt
                                       const std::wstring& exe, const wchar_t* args, const wchar_t* environment,
                                       HANDLE* jobOut) {
   *jobOut = nullptr;
-  if (exe.empty()) return nullptr;
-  HANDLE serviceToken = nullptr;
-  HANDLE childToken = nullptr;
-  bool ok = OpenProcessToken(GetCurrentProcess(),
-                             TOKEN_DUPLICATE | TOKEN_ASSIGN_PRIMARY | TOKEN_QUERY | TOKEN_ADJUST_SESSIONID,
-                             &serviceToken) &&
-            DuplicateTokenEx(serviceToken, MAXIMUM_ALLOWED, nullptr, SecurityImpersonation, TokenPrimary,
-                             &childToken) &&
-            SetTokenInformation(childToken, TokenSessionId, &sessionId, sizeof(sessionId));
-  if (serviceToken) CloseHandle(serviceToken);
-  if (!ok) {
-    if (childToken) CloseHandle(childToken);
+  if (exe.empty()) {
+    diag("prelogin: child launch failed: no executable path (session=%lu)", static_cast<unsigned long>(sessionId));
     return nullptr;
   }
+  // lk-abcd r2 (Codex R2): the token steps one by one -- a failure says which API and its Win32 code.
+  const remote60::native_poc::prelogin::ChildTokenResult tok =
+      remote60::native_poc::prelogin::PrepareChildTokenForSession(sessionId);
+  if (!tok.token) {
+    diag("prelogin: child launch failed: %s win32 %lu (session=%lu)",
+         remote60::native_poc::prelogin::ChildTokenStageName(tok.stage), static_cast<unsigned long>(tok.win32),
+         static_cast<unsigned long>(sessionId));
+    return nullptr;
+  }
+  HANDLE childToken = tok.token;
   wchar_t command[32768]{};
   _snwprintf_s(command, _TRUNCATE, L"\"%s\" %s", exe.c_str(), args);
   STARTUPINFOW startup{};
@@ -1178,9 +1214,9 @@ HANDLE launch_system_child_in_session(DWORD sessionId, const std::wstring& deskt
   PROCESS_INFORMATION proc{};
   // CREATE_SUSPENDED so the child is assigned to the kill-on-close Job BEFORE it runs (S5): it can never
   // escape the job or do anything before the lifetime boundary is in place.
-  ok = CreateProcessAsUserW(childToken, nullptr, command, nullptr, nullptr, FALSE,
-                            CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
-                            const_cast<wchar_t*>(environment), nullptr, &startup, &proc) != FALSE;
+  const bool ok = CreateProcessAsUserW(childToken, nullptr, command, nullptr, nullptr, FALSE,
+                                       CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
+                                       const_cast<wchar_t*>(environment), nullptr, &startup, &proc) != FALSE;
   if (!ok) {
     const DWORD createErr = GetLastError();
     CloseHandle(childToken);
@@ -2308,6 +2344,10 @@ int wmain(int argc, wchar_t** argv) {
   if (argc == 2 && std::wstring(argv[1]) == L"--lifecycle-test") {
     remote60::native_poc::sis_test::Active() = true;
     SIS_TEST_NOTE("lifecycle test: the product service_main on this thread, no SCM");
+    // lk-abcd r2 (Codex R3): this run's effective input state, said before anything can be sent.
+    diag("sis-test: input effects OFF -- record-only sink, agent start disabled%s",
+         remote60::native_poc::sis_test::Env(L"REMOTE60_SIS_TEST_REFUSE_LOCKED_PLAINTEXT").empty()
+             ? "" : "; locked plaintext REFUSED (negative control)");
     service_main(0, nullptr);
     SIS_TEST_NOTE("service_main returned");
     return 0;

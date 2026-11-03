@@ -362,7 +362,7 @@ constexpr uint32_t kCaptureFlagLockCredRetryV1 = 0x80000u;
 // only (a new session starts from the host's default), and a request may ask for its answer
 // (ControlDesktopBackendStatus 90; backend 0 = ask only). Without it a client cannot know either.
 constexpr uint32_t kCaptureFlagDesktopBackendStatusV1 = 0x100000u;
-// lk-abcd D (user decision 2026-11-03; number PROPOSED by the worker, pending the verifier's assignment): this
+// lk-abcd D (user decision 2026-11-03; number accepted by the verifier 2026-11-03, checked again at merge): this
 // host takes plaintext keys and text at its logon screens too -- the lock screen (LockCredV1) and the pre-login
 // worker (PreloginV1, whose control allowlist then admits ControlInputText). Without it a viewer keeps holding
 // characters back there, exactly as before: an older pre-login host closes the link on ControlInputText.

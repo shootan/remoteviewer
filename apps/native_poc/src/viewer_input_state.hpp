@@ -51,6 +51,7 @@ struct InputState {
   // lk-abcd A: characters held back for a host at a logon screen (an older host) make the Enter right after
   // them held back too -- UI thread only, like everything here.
   remote60::native_poc::input_guard::EnterAfterDropGuard enterGuard;
+  uint64_t enterGuardRunGen = 0;  // lk-abcd r2: the control connection (controlRunGen) it belongs to
 };
 
 }  // namespace remote60::native_poc::viewer

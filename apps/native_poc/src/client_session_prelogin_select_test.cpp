@@ -654,6 +654,43 @@ void p7_reconnect() {
     h.Stop();
   }
 }
+
+// lk-abcd r2 (Codex R1): the shared session's Enter guard belongs to ONE connection. A character held back for an
+// older logon-screen host must not hold the Enter of the next connection's host -- the product controller, two
+// fake hosts on loopback in a row. Positive control: on the old connection the same Enter IS held (the guard is
+// live), so a pass below is the reset, not a guard that never fired.
+void p11_enter_guard_per_connection() {
+  std::printf("\n--- P11 (lk-abcd r2): the Enter guard does not cross into a new connection ---\n");
+  n::ClientSessionController c;
+  GateSink sink;
+  const uint16_t text[] = {'P', 'w'};
+  {
+    FakeHost oldHost;
+    oldHost.pongFlags = kPrelogin;  // an older pre-login host: no 0x200000, characters held back
+    if (!oldHost.Start()) return check("P11: old fake host starts", false);
+    const bool up = connect_to(c, oldHost, &sink) && role_known(c, oldHost);
+    check("P11: connected to the older pre-login host, role known", up);
+    check("P11: the text is held back there (the guard is armed)", !c.QueueInputText(text, 2));
+    check("P11 POSITIVE CONTROL: on that connection the Enter right after it IS held back",
+          !c.QueueInputEvent(5, 0, 0, 0, 0x0D, 0) && !c.QueueInputEvent(6, 0, 0, 0, 0x0D, 0));
+    // A second drop just before the disconnect, so the window is still open when the next connection starts.
+    check("P11: ...and one more held back right before leaving", !c.QueueInputText(text, 2));
+    c.Disconnect();
+    oldHost.Stop();
+  }
+  {
+    FakeHost newHost;
+    newHost.pongFlags = kPrelogin | n::kCaptureFlagLogonPlaintextV1;
+    if (!newHost.Start()) return check("P11: new fake host starts", false);
+    const bool up = connect_to(c, newHost, &sink) && role_known(c, newHost);
+    check("P11: connected at once to a host that takes plaintext, role known", up);
+    check("P11: THE NEW CONNECTION'S FIRST ENTER IS QUEUED (the old connection's held text does not hold it)",
+          c.QueueInputEvent(5, 0, 0, 0, 0x0D, 0) && c.QueueInputEvent(6, 0, 0, 0, 0x0D, 0));
+    check("P11: ...and text then Enter go as well", c.QueueInputText(text, 2) && c.QueueInputEvent(5, 0, 0, 0, 0x0D, 0));
+    c.Disconnect();
+    newHost.Stop();
+  }
+}
 }  // namespace
 
 int main() {
@@ -667,6 +704,7 @@ int main() {
   p8_stale_turn();
   p9_commit_vs_cancel();
   p10_capability_snapshot();
+  p11_enter_guard_per_connection();
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;
 }

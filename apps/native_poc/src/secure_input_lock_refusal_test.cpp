@@ -6,11 +6,14 @@
 // (REMOTE60_SIS_TEST_FAKE_LOCK=1). Control: the same messages to a run whose session is not locked are not
 // refused there. Navigation keys, key ups and the pointer are never refused.
 //
-// lk-abcd D (user decision 2026-11-03): plaintext at the lock screen is ALLOWED now (lock_input::kRefuse is false),
-// so the locked run expects NO refusal -- text, the letter and the Enter after them all go on toward the agent.
-// The refusal rule itself (refuse=true) is the unit test's (lock_input_policy_test), and the "Enter after a
-// refused character" hold is enter_after_drop_guard_test's; this run shows the product service code, on a real
-// process and pipe, no longer refuses at a locked session.
+// lk-abcd D (user decision 2026-11-03): plaintext at the lock screen is ALLOWED now (lock_input::kRefuse is false).
+// lk-abcd r2 (Codex R3): the input effect boundary is explicit -- the TEST BUILD's forward runs the product routing
+// and records what would reach the agent ("sis-test input sink: ...") instead of starting one; the run says so
+// ("input effects OFF") and the test reads that BEFORE it sends anything. Then, positively, each message is in the
+// sink: the text (its length), the letter down/up, Tab, the pointer, Enter down/up.
+// Negative control (REMOTE60_SIS_TEST_REFUSE_LOCKED_PLAINTEXT=1, test build only: the refusal rule as it was): the
+// text and the letter are refused -- and the Enter right after them is refused too (lk-abcd A, the service's
+// guard); the sink then lacks exactly those, so the sink checks can fail.
 //
 // Not shown here: the input AGENT's own last look (it needs a SYSTEM token moved into a session -- the field
 // check), and a console fallback (one session only).
@@ -66,7 +69,7 @@ struct Service {
   PROCESS_INFORMATION pi{};
   std::wstring suffix, diag, stopEvent;
   HANDLE stopEv = nullptr;
-  bool Start(const std::wstring& tag, bool fakeLock) {
+  bool Start(const std::wstring& tag, bool fakeLock, bool refuseControl = false) {
     suffix = std::to_wstring(GetCurrentProcessId()) + L"-" + tag;
     const std::wstring dir = dir_of_self();
     diag = dir + L"sis_lockrefusal_" + tag + L".diag.log";
@@ -78,6 +81,7 @@ struct Service {
     SetEnvironmentVariableW(L"REMOTE60_SIS_TEST_DIAG", diag.c_str());
     SetEnvironmentVariableW(L"REMOTE60_SIS_TEST_FAKE_LOCK", fakeLock ? L"1" : nullptr);
     SetEnvironmentVariableW(L"REMOTE60_SIS_TEST_CREATE_FAIL", nullptr);
+    SetEnvironmentVariableW(L"REMOTE60_SIS_TEST_REFUSE_LOCKED_PLAINTEXT", refuseControl ? L"1" : nullptr);
     STARTUPINFOW si{};
     si.cb = sizeof(si);
     std::wstring cmd = L"\"" + dir + L"GNLinkInputServiceLifecycleTest.exe\" --lifecycle-test";
@@ -115,7 +119,12 @@ SecureInputMessage text(const wchar_t* s) {
 }
 
 // Sends the probe set: text, a letter down, its up, Tab down/up, a mouse move. Returns the diag log after.
-std::string probe(Service& s) {
+std::string probe(Service& s, bool* offBeforeSend) {
+  // lk-abcd r2 (Codex R3): this run's effective input state is read BEFORE anything is sent.
+  *offBeforeSend = wait_until([&] {
+    return read_all(s.diag).find("sis-test: input effects OFF -- record-only sink") != std::string::npos;
+  }, 8000);
+  if (!*offBeforeSend) return "(input effects not said to be off: nothing sent)";
   HANDLE h = INVALID_HANDLE_VALUE;
   const std::wstring name = s.InputPipe();
   wait_until([&] {
@@ -137,33 +146,83 @@ std::string probe(Service& s) {
   Sleep(300);
   return read_all(s.diag);
 }
+struct Sink {
+  int lines = 0, text = 0, letterDown = 0, letterUp = 0, tab = 0, pointer = 0, enterDown = 0, enterUp = 0;
+};
+Sink sink_of(const std::string& log) {
+  Sink k;
+  k.lines = count_of(log, "sis-test input sink: ");
+  k.text = count_of(log, "sis-test input sink: text event=0 key=0x0 textCount=2");
+  k.letterDown = count_of(log, "sis-test input sink: event event=5 key=0x51 ");
+  k.letterUp = count_of(log, "sis-test input sink: event event=6 key=0x51 ");
+  k.tab = count_of(log, "sis-test input sink: event event=5 key=0x9 ") + count_of(log, "sis-test input sink: event event=6 key=0x9 ");
+  k.pointer = count_of(log, "sis-test input sink: event event=1 ");
+  k.enterDown = count_of(log, "sis-test input sink: event event=5 key=0xd ");
+  k.enterUp = count_of(log, "sis-test input sink: event event=6 key=0xd ");
+  return k;
+}
+std::string sink_text(const Sink& k) {
+  return "lines=" + std::to_string(k.lines) + " text=" + std::to_string(k.text) + " Qdown=" + std::to_string(k.letterDown) +
+         " Qup=" + std::to_string(k.letterUp) + " tab=" + std::to_string(k.tab) + " ptr=" + std::to_string(k.pointer) +
+         " ENTdown=" + std::to_string(k.enterDown) + " ENTup=" + std::to_string(k.enterUp);
+}
 }  // namespace
 
 int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
-  std::printf("the service refuses plaintext to a locked session, by the session the input goes to (lockscreen-cred r2, L3)\n\n");
+  std::printf("the service and plaintext to a locked session, at a record-only input sink (lockscreen-cred r2 L3; lk-abcd D, r2 R3)\n\n");
+  DWORD mine = 0;
+  ProcessIdToSessionId(GetCurrentProcessId(), &mine);
   {
     Service s;
     const bool up = s.Start(L"locked", true);
-    const std::string log = probe(s);
+    bool off = false;
+    const std::string log = probe(s, &off);
     s.Stop();
-    const int textRefused = count_of(log, "plaintext text to a locked session refused at the service");
-    const int keyRefused = count_of(log, "plaintext key to a locked session refused at the service");
-    const int enterRefused = count_of(log, "Enter refused at the service");
+    const Sink k = sink_of(log);
     check("locked: the service started (product code, test build) and served the pipe", up && log.find("control pipe connected") != std::string::npos);
-    check("lk-abcd D: locked: the text is NOT refused at the service (plaintext at the lock screen is allowed)",
-          textRefused == 0, "text=" + std::to_string(textRefused));
-    check("lk-abcd D: locked: the letter down is NOT refused either", keyRefused == 0, "key=" + std::to_string(keyRefused));
-    check("lk-abcd A: locked: the Enter after them is not refused (nothing before it was)", enterRefused == 0,
-          "enter=" + std::to_string(enterRefused));
+    check("r2 R3: THE RUN SAID 'input effects OFF -- record-only sink, agent start disabled' BEFORE ANYTHING WAS SENT", off);
+    check("r2 R3: ...and no agent was ensured or started (no agent line at all)",
+          log.find("agent start refused") == std::string::npos && log.find("lock-cred agent") == std::string::npos &&
+              log.find("recreating the agent") == std::string::npos);
+    check("lk-abcd D: locked: nothing refused (text, letter, Enter)",
+          count_of(log, "to a locked session refused") == 0 && count_of(log, "Enter refused at the service") == 0);
+    check("lk-abcd D: locked: THE SINK HAS EVERY MESSAGE -- the text (2 units), the letter down and up, Tab x2, the pointer, Enter down and up",
+          k.text == 1 && k.letterDown == 1 && k.letterUp == 1 && k.tab == 2 && k.pointer == 1 && k.enterDown == 1 && k.enterUp == 1 &&
+              k.lines == 8,
+          sink_text(k));
+  }
+  {
+    Service s;
+    const bool up = s.Start(L"refusectl", true, /*refuseControl=*/true);
+    bool off = false;
+    const std::string log = probe(s, &off);
+    s.Stop();
+    const Sink k = sink_of(log);
+    check("NEGATIVE CONTROL (the old refusal rule, test build): started, effects said OFF first (and the control named)",
+          up && off && log.find("locked plaintext REFUSED (negative control)") != std::string::npos);
+    check("NEGATIVE CONTROL: the text and the letter down were refused -- for THIS session, lock known and locked",
+          count_of(log, "plaintext text to a locked session refused at the service") == 1 &&
+              count_of(log, "plaintext key to a locked session refused at the service") == 1 &&
+              log.find("session=" + std::to_string(mine) + " lockKnown=1 locked=1") != std::string::npos);
+    check("lk-abcd A (service): THE ENTER RIGHT AFTER THE REFUSED CHARACTERS WAS REFUSED TOO",
+          count_of(log, "Enter refused at the service") == 1 && k.enterDown == 0);
+    check("NEGATIVE CONTROL: the sink lacks exactly those (no text, no letter down, no Enter down); the rest reached it",
+          k.text == 0 && k.letterDown == 0 && k.enterDown == 0 && k.letterUp == 1 && k.tab == 2 && k.pointer == 1 && k.enterUp == 1 &&
+              k.lines == 5,
+          sink_text(k));
   }
   {
     Service s;
     const bool up = s.Start(L"unlocked", false);
-    const std::string log = probe(s);
+    bool off = false;
+    const std::string log = probe(s, &off);
     s.Stop();
-    check("control: the same input to a session that is NOT locked is not refused at the service",
-          up && log.find("control pipe connected") != std::string::npos && log.find("to a locked session refused") == std::string::npos);
+    const Sink k = sink_of(log);
+    check("control: a session that is NOT locked: effects OFF first, nothing refused, all 8 messages in the sink",
+          up && off && log.find("to a locked session refused") == std::string::npos && k.lines == 8 && k.text == 1 &&
+              k.enterDown == 1,
+          sink_text(k));
   }
   std::printf("\nRESULT: %s  (%d checks, %d failed)\n", gFailures ? "FAILED" : "ALL PASS", gChecks, gFailures);
   return gFailures ? 1 : 0;

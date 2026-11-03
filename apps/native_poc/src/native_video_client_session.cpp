@@ -1775,6 +1775,9 @@ void ClientSessionController::ResetUnlocked() {
     std::lock_guard<std::mutex> lk(parkMu_);
     park_.End();
     heldInput_.Reset();
+    // lk-abcd r2 (Codex R1): a character held back on the LAST connection says nothing about this one -- the
+    // next host's Enter is never held for it (under parkMu_, the lock the queue paths take it under).
+    queueEnterGuard_ = input_guard::EnterAfterDropGuard{};
   }
   parkInhibit_.store(false, std::memory_order_release);
   parkReleased_.store(0, std::memory_order_relaxed);

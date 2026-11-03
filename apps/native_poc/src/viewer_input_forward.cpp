@@ -22,12 +22,23 @@ uint32_t host_flags(ViewerState& ctx) {
 bool is_character_down(uint16_t kind, uint32_t keyCode) {
   return remote60::native_poc::input_guard::IsCharacterDown(kind, keyCode);
 }
-void character_held_back(ViewerState& ctx) { ctx.input.enterGuard.OnCharacterDropped(GetTickCount64()); }
+// lk-abcd r2 (Codex R1): the guard is this CONNECTION's -- a character held back for the last host says nothing
+// about the next one. The control thread starts each connection with a new controlRunGen; the guard (UI thread)
+// is reset the first time it is used under a different one.
+remote60::native_poc::input_guard::EnterAfterDropGuard& guard_of_this_run(ViewerState& ctx) {
+  const uint64_t run = ctx.session.controlRunGen.load(std::memory_order_acquire);
+  if (ctx.input.enterGuardRunGen != run) {
+    ctx.input.enterGuard = remote60::native_poc::input_guard::EnterAfterDropGuard{};
+    ctx.input.enterGuardRunGen = run;
+  }
+  return ctx.input.enterGuard;
+}
+void character_held_back(ViewerState& ctx) { guard_of_this_run(ctx).OnCharacterDropped(GetTickCount64()); }
 // True when this Enter (down or up) must not leave.
 bool enter_held(ViewerState& ctx, bool down, uint32_t vk) {
   if (vk != VK_RETURN) return false;
-  if (!down) return ctx.input.enterGuard.HoldEnterUp();
-  if (!ctx.input.enterGuard.HoldEnterDown(GetTickCount64())) return false;
+  if (!down) return guard_of_this_run(ctx).HoldEnterUp();
+  if (!guard_of_this_run(ctx).HoldEnterDown(GetTickCount64())) return false;
   ctx.session.preloginInputHeldBack.fetch_add(1, std::memory_order_relaxed);
   return true;
 }
@@ -80,7 +91,7 @@ bool enqueue_physical_key(ViewerState& ctx, bool down, uint16_t vk, uint16_t sca
     return false;
   }
   if (enter_held(ctx, down, vk)) return false;  // lk-abcd A
-  if (down && is_character_down(remote60::native_poc::prelogin::kInputKindKeyDown, vk)) ctx.input.enterGuard.OnCharacterDelivered();
+  if (down && is_character_down(remote60::native_poc::prelogin::kInputKindKeyDown, vk)) guard_of_this_run(ctx).OnCharacterDelivered();
   QueuedControlInputMessage msg{};
   msg.type = MessageType::ControlPhysicalKey;
   msg.physicalKey.header.magic = remote60::native_poc::kMagic;
@@ -105,7 +116,7 @@ void enqueue_input_text_units(ViewerState& ctx, const uint16_t* text, size_t cou
     held_back_at_logon(ctx);
     return;
   }
-  if (count > 0) ctx.input.enterGuard.OnCharacterDelivered();
+  if (count > 0) guard_of_this_run(ctx).OnCharacterDelivered();
   // Chunking and sequencing are the shared enqueue_control_input_text (F-09), the same code the
   // Android session runs.
   (void)remote60::native_poc::enqueue_control_input_text(ctx.control.inputQueue, text, count,
@@ -250,7 +261,7 @@ void enqueue_input_event(ViewerState& ctx, uint16_t kind, int32_t x, int32_t y, 
       enter_held(ctx, kind == remote60::native_poc::prelogin::kInputKindKeyDown, keyCode)) {
     return;  // its up still comes here (forwardedKeyDown stays set) and is held by the guard
   }
-  if (is_character_down(kind, keyCode)) ctx.input.enterGuard.OnCharacterDelivered();
+  if (is_character_down(kind, keyCode)) guard_of_this_run(ctx).OnCharacterDelivered();
   uint16_t buttons = ctx.input.mouseButtons.load();
   if (!fence_mouse_for_host(ctx, kind, keyCode, &buttons)) return;
   // The message is the shared make_control_input_event (F-09); only the live button state and

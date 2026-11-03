@@ -343,6 +343,7 @@ add_executable(remote60_secure_input_service
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
   src/prelogin_store_chain.cpp
+  src/prelogin_child_token.cpp
   src/prelogin_worker_log.cpp
   src/prelogin_admin_pipe.cpp
   src/prelogin_admin_service.cpp
@@ -374,6 +375,7 @@ add_executable(remote60_secure_input_service_lifecycle_seam
   src/prelogin_console_probe.cpp
   src/prelogin_machine_store.cpp
   src/prelogin_store_chain.cpp
+  src/prelogin_child_token.cpp
   src/prelogin_worker_log.cpp
   src/prelogin_admin_pipe.cpp
   src/prelogin_admin_service.cpp
@@ -2744,6 +2746,12 @@ add_executable(remote60_logon_plaintext_compat_test
   src/logon_plaintext_compat_test.cpp
 )
 target_include_directories(remote60_logon_plaintext_compat_test PRIVATE src)
+
+# lk-abcd r2 (Codex R2): the worker token steps say which one failed and its Win32 code -- the real steps, as this
+# (non-SYSTEM) user: SetTokenInformation(TokenSessionId) is refused without TCB. Nothing is started.
+add_executable(remote60_prelogin_child_token_test src/prelogin_child_token_test.cpp src/prelogin_child_token.cpp)
+target_include_directories(remote60_prelogin_child_token_test PRIVATE src)
+target_link_libraries(remote60_prelogin_child_token_test PRIVATE advapi32)
 
 # lockscreen-cred r1 (codex_lockcred_agent_r1.md): the service <-> agent private pipe, on real pipes and
 # processes; it also starts the built GNLinkInputService.exe as a would-be agent (it must refuse).
