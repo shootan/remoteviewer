@@ -288,6 +288,30 @@ struct SasService {
   }
 };
 
+// lk-abcd-rel: Ctrl+Alt "held" in THIS thread's key state (what the viewer's GetKeyState reads), for a WM_KEYDOWN
+// sent straight to the viewer window. Set, then READ BACK, until it holds: on this loopback the test-build host
+// injects real input on the same desktop (lk-abcd D: the modifier releases a prompt sends are typed now, no longer
+// dropped), and the thread's key state is then re-synchronised from the real (up) state on its next GetKeyState --
+// a single SetKeyboardState was undone before the U in 5 of 7 runs. Returns the try it held on, 0 when it never
+// did (the caller then sends nothing and fails, rather than typing a plain U somewhere).
+int hold_ctrl_alt_for_this_thread(const BYTE (&base)[256]) {
+  BYTE held[256];
+  std::memcpy(held, base, sizeof(held));
+  held[VK_CONTROL] = held[VK_LCONTROL] = 0x80;
+  held[VK_MENU] = held[VK_LMENU] = 0x80;
+  for (int attempt = 1; attempt <= 40; ++attempt) {
+    SetKeyboardState(held);
+    if (GetKeyState(VK_CONTROL) < 0 && GetKeyState(VK_MENU) < 0) return attempt;
+    MSG m;
+    while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
+      TranslateMessage(&m);
+      DispatchMessageW(&m);
+    }
+    Sleep(25);
+  }
+  return 0;
+}
+
 // Brings `w` to the front with its EDIT focused (this process is the foreground one at that moment:
 // its own prompt just closed). True when it is the foreground window.
 bool bring_front(HWND w) {
@@ -2247,12 +2271,9 @@ int wmain(int argc, wchar_t** argv) {
     });
     BYTE keys[256] = {};
     GetKeyboardState(keys);
-    BYTE held[256];
-    std::memcpy(held, keys, sizeof(held));
-    held[VK_CONTROL] = held[VK_LCONTROL] = 0x80;
-    held[VK_MENU] = held[VK_LMENU] = 0x80;
-    SetKeyboardState(held);  // this thread's view of the modifiers only (what GetKeyState reads)
-    SendMessageW(viewerWindow, WM_KEYDOWN, 'U', 1);  // not posted: no TranslateMessage, no WM_CHAR
+    const int holdTries = hold_ctrl_alt_for_this_thread(keys);
+    check("the test held Ctrl+Alt in this thread's key state for the U", holdTries > 0, std::to_string(holdTries) + " tries");
+    if (holdTries > 0) SendMessageW(viewerWindow, WM_KEYDOWN, 'U', 1);  // not posted: no TranslateMessage, no WM_CHAR
     pump_until([&] { return run2.sawPrompt || !box2.empty(); }, 8000);
     SetKeyboardState(keys);
     pump_until([&] { return !box2.empty(); }, 25000);
@@ -3028,12 +3049,9 @@ int wmain(int argc, wchar_t** argv) {
     });
     BYTE keys[256] = {};
     GetKeyboardState(keys);
-    BYTE held[256];
-    std::memcpy(held, keys, sizeof(held));
-    held[VK_CONTROL] = held[VK_LCONTROL] = 0x80;
-    held[VK_MENU] = held[VK_LMENU] = 0x80;
-    SetKeyboardState(held);
-    SendMessageW(viewerWindow, WM_KEYDOWN, 'U', 1);  // not posted: no TranslateMessage, no WM_CHAR
+    const int holdTries = hold_ctrl_alt_for_this_thread(keys);
+    check("the test held Ctrl+Alt in this thread's key state for the U", holdTries > 0, std::to_string(holdTries) + " tries");
+    if (holdTries > 0) SendMessageW(viewerWindow, WM_KEYDOWN, 'U', 1);  // not posted: no TranslateMessage, no WM_CHAR
     pump_until([&] { return run.sawPrompt && !cancelled.empty(); }, 12000);
     SetKeyboardState(keys);
     pump_until([] { return false; }, 1000);
