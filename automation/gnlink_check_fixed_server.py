@@ -175,6 +175,13 @@ def apk_test_markers_found(dex):
     return [m for m in APK_TEST_MARKERS if m.encode('ascii') in dex or m.encode('utf-16-le') in dex]
 
 
+# lk-abcd-rel (Codex B3): a shipped APK is not a debug build. aapt2 writes the android:debuggable attribute into
+# the binary manifest only for a debuggable variant (assembleDebug); a release variant carries no attribute of that
+# name at all. Stricter than the attribute's value: an APK that names it, even as false, is refused.
+def apk_manifest_debuggable(manifest):
+    return contains(manifest, 'debuggable')
+
+
 def check_apk(report, path):
     name = os.path.basename(path)
     with zipfile.ZipFile(path) as apk:
@@ -208,6 +215,8 @@ def check_apk(report, path):
     missing += [item for item in APK_BACKUP_ATTRIBUTES if not contains(manifest, item)]
     report.check(not missing, '%s leaves the stored sign-in out of backups%s'
                  % (name, (' -- missing: ' + ', '.join(missing)) if missing else ''))
+    report.check(bool(manifest) and not apk_manifest_debuggable(manifest),
+                 '%s is not a debuggable build (no android:debuggable in its manifest)' % name)
 
 
 def self_test():
@@ -282,6 +291,11 @@ def self_test():
         for marker in APK_NATIVE_TEST_MARKERS:
             outer.check(apk_native_markers_found(b'\x7fELF' + marker.encode('ascii')) == [marker],
                         'a native library containing "%s" fails' % marker)
+        # lk-abcd-rel (B3): the manifest check on binary-manifest bytes (aapt2 writes the attribute name UTF-16).
+        outer.check(apk_manifest_debuggable(bytes([3, 0, 8, 0]) + 'debuggable'.encode('utf-16-le')),
+                    'a manifest naming android:debuggable fails')
+        outer.check(not apk_manifest_debuggable(bytes([3, 0, 8, 0]) + 'versionCode'.encode('utf-16-le')),
+                    'a manifest without it passes')
         missing = make('missing', {})
         os.remove(os.path.join(missing, 'GNLinkViewer.exe'))
         outer.check(verdict(missing) == 1, 'a missing program fails rather than being skipped')
