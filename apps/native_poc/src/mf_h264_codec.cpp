@@ -33,6 +33,7 @@
 #include <mfobjects.h>
 #include <mftransform.h>
 #include <wmcodecdsp.h>
+#include "mf_sample_copy.hpp"  // lk-abcd-rel B2 (after windows.h and the min/max undefs)
 
 namespace remote60::native_poc {
 namespace {
@@ -304,17 +305,9 @@ bool create_input_sample(const std::vector<uint8_t>& bytes, int64_t sampleTimeHn
   return true;
 }
 
+// lk-abcd-rel B2: the copy is mf_sample_copy.hpp's -- an allocation it cannot have is a dropped frame, not a throw.
 bool sample_to_bytes(IMFSample* sample, std::vector<uint8_t>* out) {
-  if (!sample || !out) return false;
-  Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
-  if (FAILED(sample->ConvertToContiguousBuffer(&buffer)) || !buffer) return false;
-  BYTE* src = nullptr;
-  DWORD maxLen = 0;
-  DWORD curLen = 0;
-  if (FAILED(buffer->Lock(&src, &maxLen, &curLen)) || !src) return false;
-  out->assign(src, src + curLen);
-  buffer->Unlock();
-  return !out->empty();
+  return remote60::native_poc::mf_copy::SampleToBytes(sample, out);
 }
 
 bool sample_to_dxgi_texture(IMFSample* sample, ID3D11Texture2D** outTexture,
@@ -340,58 +333,10 @@ bool sample_to_dxgi_texture(IMFSample* sample, ID3D11Texture2D** outTexture,
   return false;
 }
 
+// lk-abcd-rel B2: as sample_to_bytes (mf_sample_copy.hpp).
 bool sample_to_nv12_bytes_from_2d_buffer(IMFSample* sample, uint32_t width, uint32_t height,
                                          std::vector<uint8_t>* out) {
-  if (!sample || !out || width == 0 || height == 0) return false;
-
-  DWORD bufferCount = 0;
-  if (FAILED(sample->GetBufferCount(&bufferCount)) || bufferCount == 0) return false;
-
-  for (DWORD i = 0; i < bufferCount; ++i) {
-    Microsoft::WRL::ComPtr<IMFMediaBuffer> buffer;
-    if (FAILED(sample->GetBufferByIndex(i, &buffer)) || !buffer) continue;
-
-    Microsoft::WRL::ComPtr<IMF2DBuffer> buffer2d;
-    if (FAILED(buffer.As(&buffer2d)) || !buffer2d) continue;
-
-    BYTE* scan0 = nullptr;
-    LONG pitch = 0;
-    if (FAILED(buffer2d->Lock2D(&scan0, &pitch)) || !scan0 || pitch == 0) continue;
-
-    const LONG absPitch = (pitch >= 0) ? pitch : -pitch;
-    const size_t yPlaneBytes = static_cast<size_t>(width) * static_cast<size_t>(height);
-    const size_t uvPlaneBytes =
-        static_cast<size_t>(width) * static_cast<size_t>((height + 1) / 2);
-    out->assign(yPlaneBytes + uvPlaneBytes, 0);
-    auto* dstY = out->data();
-    auto* dstUV = out->data() + yPlaneBytes;
-
-    const BYTE* yBase = (pitch >= 0)
-                            ? scan0
-                            : (scan0 + static_cast<ptrdiff_t>(height - 1) * absPitch);
-    for (uint32_t y = 0; y < height; ++y) {
-      const BYTE* srcRow =
-          (pitch >= 0) ? (yBase + static_cast<ptrdiff_t>(y) * absPitch)
-                       : (yBase - static_cast<ptrdiff_t>(y) * absPitch);
-      std::memcpy(dstY + static_cast<size_t>(y) * width, srcRow, width);
-    }
-
-    const uint32_t uvRows = (height + 1) / 2;
-    const BYTE* uvBase = (pitch >= 0)
-                             ? (yBase + static_cast<ptrdiff_t>(height) * absPitch)
-                             : (yBase - static_cast<ptrdiff_t>(height) * absPitch);
-    for (uint32_t y = 0; y < uvRows; ++y) {
-      const BYTE* srcRow =
-          (pitch >= 0) ? (uvBase + static_cast<ptrdiff_t>(y) * absPitch)
-                       : (uvBase - static_cast<ptrdiff_t>(y) * absPitch);
-      std::memcpy(dstUV + static_cast<size_t>(y) * width, srcRow, width);
-    }
-
-    buffer2d->Unlock2D();
-    return true;
-  }
-
-  return false;
+  return remote60::native_poc::mf_copy::SampleToNv12From2DBuffer(sample, width, height, out);
 }
 
 bool env_truthy_local(const char* key) {

@@ -2753,6 +2753,12 @@ add_executable(remote60_prelogin_child_token_test src/prelogin_child_token_test.
 target_include_directories(remote60_prelogin_child_token_test PRIVATE src)
 target_link_libraries(remote60_prelogin_child_token_test PRIVATE advapi32)
 
+# lk-abcd-rel B2: the decoder sample copies turn an allocation failure into a dropped frame (real MF samples, a
+# counting buffer, operator new failing on demand).
+add_executable(remote60_mf_sample_copy_test src/mf_sample_copy_test.cpp)
+target_include_directories(remote60_mf_sample_copy_test PRIVATE src)
+target_link_libraries(remote60_mf_sample_copy_test PRIVATE mfplat mfuuid)
+
 # lockscreen-cred r1 (codex_lockcred_agent_r1.md): the service <-> agent private pipe, on real pipes and
 # processes; it also starts the built GNLinkInputService.exe as a would-be agent (it must refuse).
 add_executable(remote60_lock_cred_channel_test
